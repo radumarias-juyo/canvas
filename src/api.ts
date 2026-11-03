@@ -40,6 +40,8 @@ function uploadForm(files: readonly { file: File; path: string }[]): FormData {
   return form;
 }
 
+const socketUrl = (path: string) => `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${path}`;
+
 const encodePath = (path: string) => path.split("/").map(encodeURIComponent).join("/");
 
 const send = (method: string, body: unknown): RequestInit => ({ method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
@@ -57,6 +59,8 @@ export const api = {
   signOut: () => request<object>("/api/session", { method: "DELETE" }),
   chats: () => request<ChatSummary[]>("/api/chats"),
   createChat: () => request<ChatSummary>("/api/chats", { method: "POST" }),
+  /** The user has seen the chat: it is no longer unread in their sidebar. */
+  markSeen: (chatId: string) => request<object>(`/api/chats/${chatId}/seen`, { method: "POST" }),
   /** What deleting a chat would delete with it. Only for its owner. */
   chatDeletion: (chatId: string) => request<ChatDeletion>(`/api/chats/${chatId}/deletion`),
   /** Delete a chat for everyone in it, with its artifacts and those of its files in `files` (from chatDeletion). Only for its owner. */
@@ -69,6 +73,8 @@ export const api = {
   artifacts: () => request<ArtifactSummary[]>("/api/artifacts"),
   models: () => request<ModelInfo[]>("/api/models"),
   artifact: (id: string) => request<ArtifactView>(`/api/artifacts/${id}`),
+  /** The owner opened `version` of their artifact: it is no longer new in their sidebar. */
+  markArtifactSeen: (id: string, version: number) => request<object>(`/api/artifacts/${id}/seen`, post({ version })),
   artifactTools: (id: string, version: number) => request<DeclaredTool[]>(`/api/artifacts/${id}/tools?version=${version}`),
   cloneAccess: (id: string) => request<CloneAccess>(`/api/artifacts/${id}/clone`, post({})),
   /** Resolves with the Worker's ProxyResponse, errors included; rejects only when the request itself fails. */
@@ -98,5 +104,7 @@ export const api = {
     request<{ paths: string[] }>(`/api/chats/${chatId}/attachments`, { method: "POST", body: uploadForm(files) }),
   /** What "@" offers in a chat's composer: the files and artifacts the chat's agent can open. */
   mentions: (chatId: string) => request<MentionOptions>(`/api/chats/${chatId}/mentions`),
-  chatSocketUrl: (chatId: string) => `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/chats/${chatId}/ws`,
+  chatSocketUrl: (chatId: string) => socketUrl(`/api/chats/${chatId}/ws`),
+  /** The sidebar's socket, which says when the chat list changed. */
+  sidebarSocketUrl: () => socketUrl("/api/me/ws"),
 };

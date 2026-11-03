@@ -111,6 +111,8 @@ export interface ArtifactSummary {
   chatId: string;
   latest: number;
   updatedAt: number;
+  /** Set when a version was published that its owner has not opened yet. */
+  unread?: true;
 }
 
 /** An artifact as GET /api/artifacts/:id returns it: everything but the chat it lives in and who owns it. */
@@ -137,6 +139,12 @@ export interface PublishedDetails {
   title: string;
 }
 
+/**
+ * What a chat's agent is up to, as the sidebar shows it: "running" while it works (or messages wait for it), "waiting"
+ * when its last reply ended on a question to the people in the chat. Null where it is neither.
+ */
+export type ChatStatus = "running" | "waiting";
+
 /** What a tool that writes the user's files (files_write, run_python, run_bash) says it saved: deleting the chat can delete them. */
 export interface SavedFilesDetails {
   saved: string[];
@@ -160,7 +168,13 @@ export interface ChatSummary {
   updatedAt: number;
   /** Set on a chat someone else owns and invited you to: their name. */
   sharedBy?: string;
+  status?: ChatStatus;
+  /** Set when the chat has a reply, or someone else's message, that this user has not seen yet. */
+  unread?: true;
 }
+
+/** What the sidebar's socket (GET /api/me/ws) sends: the name of a list that changed, so the app reads it again. */
+export type SidebarList = "chats" | "artifacts" | "skills";
 
 /** Someone in a chat: a verified uid, and the name the others see (their email, or the demo name). */
 export interface Person {

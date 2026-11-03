@@ -87,9 +87,16 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (page && method === "GET") return artifactPage(request, storage, page[1], Number(page[2]));
 
   // Artifact metadata and the MCP proxy.
-  const artifact = path.match(/^\/api\/artifacts\/([a-z0-9]+)(\/mcp|\/tools|\/clone)?$/);
+  const artifact = path.match(/^\/api\/artifacts\/([a-z0-9]+)(\/mcp|\/tools|\/clone|\/seen)?$/);
   if (artifact && ID_PATTERN.test(artifact[1])) {
     const id = artifact[1];
+    // The owner opened a version of one of their artifacts: only their own sidebar entry changes.
+    if (artifact[2] === "/seen" && method === "POST") {
+      const version = (await readJson<{ version?: unknown }>(request))?.version;
+      if (!Number.isInteger(version)) return json({ error: "Expected {version}." }, 400);
+      await exports.UserDirectory.getByName(uid).markArtifactSeen(id, version as number);
+      return json({});
+    }
     // A page's tool list and live calls go to the chat that published it.
     if ((artifact[2] === "/tools" && method === "GET") || (artifact[2] === "/mcp" && method === "POST")) {
       const name = await artifactChat(storage, id);
@@ -128,6 +135,11 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (mcp) return mcp;
 
   const directory = exports.UserDirectory.getByName(uid);
+  // The sidebar's socket: it hears which of the chat, artifact and skill lists changed (worker/users.ts).
+  if (path === "/api/me/ws" && method === "GET") {
+    if (request.headers.get("upgrade") !== "websocket") return json({ error: "Expected a WebSocket upgrade" }, 426);
+    return directory.fetch(request);
+  }
   if (path === "/api/chats" && method === "GET") return json(await directory.listChats());
   if (path === "/api/chats" && method === "POST") return json(await directory.createChat(newId()));
   if (path === "/api/artifacts" && method === "GET") return json(await directory.listArtifacts());

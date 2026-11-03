@@ -1,8 +1,9 @@
 import { DurableObject, exports } from "cloudflare:workers";
 import type { ModelChoice } from "../shared/models.ts";
-import type { ArtifactSummary, ChatSummary } from "../shared/protocol.ts";
+import type { ArtifactSummary, ChatStatus, ChatSummary, SidebarList } from "../shared/protocol.ts";
 import { checkSkill, MAX_SKILL_PROPOSALS, MAX_USER_SKILLS, SkillError, type SavedSkillOrigin, type SkillInfo, type SkillInput, type SkillResult } from "../shared/skills.ts";
 import { BUILTIN_SKILLS, builtinSkill, parseSkillFile } from "./skills/index.ts";
+import { titleFromMessage, UNNAMED_CHAT } from "./agent/title.ts";
 import { applyAuthChange, type McpAuthChange, type McpAuthRecord, type McpAuthStore } from "./mcp/oauth.ts";
 import { mcpServers } from "./mcp/servers.ts";
 
@@ -37,10 +38,29 @@ export class UserDirectory extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS builtin_skills_off (name TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS shared_chats (id TEXT PRIMARY KEY, owner_uid TEXT NOT NULL, owner_name TEXT NOT NULL, title TEXT NOT NULL, joined_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
     `);
+    // Added later: what the chat's agent is doing (ChatStatus), when something last came in that this user did not
+    // write, and when they last saw the chat. activity_at > seen_at is unread.
+    for (const table of ["chats", "shared_chats"]) {
+      this.#addColumn(table, "status", "TEXT");
+      this.#addColumn(table, "activity_at", "INTEGER NOT NULL DEFAULT 0");
+      this.#addColumn(table, "seen_at", "INTEGER NOT NULL DEFAULT 0");
+    }
+    // The newest version of each artifact its owner opened. Artifacts from before count as seen.
+    if (this.#addColumn("artifacts", "seen", "INTEGER NOT NULL DEFAULT 0")) ctx.storage.sql.exec("UPDATE artifacts SET seen = latest");
+    // A sidebar's socket stays open for hours: answer its keep-alive pings without waking this object.
+    ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
     // Forget sign-ins to servers this deployment no longer has, tokens included.
     const configured = mcpServers(env).map((server) => server.name);
     const placeholders = configured.map(() => "?").join(", ");
     ctx.storage.sql.exec(`DELETE FROM mcp_auth${configured.length ? ` WHERE server NOT IN (${placeholders})` : ""}`, ...configured);
+  }
+
+  /** Add a column a table made before it lacks; true when it was added. `table`, `column` and `type` are written here, never input. */
+  #addColumn(table: string, column: string, type: string): boolean {
+    const columns = this.ctx.storage.sql.exec<{ name: string }>(`SELECT name FROM pragma_table_info('${table}')`).toArray();
+    if (columns.some((row) => row.name === column)) return false;
+    this.ctx.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+    return true;
   }
 
   /** This user's OAuth state for one MCP server (worker/mcp/oauth.ts): registration, tokens, a sign-in in progress. */
@@ -56,16 +76,88 @@ export class UserDirectory extends DurableObject<Env> {
     else this.ctx.storage.sql.exec("INSERT INTO mcp_auth (server, data) VALUES (?, ?) ON CONFLICT(server) DO UPDATE SET data = excluded.data", server, JSON.stringify(record));
   }
 
+  /**
+   * The sidebar's socket: it only hears which list changed (SidebarList): a chat was added, named, bumped, or its agent
+   * started or stopped working; an artifact was published or opened; a skill was added, changed or proposed. The app
+   * reads that list again. The Worker opens it for the signed-in user only.
+   */
+  fetch(request: Request): Response {
+    if (request.headers.get("upgrade") !== "websocket") return new Response("Expected a WebSocket upgrade", { status: 426 });
+    const pair = new WebSocketPair();
+    this.ctx.acceptWebSocket(pair[1]);
+    return new Response(null, { status: 101, webSocket: pair[0] });
+  }
+
+  webSocketMessage(): void {
+    // The app sends nothing but pings, which the auto-response answers.
+  }
+
+  webSocketClose(ws: WebSocket, code: number, reason: string): void {
+    try {
+      ws.close(code, reason);
+    } catch {
+      // Already closed.
+    }
+  }
+
+  /** Tell the open sidebars that a list changed. */
+  #changed(list: SidebarList): void {
+    for (const ws of this.ctx.getWebSockets()) {
+      try {
+        ws.send(list);
+      } catch {
+        // Closing; the app reads the list again when it reconnects.
+      }
+    }
+  }
+
   /** The user's own chats and the ones shared with them, most recent first. */
   listChats(): ChatSummary[] {
     return this.ctx.storage.sql
-      .exec<{ id: string; title: string; created_at: number; updated_at: number; shared_by: string | null }>(
-        `SELECT id, title, created_at, updated_at, NULL AS shared_by FROM chats
-         UNION ALL SELECT id, title, joined_at, updated_at, owner_name FROM shared_chats
+      .exec<{ id: string; title: string; created_at: number; updated_at: number; shared_by: string | null; status: ChatStatus; unread: number }>(
+        `SELECT id, title, created_at, updated_at, NULL AS shared_by, status, activity_at > seen_at AS unread FROM chats
+         UNION ALL SELECT id, title, joined_at, updated_at, owner_name, status, activity_at > seen_at FROM shared_chats
          ORDER BY updated_at DESC`,
       )
       .toArray()
-      .map((row) => ({ id: row.id, title: row.title, createdAt: row.created_at, updatedAt: row.updated_at, ...(row.shared_by !== null && { sharedBy: row.shared_by }) }));
+      .map((row) => ({
+        id: row.id,
+        title: row.title,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+        ...(row.shared_by !== null && { sharedBy: row.shared_by }),
+        ...(row.status && { status: row.status }),
+        ...(row.unread === 1 && { unread: true as const }),
+      }));
+  }
+
+  /**
+   * Change this user's row for chat `id`, which `ownerUid` owns: in `chats` when that is this user, else in
+   * `shared_chats`. `set` is an SQL SET list written here, never input; its `?` take `values`. Tells the open sidebars
+   * when a row changed.
+   */
+  #updateChat(id: string, ownerUid: string, set: string, ...values: SqlStorageValue[]): void {
+    const own = ownerUid === this.ctx.id.name;
+    const sql = own ? `UPDATE chats SET ${set} WHERE id = ?` : `UPDATE shared_chats SET ${set} WHERE id = ? AND owner_uid = ?`;
+    if (this.ctx.storage.sql.exec(sql, ...values, id, ...(own ? [] : [ownerUid])).rowsWritten) this.#changed("chats");
+  }
+
+  /** What the chat's agent is doing now. `replied`: it just ended a run, so the chat has a reply this user has not seen. */
+  setChatStatus(id: string, ownerUid: string, status: ChatStatus | null, replied: boolean): void {
+    this.#updateChat(id, ownerUid, "status = ?, activity_at = CASE WHEN ? THEN ? ELSE activity_at END", status, replied ? 1 : 0, Date.now());
+  }
+
+  /** The title a model gave the chat, unless it was renamed since it was called `placeholder`. */
+  nameChat(id: string, ownerUid: string, title: string, placeholder: string): void {
+    this.#updateChat(id, ownerUid, "title = CASE title WHEN ? THEN ? ELSE title END", placeholder, title);
+  }
+
+  /** This user has seen everything in the chat so far. */
+  markSeen(id: string): void {
+    const now = Date.now();
+    const own = this.ctx.storage.sql.exec("UPDATE chats SET seen_at = ? WHERE id = ? AND activity_at > seen_at", now, id).rowsWritten;
+    const shared = this.ctx.storage.sql.exec("UPDATE shared_chats SET seen_at = ? WHERE id = ? AND activity_at > seen_at", now, id).rowsWritten;
+    if (own + shared > 0) this.#changed("chats");
   }
 
   /** Whose chat `id` is: this user's own uid, the owner's for a chat shared with them, or null. The chat itself still checks membership. */
@@ -76,48 +168,58 @@ export class UserDirectory extends DurableObject<Env> {
   }
 
   /** Index a chat this user joined by an invite. Chat ids are random, so one never names both an own and a shared chat. */
-  addSharedChat(chat: { id: string; ownerUid: string; ownerName: string; title: string }): void {
+  addSharedChat(chat: { id: string; ownerUid: string; ownerName: string; title: string; status: ChatStatus | null }): void {
     if (this.hasChat(chat.id)) return;
     const now = Date.now();
     this.ctx.storage.sql.exec(
-      `INSERT INTO shared_chats (id, owner_uid, owner_name, title, joined_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET owner_name = excluded.owner_name, title = excluded.title, updated_at = excluded.updated_at`,
+      `INSERT INTO shared_chats (id, owner_uid, owner_name, title, joined_at, updated_at, status) VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET owner_name = excluded.owner_name, title = excluded.title, updated_at = excluded.updated_at, status = excluded.status`,
       chat.id,
       chat.ownerUid,
       chat.ownerName,
       chat.title,
       now,
       now,
+      chat.status,
     );
+    this.#changed("chats");
   }
 
-  /** Bump a shared chat to the top with its current title, as touchChat does for the owner. */
-  touchSharedChat(id: string, ownerUid: string, title: string): void {
-    this.ctx.storage.sql.exec("UPDATE shared_chats SET title = ?, updated_at = ? WHERE id = ? AND owner_uid = ?", title, Date.now(), id, ownerUid);
+  /** Bump a shared chat to the top with its current title, as touchChat does for the owner. `byOther`: someone else wrote. */
+  touchSharedChat(id: string, ownerUid: string, title: string, byOther: boolean): void {
+    this.#touch(id, ownerUid, title, byOther);
+  }
+
+  #touch(id: string, ownerUid: string, title: string, byOther: boolean): void {
+    const now = Date.now();
+    this.#updateChat(id, ownerUid, "title = ?, updated_at = ?, activity_at = CASE WHEN ? THEN ? ELSE activity_at END", title, now, byOther ? 1 : 0, now);
   }
 
   removeSharedChat(id: string, ownerUid: string): void {
-    this.ctx.storage.sql.exec("DELETE FROM shared_chats WHERE id = ? AND owner_uid = ?", id, ownerUid);
+    if (this.ctx.storage.sql.exec("DELETE FROM shared_chats WHERE id = ? AND owner_uid = ?", id, ownerUid).rowsWritten) this.#changed("chats");
   }
 
   createChat(id: string): ChatSummary {
     const now = Date.now();
-    this.ctx.storage.sql.exec("INSERT INTO chats (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)", id, "New chat", now, now);
-    return { id, title: "New chat", createdAt: now, updatedAt: now };
+    this.ctx.storage.sql.exec("INSERT INTO chats (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)", id, UNNAMED_CHAT, now, now);
+    this.#changed("chats");
+    return { id, title: UNNAMED_CHAT, createdAt: now, updatedAt: now };
   }
 
   hasChat(id: string): boolean {
     return this.ctx.storage.sql.exec("SELECT 1 FROM chats WHERE id = ?", id).toArray().length > 0;
   }
 
-  /** Bump a chat to the top. A chat still called "New chat" is named after the prompt, so the first prompt names it. Returns its title. */
-  touchChat(id: string, prompt: string): string {
-    const title = prompt.replace(/\s+/g, " ").trim().slice(0, 60) || "New chat";
-    return (
-      this.ctx.storage.sql
-        .exec<{ title: string }>("UPDATE chats SET updated_at = ?, title = CASE title WHEN 'New chat' THEN ? ELSE title END WHERE id = ? RETURNING title", Date.now(), title, id)
-        .toArray()[0]?.title ?? title
-    );
+  /**
+   * Bump a chat to the top. A chat still unnamed is named after the prompt, so the first prompt names it (`named`), until
+   * a model gives it a better title (nameChat). `byOther`: someone other than this user wrote it. Returns its title.
+   */
+  touchChat(id: string, prompt: string, byOther: boolean): { title: string; named: boolean } {
+    const before = this.chatTitle(id);
+    const named = before === UNNAMED_CHAT;
+    const title = named || before === null ? titleFromMessage(prompt) : before;
+    this.#touch(id, this.ctx.id.name!, title, byOther);
+    return { title, named };
   }
 
   chatTitle(id: string): string | null {
@@ -131,15 +233,27 @@ export class UserDirectory extends DurableObject<Env> {
 
   /** Take a deleted chat, and the artifacts it published, out of this user's lists. The chat deletes the rest first. */
   forgetChat(id: string): void {
-    this.ctx.storage.sql.exec("DELETE FROM artifacts WHERE chat_id = ?", id);
-    this.ctx.storage.sql.exec("DELETE FROM chats WHERE id = ?", id);
+    if (this.ctx.storage.sql.exec("DELETE FROM artifacts WHERE chat_id = ?", id).rowsWritten) this.#changed("artifacts");
+    if (this.ctx.storage.sql.exec("DELETE FROM chats WHERE id = ?", id).rowsWritten) this.#changed("chats");
   }
 
   listArtifacts(): ArtifactSummary[] {
     return this.ctx.storage.sql
-      .exec<{ id: string; title: string; chat_id: string; latest: number; updated_at: number }>("SELECT * FROM artifacts ORDER BY updated_at DESC")
+      .exec<{ id: string; title: string; chat_id: string; latest: number; updated_at: number; seen: number }>("SELECT * FROM artifacts ORDER BY updated_at DESC")
       .toArray()
-      .map((row) => ({ id: row.id, title: row.title, chatId: row.chat_id, latest: row.latest, updatedAt: row.updated_at }));
+      .map((row) => ({
+        id: row.id,
+        title: row.title,
+        chatId: row.chat_id,
+        latest: row.latest,
+        updatedAt: row.updated_at,
+        ...(row.latest > row.seen && { unread: true as const }),
+      }));
+  }
+
+  /** The owner opened `version` of an artifact: it and the ones before are no longer unread. */
+  markArtifactSeen(id: string, version: number): void {
+    if (this.ctx.storage.sql.exec("UPDATE artifacts SET seen = ? WHERE id = ? AND seen < ?", version, id, version).rowsWritten) this.#changed("artifacts");
   }
 
   recordArtifact(artifact: ArtifactSummary): void {
@@ -152,6 +266,7 @@ export class UserDirectory extends DurableObject<Env> {
       artifact.latest,
       artifact.updatedAt,
     );
+    this.#changed("artifacts");
   }
 
   /**
@@ -229,13 +344,16 @@ export class UserDirectory extends DurableObject<Env> {
       on ? 1 : 0,
       now,
     );
+    this.#changed("skills");
     return { ...skill, origin, enabled: on, updatedAt: now };
   }
 
   setBuiltinSkillEnabled(name: string, enabled: boolean): SkillResult {
     if (!builtinSkill(name)) return { error: `No built-in skill named "${name}".` };
-    if (enabled) this.ctx.storage.sql.exec("DELETE FROM builtin_skills_off WHERE name = ?", name);
-    else this.ctx.storage.sql.exec("INSERT OR IGNORE INTO builtin_skills_off (name) VALUES (?)", name);
+    const written = enabled
+      ? this.ctx.storage.sql.exec("DELETE FROM builtin_skills_off WHERE name = ?", name).rowsWritten
+      : this.ctx.storage.sql.exec("INSERT OR IGNORE INTO builtin_skills_off (name) VALUES (?)", name).rowsWritten;
+    if (written) this.#changed("skills");
     return this.getBuiltinSkill(name)!;
   }
 
@@ -245,22 +363,25 @@ export class UserDirectory extends DurableObject<Env> {
    * replaced while the user reviewed it) is refused, so they read it again.
    */
   setSkillEnabled(name: string, enabled: boolean, seen?: number): SkillResult {
+    let written: number;
     if (enabled) {
       const current = this.ctx.storage.sql.exec<{ updated_at: number }>("SELECT updated_at FROM skills WHERE name = ?", name).toArray()[0];
       if (current && seen !== undefined && current.updated_at !== seen) {
         return { error: `The skill "${name}" changed since you read it; read it again before turning it on.` };
       }
       // Turning a proposal on makes it the user's own: the agent can no longer replace it.
-      this.ctx.storage.sql.exec("UPDATE skills SET enabled = 1, origin = 'user', updated_at = ? WHERE name = ?", Date.now(), name);
+      written = this.ctx.storage.sql.exec("UPDATE skills SET enabled = 1, origin = 'user', updated_at = ? WHERE name = ?", Date.now(), name).rowsWritten;
     } else {
-      this.ctx.storage.sql.exec("UPDATE skills SET enabled = 0, updated_at = ? WHERE name = ?", Date.now(), name);
+      written = this.ctx.storage.sql.exec("UPDATE skills SET enabled = 0, updated_at = ? WHERE name = ?", Date.now(), name).rowsWritten;
     }
+    if (written) this.#changed("skills");
     return this.getSkill(name) ?? { error: `No skill named "${name}".` };
   }
 
   /** Delete one of the user's skills. Built-in ones can only be turned off. */
   deleteSkill(name: string): SkillResult | null {
     const deleted = this.ctx.storage.sql.exec("DELETE FROM skills WHERE name = ?", name).rowsWritten;
+    if (deleted) this.#changed("skills");
     return deleted ? null : { error: `No skill named "${name}".` };
   }
 

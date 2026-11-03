@@ -1,16 +1,17 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type DragEvent, type FormEvent } from "react";
-import type { ChatSummary, PublishedDetails } from "../shared/protocol.ts";
+import type { PublishedDetails } from "../shared/protocol.ts";
 import { isActive, type SkillInfo } from "../shared/skills.ts";
 import { errorMessage } from "../shared/util.ts";
 import { api, type ArtifactSummary, type FileInfo, type Me } from "./api.ts";
 import { ArtifactPanel } from "./artifact/ArtifactPanel.tsx";
+import { ChatList, UnreadDot, useChatList } from "./chat/ChatList.tsx";
 import { ChatView } from "./chat/ChatView.tsx";
 import { DeleteChat } from "./chat/DeleteChat.tsx";
 import { ErrorBoundary } from "./ErrorBoundary.tsx";
-import { Icon } from "./Icon.tsx";
 import { FilesNav, useUploads } from "./files/FilesNav.tsx";
 import { carriesFiles, fromDrop } from "./files/pick.ts";
 import { ResizeHandle, useStoredState } from "./layout.tsx";
+import { useLatest, useSidebarSocket } from "./sidebar.ts";
 import { SkillsView } from "./skills/SkillsView.tsx";
 
 function usePath(): [string, (path: string) => void] {
@@ -169,11 +170,11 @@ const CHAT_MIN = 320;
 const PREVIEW_MIN = 360;
 
 function Workspace({ uid, label, chatId, showSkills, navigate, onSignOut }: WorkspaceProps) {
-  const [chats, setChats] = useState<ChatSummary[]>([]);
-  const [artifacts, setArtifacts] = useState<ArtifactSummary[]>([]);
-  const [files, setFiles] = useState<FileInfo[]>([]);
-  const [skills, setSkills] = useState<SkillInfo[] | null>(null);
+  const { chats, load: loadChats } = useChatList(chatId);
+  const [artifacts, loadArtifacts] = useLatest<ArtifactSummary[]>(api.artifacts, []);
+  const [files, loadFiles] = useLatest<FileInfo[]>(api.files, []);
   const [skillsError, setSkillsError] = useState<string | null>(null);
+  const [skills, loadSkills] = useLatest<SkillInfo[] | null>(api.skills, null, (e) => setSkillsError(e?.message ?? null));
   const [preview, setPreview] = useState<PublishedDetails | null>(null);
   // The chat whose deletion is being confirmed.
   const [deleting, setDeleting] = useState<string | null>(null);
@@ -183,26 +184,14 @@ function Workspace({ uid, label, chatId, showSkills, navigate, onSignOut }: Work
   const [chatWidth, setChatWidth] = useStoredState<number | null>("layout.chatWidth", null);
   const chatRef = useRef<HTMLElement>(null);
 
-  const loadSkills = useCallback(() => {
-    api.skills().then(
-      (list) => {
-        setSkills(list);
-        setSkillsError(null);
-      },
-      (e: Error) => setSkillsError(e.message),
-    );
-  }, []);
-  const loadChats = useCallback(() => void api.chats().then(setChats, () => {}), []);
-  const loadArtifacts = useCallback(() => void api.artifacts().then(setArtifacts, () => {}), []);
-  const loadFiles = useCallback(() => void api.files().then(setFiles, () => {}), []);
-  // After a run: it may have named the chat, published, saved files (run_python) or proposed a skill.
-  const refresh = useCallback(() => {
-    loadChats();
+  useEffect(() => {
     loadArtifacts();
     loadFiles();
     loadSkills();
-  }, [loadChats, loadArtifacts, loadFiles, loadSkills]);
-  useEffect(refresh, [refresh]);
+  }, [loadArtifacts, loadFiles, loadSkills]);
+  // Chats, artifacts and skills live in the user's directory, which says when they change. Files are not in it: a run
+  // may have saved some (run_python), so they are read again after each one.
+  useSidebarSocket({ chats: loadChats, artifacts: loadArtifacts, skills: loadSkills });
   useEffect(() => setPreview(null), [chatId]);
 
   // Skills the agent proposed in a chat wait, off, for the user to review.
@@ -210,17 +199,8 @@ function Workspace({ uid, label, chatId, showSkills, navigate, onSignOut }: Work
 
   const newChat = async () => {
     const chat = await api.createChat();
-    loadChats();
     navigate(`/c/${chat.id}`);
   };
-
-  const onArtifact = useCallback(
-    (artifact: PublishedDetails) => {
-      setPreview(artifact);
-      loadArtifacts();
-    },
-    [loadArtifacts],
-  );
 
   const { status: uploadStatus, upload } = useUploads(loadFiles);
   // Files dragged over the app: entries counted, since entering a child element leaves its parent first. Only whether
@@ -292,36 +272,15 @@ function Workspace({ uid, label, chatId, showSkills, navigate, onSignOut }: Work
           {/* Chats, artifacts and skills scroll here, above the files panel. */}
           <div className="sidebar-scroll">
           <h3>Chats</h3>
-          <nav>
-            {chats.map((chat) => (
-              <div key={chat.id} className={chat.id === chatId ? "chat-link active" : "chat-link"}>
-                <a
-                  href={`/c/${chat.id}`}
-                  title={chat.sharedBy && `Shared by ${chat.sharedBy}`}
-                  onClick={(e) => {
-                    e.preventDefault();
-                    navigate(`/c/${chat.id}`);
-                  }}
-                >
-                  {chat.title}
-                  {chat.sharedBy && <small> · {chat.sharedBy}</small>}
-                </a>
-                {/* Only the owner can delete a chat; someone it is shared with leaves it from the chat's People panel. */}
-                {!chat.sharedBy && (
-                  <button type="button" className="chat-delete" title="Delete chat" aria-label={`Delete chat ${chat.title}`} onClick={() => setDeleting(chat.id)}>
-                    <Icon size={15} box={24}>
-                      <path d="M4 7h16M10 11v6M14 11v6M5 7l1 12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2l1-12M9 7V4h6v3" />
-                    </Icon>
-                  </button>
-                )}
-              </div>
-            ))}
-          </nav>
+          <ChatList chats={chats} openId={chatId} navigate={navigate} onDelete={setDeleting} />
           <h3>Artifacts</h3>
           <nav>
             {artifacts.map((a) => (
-              <a key={a.id} href={`/a/${a.id}`} target="_blank" rel="noreferrer">
-                {a.title} <small>v{a.latest}</small>
+              <a key={a.id} href={`/a/${a.id}`} target="_blank" rel="noreferrer" className={a.unread ? "nav-item unread" : "nav-item"}>
+                <span className="nav-title">
+                  {a.title} <small>v{a.latest}</small>
+                </span>
+                {a.unread && <UnreadDot label="New version you have not opened" />}
               </a>
             ))}
           </nav>
@@ -329,14 +288,17 @@ function Workspace({ uid, label, chatId, showSkills, navigate, onSignOut }: Work
           <nav>
             <a
               href="/skills"
-              className={showSkills ? "active" : ""}
+              className={["nav-item", showSkills && "active", proposed > 0 && "unread"].filter(Boolean).join(" ")}
               onClick={(e) => {
                 e.preventDefault();
                 navigate("/skills");
               }}
             >
-              {(skills ?? []).filter(isActive).length} on, {skills?.length ?? 0} in all
-              {proposed > 0 && <small> · {proposed} to review</small>}
+              <span className="nav-title">
+                {(skills ?? []).filter(isActive).length} on, {skills?.length ?? 0} in all
+                {proposed > 0 && <small> · {proposed} to review</small>}
+              </span>
+              {proposed > 0 && <UnreadDot label="Proposed skills to review" />}
             </a>
           </nav>
           </div>
@@ -368,13 +330,9 @@ function Workspace({ uid, label, chatId, showSkills, navigate, onSignOut }: Work
             <ChatView
               chatId={chatId}
               uid={uid}
-              onArtifact={onArtifact}
-              onActivity={refresh}
-              onGone={loadChats}
-              onLeft={() => {
-                loadChats();
-                navigate("/");
-              }}
+              onArtifact={setPreview}
+              onActivity={loadFiles}
+              onLeft={() => navigate("/")}
             />
           </ErrorBoundary>
         ) : (
@@ -403,7 +361,8 @@ function Workspace({ uid, label, chatId, showSkills, navigate, onSignOut }: Work
             setDeleting(null);
             // Leaving the chat closes its preview; another chat's deletion leaves this one's open.
             if (deleting === chatId) navigate("/");
-            refresh();
+            // Its files may be gone too; the chat and artifact lists follow on their own.
+            loadFiles();
           }}
         />
       )}

@@ -120,6 +120,18 @@ body.resizing iframe { pointer-events: none; }
   font-size: 14px;
 }
 .sidebar nav a:hover, .sidebar nav a.active { background: var(--surface-2); }
+/* A sidebar entry: its name, and on the right its status (ChatList.tsx): working, waiting for an answer, or unread. */
+.sidebar nav a.nav-item { display: flex; align-items: center; gap: 8px; }
+.sidebar nav .nav-title { flex: 1; min-width: 0; padding: 0; overflow: hidden; text-overflow: ellipsis; }
+.sidebar nav a.unread .nav-title { font-weight: 600; }
+.sidebar nav a.unread .nav-title small { font-weight: 400; }
+.sidebar nav .nav-status { flex: none; padding: 0; overflow: visible; }
+.sidebar nav .spinner.nav-status { width: 12px; height: 12px; vertical-align: 0; }
+.sidebar nav .chat-waiting {
+  display: inline-grid; place-items: center; width: 16px; height: 16px; border-radius: 50%;
+  background: var(--accent); color: var(--accent-text); font-size: 11px; font-weight: 700; line-height: 1;
+}
+.sidebar nav .nav-unread { width: 8px; height: 8px; margin: 0 4px; border-radius: 50%; background: var(--accent); }
 /* A chat in the list, with its delete button: shown on hover or focus, and always on touch screens. */
 .chat-link { position: relative; display: flex; border-radius: 6px; }
 .chat-link > a { flex: 1; min-width: 0; }
@@ -129,6 +141,8 @@ body.resizing iframe { pointer-events: none; }
 .chat-link:hover .chat-delete, .chat-delete:focus-visible { opacity: 1; }
 .chat-delete:hover { color: var(--error); }
 @media (hover: none) { .chat-delete { opacity: 1; } }
+/* With a mouse, the button shows over the chat's status icon on hover, so the icons line up with the other lists'. */
+@media (hover: hover) { .chat-delete { position: absolute; top: 0; right: 0; bottom: 0; border-radius: 0 6px 6px 0; background: var(--surface-2); } }
 .confirm-dialog { width: min(440px, calc(100% - 32px)); padding: 20px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); color: var(--text); box-shadow: 0 12px 40px rgb(0 0 0 / 0.2); }
 .confirm-dialog::backdrop { background: rgb(0 0 0 / 0.35); }
 .confirm-dialog h2 { margin: 0 0 10px; font-size: 18px; }
