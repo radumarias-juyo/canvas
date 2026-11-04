@@ -1,5 +1,5 @@
 import type { Mention, MentionInput } from "../../shared/mentions.ts";
-import { isOwnedBy, type ArtifactMeta } from "../../shared/protocol.ts";
+import { isOwnedBy, type ArtifactMeta, type Person } from "../../shared/protocol.ts";
 import { literalPath } from "../storage/paths.ts";
 
 /** What resolving a message's mentions needs from its chat. */
@@ -10,6 +10,10 @@ export interface MentionScope {
   /** Whether the message's author is the owner. Others may name only this chat's artifacts. */
   byOwner: boolean;
   readMeta(id: string): Promise<ArtifactMeta | null>;
+  /** Whether someone other than the owner may name this file of the owner's: without it, they may name none. */
+  mayName?(path: string): Promise<boolean>;
+  /** The person with this uid, while they are in the chat: only they can be tagged. */
+  person?(uid: string): Person | null;
 }
 
 /**
@@ -26,18 +30,25 @@ export function mentionable(artifact: Pick<ArtifactMeta, "chatId">, chatId: stri
  * the model gets after the text, with exact paths and artifact ids; and the
  * artifacts from the owner's other chats it names, which the agent may then
  * read here (ChatScope.broughtIn). A file is taken by its path, which the
- * agent's tools check when they open it; an artifact must be the owner's and
- * mentionable. Anything else is dropped.
+ * agent's tools check when they open it (someone else's only as mayName
+ * allows); an artifact must be the owner's and mentionable; a person must be in
+ * the chat, and is recorded by the name it shows (the text already says it to
+ * the model). Anything else is dropped.
  */
 export async function resolveMentions(
   inputs: readonly MentionInput[],
   scope: MentionScope,
 ): Promise<{ mentions: Mention[]; note: string; broughtIn: string[] }> {
   const resolved = await Promise.all(
-    inputs.map(async (input): Promise<{ mention: Mention; said: string; elsewhere?: boolean } | null> => {
+    inputs.map(async (input): Promise<{ mention: Mention; said?: string; elsewhere?: boolean } | null> => {
+      if (input.kind === "person") {
+        const person = scope.person?.(input.uid);
+        return person ? { mention: { kind: "person", uid: person.uid, name: person.name } } : null;
+      }
       if (input.kind === "file") {
         const path = literalPath(input.path);
-        return path ? { mention: { kind: "file", path }, said: `the file ${path}` } : null;
+        if (!path || !(scope.byOwner || (await scope.mayName?.(path)))) return null;
+        return { mention: { kind: "file", path }, said: `the file ${path}` };
       }
       // One artifact that cannot be read is dropped like a missing one, not a reason to refuse the whole message.
       const meta = await scope.readMeta(input.id).catch((error: unknown) => {
@@ -54,9 +65,10 @@ export async function resolveMentions(
     }),
   );
   const kept = resolved.filter((r) => r !== null);
+  const said = kept.flatMap((r) => (r.said ? [r.said] : []));
   return {
     mentions: kept.map((r) => r.mention),
-    note: kept.length ? `[Mentioned with @: ${kept.map((r) => r.said).join("; ")}.]` : "",
+    note: said.length ? `[Mentioned with @: ${said.join("; ")}.]` : "",
     broughtIn: kept.flatMap((r) => (r.elsewhere && r.mention.kind === "artifact" ? [r.mention.id] : [])),
   };
 }

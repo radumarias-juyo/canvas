@@ -45,10 +45,10 @@ function cleanSegment(segment: string): string {
 /**
  * Where each of `names` is kept (see uploadPath), named over the whole list:
  * two names that clean up to one path ("a?.csv" and "a*.csv") get -2, -3…
- * rather than lose a file. A name with nothing left of it is "upload".
+ * rather than lose a file. A name with nothing left of it is "upload". With `existing`, none takes one of those either.
  */
-export function uploadTargets(names: readonly string[]): string[] {
-  const taken = new Set<string>();
+export function uploadTargets(names: readonly string[], existing: Iterable<string> = []): string[] {
+  const taken = new Set(existing);
   return names.map((name) => {
     const path = freePath(uploadPath(name) ?? `${UPLOADS}/upload`, taken);
     taken.add(path);
@@ -214,6 +214,11 @@ export const FILE_ROUTE = "/api/files/raw/";
  * root; POSTed bare, a form of picked `file` and `folder` fields downloads as one zip (worker/files-routes.ts serveSelection).
  */
 export const ZIP_ROUTE = "/api/files/zip/";
+
+/** Where a chat's files (its owner's, attached in it or saved by its agent) are served to the people in it, by path. */
+export function chatFileRoute(chatId: string): string {
+  return `/api/chats/${chatId}/files/`;
+}
 
 /** What one zip may hold, of a folder or a pick: past either, the Worker refuses and the user downloads less at a time. */
 export const MAX_ZIP_BYTES = 1024 * 1024 * 1024;

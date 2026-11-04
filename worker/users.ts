@@ -1,6 +1,6 @@
 import { DurableObject, exports } from "cloudflare:workers";
 import type { ModelChoice } from "../shared/models.ts";
-import { SOCKET_PING, type ArtifactSummary, type ChatStatus, type ChatSummary, type SidebarList } from "../shared/protocol.ts";
+import { SOCKET_PING, type ArtifactSummary, type ChatStatus, type ChatSummary, type MentionNotice, type SidebarList } from "../shared/protocol.ts";
 import { checkSkill, MAX_SKILL_PROPOSALS, MAX_USER_SKILLS, SkillError, type SavedSkillOrigin, type SkillInfo, type SkillInput, type SkillResult } from "../shared/skills.ts";
 import { BUILTIN_SKILLS, builtinSkill, parseSkillFile } from "./skills/index.ts";
 import { titleFromMessage, UNNAMED_CHAT } from "./agent/title.ts";
@@ -12,6 +12,9 @@ export function mcpAuthStore(uid: string, server: string): McpAuthStore {
   const directory = exports.UserDirectory.getByName(uid);
   return { get: () => directory.mcpAuth(server), update: (change) => directory.updateMcpAuth(server, change) };
 }
+
+/** A message that tagged this user: who wrote it, its start, and when. */
+export type Tag = Pick<MentionNotice, "from" | "text" | "at">;
 
 type ArtifactRow = { id: string; title: string; chat_id: string; latest: number; updated_at: number; seen: number };
 
@@ -41,12 +44,16 @@ export class UserDirectory extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS shared_chats (id TEXT PRIMARY KEY, owner_uid TEXT NOT NULL, owner_name TEXT NOT NULL, title TEXT NOT NULL, joined_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
     `);
     // Added later: what the chat's agent is doing (ChatStatus), when something last came in that this user did not
-    // write, and when they last saw the chat. activity_at > seen_at is unread.
+    // write, and when they last saw the chat. activity_at > seen_at is unread. Then: when someone last tagged them in
+    // it; mentioned_at > seen_at is a tag they have not seen.
     for (const table of ["chats", "shared_chats"]) {
       this.#addColumn(table, "status", "TEXT");
       this.#addColumn(table, "activity_at", "INTEGER NOT NULL DEFAULT 0");
       this.#addColumn(table, "seen_at", "INTEGER NOT NULL DEFAULT 0");
+      this.#addColumn(table, "mentioned_at", "INTEGER NOT NULL DEFAULT 0");
     }
+    // Whether this user's own chat has members: the chat tells (setChatShared) when that changes, and when it opens.
+    this.#addColumn("chats", "shared", "INTEGER NOT NULL DEFAULT 0");
     // The newest version of each artifact its owner opened. Artifacts from before count as seen.
     if (this.#addColumn("artifacts", "seen", "INTEGER NOT NULL DEFAULT 0")) ctx.storage.sql.exec("UPDATE artifacts SET seen = latest");
     // A sidebar's socket stays open for hours: answer its keep-alive pings without waking this object.
@@ -79,9 +86,10 @@ export class UserDirectory extends DurableObject<Env> {
   }
 
   /**
-   * The sidebar's socket: it only hears which list changed (SidebarList): a chat was added, named, bumped, or its agent
+   * The sidebar's socket: it hears which list changed (SidebarList): a chat was added, named, bumped, or its agent
    * started or stopped working; an artifact was published or opened; a skill was added, changed or proposed. The app
-   * reads that list again. The Worker opens it for the signed-in user only.
+   * reads that list again. It also hears when someone tagged this user (MentionNotice). The Worker opens it for the
+   * signed-in user only.
    */
   fetch(request: Request): Response {
     if (request.headers.get("upgrade") !== "websocket") return new Response("Expected a WebSocket upgrade", { status: 426 });
@@ -102,11 +110,12 @@ export class UserDirectory extends DurableObject<Env> {
     }
   }
 
-  /** Tell the open sidebars that a list changed. */
-  #changed(list: SidebarList): void {
+  /** Tell the open sidebars that a list changed, or that someone tagged this user. */
+  #changed(message: SidebarList | MentionNotice): void {
+    const sent = typeof message === "string" ? message : JSON.stringify(message);
     for (const ws of this.ctx.getWebSockets()) {
       try {
-        ws.send(list);
+        ws.send(sent);
       } catch {
         // Closing; the app reads the list again when it reconnects.
       }
@@ -116,9 +125,19 @@ export class UserDirectory extends DurableObject<Env> {
   /** The user's own chats and the ones shared with them, most recent first. */
   listChats(): ChatSummary[] {
     return this.ctx.storage.sql
-      .exec<{ id: string; title: string; created_at: number; updated_at: number; shared_by: string | null; status: ChatStatus; unread: number }>(
-        `SELECT id, title, created_at, updated_at, NULL AS shared_by, status, activity_at > seen_at AS unread FROM chats
-         UNION ALL SELECT id, title, joined_at, updated_at, owner_name, status, activity_at > seen_at FROM shared_chats
+      .exec<{
+        id: string;
+        title: string;
+        created_at: number;
+        updated_at: number;
+        shared_by: string | null;
+        shared: number;
+        status: ChatStatus;
+        unread: number;
+        mentioned: number;
+      }>(
+        `SELECT id, title, created_at, updated_at, NULL AS shared_by, shared, status, activity_at > seen_at AS unread, mentioned_at > seen_at AS mentioned FROM chats
+         UNION ALL SELECT id, title, joined_at, updated_at, owner_name, 0, status, activity_at > seen_at, mentioned_at > seen_at FROM shared_chats
          ORDER BY updated_at DESC`,
       )
       .toArray()
@@ -127,21 +146,24 @@ export class UserDirectory extends DurableObject<Env> {
         title: row.title,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
-        ...(row.shared_by !== null && { sharedBy: row.shared_by }),
+        ...(row.shared_by !== null ? { sharedBy: row.shared_by } : row.shared === 1 && { shared: true as const }),
         ...(row.status && { status: row.status }),
         ...(row.unread === 1 && { unread: true as const }),
+        ...(row.mentioned === 1 && { mentioned: true as const }),
       }));
   }
 
   /**
    * Change this user's row for chat `id`, which `ownerUid` owns: in `chats` when that is this user, else in
    * `shared_chats`. `set` is an SQL SET list written here, never input; its `?` take `values`. Tells the open sidebars
-   * when a row changed.
+   * when a row changed, and returns whether one did.
    */
-  #updateChat(id: string, ownerUid: string, set: string, ...values: SqlStorageValue[]): void {
+  #updateChat(id: string, ownerUid: string, set: string, ...values: SqlStorageValue[]): boolean {
     const own = ownerUid === this.ctx.id.name;
     const sql = own ? `UPDATE chats SET ${set} WHERE id = ?` : `UPDATE shared_chats SET ${set} WHERE id = ? AND owner_uid = ?`;
-    if (this.ctx.storage.sql.exec(sql, ...values, id, ...(own ? [] : [ownerUid])).rowsWritten) this.#changed("chats");
+    const written = this.ctx.storage.sql.exec(sql, ...values, id, ...(own ? [] : [ownerUid])).rowsWritten > 0;
+    if (written) this.#changed("chats");
+    return written;
   }
 
   /** What the chat's agent is doing now. `replied`: it just ended a run, so the chat has a reply this user has not seen. */
@@ -152,6 +174,13 @@ export class UserDirectory extends DurableObject<Env> {
   /** The title a model gave the chat, unless it was renamed since it was called `placeholder`. */
   nameChat(id: string, ownerUid: string, title: string, placeholder: string): void {
     this.#updateChat(id, ownerUid, "title = CASE title WHEN ? THEN ? ELSE title END", placeholder, title);
+  }
+
+  /** Whether this user's own chat `id` has members now. */
+  setChatShared(id: string, shared: boolean): void {
+    const flag = shared ? 1 : 0;
+    // Only a change: the chat tells again on every join and leave.
+    if (this.ctx.storage.sql.exec("UPDATE chats SET shared = ? WHERE id = ? AND shared != ?", flag, id, flag).rowsWritten) this.#changed("chats");
   }
 
   /** This user has seen everything in the chat so far. */
@@ -187,14 +216,25 @@ export class UserDirectory extends DurableObject<Env> {
     this.#changed("chats");
   }
 
-  /** Bump a shared chat to the top with its current title, as touchChat does for the owner. `byOther`: someone else wrote. */
-  touchSharedChat(id: string, ownerUid: string, title: string, byOther: boolean): void {
-    this.#touch(id, ownerUid, title, byOther);
+  /**
+   * Bump a shared chat to the top with its current title, as touchChat does for the owner. `byOther`: someone else wrote.
+   * `named`: the title was just cut from this message.
+   */
+  touchSharedChat(id: string, ownerUid: string, title: string, byOther: boolean, tag?: Tag, named = false): void {
+    this.#touch(id, ownerUid, title, byOther, tag, named);
   }
 
-  #touch(id: string, ownerUid: string, title: string, byOther: boolean): void {
+  /**
+   * Bump a chat. With `tag`, the message tagged this user: the chat is marked so until they look, and the open apps hear
+   * it (MentionNotice), with the chat's title unless the chat is named after this very message (`named`).
+   */
+  #touch(id: string, ownerUid: string, title: string, byOther: boolean, tag?: Tag, named = false): void {
+    // This object's own clock for the row, as every other write to it uses: a tag's time comes from the chat, and could
+    // put activity_at back behind a later write. The notice keeps the tag's time, which windows share.
     const now = Date.now();
-    this.#updateChat(id, ownerUid, "title = ?, updated_at = ?, activity_at = CASE WHEN ? THEN ? ELSE activity_at END", title, now, byOther ? 1 : 0, now);
+    const set = "title = ?, updated_at = ?, activity_at = CASE WHEN ? THEN ? ELSE activity_at END, mentioned_at = CASE WHEN ? THEN ? ELSE mentioned_at END";
+    if (!this.#updateChat(id, ownerUid, set, title, now, byOther ? 1 : 0, now, tag ? 1 : 0, now) || !tag) return;
+    this.#changed({ type: "mention", chatId: id, ...(!named && { title }), ...tag });
   }
 
   removeSharedChat(id: string, ownerUid: string): void {
@@ -216,11 +256,11 @@ export class UserDirectory extends DurableObject<Env> {
    * Bump a chat to the top. A chat still unnamed is named after the prompt, so the first prompt names it (`named`), until
    * a model gives it a better title (nameChat). `byOther`: someone other than this user wrote it. Returns its title.
    */
-  touchChat(id: string, prompt: string, byOther: boolean): { title: string; named: boolean } {
+  touchChat(id: string, prompt: string, byOther: boolean, tag?: Tag): { title: string; named: boolean } {
     const before = this.chatTitle(id);
     const named = before === UNNAMED_CHAT;
     const title = named || before === null ? titleFromMessage(prompt) : before;
-    this.#touch(id, this.ctx.id.name!, title, byOther);
+    this.#touch(id, this.ctx.id.name!, title, byOther, tag, named);
     return { title, named };
   }
 

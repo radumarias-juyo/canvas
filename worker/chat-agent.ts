@@ -1,12 +1,13 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
-import type { Provider } from "@earendil-works/pi-ai";
-import { createRegistry, Harness, ROOT_CONVERSATION_ID, type AgentChange, type Cursor, type AgentEvent, type AgentEventStream, type ConversationView, type SnapshotEvent } from "@earendil-works/pi-durable";
+import type { Provider, UserMessage } from "@earendil-works/pi-ai";
+import { createRegistry, Harness, ROOT_CONVERSATION_ID, type AgentChange, type Cursor, type EntryId, type JsonObject, type AgentEvent, type AgentEventStream, type ConversationView, type SnapshotEvent } from "@earendil-works/pi-durable";
 import { PiHarness, skills } from "agents/harness/pi";
 import { Lifecycle, LifecycleCapability, type DurableObjectCapability } from "agents/lifecycle";
 import { createAI } from "agents/models/pi-ai";
 import { DurableObject, exports } from "cloudflare:workers";
 import {
+  CHAT_ASIDE_KIND,
   CHAT_MESSAGE_KIND,
   CHAT_PEOPLE_KIND,
   isOwnedBy,
@@ -17,6 +18,7 @@ import {
   STREAM_STEP_MS,
   type ArtifactManifest,
   type ChatClientMessage,
+  type ChatContents,
   type ChatDeletion,
   type ChatInvite,
   type ChatMessageData,
@@ -32,15 +34,19 @@ import {
   type Presence,
   type ProxyRequest,
   type QueuedMessage,
+  type ReplyQuote,
   clampStaleMs,
+  everyone,
 } from "../shared/protocol.ts";
 import { baseName, type AttachmentInput } from "../shared/attachments.ts";
-import { parseMentions, type MentionInput } from "../shared/mentions.ts";
+import { keptMentions, parseMentions, summonsAgent, taggedPeople, type MentionInput } from "../shared/mentions.ts";
+import { freePath, MAX_LISTED, uploadTargets } from "../shared/uploads.ts";
 import type { ModelChoice } from "../shared/models.ts";
 import { deadline, errorMessage, memoAsync, sha256Hex, singleFlight } from "../shared/util.ts";
 import { attachmentContent, parseAttachments, withoutImageData, type ToMarkdown } from "./agent/attachments.ts";
 import { filesIndex } from "./agent/file-refs.ts";
 import { resolveMentions } from "./agent/mentions.ts";
+import { excerpt, replyLine, replyQuote } from "../shared/replies.ts";
 import { peopleExtension, promptExtension } from "./agent/prompt.ts";
 import { skillSource } from "./agent/skills.ts";
 import { titleFor } from "./agent/title.ts";
@@ -51,8 +57,10 @@ import { checkDraft, FailedChecks, publishDraft, writeDraft, type PublishTarget,
 import { CheckBrowser } from "./artifacts/browser.ts";
 import { CHECK_MS, checkPage, type Bridge } from "./artifacts/check.ts";
 import type { ChatAnswer } from "./artifacts/page-calls.ts";
-import { chatOutFolder, chatTraces } from "./chat-traces.ts";
+import { chatOutFolder, chatTraces, type ChatTraces } from "./chat-traces.ts";
 import { Storage } from "./storage/index.ts";
+import { literalPath } from "./storage/paths.ts";
+import { newestFirst, type FileEntry } from "./storage/user-files.ts";
 import { connectStreamableHttp, signInRequired } from "./mcp/connect.ts";
 import { McpOAuthClient } from "./mcp/oauth.ts";
 import { McpFailure, McpHub } from "./mcp/hub.ts";
@@ -61,7 +69,7 @@ import { GeminiCompat } from "./gemini.ts";
 import { ChatMembers, formatInviteToken } from "./members.ts";
 import { catalogSource, currentCatalog, defaultModelChoice, listedProviders, loadCatalog, withCurrentPrices, withEffortRecorded, type Catalog } from "./models.ts";
 import { inboxIds, queuedIdsOf, queuedMessages } from "./queue.ts";
-import { mcpAuthStore } from "./users.ts";
+import { mcpAuthStore, type Tag } from "./users.ts";
 
 /** Artifacts from the owner's other chats one chat remembers as named with "@" (see ChatAgent.#broughtIn). */
 const MAX_BROUGHT_IN = 200;
@@ -94,6 +102,11 @@ function callFailure(error: unknown, server: string): McpError {
   return error instanceof McpFailure ? error.error : { code: "upstream_error", server, message: errorMessage(error) };
 }
 const MEMBERS_TOUCH_MS = 60_000;
+/** Where the chat keeps, per person other than its owner, the paths they uploaded through it (see noteUploads). */
+const UPLOADS_KEY = "uploads:";
+/** A file someone the chat is shared with named from their own files. */
+type OwnFile = Extract<MentionInput, { kind: "file" }>;
+
 /**
  * How long a chat must stay idle before the sidebars hear its run ended: the next queued message starts its run right
  * after, and the spinner should not blink between them.
@@ -103,6 +116,8 @@ const SETTLE_MS = 1_500;
 const PROGRESS = { partialIntervalMs: STREAM_STEP_MS, outputIntervalMs: STREAM_STEP_MS };
 /** The chat's status as the sidebars last heard it, in this object's storage: after a restart, whether a run may be going. */
 const STATUS_KEY = "status";
+/** Set once the owner's sidebar heard whether this chat has members: chats shared before it kept that tell it once. */
+const SHARED_TOLD_KEY = "sharedTold";
 
 /**
  * pi-ai's models, through the chat's AI Gateway, at the vendors' current prices, each reply marked with its effort and
@@ -182,7 +197,7 @@ export class ChatAgent extends DurableObject<Env> {
     admit: (person) => this.admit(person),
     peopleFor: (uid) => this.peopleFor(uid),
     queued: (ids) => this.queued(ids),
-    prompt: (text, author, attachments, mentions) => this.prompt(text, author, attachments, mentions),
+    prompt: (text, author, attachments, mentions, replyTo) => this.prompt(text, author, attachments, mentions, replyTo),
     abort: (by) => this.abort(by),
     setModel: (input, by) => this.setModel(input, by),
   });
@@ -213,8 +228,12 @@ export class ChatAgent extends DurableObject<Env> {
   #watched: ChatStatus | null = null;
   /** Status writes to the sidebars, in order: a later status must not land before an earlier one. */
   #statusWrites: Promise<unknown> = Promise.resolve();
+  /** The owner's sidebar hears whether the chat has members in order (#tellShared). */
+  #sharedWrites: Promise<unknown> = Promise.resolve();
   /** The last read of the queue, by the inbox ids it was for: every socket asks after the same commit. */
   #queuedRead: { key: string; read: Promise<QueuedMessage[]> } | undefined;
+  /** What the transcript names, as far as it was read (see #transcriptTraces). */
+  #seen: { through: number; traces: ChatTraces } = { through: -1, traces: chatTraces([]) };
   /** Set once the owner starts deleting the chat, and kept as its only record after: from then on nobody is in it. */
   #gone = this.#deleted();
 
@@ -517,10 +536,12 @@ export class ChatAgent extends DurableObject<Env> {
     if (this.#gone) return false;
     if (person.uid === this.uid) {
       this.members.setOwnerName(person);
+      this.#tellSharedOnce();
       return true;
     }
     if (this.members.has(person.uid)) {
       this.members.rename(person);
+      this.#tellSharedOnce();
       return true;
     }
     void this.#index(person.uid).removeSharedChat(this.chatId, this.uid);
@@ -544,52 +565,187 @@ export class ChatAgent extends DurableObject<Env> {
    * as images, text or names (see attachmentContent). Files and artifacts picked
    * with "@" come after it, by exact path and id (see resolveMentions).
    * While a run is going, it waits in pi's inbox, where everyone sees it queued (see queued), and is answered next.
+   *
+   * In a shared chat only a message that calls the agent ("@pi") is a prompt; any other is people talking among
+   * themselves (#aside), which the agent reads as context the next time it is called.
    */
-  async prompt(text: string, author: Person, attachments: readonly AttachmentInput[] = [], mentionInputs: readonly MentionInput[] = []): Promise<void> {
+  async prompt(
+    text: string,
+    author: Person,
+    attachments: readonly AttachmentInput[] = [],
+    mentionInputs: readonly MentionInput[] = [],
+    replyTo?: number,
+  ): Promise<void> {
     this.#requireInChat(author);
-    const [attached, { mentions, note, broughtIn }] = await Promise.all([
-      attachments.length ? this.scope.files().then((files) => attachmentContent(attachments, files, this.#toMarkdown)) : undefined,
-      resolveMentions(mentionInputs, {
-        ownerUid: this.uid,
-        chatId: this.chatId,
-        byOwner: author.uid === this.uid,
-        readMeta: (id) => this.storage.artifacts.readMeta(id),
-      }),
-      this.refreshMcpTools().catch(() => {}),
-      this.refreshSkills(),
-      this.refreshFiles(),
+    const shared = this.members.hasAny();
+    const quote = replyTo === undefined ? null : await this.#quote(replyTo);
+    // A reply to the agent calls it too, as a follow-up to what it said. Told for sure once the mentions are known.
+    const repliesToAgent = quote !== null && "agent" in quote;
+    const calling = !shared || repliesToAgent || summonsAgent(text);
+    const byOwner = author.uid === this.uid;
+    // Someone else's own files they named come as attachments, copied to the owner's files, where the agent works.
+    const own = byOwner ? [] : mentionInputs.filter((input): input is OwnFile => input.kind === "file" && input.own === true);
+    const attaching = Promise.all([
+      // Someone else attaches only what they uploaded here, or a file the chat already holds: no other of the owner's.
+      byOwner ? attachments : this.#attachable(author.uid, attachments),
+      own.length ? this.#copyOwnFiles(author, own) : [],
+    ]).then(([given, copied]) => [...given, ...copied]);
+    const [[attached, title], { mentions, note, broughtIn }] = await Promise.all([
+      // Named after its text, or its files when it has none: for the sidebars.
+      attaching.then(async (inputs) => [
+        inputs.length ? await attachmentContent(inputs, await this.scope.files(), this.#toMarkdown) : undefined,
+        text || inputs.map((a) => baseName(a.path)).join(", "),
+      ] as const),
+      resolveMentions(
+        mentionInputs.filter((input) => !(own as readonly MentionInput[]).includes(input)),
+        {
+          ownerUid: this.uid,
+          chatId: this.chatId,
+          byOwner,
+          readMeta: (id) => this.storage.artifacts.readMeta(id),
+          mayName: (path) => this.#isChatFile(path),
+          // Only someone in the chat can be tagged.
+          person: (uid) => everyone(this.people()).find((person) => person.uid === uid) ?? null,
+        },
+      ),
+      // A message to the people in the chat starts no run: the agent needs its tools only when it is called.
+      calling && this.refreshMcpTools().catch(() => {}),
+      calling && this.refreshSkills(),
+      calling && this.refreshFiles(),
     ]);
+    // The files they named of their own are named too: "@pi notes.md" is not a call.
+    const summoned = !shared || repliesToAgent || summonsAgent(text, [...mentions, ...own]);
     // Again after the refreshes, which can take seconds: the author may have been removed meanwhile.
     this.#requireInChat(author);
+    // Nothing left to say: every attachment was one they may not attach.
+    if (!text && !attached) return;
+    this.#bringIn(broughtIn);
+    const written = [quote && replyLine(quote), text, note].filter(Boolean).join("\n\n");
+    const said = shared ? `${author.name}: ${written}` : written;
+    const content = attached ? [...attached.content, ...(written ? [{ type: "text" as const, text: said }] : [])] : said;
+    const data = {
+      uid: author.uid,
+      name: author.name,
+      text,
+      ...(attached && { attachments: attached.attachments }),
+      ...(mentions.length && { mentions }),
+      ...(quote && { replyTo: quote }),
+    } satisfies ChatMessageData;
+    if (summoned) await this.#summon(content, shared ? ({ ...data, summoned: true } satisfies ChatMessageData) : data);
+    else await this.#aside(content, data);
+    // The sidebars are only a convenience: update them off the prompt's path, and let a failure be.
+    // Only a tag whose "@name" is in the text: one sent without it would notify someone of nothing they can see.
+    const tags = taggedPeople(keptMentions(text, mentions));
+    void this.#touchIndexes(title, author, tags, text).catch((error) => console.error("chat index:", errorMessage(error)));
+  }
+
+  /** What a reply quotes of the message at transcript entry `id`; null for one it cannot quote. */
+  async #quote(id: number): Promise<ReplyQuote | null> {
+    if (!Number.isSafeInteger(id) || id < 0) return null;
+    const page = await (await this.#root()).entries({ minEntryId: id as EntryId, maxEntryId: id as EntryId }, 1, undefined, BACKGROUND_CONTEXT);
+    return replyQuote(page.items[0]);
+  }
+
+  /** A message for the agent: pi's input, which starts a run, or waits in the inbox for the one going. */
+  async #summon(content: UserMessage["content"], data: JsonObject): Promise<void> {
     // Watching before the input goes in, so the sidebars hear the run start. Not alongside the refreshes: an idle watch
     // lets go after SETTLE_MS, which they can outlast. Only a view: the prompt goes on without it.
     await this.#watchRuns().catch((error: unknown) => console.error("chat status:", errorMessage(error)));
-    this.#bringIn(broughtIn);
     this.scope.failedChecks.reset();
-    const written = note ? `${text}\n\n${note}` : text;
-    const said = this.members.hasAny() ? `${author.name}: ${written}` : written;
-    const content = attached ? [...attached.content, ...(written ? [{ type: "text" as const, text: said }] : [])] : said;
     try {
-      await this.harness.submit(content, {
-        entry: {
-          kind: CHAT_MESSAGE_KIND,
-          data: {
-            uid: author.uid,
-            name: author.name,
-            text,
-            ...(attached && { attachments: attached.attachments }),
-            ...(mentions.length && { mentions }),
-          } satisfies ChatMessageData,
-        },
-      });
+      await this.harness.submit(content, { entry: { kind: CHAT_MESSAGE_KIND, data } });
     } catch (error) {
       // No run follows: the watch settles as it would have, or the sidebars keep what they were last told.
       this.#resumeSettle();
       throw error;
     }
-    // The sidebars are only a convenience: update them off the prompt's path, and let a failure be.
-    const title = text || attachments.map((a) => baseName(a.path)).join(", ");
-    void this.#touchIndexes(title, author.uid).catch((error) => console.error("chat index:", errorMessage(error)));
+  }
+
+  /**
+   * A message to the people in a shared chat, which does not call the agent: two passive writes. The `chat.message`
+   * entry everyone sees has no model message, so it lands at once, even mid-run; what the model reads of it is a
+   * `chat.aside` entry, which pi places at once when the agent is idle, or between its steps while it works.
+   */
+  async #aside(content: UserMessage["content"], data: JsonObject): Promise<void> {
+    const root = await this.#root();
+    await root.submit({ type: "write", entry: { kind: CHAT_MESSAGE_KIND, data: { ...data, aside: true } } }, BACKGROUND_CONTEXT);
+    const message: UserMessage = { role: "user", content, timestamp: Date.now() };
+    await root.submit({ type: "write", entry: { kind: CHAT_ASIDE_KIND, model: [message] } }, BACKGROUND_CONTEXT);
+  }
+
+  /**
+   * Copy files someone the chat is shared with named from their own files into the owner's uploads/, beside the
+   * owner's files rather than over one, as attachments of their message. One that is gone is left out.
+   */
+  async #copyOwnFiles(author: Person, inputs: readonly OwnFile[]): Promise<AttachmentInput[]> {
+    const [theirs, owners] = await Promise.all([this.storage.userFiles(author.uid), this.scope.files()]);
+    const taken = await owners.uploadPaths();
+    // Named first, so no two take one name; then copied at once.
+    const copies = inputs.flatMap((input) => {
+      const path = literalPath(input.path);
+      if (!path) return [];
+      const target = freePath(uploadTargets([baseName(path)])[0], taken);
+      taken.add(target);
+      return [{ path, target }];
+    });
+    const copied = await Promise.all(
+      copies.map(async ({ path, target }) => {
+        const object = await theirs.get(path);
+        return object ? { path: await owners.put(target, object.body, object.httpMetadata?.contentType) } : null;
+      }),
+    );
+    return copied.filter((input) => input !== null);
+  }
+
+  /** Whether `path` of the owner's files belongs to this chat: attached to its messages, saved by its agent, or in its out/ folder. */
+  async #isChatFile(path: string): Promise<boolean> {
+    return this.#inChat(path, await this.#transcriptTraces());
+  }
+
+  #inChat(path: string, traces: ChatTraces): boolean {
+    return path.startsWith(chatOutFolder(this.chatId)) || traces.files.has(path);
+  }
+
+  /** The owner's files that belong to this chat (#isChatFile) and are still there, as the people it is shared with see them. */
+  async chatFiles(): Promise<FileEntry[]> {
+    const [traces, listed] = await Promise.all([this.#transcriptTraces(), this.scope.files().then((files) => files.list())]);
+    return listed.filter((file) => this.#inChat(file.path, traces));
+  }
+
+  /**
+   * What the chat holds of the owner's, for someone in it: its files (chatFiles) and the artifacts published from it.
+   * Whether an artifact is unread is the owner's to know: someone else gets none of it.
+   */
+  async contents(uid: string): Promise<ChatContents | null> {
+    if (!this.isInChat(uid)) return null;
+    const [files, artifacts] = await Promise.all([this.chatFiles(), this.#directory.listChatArtifacts(this.chatId)]);
+    return { files: newestFirst(files), artifacts: uid === this.uid ? artifacts : artifacts.map(({ unread: _, ...artifact }) => artifact) };
+  }
+
+  /** Paths someone other than the owner uploaded through this chat (noteUploads): the owner's files they may attach. */
+  #uploads(uid: string): string[] {
+    return this.ctx.storage.kv.get<string[]>(`${UPLOADS_KEY}${uid}`) ?? [];
+  }
+
+  /** Remember what someone other than the owner uploaded for their messages here (POST /api/chats/:id/attachments). */
+  noteUploads(uid: string, paths: readonly string[]): void {
+    if (uid === this.uid || !this.isInChat(uid)) return;
+    const kept = [...new Set([...this.#uploads(uid), ...paths])].slice(-MAX_LISTED);
+    this.ctx.storage.kv.put(`${UPLOADS_KEY}${uid}`, kept);
+  }
+
+  /** Of the attachments someone other than the owner sends, those they may attach: their uploads here, or the chat's files. */
+  async #attachable(uid: string, attachments: readonly AttachmentInput[]): Promise<AttachmentInput[]> {
+    if (attachments.length === 0) return [];
+    const uploaded = new Set(this.#uploads(uid));
+    const traces = await this.#transcriptTraces();
+    return attachments.filter((attachment) => uploaded.has(attachment.path) || this.#inChat(attachment.path, traces));
+  }
+
+  /** Whether `uid` may open `path` of the owner's files through this chat: the owner any, someone else only a chat file. */
+  async mayOpenFile(uid: string, path: string): Promise<boolean> {
+    if (!this.isInChat(uid)) return false;
+    return uid === this.uid || this.#isChatFile(path);
   }
 
   /** A PDF or office document as Markdown, by Workers AI (no model is involved for these formats). */
@@ -603,16 +759,23 @@ export class ChatAgent extends DurableObject<Env> {
    * Move the chat up in everyone's sidebar, marked unread for all but the author. touchChat names a chat that has no
    * name yet after the prompt, so the first prompt names it, and a small model then gives it a better title.
    * Members' sidebars get a new title at once, but in a busy chat the others' are bumped at most once a minute: each is
-   * another object. The author's own always is.
+   * another object. The author's own always is, and so is everyone the message tagged (`tags`), who hears of it at once
+   * (a Tag). `titleFrom` names an unnamed chat: the message's text, or its files' names.
    */
-  async #touchIndexes(text: string, authorUid: string): Promise<void> {
-    const { title, named } = await this.#directory.touchChat(this.chatId, text, authorUid !== this.uid);
-    if (named && text) void this.#nameChat(text, title).catch((error: unknown) => console.error("chat title:", errorMessage(error)));
+  async #touchIndexes(titleFrom: string, author: Person, tags: readonly string[], text: string): Promise<void> {
     const now = Date.now();
+    // Someone tagging themselves is told nothing; anyone else tagged is, owner or member.
+    const tagged = new Set(tags.filter((uid) => uid !== author.uid));
+    const tag: Tag = { from: author.name, text: excerpt(text), at: now };
+    const tagOf = (uid: string) => (tagged.has(uid) ? tag : undefined);
+    const { title, named } = await this.#directory.touchChat(this.chatId, titleFrom, author.uid !== this.uid, tagOf(this.uid));
+    if (named && titleFrom) void this.#nameChat(titleFrom, title).catch((error: unknown) => console.error("chat title:", errorMessage(error)));
     const all = title !== this.#membersTouched.title || now - this.#membersTouched.at >= MEMBERS_TOUCH_MS;
     if (all) this.#membersTouched = { title, at: now };
-    const members = this.members.list().filter((member) => all || member.uid === authorUid);
-    await Promise.allSettled(members.map((member) => this.#index(member.uid).touchSharedChat(this.chatId, this.uid, title, member.uid !== authorUid)));
+    const members = this.members.list().filter((member) => all || member.uid === author.uid || tagged.has(member.uid));
+    await Promise.allSettled(
+      members.map((member) => this.#index(member.uid).touchSharedChat(this.chatId, this.uid, title, member.uid !== author.uid, tagOf(member.uid), named)),
+    );
   }
 
   /**
@@ -771,7 +934,27 @@ export class ChatAgent extends DurableObject<Env> {
     }
     this.sockets.broadcastPeople();
     this.#notePeople(person, "joined");
+    this.#tellShared();
     return null;
+  }
+
+  /**
+   * Tell the owner's sidebar whether the chat has members: on joins and leaves, one after another, each reading the
+   * members as it goes, so the last says how things stand. The directory writes only a change. Only a view.
+   */
+  #tellShared(): void {
+    this.#sharedWrites = this.#sharedWrites
+      .then(async () => {
+        await this.#directory.setChatShared(this.chatId, this.members.hasAny());
+        // Told only once it landed: a failed write is tried again on the next open.
+        if (!this.#gone) this.ctx.storage.kv.put(SHARED_TOLD_KEY, true);
+      })
+      .catch((error: unknown) => console.error("chat shared:", errorMessage(error)));
+  }
+
+  /** For a chat shared before the owner's directory kept that: tell it once, whoever opens the chat first. */
+  #tellSharedOnce(): void {
+    if (!this.ctx.storage.kv.get(SHARED_TOLD_KEY)) this.#tellShared();
   }
 
   /** The owner removes a member, or a member leaves. Their open sockets close at once, and the chat leaves their sidebar. */
@@ -782,6 +965,7 @@ export class ChatAgent extends DurableObject<Env> {
     this.sockets.disconnect(uid);
     this.sockets.broadcastPeople();
     this.#notePeople(member, by.uid === uid ? "left" : "removed");
+    this.#tellShared();
     // The agent acts as the owner: a removed person's queued requests must not run after they are out.
     await this.#withdrawQueued(uid).catch((error: unknown) => console.error("withdraw queued:", errorMessage(error)));
     await this.#index(uid).removeSharedChat(this.chatId, this.uid);
@@ -878,17 +1062,27 @@ export class ChatAgent extends DurableObject<Env> {
    * one the list missed goes too), and the files it attached or saved. Read a page of the history at a time.
    */
   async #traces(): Promise<{ artifacts: string[]; files: string[] }> {
+    const [traces, ids] = await Promise.all([this.#transcriptTraces(), this.#directory.chatArtifactIds(this.chatId)]);
+    return { artifacts: [...new Set([...traces.artifacts, ...ids])], files: [...traces.files] };
+  }
+
+  /**
+   * What the transcript names (chatTraces), read on from where the last read stopped: entries never change once
+   * written, so a chat's files are known without reading its whole history on every request.
+   */
+  readonly #transcriptTraces = singleFlight(async (): Promise<ChatTraces> => {
     const root = await this.#root();
-    const traces = chatTraces([]);
+    const seen = this.#seen;
     let cursor: Cursor | undefined;
     do {
-      const page = await root.entries({ order: "ascending" }, 500, cursor, BACKGROUND_CONTEXT);
-      chatTraces(page.items, traces);
+      const page = await root.entries({ order: "ascending", minEntryId: (seen.through + 1) as EntryId }, 500, cursor, BACKGROUND_CONTEXT);
+      chatTraces(page.items, seen.traces);
+      const last = page.items.at(-1);
+      if (last) seen.through = last.id as number;
       cursor = page.next;
     } while (cursor);
-    for (const id of await this.#directory.chatArtifactIds(this.chatId)) traces.artifacts.add(id);
-    return { artifacts: [...traces.artifacts], files: [...traces.files] };
-  }
+    return seen.traces;
+  });
 
   /**
    * Publish without the model, the way the agent does (write, check, publish), the browser check included: a page with
@@ -903,9 +1097,12 @@ export class ChatAgent extends DurableObject<Env> {
     return { artifactId: meta.id, version: meta.latest, checked: report ? { errors: 0, warnings: report.warnings } : { unchecked } };
   }
 
+  /** Stop the agent's run, and the messages queued for it. In a shared chat the others see who stopped it. */
   async abort(by: Person): Promise<void> {
     this.#requireInChat(by);
+    const running = this.#status() === "running";
     await this.harness.abort();
+    if (running && this.members.hasAny()) this.#notePeople(by, "stopped");
   }
 
   /**
@@ -1042,7 +1239,7 @@ interface ChatSession {
   admit(person: Person): boolean;
   peopleFor(uid: string): ChatPeopleView;
   queued(ids: readonly number[]): Promise<QueuedMessage[]>;
-  prompt(text: string, author: Person, attachments: readonly AttachmentInput[], mentions: readonly MentionInput[]): Promise<void>;
+  prompt(text: string, author: Person, attachments: readonly AttachmentInput[], mentions: readonly MentionInput[], replyTo?: number): Promise<void>;
   abort(by: Person): Promise<void>;
   setModel(input: { model?: unknown; thinkingLevel?: unknown }, by: Person): Promise<void>;
 }
@@ -1167,7 +1364,8 @@ class ChatSockets extends LifecycleCapability implements DurableObjectCapability
         const attachments = parseAttachments(message.attachments);
         const mentions = parseMentions(message.mentions);
         const text = String(message.text ?? "").trim().slice(0, 20_000);
-        if (text || attachments.length) await this.#chat.prompt(text, person, attachments, mentions);
+        const replyTo = typeof message.replyTo === "number" ? message.replyTo : undefined;
+        if (text || attachments.length) await this.#chat.prompt(text, person, attachments, mentions, replyTo);
       }
       else if (message.type === "abort") await this.#chat.abort(person);
       else if (message.type === "model") await this.#chat.setModel(message, person);
