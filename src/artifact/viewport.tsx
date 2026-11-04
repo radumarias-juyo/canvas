@@ -128,6 +128,20 @@ export function ViewportPicker({ viewport }: { viewport: ReturnType<typeof useVi
   );
 }
 
+/** The switch between how a page or file shows (`rendered`: "Preview", "Table"…) and its source. */
+export function ShowAs({ rendered, source, onSource }: { rendered: string; source: boolean; onSource: (source: boolean) => void }) {
+  return (
+    <div className="viewport-picker" role="group" aria-label="Show as">
+      <button type="button" aria-pressed={!source} onClick={() => onSource(false)}>
+        {rendered}
+      </button>
+      <button type="button" aria-pressed={source} onClick={() => onSource(true)}>
+        Source
+      </button>
+    </div>
+  );
+}
+
 /**
  * The preview area. At a device size the page gets that viewport, so its media queries
  * react as on the device, and is scaled down when the pane is smaller. The tree is the

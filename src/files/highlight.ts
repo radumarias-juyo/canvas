@@ -99,6 +99,21 @@ export function grammarFor(name: string): string | undefined {
 let core: Promise<HLJSApi> | undefined;
 const registered = new Map<string, Promise<void>>();
 
+/** Grammars that colour others' code inside theirs once those are loaded: a web page's scripts and styles. */
+const EMBEDDED: Record<string, readonly string[]> = { xml: ["javascript", "css"] };
+
+/** Loads and registers `grammar` once. */
+function register(hljs: HLJSApi, grammar: string): Promise<void> {
+  let ready = registered.get(grammar);
+  if (!ready) {
+    ready = GRAMMARS[grammar]().then((module) => hljs.registerLanguage(grammar, module.default));
+    registered.set(grammar, ready);
+    // A failed load (the network dropped) may be tried again next time.
+    ready.catch(() => registered.delete(grammar));
+  }
+  return ready;
+}
+
 /**
  * `code` as highlight.js HTML in `grammar` (from grammarFor): spans with hljs-* classes around the code's own text,
  * which highlight.js escapes, so the HTML holds no markup of the file's.
@@ -110,13 +125,8 @@ export async function highlight(code: string, grammar: string): Promise<string> 
     core.catch(() => (core = undefined));
   }
   const hljs = await core;
-  let ready = registered.get(grammar);
-  if (!ready) {
-    ready = GRAMMARS[grammar]().then((module) => hljs.registerLanguage(grammar, module.default));
-    registered.set(grammar, ready);
-    // A failed load (the network dropped) may be tried again next time.
-    ready.catch(() => registered.delete(grammar));
-  }
-  await ready;
+  const embedded = /<(script|style)\b/i.test(code) ? (EMBEDDED[grammar] ?? []) : [];
+  // Without an embedded grammar (its load failed) the page is still coloured as markup, its scripts and styles plain.
+  await Promise.all([register(hljs, grammar), ...embedded.map((name) => register(hljs, name).catch(() => {}))]);
   return hljs.highlight(code, { language: grammar, ignoreIllegals: true }).value;
 }

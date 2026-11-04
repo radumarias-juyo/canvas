@@ -4,7 +4,8 @@ import { errorMessage } from "../../shared/util.ts";
 import { api } from "../api.ts";
 import { useVisible } from "../sidebar.ts";
 import { ArtifactFrame } from "./ArtifactFrame.tsx";
-import { ViewportPicker, ViewportStage, useViewport } from "./viewport.tsx";
+import { ArtifactSource } from "./ArtifactSource.tsx";
+import { ShowAs, ViewportPicker, ViewportStage, useViewport } from "./viewport.tsx";
 
 interface Props {
   artifactId: string;
@@ -20,6 +21,10 @@ export function ArtifactPanel({ artifactId, latestKnown, uid, onClose, fullPage 
   const [version, setVersion] = useState<number | undefined>();
   const [error, setError] = useState<string | null>(null);
   const [reloads, setReloads] = useState(0);
+  // Showing the page's source over the page, which stays loaded behind it, so going back does not reload it.
+  const [source, setSource] = useState(false);
+  // The version whose source was last shown: it stays read and coloured while the page shows, for going back to it.
+  const [sourceOf, setSourceOf] = useState<number>();
   const [clone, setClone] = useState<{ command: string; expiresAt: string } | { error: string } | null>(null);
   const viewport = useViewport();
 
@@ -65,6 +70,7 @@ export function ArtifactPanel({ artifactId, latestKnown, uid, onClose, fullPage 
   if (!meta || version === undefined) return <div className="panel-empty">Loading…</div>;
   const entry = meta.versions.find((v) => v.version === version) ?? meta.versions[meta.versions.length - 1];
   const servers = entry.manifest.mcp?.servers ?? [];
+  if (source && sourceOf !== entry.version) setSourceOf(entry.version);
 
   return (
     <section className={fullPage ? "artifact-panel full" : "artifact-panel"}>
@@ -74,7 +80,8 @@ export function ArtifactPanel({ artifactId, latestKnown, uid, onClose, fullPage 
           {servers.length > 0 && <span className="pill live">live · {servers.map((s) => s.server).join(", ")}</span>}
         </div>
         <div className="artifact-actions">
-          <ViewportPicker viewport={viewport} />
+          <ShowAs rendered="Preview" source={source} onSource={setSource} />
+          {!source && <ViewportPicker viewport={viewport} />}
           <select value={entry.version} onChange={(e) => setVersion(Number(e.target.value))} aria-label="Version">
             {[...meta.versions].reverse().map((v) => (
               <option key={v.version} value={v.version} title={v.message}>
@@ -84,9 +91,20 @@ export function ArtifactPanel({ artifactId, latestKnown, uid, onClose, fullPage 
               </option>
             ))}
           </select>
-          <button type="button" onClick={() => setReloads((n) => n + 1)} title="Reload the page">
-            ↻
-          </button>
+          {source ? (
+            <a
+              className="button"
+              href={api.artifactSourceUrl(meta.id, entry.version)}
+              download={`${meta.title} v${entry.version}.html`}
+              title="Download this version's code"
+            >
+              ↓
+            </a>
+          ) : (
+            <button type="button" onClick={() => setReloads((n) => n + 1)} title="Reload the page">
+              ↻
+            </button>
+          )}
           {meta.isOwner && (
             <button type="button" onClick={() => (clone ? setClone(null) : void showClone())} title="Clone this artifact's Git repository">
               git
@@ -125,9 +143,20 @@ export function ArtifactPanel({ artifactId, latestKnown, uid, onClose, fullPage 
           )}
         </div>
       )}
-      <ViewportStage id={viewport.id} rotated={viewport.rotated}>
-        <ArtifactFrame key={`${entry.version}:${reloads}`} artifactId={meta.id} version={entry.version} manifest={entry.manifest} uid={uid} title={meta.title} />
-      </ViewportStage>
+      <div className="artifact-view">
+        <ViewportStage id={viewport.id} rotated={viewport.rotated}>
+          <ArtifactFrame
+            key={`${entry.version}:${reloads}`}
+            artifactId={meta.id}
+            version={entry.version}
+            manifest={entry.manifest}
+            uid={uid}
+            title={meta.title}
+            covered={source}
+          />
+        </ViewportStage>
+        {sourceOf === entry.version && <ArtifactSource key={sourceOf} artifactId={meta.id} version={sourceOf} hidden={!source} />}
+      </div>
     </section>
   );
 }
