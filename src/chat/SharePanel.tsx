@@ -51,17 +51,19 @@ export function SharePanel({ chatId, uid, isOwner, people, onLeft, onClose }: Pr
     });
   };
 
-  // Escape closes it while focus is inside, as the × does.
+  // Escape closes it while focus is in it, as the × does.
   const onKeyDown = (event: KeyboardEvent<HTMLElement>) => {
     if (event.key !== "Escape") return;
     event.preventDefault();
     onClose();
   };
 
+  // Not closed by a click elsewhere or by leaving the window (as the other panels are): the owner copies a link out of it.
+  const title = isOwner ? "Share this chat" : "People in this chat";
   return (
-    <section className="share-panel" aria-label={isOwner ? "Share this chat" : "People in this chat"} onKeyDown={onKeyDown}>
-      <div className="share-head">
-        <strong>{isOwner ? "Share this chat" : "People in this chat"}</strong>
+    <div className="share-panel" role="dialog" aria-label={title} onKeyDown={onKeyDown}>
+      <div className="panel-head">
+        <strong>{title}</strong>
         <button type="button" className="icon-button" onClick={onClose} title="Close" aria-label="Close">
           ×
         </button>
@@ -114,6 +116,6 @@ export function SharePanel({ chatId, uid, isOwner, people, onLeft, onClose }: Pr
         </button>
       )}
       {error && <p className="form-error">{error}</p>}
-    </section>
+    </div>
   );
 }
