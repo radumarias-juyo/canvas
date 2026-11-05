@@ -72,10 +72,10 @@ export function ChatView({ chatId, uid, onArtifact, onActivity, onLeft }: Props)
   const [sharing, setSharing] = useState(false);
   const shareButton = useRef<HTMLButtonElement>(null);
   // Closed from inside the panel: back to the button that opens it, so the keyboard does not lose its place.
-  const closeSharing = useCallback(() => {
+  const closeSharing = () => {
     setSharing(false);
     shareButton.current?.focus();
-  }, []);
+  };
   const attachments = useAttachments(chatId);
   const list = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
@@ -212,7 +212,7 @@ export function ChatView({ chatId, uid, onArtifact, onActivity, onLeft }: Props)
             <ChatCost usage={state.usage} entries={state.entries} time={time} />
             {shared && <NotifyButton />}
             {people && (
-              <button type="button" ref={shareButton} className="share-toggle" onClick={() => setSharing(!sharing)} aria-expanded={sharing}>
+              <button type="button" ref={shareButton} className="share-button" onClick={() => setSharing(!sharing)} aria-expanded={sharing}>
                 {/* The owner shares from here also once people have joined; the people bar beside it shows who is in. */}
                 {isOwner ? "Share" : "People"}
               </button>

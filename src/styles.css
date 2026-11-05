@@ -238,7 +238,7 @@ body.resizing iframe { pointer-events: none; }
 /* The account menu and the composer's "more" menu: a box above their button, a row per action. */
 :is(.account-menu, .composer-more-menu) { position: absolute; left: 0; z-index: 5; padding: 6px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); box-shadow: 0 6px 24px rgb(0 0 0 / 0.12); }
 :is(.account-menu, .composer-more-menu) button { padding: 8px 10px; }
-:is(.account-button, .account-menu button, .composer-more-menu button):hover, .account-button[aria-expanded="true"], :is(.account-menu, .composer-more-menu) button:focus-visible { background: var(--surface-2); }
+:is(.account-button, .account-menu button, .composer-more-menu button):hover, .account-button[aria-expanded="true"], .share-button[aria-expanded="true"], :is(.account-menu, .composer-more-menu) button:focus-visible { background: var(--surface-2); }
 :is(.account-button, .composer-more-button) > svg { flex: none; color: var(--muted); transition: transform 0.15s; }
 :is(.account-button, .composer-more-button)[aria-expanded="true"] > svg { transform: rotate(180deg); }
 .avatar { flex: none; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--surface-2); border: 1px solid var(--border); font-size: 13px; font-weight: 600; }
@@ -277,8 +277,9 @@ body.resizing iframe { pointer-events: none; }
 /* React, reply, copy and "…": under the agent's replies, and beside a person's bubble (on the side away from the edge). */
 .bubble-row { position: relative; display: flex; max-width: 100%; }
 .message-actions { position: relative; display: flex; gap: 2px; opacity: 0; transition: opacity 0.1s; }
-.message-actions .icon-button { padding: 3px; color: var(--muted); }
-.message-actions .icon-button:hover { color: var(--text); }
+.message-actions .icon-button { padding: 3px; }
+:is(.message-actions, .panel-head) .icon-button { color: var(--muted); }
+:is(.message-actions, .panel-head) .icon-button:hover { color: var(--text); }
 .message-actions.floating { position: absolute; bottom: 2px; padding: 1px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
 .message.other .message-actions.floating { left: calc(100% + 6px); }
 .message.mine .message-actions.floating { right: calc(100% + 6px); }
@@ -339,10 +340,7 @@ button.reaction:hover { border-color: var(--muted); }
 .share-panel li { display: flex; align-items: center; gap: 8px; }
 .share-panel li button { margin-left: auto; padding: 2px 8px; font-size: 13px; }
 .share-panel small { color: var(--muted); }
-.share-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; margin-top: -4px; }
-.share-head .icon-button { width: 28px; height: 28px; font-size: 18px; color: var(--muted); }
-.share-head .icon-button:hover { color: var(--text); }
-.share-toggle[aria-expanded="true"] { background: var(--surface-2); }
+.share-panel .panel-head { width: 100%; align-items: center; }
 .share-warning { margin: 0; font-size: 13px; color: var(--muted); }
 .invite-link { display: flex; flex-wrap: wrap; gap: 6px; width: 100%; align-items: center; }
 .invite-link input { flex: 1; min-width: 0; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); }
@@ -551,7 +549,7 @@ a.mention-chip:hover { text-decoration: underline; }
 .context-meter.high { --level: var(--accent); }
 .context-meter.full { --level: var(--error); }
 .context-panel { position: absolute; right: 0; bottom: calc(100% + 8px); z-index: 5; width: min(300px, calc(100vw - 32px)); gap: 6px; box-shadow: 0 6px 24px rgb(0 0 0 / 0.12); font-size: 14px; }
-.context-head { display: flex; justify-content: space-between; gap: 12px; }
+.context-head, .panel-head { display: flex; justify-content: space-between; gap: 12px; }
 .context-head span { font-variant-numeric: tabular-nums; }
 .context-bar { height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; }
 .context-bar span { display: block; height: 100%; background: var(--level); }
