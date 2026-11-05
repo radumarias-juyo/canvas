@@ -339,6 +339,10 @@ button.reaction:hover { border-color: var(--muted); }
 .share-panel li { display: flex; align-items: center; gap: 8px; }
 .share-panel li button { margin-left: auto; padding: 2px 8px; font-size: 13px; }
 .share-panel small { color: var(--muted); }
+.share-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; margin-top: -4px; }
+.share-head .icon-button { width: 28px; height: 28px; font-size: 18px; color: var(--muted); }
+.share-head .icon-button:hover { color: var(--text); }
+.share-toggle[aria-expanded="true"] { background: var(--surface-2); }
 .share-warning { margin: 0; font-size: 13px; color: var(--muted); }
 .invite-link { display: flex; flex-wrap: wrap; gap: 6px; width: 100%; align-items: center; }
 .invite-link input { flex: 1; min-width: 0; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); }
