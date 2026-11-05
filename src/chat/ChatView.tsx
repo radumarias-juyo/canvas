@@ -13,6 +13,7 @@ import {
   CHAT_PEOPLE_KIND,
   everyone,
   PUBLISH_TOOL,
+  type AutoPick,
   type ChatMessageData,
   type ChatPeople,
   type ChatPeopleData,
@@ -31,6 +32,7 @@ import { calendarDay, DaySeparator, SentTime } from "./SentTime.tsx";
 import { ReactionChips, ReactionsContext, useMessageReactions, type MessageReactions } from "./Reactions.tsx";
 import { isReactable, type EntryReactions } from "../../shared/reactions.ts";
 import { AgentByline, Avatar, SharedChat, tintOf, tintStyle, useSharedChat } from "./people.tsx";
+import { AutoPicked } from "./AutoPick.tsx";
 import { ChatCost, PromptCost } from "./Cost.tsx";
 import { ContextMeter } from "./Context.tsx";
 import { SharePanel } from "./SharePanel.tsx";
@@ -68,7 +70,7 @@ function published(entry: EntryRecord): PublishedDetails | undefined {
 }
 
 export function ChatView({ chatId, uid, onArtifact, onActivity, onLeft }: Props) {
-  const { state, connected, people, online, prompt, abort, setModel, reactions, react } = useChat(chatId);
+  const { state, connected, people, online, prompt, abort, setModel, auto, reactions, react } = useChat(chatId);
   const chatReactions = useMemo(() => ({ uid, react }), [uid, react]);
   const [draft, setDraft] = useState("");
   const [sharing, setSharing] = useState(false);
@@ -361,6 +363,7 @@ export function ChatView({ chatId, uid, onArtifact, onActivity, onLeft }: Props)
                 <ModelPicker
                   model={state.model}
                   thinkingLevel={state.thinkingLevel}
+                  auto={auto}
                   disabled={!connected}
                   attachingImages={attachments.pending.some((item) => item.preview)}
                   onChange={setModel}
@@ -416,6 +419,7 @@ const Entry = memo(function Entry({
         sentAt={sentAt(entry)}
         // In the transcript, a message that called the agent was picked up: it was placed in its run.
         picked={data.summoned}
+        auto={data.auto}
         reactions={reactions}
         onReply={answer}
       />
@@ -573,6 +577,7 @@ function User({
   mentions,
   replyTo,
   picked,
+  auto,
   sentAt,
   reactions = null,
   onReply,
@@ -585,6 +590,8 @@ function User({
   mentions?: Mention[];
   replyTo?: ReplyQuote;
   picked?: boolean;
+  /** What Auto picked to answer it, in a chat on Auto. */
+  auto?: AutoPick;
   /** When it was sent, shown under it on hover; none in the queue, which says so instead. */
   sentAt?: number;
   reactions?: MessageReactions | null;
@@ -627,6 +634,7 @@ function User({
         <MessageActions content={content} text={text} reactions={reactions} onReply={onReply} floating />
       </div>
       <ReactionChips reactions={reactions} picked={picked} mine={mine} />
+      {auto && <AutoPicked pick={auto} />}
       {sentAt !== undefined && <SentTime at={sentAt} />}
     </div>
   );
