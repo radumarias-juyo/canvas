@@ -13,6 +13,8 @@ import {
   isOwnedBy,
   isReadOnly,
   manifestOf,
+  secondSeat,
+  secondSeatUid,
   SOCKET_NOT_A_MEMBER,
   SOCKET_PING,
   STREAM_STEP_MS,
@@ -408,7 +410,9 @@ export class ChatAgent extends DurableObject<Env> {
       this.sockets.broadcast({ type: "auto", on: auto });
     }
     // The chat has changed by now, so a failure to remember the pick for new chats is logged, not reported as a failed change.
-    await this.#index(by.uid).setModelChoice(setting).catch((error: unknown) => console.error("model:", errorMessage(error)));
+    await this.#index(this.#account(by.uid))
+      .setModelChoice(setting)
+      .catch((error: unknown) => console.error("model:", errorMessage(error)));
   }
 
   /** Whether the chat is on Auto. */
@@ -686,7 +690,7 @@ export class ChatAgent extends DurableObject<Env> {
       this.#tellSharedOnce();
       return true;
     }
-    void this.#index(person.uid).removeSharedChat(this.chatId, this.uid);
+    if (this.#hasSidebar(person.uid)) void this.#index(person.uid).removeSharedChat(this.chatId, this.uid);
     return false;
   }
 
@@ -727,8 +731,9 @@ export class ChatAgent extends DurableObject<Env> {
     const repliesToAgent = quote !== null && "agent" in quote;
     const calling = !shared || repliesToAgent || summonsAgent(text);
     const byOwner = author.uid === this.uid;
-    // Someone else's own files they named come as attachments, copied to the owner's files, where the agent works.
-    const own = byOwner ? [] : mentionInputs.filter((input): input is OwnFile => input.kind === "file" && input.own === true);
+    // Someone else's own files they named come as attachments, copied to the owner's files, where the agent works. The
+    // owner's second seat has none of its own.
+    const own = this.#account(author.uid) === this.uid ? [] : mentionInputs.filter((input): input is OwnFile => input.kind === "file" && input.own === true);
     const attaching = Promise.all([
       // Someone else attaches only what they uploaded here, or a file the chat already holds: no other of the owner's.
       byOwner ? attachments : this.#attachable(author.uid, attachments),
@@ -930,7 +935,7 @@ export class ChatAgent extends DurableObject<Env> {
     if (named && titleFrom) void this.#nameChat(titleFrom, title).catch((error: unknown) => console.error("chat title:", errorMessage(error)));
     const all = title !== this.#membersTouched.title || now - this.#membersTouched.at >= MEMBERS_TOUCH_MS;
     if (all) this.#membersTouched = { title, at: now };
-    const members = this.members.list().filter((member) => all || member.uid === author.uid || tagged.has(member.uid));
+    const members = this.#listingMembers().filter((member) => all || member.uid === author.uid || tagged.has(member.uid));
     await Promise.allSettled(
       members.map((member) => this.#index(member.uid).touchSharedChat(this.chatId, this.uid, title, member.uid !== author.uid, tagOf(member.uid), named)),
     );
@@ -1040,9 +1045,27 @@ export class ChatAgent extends DurableObject<Env> {
     return exports.UserDirectory.getByName(uid);
   }
 
+  /**
+   * Whose account someone in the chat is: their own, or for the owner's second seat (secondSeat) the owner's. Only
+   * someone with an account of their own has a sidebar (a directory) and files; the seat has neither.
+   */
+  #account(uid: string): string {
+    return uid === secondSeatUid(this.uid) ? this.uid : uid;
+  }
+
+  /** Whether `uid`, someone other than the owner, has a sidebar of their own that lists this chat. */
+  #hasSidebar(uid: string): boolean {
+    return this.#account(uid) === uid;
+  }
+
+  /** The members whose sidebars list this chat: all but the owner's second seat. */
+  #listingMembers(): Person[] {
+    return this.members.list().filter((member) => this.#hasSidebar(member.uid));
+  }
+
   /** The owner's directory and each member's: every sidebar that lists this chat. */
   #everyonesIndexes() {
-    return [this.#directory, ...this.members.list().map((member) => this.#index(member.uid))];
+    return [this.#directory, ...this.#listingMembers().map((member) => this.#index(member.uid))];
   }
 
   /** A single-use link's token, shown once to the owner. The chat itself decides who may: only its owner. */
@@ -1090,10 +1113,30 @@ export class ChatAgent extends DurableObject<Env> {
       await index.removeSharedChat(this.chatId, this.uid).catch(() => {});
       return refuse(403, failed.error);
     }
+    this.#joined(person);
+    return null;
+  }
+
+  /**
+   * The owner sits in the chat a second time, as a member (secondSeat), to try it as the people they share it with see
+   * it. Taken already, it is just opened again. Its windows join as the owner does, with no invite.
+   */
+  addSecondSeat(by: Person): ChatRefusal | null {
+    if (by.uid !== this.uid) return refuse(403, "Only the chat's owner can join it a second time.");
+    if (this.#gone) return refuse(404, DELETED);
+    const seat = secondSeat(by);
+    if (this.members.has(seat.uid)) return null;
+    const full = this.members.add(seat);
+    if (full) return refuse(409, full.error);
+    this.#joined(seat);
+    return null;
+  }
+
+  /** Someone new is in the chat: everyone's app and the transcript hear it, and the owner's sidebar that it is shared. */
+  #joined(person: Person): void {
     this.sockets.broadcastPeople();
     this.#notePeople(person, "joined");
     this.#tellShared();
-    return null;
   }
 
   /**
@@ -1126,7 +1169,7 @@ export class ChatAgent extends DurableObject<Env> {
     this.#tellShared();
     // The agent acts as the owner: a removed person's queued requests must not run after they are out.
     await this.#withdrawQueued(uid).catch((error: unknown) => console.error("withdraw queued:", errorMessage(error)));
-    await this.#index(uid).removeSharedChat(this.chatId, this.uid);
+    if (this.#hasSidebar(uid)) await this.#index(uid).removeSharedChat(this.chatId, this.uid);
     return null;
   }
 
@@ -1147,7 +1190,8 @@ export class ChatAgent extends DurableObject<Env> {
       title: title ?? "",
       artifacts: metas.flatMap((meta) => (meta && isOwnedBy(meta, this.uid, this.chatId) ? [{ id: meta.id, title: meta.title }] : [])),
       files: traces.files.filter((path) => stored.has(path)),
-      members: this.members.list().length,
+      // The people it is shared with: the owner's second seat is the owner.
+      members: this.#listingMembers().length,
     };
   }
 
@@ -1175,7 +1219,7 @@ export class ChatAgent extends DurableObject<Env> {
       // Only files the owner was shown, and only this chat's: never one the preview left out, nor any other path sent.
       const confirmed = new Set(files);
       const toDelete = traces.files.filter((path) => confirmed.has(path));
-      const members = this.members.list();
+      const members = this.#listingMembers();
       this.sockets.disconnect();
       await Promise.all([
         ...members.map((member) => this.#index(member.uid).removeSharedChat(this.chatId, this.uid)),
