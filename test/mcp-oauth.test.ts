@@ -270,6 +270,14 @@ describe("per-user MCP sign-in", () => {
     expect(portal.clients.size).toBe(1);
   });
 
+  it("refreshes a chat's connection held from before the user signed in at the new address", async () => {
+    const ada = new MemoryStore();
+    await signIn(ada, "ada@example.com", OLD_REDIRECT);
+    const chat = (await chatOAuthClient(ada, "Portal"))!;
+    await signIn(ada, "ada@example.com");
+    expect(await chat.clientInformation()).toEqual(ada.record.client);
+  });
+
   it("never registers a client from a chat's connection", async () => {
     const ada = new MemoryStore();
     await signIn(ada, "ada@example.com");

@@ -62,8 +62,17 @@ export function applyAuthChange(stored: McpAuthRecord, change: McpAuthChange): M
  * Whether `client` was registered with `redirectUrl` among its redirect URIs. An authorization server sends the
  * browser back only to those, so a sign-in with any other client fails on the server's sign-in page.
  */
-export function registeredFor(client: OAuthClientInformationMixed | undefined, redirectUrl: string): boolean {
-  return registeredRedirects(client).includes(redirectUrl);
+function registeredFor(client: OAuthClientInformationMixed | undefined, redirectUrl: string): boolean {
+  return registeredRedirects(client).some((uri) => sameUrl(uri, redirectUrl));
+}
+
+/** Compared as URLs, so a server that echoes a redirect URI in another spelling (host case, default port) still matches. */
+function sameUrl(a: string, b: string): boolean {
+  try {
+    return new URL(a).href === new URL(b).href;
+  } catch {
+    return a === b;
+  }
 }
 
 function registeredRedirects(client: OAuthClientInformationMixed | undefined): string[] {
@@ -105,8 +114,8 @@ export function serverOfState(state: string): string | undefined {
  * redirects the browser to it. A chat's connection is not `interactive`: if
  * its refresh fails, it records nothing, so it cannot overwrite a sign-in the
  * user has open, and the call fails with auth_required. Nor does it ever
- * register a client: only a sign-in does, for the address the user signed in
- * at, so a chat cannot leave behind a registration for another address.
+ * save a client registration: only a sign-in does, for the address the user
+ * signed in at, so a chat cannot leave behind one for another address.
  */
 export class McpOAuthClient implements OAuthClientProvider {
   authorizationUrl: URL | undefined;
@@ -149,14 +158,16 @@ export class McpOAuthClient implements OAuthClientProvider {
   }
 
   /**
-   * The stored registration, if it was made for this redirect URL. Otherwise a sign-in registers again; a chat's
-   * connection, which cannot, needs a new sign-in.
+   * For a sign-in, the stored registration if it was made for this redirect URL; otherwise the sign-in registers
+   * again. A chat's connection only refreshes, which needs no redirect URL, so it takes whatever registration is
+   * stored now (a sign-in at another address may have replaced the one it started with); with none, it cannot
+   * register one, and needs a new sign-in.
    */
   async clientInformation(): Promise<OAuthClientInformationMixed | undefined> {
     const { client } = await this.#store.get();
-    if (registeredFor(client, this.#redirectUrl)) return client;
-    if (!this.#interactive) throw new UnauthorizedError(`No client registration for ${this.#server} at ${this.#redirectUrl}.`);
-    return undefined;
+    if (this.#interactive) return registeredFor(client, this.#redirectUrl) ? client : undefined;
+    if (!client) throw new UnauthorizedError(`No client registration for ${this.#server}.`);
+    return client;
   }
 
   /** Only a sign-in saves a registration. A chat's connection may only be asked to re-save the one it read, which can wait. */
@@ -226,6 +237,8 @@ export async function startSignIn(serverUrl: string, server: string, store: McpA
 export async function finishSignIn(serverUrl: string, server: string, store: McpAuthStore, code: string, state: string, redirectUrl: string): Promise<void> {
   const record = await store.get();
   if (!record.state || record.state !== state) throw new Error("This sign-in did not start here, or a newer one replaced it. Open the sign-in link again.");
+  // The code is exchanged with the redirect URL the sign-in started with, which its registration names.
+  if (!registeredFor(record.client, redirectUrl)) throw new Error("This sign-in started at another address of this app. Open the sign-in link again.");
   const client = new McpOAuthClient(store, server, { redirectUrl, interactive: true });
   const trace = tracedFetch();
   await auth(client, { serverUrl, authorizationCode: code, fetchFn: trace.fetch }).catch(trace.explain);
