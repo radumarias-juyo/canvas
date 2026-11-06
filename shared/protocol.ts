@@ -418,8 +418,8 @@ export function autoPickFailed(pick: AutoPick): boolean {
   return !pick.running && !LEGACY_RUNNING.test(pick.failed ?? "");
 }
 
-/** A router call: the router's picker id, and what the call cost, in dollars and tokens. */
-export type RouterSpend = { model: string; cost: number; input: number; output: number };
+/** A router call: the router's picker id, what the call cost, in dollars and tokens, and how long the call alone took (`ms`, absent on older picks). */
+export type RouterSpend = { model: string; cost: number; input: number; output: number; ms?: number };
 
 /** A message a reply quotes: its transcript entry, who wrote it (the agent, or a person) and the start of its text. */
 export type ReplyQuote = { id: number; name: string; text: string } & ({ agent: true } | { uid: string });
