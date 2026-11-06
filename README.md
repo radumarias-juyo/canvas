@@ -587,7 +587,9 @@ The project uses Cloudflare's [`cf` CLI](https://developers.cloudflare.com/cf/);
    (`anthropic/claude-opus-5.5`); a Workers AI id such as `@cf/zai-org/glm-5.3-flash` needs no key. See [Models](#models).
 4. Put the app behind Cloudflare Access: create a self-hosted Access application for the Worker's hostname with a
    policy listing who may sign in, then set `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` (the application's audience tag) in
-   `cloudflare.config.ts`.
+   `cloudflare.config.ts`. That hostname is `domains` there, a custom domain on a zone in your account, with
+   workers.dev and Preview URLs off so the Worker is reachable only through Access; change it to yours, or drop it and
+   set `workersDev: true` to serve on workers.dev.
 5. Generate the file-encryption master key (`openssl rand -base64 32`, at least 32 bytes) and keep a copy somewhere
    safe: losing it makes every user's files unreadable, and changing it later needs a migration (see
    [How file encryption works](#how-file-encryption-works)). Pass it as a secret:
