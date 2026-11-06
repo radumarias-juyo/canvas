@@ -14,6 +14,10 @@ import {
   type ChatSummary,
   type CloneAccess,
   type CreatedInvite,
+  type PageAiRequest,
+  type PageAiResponse,
+  type PageStorageRequest,
+  type PageStorageResponse,
   type ProxyRequest,
   type ProxyResponse,
   type DeclaredTool,
@@ -96,6 +100,13 @@ const encodePath = (path: string) => path.split("/").map(encodeURIComponent).joi
 const send = (method: string, body: unknown): RequestInit => ({ method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
 const post = (body: unknown) => send("POST", body);
 
+/** A page's call through the Worker: its answer, errors included (`ok: false`); throws only when the request itself fails. */
+async function pageCall<T extends { ok: boolean }>(path: string, body: unknown): Promise<T> {
+  const { response, body: answer } = await fetchJson(path, post(body));
+  if (answer && typeof (answer as T).ok === "boolean") return answer as T;
+  throw new Error(`The Worker answered ${response.status}`);
+}
+
 export const api = {
   /** The signed-in user, or null with the Worker's auth mode when nobody is. */
   me: async (): Promise<{ me: Me | null; auth: Me["auth"] }> => {
@@ -144,12 +155,11 @@ export const api = {
     return response.text();
   },
   /** Resolves with the Worker's ProxyResponse, errors included; rejects only when the request itself fails. */
-  proxy: async (id: string, call: ProxyRequest): Promise<ProxyResponse> => {
-    const { response, body } = await fetchJson(`/api/artifacts/${id}/mcp`, post(call));
-    const proxied = body as ProxyResponse | null;
-    if (proxied && typeof proxied.ok === "boolean") return proxied;
-    throw new Error(`The proxy answered ${response.status}`);
-  },
+  proxy: (id: string, call: ProxyRequest) => pageCall<ProxyResponse>(`/api/artifacts/${id}/mcp`, call),
+  /** A page's saved values for this viewer (pi.use("storage")). Resolves with errors too; rejects only when the request fails. */
+  pageStorage: (id: string, request: PageStorageRequest) => pageCall<PageStorageResponse>(`/api/artifacts/${id}/storage`, request),
+  /** One answer from the page's model (pi.use("ai")), paid for by this viewer. */
+  pageAi: (id: string, request: PageAiRequest) => pageCall<PageAiResponse>(`/api/artifacts/${id}/ai`, request),
   /** The user's own system prompt, added to the built-in one in all their chats. Always theirs to change. */
   systemPrompt: () => request<ChatSystemPrompt>("/api/me/system-prompt"),
   /** Save it; empty clears it. */
@@ -188,6 +198,8 @@ export const api = {
   },
   /** Where a user folder downloads as a zip named after it, with the folder itself at its root. */
   folderZipUrl: (path: string) => ZIP_ROUTE + encodePath(path),
+  /** Delete the user's own files and folders, each folder with everything under it. */
+  deleteFiles: (files: readonly string[], folders: readonly string[]) => request<object>("/api/files", send("DELETE", { files, folders })),
   /** One request's worth of files (see uploadBatches), each with its name or its path inside a picked folder. */
   upload: (files: readonly { file: File; path: string }[]) => request<{ paths: string[] }>("/api/files", { method: "POST", body: uploadForm(files) }),
   /** Files for a chat message, stored under uploads/ in the chat owner's files; send the paths with the message. */

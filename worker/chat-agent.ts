@@ -1,6 +1,5 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { createModels } from "@earendil-works/pi-ai/models";
-import type { Models, Provider, UserMessage } from "@earendil-works/pi-ai";
+import type { Models, UserMessage } from "@earendil-works/pi-ai";
 import { createRegistry, Harness, ROOT_CONVERSATION_ID, type Agent, type AgentChange, type AgentState, type Submission, type Conversation, type Cursor, type EntryId, type EntryRecord, type Extension, type JsonObject, type AgentEvent, type AgentEventStream, type ConversationView, type SnapshotEvent } from "@earendil-works/pi-durable";
 import { createToolSearchExtension } from "@earendil-works/pi-durable/tool-search";
 import { PiHarness, skills } from "agents/harness/pi";
@@ -105,10 +104,8 @@ import {
   checkSetting,
   currentCatalog,
   defaultModelChoice,
-  listedProviders,
+  piModels,
   loadCatalog,
-  withCurrentPrices,
-  withEffortRecorded,
   type Catalog,
 } from "./models.ts";
 import { inboxIds, queuedIdsOf, queuedMessages } from "./queue.ts";
@@ -181,17 +178,6 @@ interface SkillsFor {
   recent: RecentEntries;
 }
 
-/**
- * pi-ai's models, through the chat's AI Gateway, at the vendors' current prices, each reply marked with its effort and
- * Gemini's tool calls signed: AI Gateway's catalog and Workers AI's through `provider`, and the models the providers list
- * (as this isolate's catalog has them now) through one pi provider each.
- */
-function piModels(provider: Provider, gemini: GeminiCompat) {
-  const models = createModels();
-  models.setProvider(withCurrentPrices(provider));
-  for (const listed of listedProviders(provider, currentCatalog)) models.setProvider(listed);
-  return gemini.models(withEffortRecorded(models));
-}
 
 /** The name of a user's chat object. The uid must come from a verified identity: it is what keeps users apart. */
 export function chatAgentName(uid: string, chatId: string): string {
@@ -486,8 +472,8 @@ export class ChatAgent extends DurableObject<Env> {
   }
 
   /**
-   * Auto's pick for a message about to start a run: the deployment's router (ROUTER_MODEL, the first the picker lists
-   * that answers) reads the end of the conversation and the message (and how many images and other files it attaches),
+   * Auto's pick for a message about to start a run: the deployment's router (ROUTER_MODEL: of those the picker lists,
+   * the first to pick) reads the end of the conversation and the message (and how many images and other files it attaches),
    * and picks one of AUTO_MODELS and an effort. The router call counts in pi's ledger like any model call. While a
    * reply is running (as pi's own queue says: the sidebars' status lags behind it) the router is not asked. Undefined
    * only when the conversation could not be read. Never throws: when no router picks in time (ROUTE_MS), or one picks a
@@ -1880,6 +1866,18 @@ export class ChatAgent extends DurableObject<Env> {
   /** Whether only people in the chat may load this server's data (see #mayLoad). */
   #membersOnly(server: string): boolean {
     return this.hub.server(server)?.auth === "oauth";
+  }
+
+  /**
+   * Whether `viewer` may read what the author's views of a page saved (the defaults pi.use("storage") serves). A page
+   * may save what it loaded, so its saved values follow the rule for its data: an artifact with a version that calls a
+   * server only the chat's people may load (#mayLoad) shares its author's values only with them.
+   */
+  async mayReadPageDefaults(artifactId: string, viewer: string): Promise<boolean> {
+    if (this.isInChat(viewer)) return true;
+    const meta = await this.storage.artifacts.readMeta(artifactId);
+    if (!meta || !isOwnedBy(meta, this.uid, this.chatId)) return false;
+    return meta.versions.every((version) => (version.manifest.mcp?.servers ?? []).every((entry) => this.#mayLoad(entry.server, viewer)));
   }
 
   /** Versions never change once published, so their manifests cache for the object's lifetime. */

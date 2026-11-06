@@ -18,7 +18,7 @@ import type { EntryRecord } from "@earendil-works/pi-durable";
 import { textOf } from "../../shared/canonical.ts";
 import { COMPACTION, modelKey, pricePerMillion, type AutoCandidate, type ModelInfo } from "../../shared/models.ts";
 import { CHAT_MESSAGE_KIND, type ChatMessageData, type RouterSpend } from "../../shared/protocol.ts";
-import { clip, errorMessage, isObject, plural } from "../../shared/util.ts";
+import { abortable, clip, errorMessage, isObject, jsonIn, plural } from "../../shared/util.ts";
 import { gatewayFetch, type GatewayOptions } from "../gateway-models.ts";
 import { bindingClassifierOptions, systemOneModel, type ModelRunner } from "./workers-ai.ts";
 import { DEFAULT_CONTEXT_WINDOW, thinkingLevelOf, type Catalog } from "../models.ts";
@@ -64,8 +64,11 @@ export interface RoutePick {
 
 /** How long the routers together may take before the chat goes on without a pick: a person is waiting. */
 export const ROUTE_MS = 5_000;
-/** How long one router may take when another is left to ask: a hung first router leaves the next one time to answer. */
-const TRY_MS = 2_000;
+/**
+ * How long a router has alone before the next one is asked beside it: a slow first router keeps going, and a hung one
+ * leaves the next one time to answer. One that fails has the next one asked at once.
+ */
+const TRY_MS = 1_500;
 /** How much of each router's error a failed pick keeps. */
 export const MAX_ERROR_CHARS = 120;
 /** And of all of them: what a message's failed pick keeps, for everyone in the chat to read. */
@@ -210,15 +213,7 @@ function effortOf(value: unknown): ModelThinkingLevel | undefined {
  * for a reply that names none. The effort is as named; the chat moves one the model does not take to the nearest it does.
  */
 export function parsePick(reply: string, candidates: readonly Candidate[]): RoutePick | undefined {
-  const start = reply.indexOf("{");
-  const end = reply.lastIndexOf("}");
-  if (start < 0 || end <= start) return undefined;
-  let value: unknown;
-  try {
-    value = JSON.parse(reply.slice(start, end + 1));
-  } catch {
-    return undefined;
-  }
+  const value = jsonIn(reply);
   if (!isObject(value)) return undefined;
   return pickOf(candidates, value.model, value.effort, value.reason);
 }
@@ -237,8 +232,6 @@ function pickOf(candidates: readonly Candidate[], model: unknown, effort: unknow
 export interface Router {
   /** The picker's id of the model that picks: the ledger's key and the pick's tooltip name it. */
   id: string;
-  /** Set for one ROUTER_MODEL names that cannot be asked (it fails at once): it leaves the routers before it all the time. */
-  unavailable?: true;
   /** Its pick for `request`, or a throw; and the call's usage, for pi's ledger. */
   ask(request: RouteRequest, signal: AbortSignal): Promise<{ pick: RoutePick; usage: Usage }>;
 }
@@ -362,30 +355,54 @@ export interface Routed {
 }
 
 /**
- * Ask `routers` in turn, until one picks, within `timeoutMs` in all; one with another after it gets at most TRY_MS.
- * Throws when none picked, with each one's error, cut short.
+ * Ask `routers` in their order, until one picks, within `timeoutMs` in all: the next one is asked when one fails, or
+ * beside it once it has had TRY_MS, and the first pick wins; those still asking are stopped. Throws when none picked,
+ * with each one's error, cut short.
  */
 export async function route(routers: readonly Router[], request: RouteRequest, timeoutMs = ROUTE_MS): Promise<Routed> {
   if (!routers.length) throw new Error("no router model is available");
   if (!request.candidates.length) throw new Error("none of the models Auto picks among is available");
-  const deadline = Date.now() + timeoutMs;
+  const done = new AbortController();
+  const signal = AbortSignal.any([done.signal, AbortSignal.timeout(timeoutMs)]);
   const errors: string[] = [];
-  // The last router that can be asked has whatever time is left: those after it fail at once.
-  const last = routers.findLastIndex((router) => !router.unavailable);
-  for (const [i, router] of routers.entries()) {
-    const left = Math.min(deadline - Date.now(), i < last ? TRY_MS : Infinity);
-    if (left <= 0) {
-      errors.push(`${router.id}: out of time`);
-      break;
-    }
-    try {
-      const { pick, usage } = await router.ask(request, AbortSignal.timeout(left));
-      return { pick, router: routerSpend(router.id, usage), usage };
-    } catch (error) {
-      errors.push(`${router.id}: ${clip(errorMessage(error), MAX_ERROR_CHARS)}`);
-    }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await new Promise<Routed>((resolve, reject) => {
+      let next = 0;
+      let asking = 0;
+      let picked = false;
+      const ask = () => {
+        clearTimeout(timer);
+        if (picked) return;
+        if (next < routers.length && !signal.aborted) {
+          const i = next++;
+          const router = routers[i];
+          asking++;
+          // The deadline holds even for a router that does not stop on the signal.
+          abortable(router.ask(request, signal), signal).then(
+            ({ pick, usage }) => {
+              picked = true;
+              resolve({ pick, router: routerSpend(router.id, usage), usage });
+            },
+            (error) => {
+              errors[i] = `${router.id}: ${clip(errorMessage(error), MAX_ERROR_CHARS)}`;
+              asking--;
+              ask();
+            },
+          );
+          if (next < routers.length) timer = setTimeout(ask, TRY_MS);
+        }
+        if (asking === 0) {
+          for (let i = next; i < routers.length; i++) errors[i] = `${routers[i].id}: out of time`;
+          reject(new Error(clip(errors.filter(Boolean).join("; "), MAX_ERRORS_CHARS)));
+        }
+      };
+      ask();
+    });
+  } finally {
+    clearTimeout(timer);
+    done.abort();
   }
-  throw new Error(clip(errors.join("; "), MAX_ERRORS_CHARS));
 }
 
 /**
@@ -420,7 +437,6 @@ export function routersFrom(spec: string, catalog: Catalog, use: { models: Model
 function unavailable(id: string, why: string): Router {
   return {
     id,
-    unavailable: true,
     ask: () => Promise.reject(new Error(why)),
   };
 }

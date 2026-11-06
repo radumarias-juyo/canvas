@@ -1,6 +1,6 @@
 import type { ClassifierModel, ClassifierOptions } from "@earendil-works/pi-ai";
 import { CLOUDFLARE_WORKERS_AI_CLASSIFIER_MODELS } from "@earendil-works/pi-ai/providers/cloudflare-workers-ai.models";
-import { abortable } from "../../shared/util.ts";
+import { abortable, isObject } from "../../shared/util.ts";
 
 /**
  * System One classifiers on Workers AI (TypeSafe's Jev, Cloudflare's Clef), asked with pi-ai's `classify` through the AI
@@ -27,9 +27,41 @@ export function bindingClassifierOptions(ai: ModelRunner): Pick<ClassifierOption
   const fetch = async (_url: string | URL | Request, init?: RequestInit) => {
     const { model, input } = JSON.parse(String(init?.body)) as { model: string; input: object };
     const signal = init?.signal ?? undefined;
-    const result = await abortable(ai.run(model, input, { signal }), signal);
-    return Response.json({ success: true, result });
+    const answer = await abortable(ai.run(model, input, { signal }), signal);
+    // A failed Response goes to pi-ai as it is: pi-ai reports its status and text.
+    if (answer instanceof Response && !answer.ok) return answer;
+    // A Response or a stream would go to pi-ai as `{}`: its JSON is read instead, within the call's signal too.
+    const read = answer instanceof Response ? answer.json() : answer instanceof ReadableStream ? new Response(answer).json() : undefined;
+    const body = read ? await abortable(read, signal) : answer;
+    return Response.json(restEnvelope(body));
   };
   // The binding needs no key; pi-ai only wants one to send.
   return { apiKey: "ai-binding", fetch };
+}
+
+/**
+ * The binding's answer in the REST API's envelope, which pi-ai reads (its run record, `state`, its errors): a Workers AI
+ * model's output comes alone, but a third-party one's (Jev's) can come already enveloped. An answer pi-ai would find no
+ * output in fails here, naming its shape (its keys, never its values), so the reason shown says what came back.
+ */
+export function restEnvelope(answer: unknown): object {
+  const envelope = isObject(answer) && "success" in answer ? answer : { success: true, result: answer };
+  const { success, result } = envelope;
+  if (success !== false && !(isObject(result) && ("answers" in result || "state" in result))) {
+    throw new Error(`Workers AI answered with no classifier output: ${shapeOf(answer)}`);
+  }
+  return envelope;
+}
+
+/** How deep an answer's shape is shown. */
+const SHAPE_DEPTH = 3;
+
+/** An answer's shape, for an error: its keys, nested, and the kind of each leaf: `{success: boolean, result: {id: string}}`. */
+function shapeOf(value: unknown, depth = 0): string {
+  if (Array.isArray(value)) return "array";
+  if (!isObject(value)) return value === null ? "null" : typeof value;
+  if (depth >= SHAPE_DEPTH) return "{…}";
+  const keys = Object.keys(value);
+  const shown = keys.slice(0, 8).map((key) => `${key}: ${shapeOf(value[key], depth + 1)}`);
+  return `{${shown.join(", ")}${keys.length > shown.length ? ", …" : ""}}`;
 }

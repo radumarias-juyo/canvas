@@ -140,3 +140,23 @@ export function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise
   });
   return Promise.race([promise, stop]).finally(() => signal.removeEventListener("abort", onAbort!));
 }
+
+/**
+ * The JSON value a model's reply holds: all of it, else a fenced block, else from its first brace to its last, else
+ * from its first square bracket to its last (each kind apart, so prose such as "[1]" around an object leaves it whole).
+ */
+export function jsonIn(text: string): unknown {
+  const attempts = [text, /```(?:json)?\s*([\s\S]*?)```/i.exec(text)?.[1]];
+  for (const [open, close] of [["{", "}"], ["[", "]"]]) {
+    const start = text.indexOf(open);
+    const end = text.lastIndexOf(close);
+    if (start >= 0 && end > start) attempts.push(text.slice(start, end + 1));
+  }
+  for (const attempt of attempts) {
+    if (attempt === undefined) continue;
+    try {
+      return JSON.parse(attempt.trim());
+    } catch {}
+  }
+  return undefined;
+}

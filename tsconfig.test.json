@@ -37,6 +37,7 @@
     "src/chat/SentTime.tsx",
     "src/chat/gestures.ts",
     "src/chat/Steps.tsx",
+    "src/chat/stepRuns.ts",
     "src/chat/Linkified.tsx",
     "src/files/highlight.ts",
     "src/files/preview.ts",
@@ -95,6 +96,7 @@
     "worker/agent/publish.ts",
     "worker/agent/prompt.ts",
     "worker/artifacts/serve.ts",
-    "worker/artifacts/page-calls.ts"
+    "worker/artifacts/page-calls.ts",
+    "worker/artifacts/page-features.ts"
   ]
 }

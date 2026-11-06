@@ -52,8 +52,9 @@ export default defineConfig({
       CALL_HINT_MODEL: bindings.text("typesafe/jev"),
       // Auto, in the model picker: before each message that starts a run, a router model reads the end of the
       // conversation and the message, and picks one of AUTO_MODELS and an effort to answer it (worker/agent/route.ts).
-      // ROUTER_MODEL: the router, a small, fast model; a comma-separated list is tried in order (the first the picker
-      // lists answers; the next if it fails), with ROUTE_MS for all of them. If none answers, the chat keeps its model.
+      // ROUTER_MODEL: the router, a small, fast model; a comma-separated list is asked in order (the next one when one
+      // fails, or beside it once it is slow; the first pick wins), with ROUTE_MS for all of them. If none answers,
+      // the chat keeps its model.
       // decisions:<model> asks that OpenAI model through OpenAI's Decisions API, which picks without writing a reply
       // (input priced only), through AI Gateway with the OpenAI key; system-one:<model> asks a System One classifier on
       // Workers AI (typesafe/jev, @cf/cloudflare/clef-flash) the same way, through the AI binding. Workers AI runs on
@@ -102,8 +103,18 @@ export default defineConfig({
       // a link the agent gives. A Cloudflare MCP portal is one entry for every server behind it.
       MCP_SERVERS: bindings.json(mcpServerList()),
       // Live calls from published pages: 120 a minute per viewer and chat, counted by Cloudflare across the Worker's
-      // isolates. The namespace is any number unique within the account.
+      // isolates; and, counted apart, each viewer's writes of pages' saved values. The namespace is any number unique within the account.
       PAGE_CALLS: bindings.rateLimit({ namespace: "4201", simple: { limit: 120, period: 60 } }),
+      // What saved pages' model calls (pi.use("ai"): a viewer typing "put revenue first" into a dashboard) run on: a
+      // comma-separated list of the picker's model ids, tried in order (worker/artifacts/page-ai.ts). gpt-oss-120b on
+      // Workers AI needs no provider key; Gemini Flash-Lite, with the Google AI Studio key, answers when it fails.
+      // Empty: pages have no model.
+      PAGE_AI_MODEL: bindings.text("@cf/openai/gpt-oss-120b,google-ai-studio/gemini-flash-lite-latest"),
+      // What one person's calls to pages' models may cost a day (UTC), in dollars: the person typing pays, not the
+      // page's author. Counted in their UserDirectory.
+      PAGE_AI_DAILY_USD: bindings.text("0.50"),
+      // Calls to pages' models: 20 a minute per person.
+      PAGE_AI: bindings.rateLimit({ namespace: "4202", simple: { limit: 20, period: 60 } }),
       // Headless Chrome (Browser Rendering): the agent checks each page in it before publishing (worker/artifacts/check.ts).
       // Local development runs a local Chrome, which miniflare downloads on first use.
       BROWSER: bindings.browser({ dev: { remote: false } }),

@@ -235,10 +235,10 @@ body.resizing iframe { pointer-events: none; }
 .upload-actions { display: flex; flex-wrap: wrap; }
 .upload-status { padding: 2px 8px; overflow-wrap: anywhere; }
 .upload-status.error { color: var(--error); }
-.file-folder > summary { position: relative; padding: 5px 30px 5px 8px; border-radius: 6px; cursor: pointer; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.file-folder > summary { position: relative; padding: 5px 56px 5px 8px; border-radius: 6px; cursor: pointer; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .file-folder > summary:hover { background: var(--surface-2); }
 .file-folder > :not(summary) { display: block; margin-left: 12px; }
-/* A file's name (an image's opens it in a new tab) and its download button; a folder's zip download sits at its summary's end. */
+/* A file's name (an image's opens it in a new tab), its download and delete buttons; a folder's zip download and delete sit at its summary's end. */
 .files .file-row { display: flex; align-items: center; border-radius: 6px; }
 .file-row:hover { background: var(--surface-2); }
 .file-row > .file-name { flex: 1; min-width: 0; }
@@ -250,20 +250,24 @@ body.resizing iframe { pointer-events: none; }
 .files-tools { display: flex; gap: 6px; padding: 2px 0 4px; }
 .files-tools input { flex: 1; min-width: 0; padding: 5px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); font-size: 14px; }
 .files-tools button { padding: 4px 10px; font-size: 13px; }
-.files-selection { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 2px 0 6px; font-size: 13px; }
-.files-selection > span { flex: 1; color: var(--muted); }
-.files-selection .button, .files-selection button { padding: 3px 10px; font-size: 13px; }
+.files-selection { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 2px 0 6px; font-size: 13px; }
+/* The count gives way first, so download, delete and Done stay on one line in a narrow sidebar. */
+.files-selection > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.files-selection .button, .files-selection button { padding: 3px 8px; font-size: 13px; }
+.files-selection .selection-icon { display: inline-flex; padding: 4px 6px; }
+.files-selection button.files-delete:not(:disabled) { color: var(--error); }
 .files-selection .upload-status { flex-basis: 100%; padding: 0; }
 .file-pick { flex: none; margin: 0 2px 0 6px; accent-color: var(--accent); }
 .file-folder > summary > .file-pick { margin: 0 4px 0 2px; vertical-align: -2px; }
 .files-empty { padding: 4px 8px; }
-.sidebar .file-action { display: inline-flex; flex: none; padding: 4px; margin-right: 2px; border-radius: 5px; color: var(--muted); opacity: 0; }
-.file-folder > summary > .file-action { position: absolute; right: 2px; top: 50%; transform: translateY(-50%); }
-.file-row:hover .file-action, .file-folder > summary:hover > .file-action, .file-action:focus-visible { opacity: 1; }
-.sidebar .file-action[href]:hover { color: var(--text); background: var(--border); }
-/* Too big to zip: no href, so it is inert; its title says why. */
-.file-action:not([href]) { cursor: not-allowed; }
-.file-action:not([href]) svg { opacity: 0.45; }
+.sidebar .file-action { display: inline-flex; flex: none; padding: 4px; margin-right: 2px; border: 0; border-radius: 5px; background: none; color: var(--muted); opacity: 0; cursor: pointer; }
+.file-folder > summary > .file-actions { position: absolute; right: 2px; top: 50%; display: flex; transform: translateY(-50%); }
+.file-row:hover .file-action, .file-folder > summary:hover .file-action, .file-action:focus-visible { opacity: 1; }
+.sidebar .file-action:not([aria-disabled="true"]):hover { color: var(--text); background: var(--border); }
+.sidebar .file-action.file-delete:hover { color: var(--error); }
+/* Too big to zip: inert, and its title says why. */
+.file-action[aria-disabled="true"] { cursor: not-allowed; }
+.file-action[aria-disabled="true"] svg { opacity: 0.45; }
 @media (hover: none) { .sidebar .file-action { opacity: 1; } }
 /* A drag of files over the app: one target over everything, and the preview's iframe must not take the drop. */
 .drop-target {
@@ -511,7 +515,8 @@ button.reaction:hover { border-color: var(--muted); }
 .assistant { display: flex; flex-direction: column; gap: 4px; }
 .tool-call { color: var(--muted); font-size: 13px; }
 /* One step of the agent (Steps.tsx): a plain line with an icon, what it is, a hint and its status. An arrow after the
-   hint opens what went in and came out, beside a thin guide line; a step with nothing more to show has no arrow. */
+   hint opens what went in and came out, beside a thin guide line; a step with nothing more to show has no arrow.
+   A run of steps is a step too, holding its steps: rules on a step's line reach only its own (`> .step-line`). */
 .step { font-size: 13px; min-width: 0; }
 .step-line { display: flex; align-items: flex-start; gap: 8px; margin: 0 -6px; padding: 3px 6px; border-radius: 6px; line-height: 20px; list-style: none; }
 .step > summary { cursor: pointer; }
@@ -520,27 +525,39 @@ button.reaction:hover { border-color: var(--muted); }
 .step > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .step-icon { flex: none; display: grid; place-items: center; width: 16px; height: 20px; color: var(--muted); font-size: 12px; }
 .step-icon .thinking-spark { width: 14px; height: 14px; }
-.step.done .step-icon { color: var(--live); }
-.step.error .step-icon { color: var(--error); }
+.step.done > .step-line .step-icon { color: var(--live); }
+.step.error > .step-line .step-icon { color: var(--error); }
 .step-label { flex: none; font-weight: 500; white-space: nowrap; }
 /* Cut to one line, except on a step that has nothing to open, where it is the whole detail. */
 .step-hint { flex: 0 1 auto; min-width: 0; color: var(--muted); font: 12px/20px var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .step-hint.prose { font: inherit; }
-.step.static .step-hint { flex: 1; white-space: normal; overflow-wrap: anywhere; }
-.step.error.static .step-hint { color: var(--error); }
+.step.static > .step-line .step-hint { flex: 1; white-space: normal; overflow-wrap: anywhere; }
+.step.error.static > .step-line .step-hint { color: var(--error); }
 /* Opened, the body shows it all. */
-.step[open] .step-hint { display: none; }
+.step[open] > .step-line .step-hint { display: none; }
 .step-status { flex: none; margin-left: auto; padding-left: 8px; color: var(--muted); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
-.step.error .step-status { color: var(--error); }
+.step.error > .step-line .step-status { color: var(--error); }
 /* A running step's count (RunningFor in Steps.tsx), beside its shimmering status. */
 .step-time { flex: none; margin-left: -4px; color: var(--muted); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .step-chevron { flex: none; align-self: center; width: 12px; height: 12px; margin-left: -4px; fill: none; stroke: var(--muted); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; transition: transform 0.15s; }
 .step > summary:hover .step-chevron { stroke: var(--text); }
-.step[open] .step-chevron { transform: rotate(90deg); }
+.step[open] > .step-line .step-chevron { transform: rotate(90deg); }
 .step-body { display: flex; flex-direction: column; gap: 8px; margin: 2px 0 6px 7px; padding: 4px 0 4px 16px; border-left: 1px solid var(--border); }
-.step-section-label { margin-bottom: 4px; }
-.step-section pre { margin: 0; max-height: 320px; overflow: auto; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); font: 12px/1.5 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
-.step-section.error pre { color: var(--error); background: color-mix(in srgb, var(--error) 8%, var(--surface-2)); }
+/* What went in and what came out, each a shaded block with its name in it. */
+.step-section { padding: 8px 10px; border-radius: 8px; background: var(--surface-2); }
+.step-section-label { margin-bottom: 6px; }
+.step-section pre { margin: 0; max-height: 320px; overflow: auto; font: 12px/1.5 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.step-section.error { background: color-mix(in srgb, var(--error) 8%, var(--surface-2)); }
+.step-section.error pre { color: var(--error); }
+/* A run of steps (StepRun): one line on what they did, which may wrap, opening on a box that lists them, a line between
+   each two. A step opened in it shows what went in and came out across the box, with no guide line. */
+.step-run > .step-line .step-label { flex: 0 1 auto; min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+.step-run > .step-body { gap: 0; margin: 4px 0 8px; padding: 2px 12px; border: 1px solid var(--border); border-radius: 10px; }
+.step-run-list { display: flex; flex-direction: column; }
+.step-run-list > .step { padding: 4px 0; }
+.step-run-list > .step + .step { border-top: 1px solid var(--border); }
+.step-run-list > .step > .step-body { margin: 4px 0 6px; padding: 0; border-left: 0; }
+.step-failed { color: var(--error); }
 .step-note { margin: 0; color: var(--muted); }
 .step-shot { margin: 0 0 10px; }
 .step-shot img { display: block; max-width: min(100%, 480px); max-height: 360px; object-fit: cover; object-position: top; border: 1px solid var(--border); border-radius: 6px; }
@@ -569,7 +586,7 @@ button.reaction:hover { border-color: var(--muted); }
 .thinking-spark g { transform-origin: 12px 12px; animation: thinking-morph 1.6s ease-in-out infinite; }
 .thinking-spark .thinking-spark-short { animation-delay: -0.8s; }
 /* The gradient is 2.5× the word, so moving it from 100% to 0% carries the bright band from left of the word to right of it. */
-.thinking-word, .step.active .step-status {
+.thinking-word, .step.active > .step-line .step-status {
   background: linear-gradient(90deg, var(--muted) 40%, var(--text) 50%, var(--muted) 60%) 100% 0 / 250% 100%;
   -webkit-background-clip: text;
   background-clip: text;
@@ -586,10 +603,10 @@ button.reaction:hover { border-color: var(--muted); }
 .spinner { display: inline-block; width: 10px; height: 10px; border: 2px solid var(--border); border-top-color: var(--working); border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: -1px; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) {
-  .thinking-dots i, .thinking-spark, .thinking-spark g, .thinking-word, .step.active .step-status, .spinner { animation: none; }
+  .thinking-dots i, .thinking-spark, .thinking-spark g, .thinking-word, .step.active > .step-line .step-status, .spinner { animation: none; }
   .thinking-dots i { opacity: 0.7; }
   .thinking-spark .thinking-spark-short { transform: scale(0.6); }
-  .thinking-word, .step.active .step-status { background: none; color: var(--muted); }
+  .thinking-word, .step.active > .step-line .step-status { background: none; color: var(--muted); }
   .step-chevron { transition: none; }
   .presence.working { animation: none; }
 }
