@@ -1,0 +1,123 @@
+import { describe, expect, it } from "vitest";
+import { checkSkill, MAX_SKILL_INSTRUCTIONS, SkillError, skillPath, splitTools, type SkillInfo } from "../shared/skills.ts";
+import { skillBody, skillSource } from "../worker/agent/skills.ts";
+import { BUILTIN_SKILLS, builtinSkill, formatSkillFile, parseSkillFile } from "../worker/skills/index.ts";
+
+const skill = { name: "weekly-report", description: "Use when the user asks for the weekly report.", instructions: "1. Read the data.\n2. Publish.", tools: ["files_read", "run_python"] };
+const info = (over: Partial<SkillInfo> = {}): SkillInfo => ({ ...skill, origin: "user", enabled: true, updatedAt: 1, ...over });
+
+describe("checkSkill", () => {
+  it("trims, collapses the description and deduplicates tools", () => {
+    expect(checkSkill({ ...skill, name: " weekly-report ", description: "Use when\n  asked.", tools: ["run_python", " run_python"] })).toEqual({
+      ...skill,
+      description: "Use when asked.",
+      tools: ["run_python"],
+    });
+  });
+
+  it("defaults tools to none", () => {
+    expect(checkSkill({ ...skill, tools: undefined }).tools).toEqual([]);
+  });
+
+  it.each([
+    ["an upper-case name", { name: "Weekly" }],
+    ["a name with spaces", { name: "weekly report" }],
+    ["a double hyphen", { name: "weekly--report" }],
+    ["a long name", { name: "a".repeat(65) }],
+    ["no description", { description: "  " }],
+    ["no instructions", { instructions: "" }],
+    ["long instructions", { instructions: "x".repeat(MAX_SKILL_INSTRUCTIONS + 1) }],
+    ["a tool that is not a name", { tools: ["rm -rf"] }],
+    ["tools that are not a list", { tools: "run_python" }],
+    ["too many tools", { tools: Array.from({ length: 31 }, (_, n) => `t${n}`) }],
+  ])("rejects %s", (_, change) => {
+    expect(() => checkSkill({ ...skill, ...change })).toThrow(SkillError);
+  });
+
+  it("splits a tool list on spaces and commas", () => {
+    expect(splitTools(" files_read, run_python\nrun_bash ")).toEqual(["files_read", "run_python", "run_bash"]);
+    expect(splitTools("Bash(git add:*) Read, Grep")).toEqual(["Bash(git add:*)", "Read", "Grep"]);
+  });
+
+  it("rejects what is not an object", () => {
+    expect(() => checkSkill(null)).toThrow(SkillError);
+    expect(() => checkSkill("weekly-report")).toThrow(SkillError);
+  });
+});
+
+describe("SKILL.md", () => {
+  it("round-trips through format and parse", () => {
+    expect(parseSkillFile(formatSkillFile(skill))).toEqual(skill);
+  });
+
+  it("quotes a description YAML would misread", () => {
+    const tricky = { ...skill, description: "Use when: the user says \"report\" # weekly", tools: [] };
+    const markdown = formatSkillFile(tricky);
+    expect(markdown).not.toContain("allowed-tools");
+    expect(parseSkillFile(markdown)).toEqual(tricky);
+  });
+
+  it("reads allowed-tools as a space- or comma-separated string, or a list", () => {
+    const head = "---\nname: a\ndescription: Use when.\n";
+    expect(parseSkillFile(`${head}allowed-tools: files_read, run_python\n---\nGo.`).tools).toEqual(["files_read", "run_python"]);
+    expect(parseSkillFile(`${head}allowed-tools:\n  - files_read\n---\nGo.`).tools).toEqual(["files_read"]);
+  });
+
+  it("reads a Claude Code skill's allowed-tools, and tells the agent which tool here does each one's work", () => {
+    const head = "---\nname: a\ndescription: Use when.\nlicense: MIT\n";
+    const skill = parseSkillFile(`${head}allowed-tools: Bash(git add:*) Read Edit WebFetch\n---\nGo.`);
+    expect(skill.tools).toEqual(["Bash", "Read", "Edit", "WebFetch"]);
+    expect(skillBody(skill)).toContain("Tools this skill works with: Bash (here: run_bash), Read (here: files_read), Edit (here: files_write), WebFetch.");
+  });
+
+  it("accepts CRLF line ends and a byte-order mark", () => {
+    expect(parseSkillFile("﻿---\r\nname: a\r\ndescription: Use when.\r\n---\r\nGo.").name).toBe("a");
+  });
+
+  it.each([
+    ["no frontmatter", "# Weekly report\nDo things."],
+    ["invalid YAML", "---\nname: [a\ndescription: x\n---\nGo."],
+    ["no name", "---\ndescription: Use when.\n---\nGo."],
+    ["no body", "---\nname: a\ndescription: Use when.\n---\n"],
+  ])("rejects %s", (_, markdown) => {
+    expect(() => parseSkillFile(markdown)).toThrow(SkillError);
+  });
+});
+
+describe("built-in skills", () => {
+  it("are valid and have distinct names", () => {
+    expect(BUILTIN_SKILLS.length).toBeGreaterThan(0);
+    for (const builtin of BUILTIN_SKILLS) expect(checkSkill(builtin)).toEqual(builtin);
+    expect(new Set(BUILTIN_SKILLS.map((s) => s.name)).size).toBe(BUILTIN_SKILLS.length);
+    expect(builtinSkill(BUILTIN_SKILLS[0].name)).toBe(BUILTIN_SKILLS[0]);
+    expect(builtinSkill("weekly-report")).toBeUndefined();
+  });
+});
+
+describe("skillSource", () => {
+  it("lists and loads only enabled skills", async () => {
+    const source = skillSource([info(), info({ name: "draft", origin: "agent", enabled: false })], "v1");
+    expect(source.fingerprint).toBe("v1");
+    expect((await source.list()).map((d) => d.name)).toEqual(["weekly-report"]);
+    expect(await source.load("draft")).toBeNull();
+    const loaded = await source.load("weekly-report");
+    expect(loaded?.description).toBe(skill.description);
+    expect(loaded?.body).toBe(skillBody(skill));
+    expect(loaded?.body).toContain("files_read, run_python");
+  });
+
+  it("leaves out a built-in skill the user replaced with their own", async () => {
+    const source = skillSource([info({ origin: "builtin", updatedAt: 0, replaced: true, instructions: "Built in." }), info()], "v1");
+    expect((await source.list()).map((d) => d.name)).toEqual(["weekly-report"]);
+    expect((await source.load("weekly-report"))?.body).toContain("1. Read the data.");
+  });
+
+  it("gives built-in and own skills separate paths", () => {
+    expect(skillPath({ name: "weekly-report", origin: "builtin" })).toBe("/api/skills/builtin/weekly-report");
+    expect(skillPath({ name: "weekly-report", origin: "agent" })).toBe("/api/skills/weekly-report");
+  });
+
+  it("leaves the tools line out when a skill names none", () => {
+    expect(skillBody({ ...skill, tools: [] })).toBe(skill.instructions);
+  });
+});

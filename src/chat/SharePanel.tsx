@@ -1,0 +1,162 @@
+import { type KeyboardEvent, useEffect, useRef, useState } from "react";
+import { secondSeatUid, type ChatPeopleView, type CreatedInvite } from "../../shared/protocol.ts";
+import { errorMessage } from "../../shared/util.ts";
+import { api, secondSeatPath } from "../api.ts";
+
+interface Props {
+  chatId: string;
+  uid: string;
+  isOwner: boolean;
+  /** Who is in the chat and, for its owner, the open invites: live from the chat's socket. */
+  people: ChatPeopleView;
+  onLeft: () => void;
+  onClose: () => void;
+}
+
+/**
+ * The chat's people. Its owner invites by link, removes members, and can join a second time as a member (secondSeat)
+ * to try the chat as they see it; a member can leave.
+ */
+export function SharePanel({ chatId, uid, isOwner, people, onLeft, onClose }: Props) {
+  const [created, setCreated] = useState<CreatedInvite | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  // Once the link is used or revoked, its invite leaves the open list: stop offering a dead link. Only once the list
+  // has shown it, though: a socket that is reconnecting has an old list, and the link is shown only now.
+  const seenOpen = useRef(false);
+  useEffect(() => {
+    if (!created) return;
+    if (people.invites?.some((open) => open.id === created.id)) seenOpen.current = true;
+    else if (seenOpen.current) setCreated(null);
+  }, [created, people.invites]);
+
+  // No reload afterwards: the chat's socket brings the new people and invites, also after a refusal from an old list.
+  const act = async (action: () => Promise<unknown>) => {
+    setError(null);
+    try {
+      await action();
+    } catch (e) {
+      setError(errorMessage(e));
+    }
+  };
+
+  const createLink = () =>
+    void act(async () => {
+      const invite = await api.createInvite(chatId);
+      seenOpen.current = false;
+      setCreated(invite);
+    });
+
+  const seatUid = secondSeatUid(people.owner.uid);
+  const seat = people.members.find((member) => member.uid === seatUid);
+  // The tab opens at the click, as a browser allows, and goes to the chat once the seat is there.
+  const joinSecondSeat = () =>
+    void act(async () => {
+      const tab = window.open("", "_blank");
+      try {
+        await api.joinSecondSeat(chatId);
+        if (tab) tab.location.href = secondSeatPath(chatId);
+      } catch (e) {
+        tab?.close();
+        throw e;
+      }
+    });
+
+  const leave = () => {
+    const question =
+      uid === seatUid
+        ? "Leave this chat as your second seat? You can join again from Share in your own window."
+        : "Leave this chat? You need a new invite to come back.";
+    if (!confirm(question)) return;
+    void act(async () => {
+      await api.removeMember(chatId, uid);
+      onLeft();
+    });
+  };
+
+  // Opened from its button, it takes the focus: Escape then closes it straight away, and a screen reader reads its title.
+  const box = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    box.current?.focus();
+  }, []);
+
+  // Escape closes it while focus is in it, as the × does.
+  const onKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    onClose();
+  };
+
+  // Not closed by a click elsewhere or by leaving the window (as the other panels are): the owner copies a link out of it.
+  const title = isOwner ? "Share this chat" : "People in this chat";
+  return (
+    <div className="share-panel" role="dialog" aria-label={title} ref={box} tabIndex={-1} onKeyDown={onKeyDown}>
+      <div className="panel-head">
+        <strong>{title}</strong>
+        <button type="button" className="icon-button" onClick={onClose} title="Close" aria-label="Close">
+          ×
+        </button>
+      </div>
+      <ul>
+        <li>
+          {people.owner.name} <small>owner{isOwner && " · you"}</small>
+        </li>
+        {people.members.map((member) => (
+          <li key={member.uid}>
+            {member.name} {member.uid === uid && <small>you</small>}
+            {isOwner && member.uid === seatUid && <small>you, second seat</small>}
+            {isOwner && (
+              <button type="button" onClick={() => void act(() => api.removeMember(chatId, member.uid))}>
+                Remove
+              </button>
+            )}
+          </li>
+        ))}
+        {people.invites?.map((open) => (
+          <li key={open.id}>
+            <small>Invite link, open until {new Date(open.expiresAt).toLocaleString()}</small>
+            <button type="button" onClick={() => void act(() => api.revokeInvite(chatId, open.id))}>
+              Revoke
+            </button>
+          </li>
+        ))}
+      </ul>
+      {isOwner ? (
+        <>
+          <p className="share-warning">
+            People you invite chat with this chat's agent, which works as you: with your MCP connections and sign-ins, your files and your skills.
+            They can ask it to read or change anything those reach.
+          </p>
+          <button type="button" className="primary" onClick={createLink}>
+            Create an invite link
+          </button>
+          {created && (
+            <div className="invite-link">
+              <input readOnly value={created.url} onFocus={(e) => e.target.select()} />
+              <button type="button" onClick={() => void navigator.clipboard.writeText(created.url)}>
+                Copy
+              </button>
+              <small>Works once, until {new Date(created.expiresAt).toLocaleString()}. Only shown now.</small>
+            </div>
+          )}
+          <div className="second-seat">
+            {seat ? (
+              <a href={secondSeatPath(chatId)} target="_blank" rel="noreferrer">
+                Open as {seat.name}
+              </a>
+            ) : (
+              <button type="button" onClick={joinSecondSeat}>
+                Join as a second person
+              </button>
+            )}
+            <small>Try the chat as the people you invite see it: you join as a member in another tab, with this same sign-in.</small>
+          </div>
+        </>
+      ) : (
+        <button type="button" onClick={leave}>
+          Leave this chat
+        </button>
+      )}
+      {error && <p className="form-error">{error}</p>}
+    </div>
+  );
+}

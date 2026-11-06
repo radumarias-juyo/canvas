@@ -1,0 +1,222 @@
+import { describe, expect, it } from "vitest";
+import type { DeclaredTool, ProxyRequest, ProxyResponse } from "../shared/protocol.ts";
+import { ArtifactBroker } from "../src/artifact/broker.ts";
+
+/** A broker on a fake clock, with a fake port standing in for the iframe's end. */
+function setup(answer: (request: ProxyRequest, now: number) => ProxyResponse, tools: DeclaredTool[] = []) {
+  let now = 1_000_000;
+  const timers: { at: number; fn: () => void; id: number }[] = [];
+  let nextTimer = 0;
+  const requests: ProxyRequest[] = [];
+  const posted: any[] = [];
+  const port = { onmessage: null as ((e: { data: unknown }) => void) | null, postMessage: (m: unknown) => posted.push(m), close() {} };
+
+  const broker = new ArtifactBroker({
+    artifactId: "abc12345",
+    version: 1,
+    cacheNamespace: "ann",
+    transport: async (request) => {
+      requests.push(request);
+      return answer(request, now);
+    },
+    describe: async () => tools,
+    manifest: { mcp: { servers: [{ server: "S", tools: ["t"] }] } },
+    now: () => now,
+    random: () => 0,
+    setTimer: (fn, ms) => {
+      const id = ++nextTimer;
+      timers.push({ at: now + ms, fn, id });
+      return id;
+    },
+    clearTimer: (id) => {
+      const i = timers.findIndex((t) => t.id === id);
+      if (i >= 0) timers.splice(i, 1);
+    },
+  });
+  broker.connect(port as unknown as MessagePort);
+
+  const send = (data: unknown) => port.onmessage!({ data });
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+  /** Advance the clock, firing due timers in order. */
+  const advance = async (ms: number) => {
+    const end = now + ms;
+    for (;;) {
+      timers.sort((a, b) => a.at - b.at);
+      const next = timers[0];
+      if (!next || next.at > end) break;
+      timers.shift();
+      now = next.at;
+      next.fn();
+      await flush();
+    }
+    now = end;
+  };
+  const events = (watchId: number) => posted.filter((m) => m.type === "watch" && m.watchId === watchId).map((m) => m.event);
+  return { broker, send, flush, advance, requests, posted, events, timers, clock: () => now };
+}
+
+const fresh = (now: number, staleMs = 30_000): ProxyResponse => ({
+  ok: true,
+  result: { content: [{ type: "text", text: "{}" }], payload: { at: now } },
+  storedAt: now,
+  nextRefreshAt: now + staleMs,
+});
+
+describe("ArtifactBroker watches", () => {
+  it("fetches on registration, then polls just after the server's hint", async () => {
+    const t = setup((_, now) => fresh(now));
+    t.send({ type: "watch", watchId: 1, server: "CoinGecko", tool: "execute", input: { code: "x" }, refetchInterval: 30_000 });
+    await t.flush();
+    expect(t.requests).toEqual([{ version: 1, mode: "read", server: "CoinGecko", tool: "execute", input: { code: "x" }, staleMs: 30_000 }]);
+    expect(t.events(1)).toHaveLength(1);
+
+    await t.advance(30_000);
+    expect(t.requests).toHaveLength(1); // the hint is +30 s, and the poll goes out 250 ms after it
+    await t.advance(300);
+    expect(t.requests).toHaveLength(2);
+  });
+
+  it("aligns to an older server copy instead of waiting a whole interval", async () => {
+    // The Durable Object's copy was produced 20 s before this viewer asked.
+    const t = setup((_, now) => ({ ...fresh(now - 20_000), result: { content: [], cache: { storedAt: now - 20_000, revalidating: false } } }));
+    t.send({ type: "watch", watchId: 1, server: "S", tool: "t", input: {}, refetchInterval: 30_000 });
+    await t.flush();
+    await t.advance(10_300);
+    expect(t.requests).toHaveLength(2);
+  });
+
+  it("clamps polling to 30 s and shares one request between identical watches", async () => {
+    const t = setup((_, now) => fresh(now));
+    t.send({ type: "watch", watchId: 1, server: "S", tool: "t", input: { a: 1, b: 2 }, refetchInterval: 1_000 });
+    await t.flush();
+    t.send({ type: "watch", watchId: 2, server: "S", tool: "t", input: { b: 2, a: 1 }, refetchInterval: 5_000 });
+    await t.flush();
+    expect(t.requests).toHaveLength(1);
+    expect(t.requests[0].staleMs).toBe(30_000);
+    expect(t.events(2)[0].result.cache.revalidating).toBe(false); // replayed from the first watch's result
+  });
+
+  it("starts polling when a polling watch joins one that does not poll", async () => {
+    const t = setup((_, now) => fresh(now));
+    t.send({ type: "watch", watchId: 1, server: "S", tool: "t", input: {}, cache: undefined });
+    await t.flush();
+    t.send({ type: "watch", watchId: 2, server: "S", tool: "t", input: {}, refetchInterval: 30_000 });
+    await t.flush();
+    expect(t.requests).toHaveLength(1); // the first result is still fresh
+    await t.advance(30_000);
+    expect(t.requests).toHaveLength(2);
+  });
+
+  it("pauses while hidden and catches up when visible", async () => {
+    const t = setup((_, now) => fresh(now));
+    t.send({ type: "watch", watchId: 1, server: "S", tool: "t", input: {}, refetchInterval: 30_000 });
+    await t.flush();
+    t.broker.setHidden(true);
+    await t.advance(120_000);
+    expect(t.requests).toHaveLength(1);
+    t.broker.setHidden(false);
+    await t.advance(0);
+    expect(t.requests).toHaveLength(2);
+  });
+
+  it("waits for the tab to be visible before a background page's first fetch", async () => {
+    const t = setup((_, now) => fresh(now));
+    t.broker.setHidden(true);
+    t.send({ type: "watch", watchId: 1, server: "S", tool: "t", input: {}, refetchInterval: 30_000 });
+    await t.advance(60_000);
+    expect(t.requests).toHaveLength(0);
+    t.broker.setHidden(false);
+    await t.advance(0);
+    expect(t.requests).toHaveLength(1);
+    expect(t.events(1)).toHaveLength(1);
+  });
+
+  it("tells a later watch of a denied call why, without asking again", async () => {
+    const t = setup(() => ({ ok: false, error: { code: "not_granted", message: "author only" } }));
+    t.send({ type: "watch", watchId: 1, server: "S", tool: "t", input: {}, refetchInterval: 30_000 });
+    await t.flush();
+    t.send({ type: "watch", watchId: 2, server: "S", tool: "t", input: {}, refetchInterval: 30_000 });
+    await t.flush();
+    expect(t.requests).toHaveLength(1);
+    expect(t.events(2)).toEqual([{ type: "error", error: { code: "not_granted", message: "author only" } }]);
+  });
+
+  it("retries a retryable error once, then falls back to the interval", async () => {
+    const t = setup(() => ({ ok: false, error: { code: "server_unavailable", message: "down", retryable: true, retryAfterMs: 5_000 } }));
+    t.send({ type: "watch", watchId: 1, server: "S", tool: "t", input: {}, refetchInterval: 30_000 });
+    await t.flush();
+    await t.advance(5_000);
+    expect(t.requests).toHaveLength(2);
+    await t.advance(29_000);
+    expect(t.requests).toHaveLength(2);
+    await t.advance(1_000);
+    expect(t.requests).toHaveLength(3);
+    expect(t.events(1).every((e: any) => e.type === "error")).toBe(true);
+  });
+
+  it("stops polling on a denial", async () => {
+    const t = setup(() => ({ ok: false, error: { code: "not_in_manifest", message: "nope" } }));
+    t.send({ type: "watch", watchId: 1, server: "S", tool: "t", input: {}, refetchInterval: 30_000 });
+    await t.flush();
+    await t.advance(300_000);
+    expect(t.requests).toHaveLength(1);
+    expect(t.timers).toHaveLength(0);
+  });
+
+  it("stops the timer when the last watcher leaves", async () => {
+    const t = setup((_, now) => fresh(now));
+    t.send({ type: "watch", watchId: 1, server: "S", tool: "t", input: {}, refetchInterval: 30_000 });
+    await t.flush();
+    t.send({ type: "unwatch", watchId: 1 });
+    expect(t.timers).toHaveLength(0);
+  });
+});
+
+describe("ArtifactBroker calls", () => {
+  it("sends one-shot calls uncached and replies on the port", async () => {
+    const t = setup((_, now) => fresh(now));
+    t.send({ type: "request", id: 7, method: "call", params: { server: "S", tool: "t", input: { x: 1 } } });
+    await t.flush();
+    expect(t.requests[0]).toMatchObject({ mode: "call", staleMs: 0 });
+  });
+
+  it("holds reads while the tab is hidden and sends identical ones as one when it returns", async () => {
+    const readOnly: DeclaredTool = { server: "S", name: "t", description: "", annotations: { readOnlyHint: true } };
+    const t = setup((_, now) => fresh(now), [readOnly]);
+    t.broker.setHidden(true);
+    t.send({ type: "request", id: 1, method: "call", params: { server: "S", tool: "t", input: { x: 1 } } });
+    t.send({ type: "request", id: 2, method: "call", params: { server: "S", tool: "t", input: { x: 1 } } });
+    t.send({ type: "request", id: 3, method: "call", params: { server: "S", tool: "t", input: { x: 1 }, cache: { staleTime: 60_000 } } });
+    await t.flush();
+    expect(t.requests).toHaveLength(0);
+    t.broker.setHidden(false);
+    await t.flush();
+    expect(t.requests).toHaveLength(2);
+    expect(t.requests).toEqual(
+      expect.arrayContaining([
+        { version: 1, mode: "call", server: "S", tool: "t", input: { x: 1 }, staleMs: 0 },
+        { version: 1, mode: "read", server: "S", tool: "t", input: { x: 1 }, staleMs: 60_000 },
+      ]),
+    );
+    expect(t.posted.filter((m) => m.type === "reply" && m.ok).map((m) => m.id).sort()).toEqual([1, 2, 3]);
+  });
+
+  it("sends a call to a tool that is not read-only at once, even while hidden", async () => {
+    const t = setup((_, now) => fresh(now), [{ server: "S", name: "t", description: "" }]);
+    t.broker.setHidden(true);
+    t.send({ type: "request", id: 1, method: "call", params: { server: "S", tool: "t", input: {} } });
+    await t.flush();
+    expect(t.requests).toHaveLength(1);
+  });
+
+  it("describes a declared tool withheld from this viewer as not granted, and an undeclared one as not in the manifest", async () => {
+    // describe() lists nothing: the Worker leaves out a server this viewer may not load.
+    const t = setup((_, now) => fresh(now));
+    t.send({ type: "request", id: 1, method: "describe", params: { server: "S", tool: "t" } });
+    t.send({ type: "request", id: 2, method: "describe", params: { server: "S", tool: "other" } });
+    await t.flush();
+    const replies = t.posted.filter((m) => m.type === "reply");
+    expect(replies.find((m) => m.id === 1).error.code).toBe("not_granted");
+    expect(replies.find((m) => m.id === 2).error.code).toBe("not_in_manifest");
+  });
+});

@@ -1,0 +1,167 @@
+import { describe, expect, it } from "vitest";
+import { ARRIVING_MS, reduce, type ChatState } from "../src/chat/useChat.ts";
+
+const empty: ChatState = { entries: [], tools: [], busy: false, queued: [], incoming: [] };
+const assistant = (content: unknown[]) => ({ role: "assistant", content, api: "anthropic-messages", provider: "cloudflare", model: "m", usage: {}, stopReason: "stop", timestamp: 0 });
+
+// Event shapes as the deployed agent streams them: an assistant message can
+// open with blocks already in it, and later changes index past them.
+describe("chat reducer", () => {
+  it("moves a queued message into the transcript in one step, and keeps the queue across a snapshot", () => {
+    const queued = [{ id: 7, uid: "bob", name: "bob", text: "next" }];
+    const waiting = reduce(empty, { type: "events", at: 0, events: [{ type: "inbox_update", items: [{ id: 7, mode: "followUp" }] }] as never, queued });
+    expect(waiting.queued).toEqual(queued);
+    const entry = { id: 1, conversationId: 1, kind: "chat.message", data: queued[0] };
+    const placed = reduce(waiting, { type: "events", at: 0, events: [{ type: "entry_appended", entry }, { type: "inbox_update", items: [] }] as never, queued: [] });
+    expect(placed.queued).toEqual([]);
+    expect(placed.entries).toEqual([entry]);
+    // A batch that does not touch the inbox leaves the queue as it was.
+    expect(reduce(waiting, { type: "events", at: 0, events: [{ type: "run_start" }] as never }).queued).toEqual(queued);
+    // A snapshot keeps it too, unless it comes with the queue as it now is.
+    const snapshot = { type: "snapshot", entries: [], tools: [], inbox: [{ id: 7, mode: "followUp" }], agent: {} };
+    expect(reduce(waiting, { type: "events", at: 0, events: [snapshot] as never }).queued).toEqual(queued);
+    expect(reduce(waiting, { type: "events", at: 0, events: [snapshot] as never, queued: [] }).queued).toEqual([]);
+  });
+
+  it("keeps the blocks an assistant message opens with", () => {
+    const state = reduce(empty, {
+      type: "events",
+      at: 0,
+      events: [
+        { type: "message_start", message: assistant([{ type: "text", text: "I can build live" }]) },
+        { type: "message_update", usage: {}, changes: [{ type: "text_delta", contentIndex: 0, delta: " dashboards." }] },
+      ] as never,
+    });
+    expect(state.partial?.content).toEqual([{ type: "text", text: "I can build live dashboards." }]);
+  });
+
+  it("leaves no holes when a later block starts after the opening ones", () => {
+    const state = reduce(empty, {
+      type: "events",
+      at: 0,
+      events: [
+        { type: "message_start", message: assistant([{ type: "thinking", thinking: "Plan" }]) },
+        { type: "message_update", usage: {}, changes: [{ type: "text_start", contentIndex: 1, block: { type: "text", text: "Done" } }] },
+      ] as never,
+    });
+    const content = state.partial!.content;
+    expect(content).toHaveLength(2);
+    expect(content.every((block) => block !== undefined)).toBe(true);
+  });
+
+  it("streams a tool call's arguments into the call", () => {
+    const state = reduce(empty, {
+      type: "events",
+      at: 0,
+      events: [
+        { type: "message_start", message: assistant([{ type: "toolCall", id: "c", name: "run_python", arguments: { code: "import", files: ["sales"] } }]) },
+        { type: "message_update", usage: {}, changes: [{ type: "toolcall_delta", contentIndex: 0, path: ["code"], delta: " pandas" }] },
+        { type: "message_update", usage: {}, changes: [{ type: "toolcall_delta", contentIndex: 0, path: ["files", 0], delta: ".csv" }] },
+      ] as never,
+    });
+    expect(state.partial?.content[0]).toMatchObject({ arguments: { code: "import pandas", files: ["sales.csv"] } });
+  });
+
+  it("picks up the calls running when the socket connects", () => {
+    const state = reduce(empty, {
+      type: "events",
+      at: 0,
+      events: [
+        {
+          type: "snapshot",
+          entries: [],
+          run: { inputs: [] },
+          tools: [
+            { callId: "a", name: "run_python", status: "running", output: "step 1\n" },
+            { callId: "b", name: "run_bash", status: "pending" },
+            { callId: "c", name: "run_bash", status: "done", entry: "e1" },
+            { callId: "d", name: "run_bash", status: "done" },
+          ],
+          agent: {},
+        },
+      ] as never,
+    });
+    expect(state.tools).toEqual([
+      { toolCallId: "a", toolName: "run_python", output: "step 1\n", status: "running", startedAt: 0 },
+      { toolCallId: "b", toolName: "run_bash", output: "", status: "pending" },
+      // Done without a result entry: it faulted or was orphaned.
+      { toolCallId: "d", toolName: "run_bash", output: "", status: "stopped" },
+    ]);
+  });
+
+  it("follows a call from its start to its end, and keeps one that ended without a result as stopped", () => {
+    const call = { toolName: "run_python" };
+    let state = reduce(empty, { type: "events", at: 0, events: [{ type: "tool_execution_start", toolCallId: "a", ...call, args: {} }] as never });
+    expect(state.tools).toEqual([{ toolCallId: "a", toolName: "run_python", output: "", status: "running", startedAt: 0 }]);
+    state = reduce(state, { type: "events", at: 0, events: [{ type: "tool_execution_end", toolCallId: "a", ...call }] as never });
+    expect(state.tools[0].status).toBe("stopped");
+    const entry = { id: "r", kind: "pi.tool-result", model: [] };
+    state = reduce(state, { type: "events", at: 0, events: [{ type: "tool_execution_start", toolCallId: "b", ...call, args: {} }, { type: "tool_execution_end", toolCallId: "b", ...call, entry }] as never });
+    expect(state.tools.map((t) => t.toolCallId)).toEqual(["a"]);
+    expect(state.entries).toEqual([entry]);
+    // Orphaned before it started.
+    state = reduce(state, { type: "events", at: 0, events: [{ type: "tool_execution_end", toolCallId: "c", ...call }] as never });
+    expect(state.tools.map((t) => [t.toolCallId, t.status])).toEqual([["a", "stopped"], ["c", "stopped"]]);
+  });
+
+  it("ignores message_start for user, system and tool-result messages", () => {
+    const state = reduce(empty, {
+      type: "events",
+      at: 0,
+      events: [
+        { type: "message_start", message: { role: "user", content: "hi", timestamp: 0 } },
+        { type: "message_start", message: { role: "system", content: "" } },
+      ] as never,
+    });
+    expect(state.partial).toBeUndefined();
+  });
+});
+
+describe("chat model", () => {
+  it("follows the agent state from the snapshot and its changes", () => {
+    const agent = (modelId: string, thinkingLevel: string) => ({ model: { provider: "cloudflare", modelId }, thinkingLevel });
+    let state = reduce(empty, { type: "events", at: 0, events: [{ type: "snapshot", entries: [], tools: [], agent: agent("anthropic/claude-opus-5.5", "high") }] as never });
+    expect([state.model, state.thinkingLevel]).toEqual(["anthropic/claude-opus-5.5", "high"]);
+    state = reduce(state, { type: "events", at: 0, events: [{ type: "agent_changed", agent: agent("openai/gpt-5.5", "medium") }] as never });
+    expect([state.model, state.thinkingLevel]).toEqual(["openai/gpt-5.5", "medium"]);
+  });
+});
+
+describe("incoming messages", () => {
+  const aa = { uid: "me", name: "me", text: "aa", sentAt: 5, picking: true as const };
+  const bb = { uid: "ann", name: "ann", text: "bb", sentAt: 6 };
+  const entry = (id: number, data: object) => ({ id, conversationId: 1, kind: "chat.message", data });
+  const appended = (state: ChatState, id: number, data: object) =>
+    reduce(state, { type: "events", at: 0, events: [{ type: "entry_appended", entry: entry(id, data) }] as never });
+
+  it("shows what the chat says is coming, and lets a dropped one go at once", () => {
+    const coming = reduce(empty, { type: "incoming", incoming: [aa, bb], at: 0 });
+    expect(coming.incoming).toEqual([aa, bb]);
+    expect(reduce(coming, { type: "incoming", incoming: [bb], at: 0 }).incoming).toEqual([bb]);
+  });
+
+  it("keeps one that went in until its entry comes, whichever the chat says first", () => {
+    const coming = reduce(empty, { type: "incoming", incoming: [aa], at: 0 });
+    const went = reduce(coming, { type: "incoming", incoming: [], placed: "me:5", at: 100 });
+    expect(went.incoming).toEqual([{ ...aa, arriving: 100 }]);
+    // Another message's news keeps it arriving.
+    expect(reduce(went, { type: "incoming", incoming: [bb], at: 0 }).incoming).toEqual([bb, { ...aa, arriving: 100 }]);
+    // Only its own entry (its author's, sent then) ends it.
+    expect(appended(went, 3, { ...aa, sentAt: 4 }).incoming).toHaveLength(1);
+    expect(appended(went, 3, { ...aa, text: "edited?" }).incoming).toEqual([]);
+    // The entry first, then the news: gone at once.
+    expect(reduce(appended(coming, 3, aa), { type: "incoming", incoming: [], placed: "me:5", at: 100 }).incoming).toEqual([]);
+  });
+
+  it("lets one go once it waits in the queue", () => {
+    const went = reduce(reduce(empty, { type: "incoming", incoming: [aa], at: 0 }), { type: "incoming", incoming: [], placed: "me:5", at: 100 });
+    const queued = reduce(went, { type: "events", at: 0, events: [{ type: "inbox_update", items: [{ id: 9, mode: "followUp" }] }] as never, queued: [{ ...aa, id: 9 }] });
+    expect(queued.incoming).toEqual([]);
+  });
+
+  it("lets one that went in go after ARRIVING_MS, should it never show", () => {
+    const went = reduce(reduce(empty, { type: "incoming", incoming: [aa, bb], at: 0 }), { type: "incoming", incoming: [bb], placed: "me:5", at: 100 });
+    expect(reduce(went, { type: "expire", at: 99 + ARRIVING_MS }).incoming).toHaveLength(2);
+    expect(reduce(went, { type: "expire", at: 100 + ARRIVING_MS }).incoming).toEqual([bb]);
+  });
+});

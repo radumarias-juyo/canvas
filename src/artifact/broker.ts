@@ -1,0 +1,400 @@
+import { callIdentity, stripCache, withCache } from "../../shared/canonical.ts";
+import { errorMessage, memoAsync } from "../../shared/util.ts";
+import { isReadOnly, MIN_REFETCH_MS, type ArtifactManifest, type CallToolResult, type McpError, type DeclaredTool, type ProxyRequest, type ProxyResponse } from "../../shared/protocol.ts";
+
+/** Sends one proxied call to the Worker. Swappable in tests. */
+export type Transport = (request: ProxyRequest) => Promise<ProxyResponse>;
+
+export interface BrokerOptions {
+  artifactId: string;
+  version: number;
+  transport: Transport;
+  /** The version's tools this viewer may call; a declared server the viewer may not load is left out. */
+  describe: () => Promise<DeclaredTool[]>;
+  /** What the version declared: tells a tool withheld from this viewer or not listed (not_granted) from one never declared. */
+  manifest: ArtifactManifest;
+  /** Browser cache namespace; include the viewer so accounts on one browser never share results. */
+  cacheNamespace: string;
+  storage?: Pick<Storage, "getItem" | "setItem" | "removeItem" | "key" | "length"> | null;
+  now?: () => number;
+  random?: () => number;
+  setTimer?: (fn: () => void, ms: number) => unknown;
+  clearTimer?: (timer: unknown) => void;
+}
+
+type WatchEvent = { type: "data"; result: CallToolResult } | { type: "error"; error: McpError };
+
+interface Cached {
+  result: CallToolResult;
+  storedAt: number;
+}
+
+interface Group {
+  key: string;
+  server: string;
+  tool: string;
+  input: unknown;
+  subscribers: Map<number, { interval?: number; staleTime?: number }>;
+  last?: Cached;
+  nextAt?: number;
+  timer?: unknown;
+  inflight: boolean;
+  retried: boolean;
+  /** Set by a denial no refetch can fix: polling stops, and later subscribers get this error. */
+  denied?: McpError;
+}
+
+const CACHE_LIFETIME_MS = 10 * 60_000;
+/** The storages swept of expired results already (see #sweepStorage). */
+const sweptStorages = new WeakSet<object>();
+/** Errors no refetch can fix: stop polling and drop the data. */
+const DENIALS = new Set(["not_in_manifest", "server_not_connected", "not_granted", "bad_request"]);
+
+/**
+ * The viewer-side half of the page runtime: it owns the iframe's MessagePort,
+ * sends calls to the Worker and keeps watches current.
+ *
+ * Polling follows the server's hint: each response says when its result goes
+ * stale (`nextRefreshAt`), and the next poll goes out just after that, so a
+ * viewer sees a new upstream result within about a second of the Durable
+ * Object fetching it.
+ */
+export class ArtifactBroker {
+  readonly #o: Required<Omit<BrokerOptions, "storage">> & { storage: BrokerOptions["storage"] };
+  readonly #groups = new Map<string, Group>();
+  readonly #watchGroup = new Map<number, Group>();
+  #port: MessagePort | undefined;
+  #hidden = false;
+  /** Read-only calls the page made while the viewer's tab was hidden, by call: `send` lets each out once it is visible. */
+  readonly #waiting = new Map<string, { call: Omit<ProxyRequest, "version">; send: () => void; response: Promise<ProxyResponse> }>();
+  #closed = false;
+  /** A version's tool list never changes, so one describe call serves the page's whole life. */
+  readonly #tools: () => Promise<DeclaredTool[]>;
+  readonly #readOnlyTools: () => Promise<DeclaredTool[]>;
+
+  constructor(options: BrokerOptions) {
+    this.#o = {
+      now: Date.now,
+      random: Math.random,
+      setTimer: (fn, ms) => setTimeout(fn, ms),
+      clearTimer: (timer) => clearTimeout(timer as number),
+      storage: null,
+      ...options,
+    };
+    this.#tools = memoAsync(() => this.#o.describe());
+    // Asked once per page at most, even when the list fails: only a hidden tab asks, and it should not keep waking the chat.
+    this.#readOnlyTools = memoAsync(() => this.#tools().then((tools) => tools.filter(isReadOnly), () => []));
+    this.#sweepStorage();
+  }
+
+  /** Take the port whose other end was handed to the page. */
+  connect(port: MessagePort): void {
+    this.#port = port;
+    port.onmessage = (event: MessageEvent) => this.#onMessage(event.data);
+  }
+
+  /** Pause polling and reads while the viewer cannot see the page; catch up when it comes back. */
+  setHidden(hidden: boolean): void {
+    if (this.#hidden === hidden) return;
+    this.#hidden = hidden;
+    for (const group of this.#groups.values()) {
+      if (hidden) this.#clearTimer(group);
+      else this.#schedule(group);
+    }
+    if (hidden) return;
+    const waiting = [...this.#waiting.values()];
+    this.#waiting.clear();
+    for (const { send } of waiting) send();
+  }
+
+  close(): void {
+    this.#closed = true;
+    for (const group of this.#groups.values()) this.#clearTimer(group);
+    this.#groups.clear();
+    this.#watchGroup.clear();
+    this.#waiting.clear();
+    this.#port?.close();
+  }
+
+  #onMessage(message: any): void {
+    if (!message || this.#closed) return;
+    if (message.type === "request") void this.#onRequest(message.id, message.method, message.params ?? {});
+    else if (message.type === "watch") this.#watch(message);
+    else if (message.type === "unwatch") this.#unwatch(message.watchId);
+  }
+
+  async #onRequest(id: number, method: string, params: any): Promise<void> {
+    const reply = (ok: boolean, payload: unknown) => this.#port?.postMessage(ok ? { type: "reply", id, ok, value: payload } : { type: "reply", id, ok, error: payload });
+    try {
+      if (method === "call") {
+        const cache = params.cache;
+        const read = typeof cache === "object" && cache !== null;
+        const staleMs = read ? (cache.refresh ? 0 : Math.max(0, Number(cache.staleTime) || 0)) : 0;
+        const response = await this.#sendWhenVisible({ mode: read ? "read" : "call", server: params.server, tool: params.tool, input: params.input, staleMs });
+        if (!response.ok) return reply(false, response.error);
+        if (read) this.#feed(callIdentity(params.server, params.tool, params.input), response);
+        reply(true, response.result);
+      } else if (method === "invalidate") {
+        this.#invalidate(params.server, params.tool, params.input);
+        reply(true, undefined);
+      } else if (method === "describe") {
+        const tools = await this.#tools();
+        const tool = tools.find((t) => t.server === params.server && t.name === params.tool);
+        if (!tool) {
+          const declared = this.#o.manifest.mcp?.servers.some((s) => s.server === params.server && s.tools.includes(params.tool));
+          return declared
+            ? reply(false, { code: "not_granted", server: params.server, message: `This page declared ${params.server}/${params.tool}, but it is not available to you here.` })
+            : reply(false, { code: "not_in_manifest", server: params.server, message: `${params.server}/${params.tool} is not declared by this page.` });
+        }
+        reply(true, { name: tool.name, description: tool.description, inputSchema: tool.inputSchema, annotations: tool.annotations });
+      } else {
+        reply(false, { code: "bad_request", message: `Unknown method ${method}` });
+      }
+    } catch (error) {
+      reply(false, { code: "upstream_error", message: errorMessage(error) });
+    }
+  }
+
+  #watch(message: { watchId: number; server: string; tool: string; input: unknown; refetchInterval?: number; staleTime?: number }): void {
+    const key = callIdentity(message.server, message.tool, message.input);
+    let group = this.#groups.get(key);
+    if (!group) {
+      group = { key, server: message.server, tool: message.tool, input: message.input, subscribers: new Map(), inflight: false, retried: false };
+      group.last = this.#readStorage(key);
+      this.#groups.set(key, group);
+    }
+    const interval = message.refetchInterval ? Math.max(Number(message.refetchInterval) || 0, MIN_REFETCH_MS) : undefined;
+    group.subscribers.set(message.watchId, { interval, staleTime: message.staleTime });
+    this.#watchGroup.set(message.watchId, group);
+
+    const stale = !group.last || this.#o.now() - group.last.storedAt >= this.#staleMs(group);
+    if (group.last) this.#deliverTo(message.watchId, { type: "data", result: withCache(group.last.result, group.last.storedAt, stale) });
+    if (group.denied) return this.#deliverTo(message.watchId, { type: "error", error: group.denied });
+    if (stale && !group.inflight) {
+      if (!this.#hidden) return void this.#fetch(group);
+      // In a hidden tab (a page opened in the background), the first fetch waits until the viewer looks: setHidden(false) schedules it.
+      group.nextAt = this.#o.now();
+      return;
+    }
+    // This subscriber may poll sooner than the group does, or be the first of it to poll at all.
+    const polling = this.#interval(group);
+    if (polling !== undefined && group.last) group.nextAt = Math.min(group.nextAt ?? Infinity, group.last.storedAt + polling);
+    this.#schedule(group);
+  }
+
+  #unwatch(watchId: number): void {
+    const group = this.#watchGroup.get(watchId);
+    this.#watchGroup.delete(watchId);
+    if (!group) return;
+    group.subscribers.delete(watchId);
+    if (group.subscribers.size === 0) {
+      this.#clearTimer(group);
+      this.#groups.delete(group.key);
+    }
+  }
+
+  /** The shortest interval any subscriber asked for. */
+  #interval(group: Group): number | undefined {
+    return smallest([...group.subscribers.values()].map((s) => s.interval));
+  }
+
+  /** How young a result must be to skip a fetch: the declared staleTime, else the polling interval. */
+  #staleMs(group: Group): number {
+    return smallest([...group.subscribers.values()].map((s) => s.staleTime)) ?? this.#interval(group) ?? 0;
+  }
+
+  async #fetch(group: Group, staleOverride?: number): Promise<void> {
+    if (this.#closed || group.inflight) return;
+    this.#clearTimer(group);
+    group.inflight = true;
+    const response = await this.#send({ mode: "read", server: group.server, tool: group.tool, input: group.input, staleMs: staleOverride ?? this.#staleMs(group) });
+    group.inflight = false;
+    // An unwatched group may since have been replaced by a new one for the same call: leave that one alone.
+    if (this.#closed || this.#groups.get(group.key) !== group) return;
+
+    if (response.ok) {
+      group.retried = false;
+      group.denied = undefined;
+      this.#feed(group.key, response);
+      return;
+    }
+    const error = response.error;
+    this.#deliver(group, { type: "error", error });
+    if (DENIALS.has(error.code)) {
+      group.last = undefined;
+      group.denied = error;
+      this.#removeStorage(group.key);
+      return;
+    }
+    const interval = this.#interval(group);
+    if (error.retryable && !group.retried) {
+      group.retried = true;
+      group.nextAt = this.#o.now() + (error.retryAfterMs ?? 2_000 + this.#o.random() * 3_000);
+    } else {
+      group.retried = false;
+      group.nextAt = interval ? this.#o.now() + interval : undefined;
+    }
+    this.#schedule(group);
+  }
+
+  /** A fresh result for an identity: store it, deliver it, and plan the next poll from the server's hint. */
+  #feed(key: string, response: Extract<ProxyResponse, { ok: true }>): void {
+    const group = this.#groups.get(key);
+    const cached = { result: stripCache(response.result), storedAt: response.storedAt };
+    // A copy the server served again is already stored.
+    if (group?.last?.storedAt !== cached.storedAt) this.#writeStorage(key, cached);
+    if (!group) return;
+    group.last = cached;
+    this.#deliver(group, { type: "data", result: response.result });
+    const interval = this.#interval(group);
+    if (!interval) {
+      group.nextAt = undefined;
+    } else {
+      // Ask again just after the server's copy goes stale; never sooner than a second from now.
+      const due = response.nextRefreshAt ?? response.storedAt + interval;
+      group.nextAt = Math.max(due, this.#o.now() + 1_000) + 250 + this.#o.random() * 1_000;
+    }
+    this.#schedule(group);
+  }
+
+  #schedule(group: Group): void {
+    this.#clearTimer(group);
+    if (this.#hidden || this.#closed || group.denied || group.nextAt === undefined) return;
+    const delay = Math.max(0, group.nextAt - this.#o.now());
+    group.timer = this.#o.setTimer(() => {
+      group.timer = undefined;
+      void this.#fetch(group);
+    }, delay);
+  }
+
+  #clearTimer(group: Group): void {
+    if (group.timer !== undefined) this.#o.clearTimer(group.timer);
+    group.timer = undefined;
+  }
+
+  #invalidate(server?: string, tool?: string, input?: unknown): void {
+    const exact = input !== undefined && server !== undefined && tool !== undefined ? callIdentity(server, tool, input) : undefined;
+    const matches = (key: string, g: { server: string; tool: string }) =>
+      exact ? key === exact : (server === undefined || g.server === server) && (tool === undefined || g.tool === tool);
+    const storage = this.#o.storage;
+    if (storage) {
+      const prefix = this.#storagePrefix();
+      const doomed: string[] = [];
+      for (let i = 0; i < storage.length; i++) {
+        const k = storage.key(i);
+        if (!k?.startsWith(prefix)) continue;
+        const [s, t] = k.slice(prefix.length).split("\u0000");
+        if (matches(k.slice(prefix.length), { server: s, tool: t })) doomed.push(k);
+      }
+      for (const k of doomed) storage.removeItem(k);
+    }
+    for (const group of this.#groups.values()) {
+      if (!matches(group.key, group)) continue;
+      group.denied = undefined;
+      void this.#fetch(group, 0);
+    }
+  }
+
+  /**
+   * Send a page's call, unless the viewer's tab is hidden and the tool only reads: then it waits until the tab is
+   * visible, and identical waiting calls share one request. Calls to other tools go out at once.
+   */
+  async #sendWhenVisible(call: Omit<ProxyRequest, "version">): Promise<ProxyResponse> {
+    if (!this.#hidden) return this.#send(call);
+    const holds = call.mode === "read" || (await this.#readOnly(call.server, call.tool));
+    // The tab may have come back while the tool list loaded.
+    if (!holds || !this.#hidden) return this.#send(call);
+    const key = `${call.mode}\u0000${callIdentity(call.server, call.tool, call.input)}`;
+    const waiting = this.#waiting.get(key);
+    if (waiting) {
+      waiting.call.staleMs = Math.min(waiting.call.staleMs ?? 0, call.staleMs ?? 0);
+      return waiting.response;
+    }
+    let send!: () => void;
+    const response = new Promise<void>((resolve) => (send = resolve)).then(() => this.#send(call));
+    this.#waiting.set(key, { call, send, response });
+    return response;
+  }
+
+  /** Whether the version's tool is read-only, from its tool list; a tool the list does not have counts as a write. */
+  async #readOnly(server: string, tool: string): Promise<boolean> {
+    return (await this.#readOnlyTools()).some((t) => t.server === server && t.name === tool);
+  }
+
+  async #send(call: Omit<ProxyRequest, "version">): Promise<ProxyResponse> {
+    try {
+      return await this.#o.transport({ ...call, version: this.#o.version });
+    } catch (error) {
+      return { ok: false, error: { code: "server_unavailable", retryable: true, message: errorMessage(error) } };
+    }
+  }
+
+  #deliver(group: Group, event: WatchEvent): void {
+    for (const watchId of group.subscribers.keys()) this.#deliverTo(watchId, event);
+  }
+
+  #deliverTo(watchId: number, event: WatchEvent): void {
+    this.#port?.postMessage({ type: "watch", watchId, event });
+  }
+
+  #storagePrefix(): string {
+    return `pi-cache:${this.#o.cacheNamespace}:${this.#o.artifactId}:`;
+  }
+
+  /**
+   * Expiry is only checked on read, so drop the expired results of every page
+   * this browser has viewed. Otherwise they pile up until the
+   * storage quota is full.
+   */
+  #sweepStorage(): void {
+    const storage = this.#o.storage;
+    // Every result is parsed, so sweep once per page load, not for every preview opened.
+    if (!storage || sweptStorages.has(storage)) return;
+    sweptStorages.add(storage);
+    try {
+      const expired: string[] = [];
+      for (let i = 0; i < storage.length; i++) {
+        const key = storage.key(i);
+        if (!key?.startsWith("pi-cache:")) continue;
+        const storedAt = (JSON.parse(storage.getItem(key) ?? "null") as Cached | null)?.storedAt;
+        if (typeof storedAt !== "number" || this.#o.now() - storedAt >= CACHE_LIFETIME_MS) expired.push(key);
+      }
+      for (const key of expired) storage.removeItem(key);
+    } catch {
+      // Unreadable storage: nothing to sweep.
+    }
+  }
+
+  #readStorage(key: string): Cached | undefined {
+    try {
+      const raw = this.#o.storage?.getItem(this.#storagePrefix() + key);
+      if (!raw) return undefined;
+      const cached = JSON.parse(raw) as Cached;
+      return this.#o.now() - cached.storedAt < CACHE_LIFETIME_MS ? cached : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  #writeStorage(key: string, cached: Cached): void {
+    try {
+      this.#o.storage?.setItem(this.#storagePrefix() + key, JSON.stringify(cached));
+    } catch {
+      // Full or unavailable storage only costs the instant replay on the next visit.
+    }
+  }
+
+  #removeStorage(key: string): void {
+    try {
+      this.#o.storage?.removeItem(this.#storagePrefix() + key);
+    } catch {}
+  }
+}
+
+/** The smallest of the numbers given, or undefined when none is. */
+function smallest(values: (number | undefined)[]): number | undefined {
+  const numbers = values.filter((v): v is number => typeof v === "number");
+  return numbers.length ? Math.min(...numbers) : undefined;
+}
+
+

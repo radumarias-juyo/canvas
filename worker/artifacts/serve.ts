@@ -1,0 +1,98 @@
+import RUNTIME from "../../runtime/pi-runtime.js?raw";
+import { ARTIFACT_SANDBOX } from "../../shared/protocol.ts";
+
+/** The only hosts a page may load scripts from, as on claude.ai. */
+export const SCRIPT_HOSTS = [
+  "https://cdnjs.cloudflare.com",
+  "https://cdn.jsdelivr.net/npm/",
+  "https://unpkg.com",
+  "https://cdn.tailwindcss.com",
+  "https://code.jquery.com",
+];
+
+/** The policy without its sandbox directive, which a <meta> policy cannot carry: the check (check.ts) sandboxes its frame instead. */
+export const PAGE_POLICY = [
+  "default-src 'none'",
+  `script-src 'unsafe-inline' ${SCRIPT_HOSTS.join(" ")}`,
+  "style-src 'unsafe-inline' https://fonts.googleapis.com",
+  "font-src https://fonts.gstatic.com data:",
+  "img-src data: blob:",
+  "media-src data: blob:",
+  "connect-src 'none'",
+  "frame-src 'none'",
+  "form-action 'none'",
+  "base-uri 'none'",
+].join("; ");
+
+/**
+ * The page has no network of its own: `connect-src 'none'`. Every connector
+ * call goes through the runtime's message port to the viewer page, which
+ * sends it to the Worker.
+ *
+ * `sandbox` gives the page an opaque origin however it is loaded: framed by
+ * the viewer, opened directly from a link, or as a popup that escaped the
+ * frame's sandbox. Without it, a page loaded top-level would run on the app's
+ * origin and could script the app as the viewer.
+ */
+export const ARTIFACT_CSP = `sandbox ${ARTIFACT_SANDBOX}; ${PAGE_POLICY}`;
+
+/**
+ * Wrap the HTML the agent published in a document that loads the runtime
+ * first. A page that is already a full document gets the runtime as the first
+ * thing in its head. `prelude` goes before the runtime (the check's policy and
+ * error capture).
+ */
+export function renderArtifact(html: string, prelude = ""): string {
+  const runtime = `${prelude}<script>${RUNTIME}</script>`;
+  if (/<head[\s>]/i.test(html)) return html.replace(/<head(\s[^>]*)?>/i, (head) => `${head}${runtime}`);
+  if (/<html[\s>]/i.test(html)) return html.replace(/<html(\s[^>]*)?>/i, (tag) => `${tag}<head>${runtime}</head>`);
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${runtime}</head><body>${html}</body></html>`;
+}
+
+/** FNV-1a: a cheap, stable fingerprint, not a security measure. */
+function fingerprint(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) hash = Math.imul(hash ^ text.charCodeAt(i), 0x01000193);
+  return (hash >>> 0).toString(36);
+}
+
+// What a served page is made of besides its version: the wrapper and runtime renderArtifact adds, and its policy.
+const BUILD = fingerprint(renderArtifact("") + ARTIFACT_CSP);
+
+/**
+ * A version's page never changes, but the runtime inlined into it changes
+ * with a deploy, so the ETag names both. The browser revalidates on every
+ * view, and a repeat view costs a 304: no R2 read, no body.
+ */
+export function artifactETag(id: string, version: number): string {
+  return `"${id}-v${version}-${BUILD}"`;
+}
+
+/** What a served page carries: its policy, and nothing that would let a browser read it as another type or leak where it is. */
+export const PAGE_HEADERS = {
+  "content-security-policy": ARTIFACT_CSP,
+  "x-content-type-options": "nosniff",
+  "referrer-policy": "no-referrer",
+  "cache-control": "private, no-cache",
+};
+
+/** 304 when the browser already holds this exact page. */
+export function notModified(request: Request, etag: string): Response | undefined {
+  const sent = request.headers.get("if-none-match");
+  if (!sent || !sent.split(",").some((tag) => tag.trim().replace(/^W\//, "") === etag)) return undefined;
+  return new Response(null, { status: 304, headers: { ...PAGE_HEADERS, etag } });
+}
+
+export function artifactResponse(html: string, etag: string): Response {
+  return new Response(renderArtifact(html), { headers: { ...PAGE_HEADERS, "content-type": "text/html; charset=utf-8", etag } });
+}
+
+/** A version's source never changes either, and has no runtime in it: a deploy leaves it as it is. */
+export function sourceETag(id: string, version: number): string {
+  return `"${id}-v${version}-source"`;
+}
+
+/** The page as the agent wrote it, without the runtime, as plain text: a browser shows it and runs none of it. */
+export function sourceResponse(html: string, etag: string): Response {
+  return new Response(html, { headers: { ...PAGE_HEADERS, "content-type": "text/plain; charset=utf-8", etag } });
+}
