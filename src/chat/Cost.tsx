@@ -86,7 +86,7 @@ export const ChatCost = memo(function ChatCost({ usage, entries, time }: { usage
     <div className="chat-cost" ref={box}>
       <button type="button" onClick={() => setOpen(!open)} aria-expanded={open} title={`AI cost of this chat: ${describeTokens(spend.total)}`}>
         {formatCost(spend.total.cost)}
-        {time.ms > 0 && ` · ${formatElapsed(time.ms)}`}
+        {time.ms > 0 && <span className="chat-time"> · {formatElapsed(time.ms)}</span>}
       </button>
       {open && (
         <div className="cost-panel" role="dialog" aria-label="AI cost and time of this chat">
