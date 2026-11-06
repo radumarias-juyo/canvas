@@ -40,9 +40,13 @@ class FakePortal {
     return { access_token: accessToken, token_type: "Bearer", expires_in: Math.floor(this.ttlMs / 1000), refresh_token: refreshToken };
   }
 
-  /** The user approves the sign-in in the browser: the portal redirects back with a code. */
+  /**
+   * The user approves the sign-in in the browser: the portal redirects back with a code. Like a real portal, it
+   * refuses a redirect URI the client was not registered with.
+   */
   approve(authorizationUrl: string, user: string): { code: string; state: string } {
     const url = new URL(authorizationUrl);
+    if (!this.clients.get(url.searchParams.get("client_id")!)?.includes(url.searchParams.get("redirect_uri")!)) throw new Error("invalid redirect_uri");
     const code = `code-${crypto.randomUUID()}`;
     this.codes.set(code, {
       user,
@@ -135,6 +139,8 @@ class MemoryStore implements McpAuthStore {
 }
 
 const REDIRECT = "https://app.example/api/mcp/oauth/callback";
+/** Where the app was before it moved. */
+const OLD_REDIRECT = "https://app.old.example/api/mcp/oauth/callback";
 let portal: FakePortal;
 let server: Server;
 let origin: string;
@@ -162,8 +168,8 @@ async function whoami(store: MemoryStore) {
   }
 }
 
-async function signIn(store: MemoryStore, user: string) {
-  const started = await startSignIn(config.url, "Portal", store, REDIRECT);
+async function signIn(store: MemoryStore, user: string, redirect = REDIRECT) {
+  const started = await startSignIn(config.url, "Portal", store, redirect);
   if (!("url" in started)) throw new Error("expected a sign-in page");
   const { code, state } = portal.approve(started.url, user);
   await finishSignIn(config.url, "Portal", store, code, state);
@@ -244,6 +250,38 @@ describe("per-user MCP sign-in", () => {
     expect(ada.record.tokens!.access_token).not.toBe(tokens!.access_token);
   });
 
+  it("registers again when the app signs in from another address", async () => {
+    const ada = new MemoryStore();
+    await signIn(ada, "ada@example.com", OLD_REDIRECT);
+    const old = ada.record.client!.client_id;
+    await signIn(ada, "ada@example.com");
+    expect(ada.record.client!.client_id).not.toBe(old);
+    expect(portal.clients.get(ada.record.client!.client_id)).toEqual([REDIRECT]);
+    expect(ada.record.redirectUrl).toBe(REDIRECT);
+    expect(await whoami(ada)).toBe("ada@example.com");
+  });
+
+  it("replaces a stored registration made for another address, even when the record names this one", async () => {
+    const ada = new MemoryStore();
+    await signIn(ada, "ada@example.com", OLD_REDIRECT);
+    // The stuck state: a registration for the old address under the new address's name.
+    ada.record.redirectUrl = REDIRECT;
+    await signIn(ada, "ada@example.com");
+    expect(portal.clients.get(ada.record.client!.client_id)).toEqual([REDIRECT]);
+    expect(await whoami(ada)).toBe("ada@example.com");
+  });
+
+  it("never registers a client from a chat's connection", async () => {
+    const ada = new MemoryStore();
+    await signIn(ada, "ada@example.com", OLD_REDIRECT);
+    ada.record.redirectUrl = REDIRECT;
+    portal.access.get(ada.record.tokens!.access_token)!.expires = 0;
+    const failure = await whoami(ada).catch((error) => error);
+    expect((failure as McpFailure).error.code).toBe("auth_required");
+    expect(portal.clients.size).toBe(1);
+    expect(portal.clients.get(ada.record.client!.client_id)).toEqual([OLD_REDIRECT]);
+  });
+
   it("names the request that failed when the code exchange is refused", async () => {
     const ada = new MemoryStore();
     const started = await startSignIn(config.url, "Portal", ada, REDIRECT);
@@ -280,9 +318,12 @@ describe("applyAuthChange", () => {
     expect(applyAuthChange(record, { clearTokensIf: { access_token: "a", token_type: "Bearer" } }).tokens).toBeUndefined();
   });
 
-  it("keeps a client registration only for a sign-in to the same redirect URL", () => {
-    const client = { client_id: "c" };
+  it("keeps a client registration only for a sign-in to a redirect URL it was registered with", () => {
+    const client = { client_id: "c", redirect_uris: ["r"] };
     expect(applyAuthChange({ ...record, client }, { restart: "r" })).toEqual({ client, tokens: record.tokens, redirectUrl: "r" });
     expect(applyAuthChange({ ...record, client }, { restart: "elsewhere" })).toEqual({ redirectUrl: "elsewhere" });
+    // The record's own redirect URL does not count, only the registration's.
+    expect(applyAuthChange({ ...record, redirectUrl: "elsewhere", client }, { restart: "elsewhere" })).toEqual({ redirectUrl: "elsewhere" });
+    expect(applyAuthChange({ ...record, client: { client_id: "c" } }, { restart: "r" })).toEqual({ redirectUrl: "r" });
   });
 });
