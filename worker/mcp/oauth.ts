@@ -8,11 +8,9 @@ import { errorMessage, randomHex } from "../../shared/util.ts";
  * other user can reach it.
  */
 export interface McpAuthRecord {
-  /** What dynamic client registration returned. */
+  /** What dynamic client registration returned, its redirect URIs included: the one record of where sign-ins return. */
   client?: OAuthClientInformationMixed;
   tokens?: OAuthTokens;
-  /** The redirect URL the client was registered with; refreshes reuse it. */
-  redirectUrl?: string;
   /** A sign-in in progress: its PKCE verifier and state. */
   verifier?: string;
   state?: string;
@@ -48,8 +46,7 @@ export interface McpAuthStore {
 export function applyAuthChange(stored: McpAuthRecord, change: McpAuthChange): McpAuthRecord {
   if ("set" in change) return { ...stored, ...change.set };
   if ("restart" in change) {
-    const redirectUrl = change.restart;
-    return registeredFor(stored.client, redirectUrl) ? { client: stored.client, tokens: stored.tokens, redirectUrl } : { redirectUrl };
+    return registeredFor(stored.client, change.restart) ? { client: stored.client, tokens: stored.tokens } : {};
   }
   if ("clear" in change) {
     if (change.clear === "all") return {};
@@ -66,7 +63,22 @@ export function applyAuthChange(stored: McpAuthRecord, change: McpAuthChange): M
  * browser back only to those, so a sign-in with any other client fails on the server's sign-in page.
  */
 export function registeredFor(client: OAuthClientInformationMixed | undefined, redirectUrl: string): boolean {
-  return !!client && "redirect_uris" in client && Array.isArray(client.redirect_uris) && client.redirect_uris.includes(redirectUrl);
+  return registeredRedirects(client).includes(redirectUrl);
+}
+
+function registeredRedirects(client: OAuthClientInformationMixed | undefined): string[] {
+  return client && "redirect_uris" in client && Array.isArray(client.redirect_uris) ? client.redirect_uris : [];
+}
+
+/**
+ * The OAuth client a chat's connection uses: the user's stored sign-in, at the redirect URL its client was registered
+ * with (refreshes need none, but the SDK takes a missing one for a machine-to-machine flow). Undefined until the user
+ * has signed in.
+ */
+export async function chatOAuthClient(store: McpAuthStore, server: string): Promise<McpOAuthClient | undefined> {
+  const { client, tokens } = await store.get();
+  const [redirectUrl] = registeredRedirects(client);
+  return tokens && redirectUrl ? new McpOAuthClient(store, server, { redirectUrl, interactive: false }) : undefined;
 }
 
 /** The callback path the authorization server sends the browser back to. */
@@ -132,7 +144,7 @@ export class McpOAuthClient implements OAuthClientProvider {
 
   async state(): Promise<string> {
     const state = `${this.#server}~${randomHex(16)}`;
-    if (this.#interactive) await this.#store.update({ set: { state, redirectUrl: this.#redirectUrl } });
+    if (this.#interactive) await this.#store.update({ set: { state } });
     return state;
   }
 
@@ -207,11 +219,14 @@ export async function startSignIn(serverUrl: string, server: string, store: McpA
   return { url: client.authorizationUrl.href };
 }
 
-/** Finish a sign-in from the callback: check the state, exchange the code for tokens, clear the sign-in in progress. */
-export async function finishSignIn(serverUrl: string, server: string, store: McpAuthStore, code: string, state: string): Promise<void> {
+/**
+ * Finish a sign-in from the callback at `redirectUrl`, the address the server sent the browser back to: check the
+ * state, exchange the code for tokens, clear the sign-in in progress.
+ */
+export async function finishSignIn(serverUrl: string, server: string, store: McpAuthStore, code: string, state: string, redirectUrl: string): Promise<void> {
   const record = await store.get();
-  if (!record.state || record.state !== state || !record.redirectUrl) throw new Error("This sign-in did not start here, or a newer one replaced it. Open the sign-in link again.");
-  const client = new McpOAuthClient(store, server, { redirectUrl: record.redirectUrl, interactive: true });
+  if (!record.state || record.state !== state) throw new Error("This sign-in did not start here, or a newer one replaced it. Open the sign-in link again.");
+  const client = new McpOAuthClient(store, server, { redirectUrl, interactive: true });
   const trace = tracedFetch();
   await auth(client, { serverUrl, authorizationCode: code, fetchFn: trace.fetch }).catch(trace.explain);
   await store.update({ clear: ["state", "verifier"] });
