@@ -262,15 +262,18 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
         <section className="chat">
           <header className="chat-header">
             {onMenu && <MenuButton onClick={onMenu} />}
-            <h1 className="chat-title" title={title}>
-              {title}
-            </h1>
+            {/* The name and the chat's cost: a line under the name on a phone, apart on wider screens (styles.css). */}
+            <div className="chat-heading">
+              <h1 className="chat-title" title={title}>
+                {title}
+              </h1>
+              <ChatCost usage={state.usage} entries={state.entries} time={time} />
+            </div>
             {shared ? (
               <PeopleBar people={shared} online={online} uid={uid} working={state.busy} />
             ) : (
               <span className="chat-people">{mine > 1 && `Open in ${mine} of your windows`}</span>
             )}
-            <ChatCost usage={state.usage} entries={state.entries} time={time} />
             {shared && <NotifyButton />}
             {people && <ChatPromptButton chatId={chatId} />}
             {people && (

@@ -970,8 +970,6 @@ a.mention-chip:hover { text-decoration: underline; }
   .composer-more:has(> .composer-history) { position: static; }
   .composer-history { left: 12px; right: 12px; bottom: calc(100% - 8px); width: auto; }
 }
-/* A phone's header has room for the name, the people and sharing; each answer's cost still shows under it. */
-@media (max-width: 480px) { .chat-header .chat-cost { display: none; } }
 /* Touch: targets big enough for a finger. */
 @media (pointer: coarse) {
   .icon-button { width: 40px; height: 40px; }
@@ -1038,7 +1036,18 @@ a.mention-chip:hover { text-decoration: underline; }
 .cost-panel .cost-amount { grid-row: 1 / 3; grid-column: 2; align-self: center; font-variant-numeric: tabular-nums; }
 .cost-panel > small, .context-panel > small { color: var(--muted); font-size: 12px; }
 .cost-panel .cost-time { padding-top: 8px; border-top: 1px solid var(--border); }
-@media (max-width: 480px) { .chat-time { display: none; } }
+/* The name and the cost share a box only on a phone (below); elsewhere they sit in the header's row, the cost after the
+   people, as if the box were not there: the menu button, the name and the people come first. */
+.chat-heading { display: contents; }
+.chat-header > :is(.menu-button, .chat-heading), .chat-heading > .chat-title, .chat-header > :is(.people-bar, .chat-people) { order: -1; }
+/* A phone: the cost on a small line under the chat's name, so the name keeps its room beside the buttons. */
+@media (max-width: 480px) {
+  .chat-heading { display: flex; flex: 0 100 auto; flex-direction: column; align-items: flex-start; min-width: 0; }
+  .chat-heading > .chat-title { max-width: 100%; line-height: 1.25; }
+  .chat-heading > .chat-cost { max-width: 100%; }
+  .chat-heading > .chat-cost > button { max-width: 100%; padding: 0; border: 0; border-radius: 4px; background: none; color: var(--muted); font-size: 12px; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cost-panel { right: 12px; width: min(340px, calc(100% - 24px)); }
+}
 
 /* Groups in a sidebar list (a shared chat's artifacts beside the user's own), and a list with nothing in it. */
 .sidebar .nav-group { margin: 6px 0 2px; padding: 0 8px; color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }
