@@ -951,6 +951,8 @@ a.mention-chip:hover { text-decoration: underline; }
   .composer { padding: 8px 12px max(10px, env(safe-area-inset-bottom)); }
   .mention-list { left: 12px; right: 12px; }
   .share-panel { margin: 8px 12px 0; }
+  /* Under the header's narrower padding. */
+  .chat-header .cost-panel { right: 12px; width: min(340px, calc(100% - 24px)); }
   .skills { padding: 20px 16px; }
 }
 /* After the rules above, which it overrides. */
@@ -1036,17 +1038,17 @@ a.mention-chip:hover { text-decoration: underline; }
 .cost-panel .cost-amount { grid-row: 1 / 3; grid-column: 2; align-self: center; font-variant-numeric: tabular-nums; }
 .cost-panel > small, .context-panel > small { color: var(--muted); font-size: 12px; }
 .cost-panel .cost-time { padding-top: 8px; border-top: 1px solid var(--border); }
-/* The name and the cost share a box only on a phone (below); elsewhere they sit in the header's row, the cost after the
-   people, as if the box were not there: the menu button, the name and the people come first. */
-.chat-heading { display: contents; }
-.chat-header > :is(.menu-button, .chat-heading), .chat-heading > .chat-title, .chat-header > :is(.people-bar, .chat-people) { order: -1; }
-/* A phone: the cost on a small line under the chat's name, so the name keeps its room beside the buttons. */
+/* A phone: the chat's cost on a small line under its name, which keeps its room beside the buttons. Grid rows rather
+   than a box around the two, so the header's order stays the same at every width: the rest spans both rows. */
 @media (max-width: 480px) {
-  .chat-heading { display: flex; flex: 0 100 auto; flex-direction: column; align-items: flex-start; min-width: 0; }
-  .chat-heading > .chat-title { max-width: 100%; line-height: 1.25; }
-  .chat-heading > .chat-cost { max-width: 100%; }
-  .chat-heading > .chat-cost > button { max-width: 100%; padding: 0; border: 0; border-radius: 4px; background: none; color: var(--muted); font-size: 12px; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .cost-panel { right: 12px; width: min(340px, calc(100% - 24px)); }
+  .chat-header:has(> .chat-cost) { display: grid; grid-auto-flow: column; grid-template-columns: auto 1fr; row-gap: 0; }
+  .chat-header:has(> .chat-cost) > * { grid-row: 1 / 3; }
+  /* Its column's width, so it is cut there: an auto margin would size it to its badges. */
+  .chat-header:has(> .chat-cost) > .people-bar { margin-left: 0; }
+  .chat-header:has(> .chat-cost) > .chat-title { grid-area: 1 / 2; align-self: end; line-height: 1.25; }
+  /* Whole: its width is the least the name's column gets, the people bar beside them is cut first. */
+  .chat-header:has(> .chat-cost) > .chat-cost { grid-area: 2 / 2; align-self: start; }
+  .chat-cost > button { padding: 0; border: 0; background: none; color: var(--muted); font-size: 12px; line-height: 1.3; white-space: nowrap; }
 }
 
 /* Groups in a sidebar list (a shared chat's artifacts beside the user's own), and a list with nothing in it. */
