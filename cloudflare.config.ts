@@ -33,6 +33,13 @@ export default defineConfig({
     compatibilityFlags: ["nodejs_compat"],
     entrypoint,
     observability: { enabled: true },
+    // Served only on this custom domain (its zone must be in the account), behind the Access app of ACCESS_TEAM_DOMAIN and
+    // ACCESS_AUD below. workers.dev and Preview URLs stay off, so a deploy never reopens the Worker outside Access; both
+    // are set explicitly, since cf leaves an unset previewUrls to the account's current setting. Another account changes
+    // the domain along with those two (or drops it and sets workersDev: true).
+    domains: ["pi.oxfer.app"],
+    workersDev: false,
+    previewUrls: false,
     // The React app. Everything the Worker answers itself is listed in
     // runWorkerFirst; any other path falls back to the SPA's index.html.
     assets: {
