@@ -1,0 +1,81 @@
+# Weekly sync from the public upstream radumarias/pi-artifacts.
+#
+# 1. Copies any new Git LFS files (docs/media screenshots) from upstream into
+#    this private repo, so the upstream commits can be merged here.
+# 2. Points the `upstream-sync` branch at upstream's main and opens (or refreshes)
+#    a PR into main. Review and merge it; resolve conflicts in the PR if any.
+#
+# Nothing is ever pushed to upstream. Run it anytime from the Actions tab.
+#
+# Opening the PR needs: Settings → Actions → General → Workflow permissions →
+# "Allow GitHub Actions to create and approve pull requests". Without it the job
+# still syncs the branch and prints a link to open the PR by hand.
+name: Sync from upstream
+
+on:
+  schedule:
+    - cron: "17 6 * * 1" # Mondays 06:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          lfs: false
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/radumarias/pi-artifacts
+          git fetch upstream main
+
+      - name: Check for new upstream commits
+        id: check
+        run: |
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "Already up to date with upstream."
+            echo "new=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "New upstream commits:"
+            git log --oneline HEAD..upstream/main
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Copy LFS files from upstream
+        if: steps.check.outputs.new == 'true'
+        run: |
+          git lfs fetch --all upstream upstream/main
+          git lfs push --all origin upstream/main
+
+      - name: Update upstream-sync branch and open PR
+        if: steps.check.outputs.new == 'true'
+        run: |
+          git push --force origin upstream/main:refs/heads/upstream-sync
+          count=$(git rev-list --count HEAD..upstream/main)
+          existing=$(gh pr list --head upstream-sync --base main --state open --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            echo "PR #$existing already open; branch updated."
+            exit 0
+          fi
+          body="Brings in $count new commit(s) from [radumarias/pi-artifacts](https://github.com/radumarias/pi-artifacts).
+
+          Merge with a **merge commit** (not squash or rebase) so future syncs stay clean.
+
+          $(git log --format='- %s (%h)' HEAD..upstream/main | head -50)"
+          if ! gh pr create --base main --head upstream-sync \
+              --title "Sync from upstream pi-artifacts ($count commits)" --body "$body"; then
+            echo "::warning::Could not open the PR automatically (enable 'Allow GitHub Actions to create and approve pull requests'). Open it here: https://github.com/${{ github.repository }}/compare/main...upstream-sync"
+          fi
