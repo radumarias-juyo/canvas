@@ -1,6 +1,7 @@
 import { DurableObject, exports } from "cloudflare:workers";
 import type { ModelSetting } from "../shared/models.ts";
 import { SOCKET_PING, type ArtifactSummary, type ChatStatus, type ChatSummary, type MentionNotice, type SidebarList } from "../shared/protocol.ts";
+import { checkSystemPrompt, type ChatSystemPrompt } from "../shared/system-prompt.ts";
 import { checkSkill, MAX_SKILL_PROPOSALS, MAX_USER_SKILLS, SkillError, type SavedSkillOrigin, type SkillInfo, type SkillInput, type SkillResult } from "../shared/skills.ts";
 import { BUILTIN_SKILLS, builtinSkill, parseSkillFile } from "./skills/index.ts";
 import { titleFromMessage, UNNAMED_CHAT } from "./agent/title.ts";
@@ -11,6 +12,23 @@ import { mcpServers } from "./mcp/servers.ts";
 export function mcpAuthStore(uid: string, server: string): McpAuthStore {
   const directory = exports.UserDirectory.getByName(uid);
   return { get: () => directory.mcpAuth(server), update: (change) => directory.updateMcpAuth(server, change) };
+}
+
+/** Where a user's, or a chat's, own system prompt is kept, in its object's KV storage. */
+const SYSTEM_PROMPT_KEY = "systemPrompt";
+
+/** The system prompt kept under SYSTEM_PROMPT_KEY in `kv`; "" for none. */
+export function readSystemPrompt(kv: SyncKvStorage): string {
+  return kv.get<string>(SYSTEM_PROMPT_KEY) ?? "";
+}
+
+/** Check `value` as a system prompt and keep it under SYSTEM_PROMPT_KEY in `kv`; empty clears it. */
+export function saveSystemPrompt(kv: SyncKvStorage, value: unknown): { text: string } | { error: string } {
+  const checked = checkSystemPrompt(value);
+  if ("error" in checked) return checked;
+  if (checked.text) kv.put(SYSTEM_PROMPT_KEY, checked.text);
+  else kv.delete(SYSTEM_PROMPT_KEY);
+  return checked;
 }
 
 /** A message that tagged this user: who wrote it, its start, and when. */
@@ -461,6 +479,17 @@ export class UserDirectory extends DurableObject<Env> {
 
   setModelChoice(choice: ModelSetting): void {
     this.ctx.storage.kv.put("model", choice);
+  }
+
+  /** The user's own system prompt, added to the built-in one in all their chats; "" for none. Always theirs to change. */
+  systemPrompt(): ChatSystemPrompt {
+    return { text: readSystemPrompt(this.ctx.storage.kv), editable: true };
+  }
+
+  /** Save the user's system prompt; their chats use it from their next message on. */
+  setSystemPrompt(value: unknown): ChatSystemPrompt | { error: string } {
+    const saved = saveSystemPrompt(this.ctx.storage.kv, value);
+    return "error" in saved ? saved : { ...saved, editable: true };
   }
 }
 

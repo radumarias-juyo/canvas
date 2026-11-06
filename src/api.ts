@@ -1,5 +1,6 @@
 import type { MentionOptions } from "../shared/mentions.ts";
 import type { ModelCatalog } from "../shared/models.ts";
+import type { ChatSystemPrompt } from "../shared/system-prompt.ts";
 import { skillPath, type SkillInfo, type SkillInput } from "../shared/skills.ts";
 import { FILE_ROUTE, VIEW_PARAM, ZIP_ROUTE } from "../shared/uploads.ts";
 import {
@@ -149,6 +150,13 @@ export const api = {
     if (proxied && typeof proxied.ok === "boolean") return proxied;
     throw new Error(`The proxy answered ${response.status}`);
   },
+  /** The user's own system prompt, added to the built-in one in all their chats. Always theirs to change. */
+  systemPrompt: () => request<ChatSystemPrompt>("/api/me/system-prompt"),
+  /** Save it; empty clears it. */
+  setSystemPrompt: (text: string) => request<ChatSystemPrompt>("/api/me/system-prompt", send("PUT", { text })),
+  /** A chat's system prompt, which adds to its owner's own: everyone in the chat reads it, only the owner changes it. */
+  chatSystemPrompt: (chatId: string) => request<ChatSystemPrompt>(chatPath(chatId, "/system-prompt")),
+  setChatSystemPrompt: (chatId: string, text: string) => request<ChatSystemPrompt>(chatPath(chatId, "/system-prompt"), send("PUT", { text })),
   skills: () => request<SkillInfo[]>("/api/skills"),
   /** Save one of the user's skills, from its fields or from a SKILL.md file's text. */
   saveSkill: (skill: (SkillInput | { markdown: string }) & { enabled?: boolean }) => request<SkillInfo>("/api/skills", post(skill)),
