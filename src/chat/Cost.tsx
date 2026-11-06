@@ -2,6 +2,7 @@ import type { EntryRecord, UsageState } from "@earendil-works/pi-durable";
 import { memo, useMemo, useState } from "react";
 import { AUTO_LEDGER_PREFIX, effortLabel, HINT_LEDGER_PREFIX, SKILLS_LEDGER_PREFIX, TOOL_PICK_LEDGER_PREFIX, type ModelInfo } from "../../shared/models.ts";
 import { AGENT_NAME } from "../../shared/mentions.ts";
+import { stepLabel } from "./Steps.tsx";
 import { useDismiss } from "../layout.tsx";
 import { useCatalog } from "./ModelPicker.tsx";
 import { chatSpend, describeTokens, formatCost, type PromptSpend, type Share, shortTokens, type Timing } from "./spend.ts";
@@ -34,7 +35,8 @@ function shareName(share: Share, models: ReadonlyMap<string, ModelInfo>): string
     const picker = share.model.slice(prefix.length);
     return `${label} · ${models.get(picker)?.name ?? picker}`;
   }
-  const name = models.get(share.model)?.name ?? share.model;
+  // Else a model's, or a tool's that reports a spend of its own (the page check's look at its screenshot).
+  const name = models.get(share.model)?.name ?? stepLabel(share.model);
   return share.effort ? `${name} · ${effortLabel(share.effort)}` : name;
 }
 
