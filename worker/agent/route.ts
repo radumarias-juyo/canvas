@@ -349,6 +349,11 @@ export const NO_USAGE: Usage = {
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
+/** What a router call (Auto's, or the tool picker's) cost, as a message's pick shows it. */
+export function routerSpend(id: string, usage: Usage): RouterSpend {
+  return { model: id, cost: usage.cost.total, input: usage.input + usage.cacheRead, output: usage.output };
+}
+
 /** A router's pick, the router that made it (by the picker's id) and what its call cost, and the call's usage, for pi's ledger. */
 export interface Routed {
   pick: RoutePick;
@@ -375,8 +380,7 @@ export async function route(routers: readonly Router[], request: RouteRequest, t
     }
     try {
       const { pick, usage } = await router.ask(request, AbortSignal.timeout(left));
-      const spend = { model: router.id, cost: usage.cost.total, input: usage.input + usage.cacheRead, output: usage.output };
-      return { pick, router: spend, usage };
+      return { pick, router: routerSpend(router.id, usage), usage };
     } catch (error) {
       errors.push(`${router.id}: ${clip(errorMessage(error), MAX_ERROR_CHARS)}`);
     }

@@ -15,6 +15,7 @@ import {
   incomingKey,
   PUBLISH_TOOL,
   type AutoPick,
+  type ToolPickNote,
   type ChatMessageData,
   type ChatPeople,
   type ChatPeopleData,
@@ -36,7 +37,7 @@ import { ReactionChips, ReactionsContext, useMessageReactions, type MessageReact
 import { isReactable, type EntryReactions } from "../../shared/reactions.ts";
 import { AgentAvatar, AgentByline, Avatar, SharedChat, tintOf, tintStyle, useSharedChat } from "./people.tsx";
 import { MenuButton } from "../layout.tsx";
-import { AutoPicked } from "./AutoPick.tsx";
+import { AutoPicked, ToolsPicked } from "./AutoPick.tsx";
 import { ChatCost, PromptCost } from "./Cost.tsx";
 import { ContextMeter } from "./Context.tsx";
 import { ChatPromptButton } from "../SystemPrompt.tsx";
@@ -482,6 +483,7 @@ const Entry = memo(function Entry({
         // In the transcript, a message that called the agent was picked up: it was placed in its run.
         picked={data.summoned}
         auto={data.auto}
+        tools={data.tools}
         reactions={reactions}
         onReply={answer}
         hint={hinted && <CallHint onAsk={() => onAskAgent(entry.id as number)} onNo={() => onNoHint(entry.id as number)} />}
@@ -683,6 +685,7 @@ function User({
   replyTo,
   picked,
   auto,
+  tools,
   sentAt,
   reactions = null,
   onReply,
@@ -699,6 +702,8 @@ function User({
   picked?: boolean;
   /** What Auto picked to answer it, in a chat on Auto. */
   auto?: AutoPick;
+  /** Which MCP tools were offered to answer it, when the chat had enough to pick. */
+  tools?: ToolPickNote;
   /** When it was sent, shown under it on hover; none in the queue, which says so instead. */
   sentAt?: number;
   reactions?: MessageReactions | null;
@@ -733,6 +738,7 @@ function User({
       </div>
       <ReactionChips reactions={reactions} picked={picked} />
       {auto && <AutoPicked pick={auto} />}
+      {tools && <ToolsPicked note={tools} />}
       {hint}
       {sentAt !== undefined && <SentTime at={sentAt} />}
     </div>
