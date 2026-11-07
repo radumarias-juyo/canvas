@@ -7,7 +7,7 @@ import type { Value } from "../../../shared/conditions.ts";
 import { mayUseServer, type AgentDefinition, type AgentTrigger, type LookStep } from "../../../shared/agents.ts";
 import { errorMessage, sha256Hex } from "../../../shared/util.ts";
 import { readFor, resultName, RunExecutor, watchFires, type RunEnd, type RunHost, type RunStart } from "./executor.ts";
-import type { RunRecord } from "./store.ts";
+import type { ActedStep, RunRecord } from "./store.ts";
 import { nextRunAt } from "./schedule.ts";
 import { sourceName } from "./source.ts";
 import type { Sql } from "../../members.ts";
@@ -359,6 +359,23 @@ export class AgentRunner {
     }
     for (const agentId of agentIds) this.#host.changed(agentId);
     return restarted;
+  }
+
+  /**
+   * The owner decided a do step a run's item waited at (approved and ran, failed, declined or expired): the item goes on
+   * from that step with its outcome, and the run then sends what its items reached. Nothing when it no longer waited.
+   */
+  async decided(ref: { agentId: string; dueAt: number; item: string; step: string }, acted: ActedStep): Promise<void> {
+    if (!this.executor.decided(ref.agentId, ref.dueAt, ref.item, ref.step, acted)) return;
+    this.#host.changed(ref.agentId);
+    const agent = await this.#host.definition(ref.agentId);
+    const run = this.#host.runs.get(ref.agentId, ref.dueAt);
+    if (!run) return;
+    if (!agent) {
+      this.#host.runs.update(run.agentId, run.dueAt, { status: "failed", summary: "Failed: the agent was deleted." });
+      return;
+    }
+    await this.executor.again(startOf(agent, run));
   }
 
   /** After a restart: the runs that were going go on, from where their rows say. Cheap when there are none. */

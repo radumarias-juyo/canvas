@@ -3,7 +3,7 @@ import type { AgentDefinition, AgentStep, LookStep, StepInput } from "../shared/
 import type { Value } from "../shared/conditions.ts";
 import type { ArtifactMeta } from "../shared/protocol.ts";
 import type { RunDelivery } from "../shared/runs.ts";
-import { fillInput, itemKey, itemsOf, reportOf, SignInNeeded, type ActContext, type ActResult, type DeliveryRequest, type WorkResult } from "../worker/agents/runs/executor.ts";
+import { actedOf, fillInput, itemKey, itemsOf, reportOf, SignInNeeded, type ActContext, type ActResult, type DeliveryRequest, type WorkResult } from "../worker/agents/runs/executor.ts";
 import { publishedAlready, publishFindings, publishRebuilt, readOnlyDeclaration, runMark } from "../worker/agents/runs/page.ts";
 import { findingsEdit, FINDINGS_END, FINDINGS_START, reportHtml, workSpend } from "../worker/agents/runs/report.ts";
 import { AgentRunner, type RunAlarm, type RunnerHost, type WatchAlarm } from "../worker/agents/runs/runner.ts";
@@ -381,16 +381,128 @@ describe("scheduled runs", () => {
     expect([...host.writes.values()].some((write) => write.text.startsWith("Result of crm.update (done)"))).toBe(true);
   });
 
-  it("records a held do step as waiting, and a test run calls nothing", async () => {
+  it("a test run calls nothing for a do step", async () => {
     const workflow: AgentStep[] = [{ kind: "do", server: "crm", tool: "update", input: {} }, { kind: "work", prompt: "Report." }];
     const { host, runner, definition } = home(agent({ workflow, autonomy: 3 }));
-    host.actAnswer = () => ({ status: "held", message: "Not run yet: waiting for your owner's approval." });
-    await runner.now(definition.id, false);
-    await host.settled();
-    expect(host.runs.items(definition.id, T0)[0].steps[0]).toMatchObject({ ok: true, detail: expect.stringMatching(/waiting/) });
     await runner.now(definition.id, true);
     await host.settled();
-    expect(host.acts).toHaveLength(1);
+    expect(host.acts).toHaveLength(0);
+    expect(host.runs.items(definition.id, T0)[0].steps[0]).toMatchObject({ ok: true, detail: expect.stringMatching(/^a test: would call it/) });
+  });
+
+  describe("a do step held for the owner", () => {
+    // Look, then a do step, then the work and the tell after it: held, the item stops at the do step.
+    const workflow: AgentStep[] = [
+      sales,
+      { kind: "do", server: "crm", tool: "update", input: { total: "{{sales.total}}" } },
+      { kind: "work", prompt: "Report what was done." },
+      { kind: "tell", to: ["owner"], via: "chat" },
+    ];
+    const ref = (definition: AgentDefinition) => ({ agentId: definition.id, dueAt: T0, item: "", step: "1" });
+
+    async function held() {
+      const setup = home(agent({ workflow, autonomy: 3 }));
+      setup.host.actAnswer = () => ({ status: "held", message: "Not run yet: waiting for your owner's approval." });
+      await setup.runner.now(setup.definition.id, false);
+      await setup.host.settled();
+      return setup;
+    }
+
+    it("stops the item there and the run waits, sending nothing", async () => {
+      const { host, definition } = await held();
+      const [item] = host.runs.items(definition.id, T0);
+      expect(item.status).toBe("waiting");
+      expect(item.steps.map((step) => step.kind)).toEqual(["look", "do"]);
+      expect(item.steps[1]).toMatchObject({ ok: false, detail: expect.stringMatching(/waiting/) });
+      expect(host.works).toHaveLength(0);
+      expect(host.delivered).toHaveLength(0);
+      expect(host.runs.list(definition.id)[0]).toMatchObject({ status: "waiting", summary: "Waiting for you to approve a call." });
+      // Not a run cut off by a restart: a resume leaves it waiting.
+      const again = new AgentRunner(host, host.sql);
+      again.resume();
+      await host.settled();
+      expect(host.acts).toHaveLength(1);
+      expect(host.runs.list(definition.id)[0].status).toBe("waiting");
+    });
+
+    it("goes on from there once approved, with the call's result as done", async () => {
+      const { host, runner, definition } = await held();
+      host.answer = () => ({ status: "done", text: "Updated the total.", cost: 0.01 });
+      await runner.decided(ref(definition), actedOf({ status: "done", result: '{"updated":940}' }));
+      await host.settled();
+      // The call is not made again: the approved call ran in the chat. The work and the tell after it go.
+      expect(host.acts).toHaveLength(1);
+      expect(host.works).toHaveLength(1);
+      expect(host.delivered.map((request) => request.text)).toEqual(["Updated the total."]);
+      const [item] = host.runs.items(definition.id, T0);
+      expect(item.status).toBe("acted");
+      expect(item.steps[1]).toMatchObject({ kind: "do", ok: true, detail: 'approved: {"updated":940}' });
+      expect(host.runs.get(definition.id, T0)?.detail.acted?.[":1"]).toMatchObject({ ok: true, value: { updated: 940 } });
+      expect(host.runs.list(definition.id)[0].status).toBe("sent");
+      // Decided twice (a second press, a late expiry): nothing more.
+      await runner.decided(ref(definition), actedOf({ status: "expired" }));
+      await host.settled();
+      expect(host.delivered).toHaveLength(1);
+    });
+
+    it("ends the item once declined, sending what it reached before", async () => {
+      const early: AgentStep[] = [sales, { kind: "tell", to: ["owner"], via: "chat" }, ...workflow.slice(1, 3)];
+      const { host, runner, definition } = home(agent({ workflow: early, autonomy: 3 }));
+      host.actAnswer = () => ({ status: "held", message: "Not run yet: waiting for your owner's approval." });
+      await runner.now(definition.id, false);
+      await host.settled();
+      expect(host.delivered).toHaveLength(0);
+      await runner.decided({ ...ref(definition), step: "2" }, actedOf({ status: "declined" }));
+      await host.settled();
+      const [item] = host.runs.items(definition.id, T0);
+      expect(item).toMatchObject({ status: "not_today", reason: "crm.update was not done: you declined it" });
+      expect(host.works).toHaveLength(0);
+      // The tell before the do step was reached: it goes, with what the item had then (nothing worked out).
+      expect(host.delivered).toHaveLength(1);
+      expect(host.runs.list(definition.id)[0].status).toBe("sent");
+    });
+
+    it("ends the item once it expired, and the run with it", async () => {
+      const { host, runner, definition } = await held();
+      await runner.decided(ref(definition), actedOf({ status: "expired" }));
+      await host.settled();
+      const [item] = host.runs.items(definition.id, T0);
+      expect(item).toMatchObject({ status: "not_today", reason: "crm.update was not done: it expired before you decided" });
+      expect(host.works).toHaveLength(0);
+      expect(host.delivered).toHaveLength(0);
+      expect(host.runs.list(definition.id)[0]).toMatchObject({ status: "not_today", summary: expect.stringMatching(/expired/) });
+    });
+
+    it("waits for every held item before it sends, an item decided while others still run going on after them", async () => {
+      const scoped = agent({
+        workflow: [
+          { kind: "do", server: "crm", tool: "update", input: { region: "{{item.name}}" } },
+          { kind: "work", prompt: "Report." },
+          { kind: "tell", to: ["owner"], via: "chat" },
+        ],
+        scope: { list: { kind: "look", server: "crm", tool: "regions", input: {} }, each: true },
+        autonomy: 3,
+      });
+      const { host, runner, definition } = home(scoped);
+      host.values.set("crm.regions", [{ name: "north" }, { name: "south" }]);
+      host.actAnswer = () => ({ status: "held", message: "Not run yet: waiting for your owner's approval." });
+      await runner.now(definition.id, false);
+      await host.settled();
+      expect(host.runs.items(definition.id, T0).map((item) => item.status)).toEqual(["waiting", "waiting"]);
+      expect(host.runs.list(definition.id)[0].summary).toBe("Waiting for you to approve a call for 2 items.");
+      await runner.decided({ agentId: definition.id, dueAt: T0, item: "north", step: "0" }, actedOf({ status: "done", result: "ok" }));
+      await host.settled();
+      // North went through; south still waits, so nothing is sent yet.
+      expect(host.runs.items(definition.id, T0).map((item) => item.status)).toEqual(["acted", "waiting"]);
+      expect(host.runs.list(definition.id)[0]).toMatchObject({ status: "waiting", summary: "Waiting for you to approve a call for south." });
+      expect(host.delivered).toHaveLength(0);
+      await runner.decided({ agentId: definition.id, dueAt: T0, item: "south", step: "0" }, actedOf({ status: "failed", result: "server down" }));
+      await host.settled();
+      // A failed approved call goes on, as any failed call: both items reach the tell, which goes once.
+      expect(host.runs.items(definition.id, T0).map((item) => item.status)).toEqual(["acted", "acted"]);
+      expect(host.delivered).toHaveLength(1);
+      expect(host.runs.list(definition.id)[0].status).toBe("sent");
+    });
   });
 
   it("makes a do step's call once when the run goes on after a restart", async () => {

@@ -154,7 +154,7 @@ import {
 import { AgentTurns, sessionOf, type TurnHost } from "./agents/controller.ts";
 import { isTurnEntry, TurnFilter } from "./agents/live.ts";
 import { ChatRoster, type AgentTurn, type RosterEntry } from "./agents/roster.ts";
-import { jsonOf, reportOf, SignInNeeded, whenOf, type ActContext, type ActResult, type DeliveryRequest } from "./agents/runs/executor.ts";
+import { actedOf, jsonOf, reportOf, SignInNeeded, whenOf, type ActContext, type ActResult, type DeliveryRequest } from "./agents/runs/executor.ts";
 import { AgentRunner, type RunAlarm, type RunnerHost, type WatchAlarm } from "./agents/runs/runner.ts";
 import { AgentRuns } from "./agents/runs/store.ts";
 import { reportContext, runInstructions, RUN_STEP_KIND, workSpend, type RunStepData } from "./agents/runs/report.ts";
@@ -3546,9 +3546,12 @@ export class ChatAgent extends DurableObject<Env> {
     const origin = this.actions.origin(view.id);
     const session = origin?.session ?? (origin?.run && this.runs.item(origin.run.agentId, origin.run.dueAt, origin.run.item)?.session);
     const conversation = session ? await this.harness.conversation(session) : undefined;
-    if (!conversation) return;
-    const message: UserMessage = { role: "user", content: approvalNote(view), timestamp: Date.now() };
-    await conversation.submit({ type: "write", requestId: `approval:${view.id}`, entry: { kind: APP_APPROVAL_KIND, model: [message] } }, BACKGROUND_CONTEXT);
+    if (conversation) {
+      const message: UserMessage = { role: "user", content: approvalNote(view), timestamp: Date.now() };
+      await conversation.submit({ type: "write", requestId: `approval:${view.id}`, entry: { kind: APP_APPROVAL_KIND, model: [message] } }, BACKGROUND_CONTEXT);
+    }
+    // A run's item waited at this step: it goes on from there (after the note above, which its later steps read).
+    if (origin?.run) this.ctx.waitUntil(this.runner.decided(origin.run, actedOf(view)).catch((error: unknown) => console.error("run:", errorMessage(error))));
   }
 
   /**

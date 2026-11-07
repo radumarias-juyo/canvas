@@ -10,10 +10,12 @@ export type RunWhy = "schedule" | "watch" | "test" | "manual";
 
 /**
  * How a run ended: `sent` when it acted on at least one item, `not_today` when every item stopped at a condition (no
- * model call), `failed`, or `needs_sign_in` when a server it reads needs its owner to sign in again (kept to retry).
+ * model call), `failed`, `needs_sign_in` when a server it reads needs its owner to sign in again (kept to retry), or
+ * `waiting` while a do step of one of its items is held for its owner's approval (it goes on once they decide).
  */
-export type RunStatus = "running" | "sent" | "not_today" | "failed" | "needs_sign_in";
-export type RunItemStatus = "running" | "acted" | "not_today" | "failed";
+export type RunStatus = "running" | "sent" | "not_today" | "failed" | "needs_sign_in" | "waiting";
+/** `waiting`: stopped at a do step held for its owner; approved it goes on from there, declined or expired it stops. */
+export type RunItemStatus = "running" | "acted" | "not_today" | "failed" | "waiting";
 
 /** One step as a run went through it, for the run detail's "How it got there". */
 export interface RunStepRecord {

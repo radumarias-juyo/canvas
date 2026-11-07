@@ -11,6 +11,7 @@ const RUN_STATUS: Record<RunStatus, { text: string; tone: Tone }> = {
   not_today: { text: "Not today", tone: "off" },
   failed: { text: "Failed", tone: "error" },
   needs_sign_in: { text: "Needs sign-in", tone: "error" },
+  waiting: { text: "Waits for you", tone: "draft" },
 };
 
 /** A run's status as its pill says it, and the pill's tone: a test that acted "Would send". */
@@ -27,7 +28,7 @@ export function whyLabel(why: RunWhy): string {
 
 /** An item's status, in words. */
 export function itemStatusLabel(status: RunItemStatus): string {
-  return { running: "Running", acted: "Acted", not_today: "Not today", failed: "Failed" }[status];
+  return { running: "Running", acted: "Acted", not_today: "Not today", failed: "Failed", waiting: "Waits for you" }[status];
 }
 
 /** How a run's items went, when it had a scope: "3 of 6 acted · 3 not today". Empty for a run with one item. */

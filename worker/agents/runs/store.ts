@@ -64,6 +64,10 @@ export interface ActedStep {
   detail: string;
   /** The call's result, when it ran: what later steps read as `done`. */
   value?: unknown;
+  /** Held for its owner: the item stops here until they decide (AgentRunner.decided). */
+  waiting?: true;
+  /** Declined, or its wait expired: the item stops here, as at a condition that did not hold. */
+  stopped?: true;
 }
 
 /** What an item's row keeps: its steps, its part of the report and why it stopped. */
@@ -213,6 +217,26 @@ export class AgentRuns {
       agentId,
       dueAt,
     );
+  }
+
+  /**
+   * The owner decided a do step an item waited at: the item and its run go back to running, to go on from that step
+   * (the step's outcome is in the run's `acted`). False when the item was not waiting.
+   */
+  reopen(agentId: string, dueAt: number, item: string): boolean {
+    const reopened = this.#sql.exec(
+      "UPDATE agent_runs SET status = 'running', ended_at = NULL WHERE agent_id = ? AND due_at = ? AND item = ? AND status = 'waiting'",
+      agentId,
+      dueAt,
+      rowKey(item),
+    ).rowsWritten;
+    if (!reopened) return false;
+    this.#sql.exec(
+      "UPDATE agent_runs SET status = 'running', ended_at = NULL, summary = NULL WHERE agent_id = ? AND due_at = ? AND item = '' AND status IN ('waiting', 'running')",
+      agentId,
+      dueAt,
+    );
+    return true;
   }
 
   /** Change what a run's row keeps: its status (an end once it is not running), summary, detail. */

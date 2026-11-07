@@ -31,6 +31,7 @@ import {
   type RunStepRecord,
   type RunWhy,
 } from "../../../shared/runs.ts";
+import type { PendingActionView } from "../../../shared/limits.ts";
 import { clip, errorMessage, mapLimit } from "../../../shared/util.ts";
 import { describeSchedule } from "./schedule.ts";
 import type { ActedStep, AgentRuns, RunRecord } from "./store.ts";
@@ -46,6 +47,9 @@ export class SignInNeeded extends Error {
     super(`Sign in to ${server} again.`);
   }
 }
+
+/** A do step held for its owner: its item stops there, and waits until they decide. */
+class ItemWaits extends Error {}
 
 /** What a work step's run came to. */
 export interface WorkResult {
@@ -287,7 +291,17 @@ export class RunExecutor {
       const missing = await this.#host.needsSignIn(runServers(agent, await this.#host.signInServers()));
       if (missing.length) return this.#waitForSignIn(agent, run, missing);
       const elements = await this.#elements(agent);
-      const outcomes = await mapLimit(elements, RUN_CONCURRENCY, (element) => this.#item(agent, run, element, when));
+      await mapLimit(elements, RUN_CONCURRENCY, (element) => this.#item(agent, run, element, when));
+      // Read back, not as the items returned: an item decided while others ran is running again (a start after this
+      // one takes it on), and one held waits. No await between the read and the update, so neither is lost.
+      const outcomes = elements.map((element) => runs.item(agent.id, dueAt, element.key)!);
+      if (outcomes.some((item) => item.status === "running")) return { status: "running", started };
+      const held = outcomes.filter((item) => item.status === "waiting");
+      if (held.length) {
+        const which = held.length === 1 ? (held[0].label ? `for ${held[0].label}` : "") : `for ${held.length} items`;
+        runs.update(agent.id, dueAt, { status: "waiting", summary: `Waiting for you to approve a call${which && ` ${which}`}.` });
+        return { status: "waiting", started };
+      }
       const status = await this.#finish(agent, runs.get(agent.id, dueAt)!, outcomes);
       return { status, started };
     } catch (error) {
@@ -368,7 +382,7 @@ export class RunExecutor {
       }
     } catch (error) {
       if (error instanceof SignInNeeded) throw error;
-      status = "failed";
+      status = error instanceof ItemWaits ? "waiting" : "failed";
       reason = errorMessage(error);
     }
     runs.endItem(agent.id, run.dueAt, element.key, {
@@ -456,6 +470,10 @@ export class RunExecutor {
             state.scope.last = acted.value as Value;
           }
           record(label, acted.ok, acted.detail);
+          // Held: the item stops here, its deliveries unsent, until the owner decides (then it goes through again,
+          // to this step's outcome). Declined or expired, it stops as at a condition that did not hold.
+          if (acted.waiting) throw new ItemWaits(`Waits for you to approve ${step.server}.${step.tool}.`);
+          if (acted.stopped) return `${step.server}.${step.tool} was not done: ${acted.detail}`;
           break;
         }
         case "tell":
@@ -502,7 +520,7 @@ export class RunExecutor {
         keep(json.length > MAX_RESULT_CHARS ? { ok: true, detail: acted.detail } : acted);
         return acted;
       }
-      acted = { ok: result.status === "held", detail: result.message };
+      acted = result.status === "held" ? { ok: false, waiting: true, detail: result.message } : { ok: false, detail: result.message };
     } catch (error) {
       if (error instanceof SignInNeeded) {
         // Nothing reached the server: asked again once signed in.
@@ -515,6 +533,25 @@ export class RunExecutor {
     }
     keep(acted);
     return acted;
+  }
+
+  /**
+   * The owner decided a do step a run's item waited at: its outcome is kept as the step's, and the item and run go back
+   * to running (start the run again to go on). False when that item was not waiting there (decided already, or gone).
+   */
+  decided(agentId: string, dueAt: number, item: string, step: string, acted: ActedStep): boolean {
+    const runs = this.#host.runs;
+    const run = runs.get(agentId, dueAt);
+    const mark = `${item}:${step}`;
+    if (!run?.detail.acted?.[mark]?.waiting) return false;
+    runs.update(agentId, dueAt, { detail: { acted: { ...run.detail.acted, [mark]: acted } } });
+    return runs.reopen(agentId, dueAt, item);
+  }
+
+  /** Start a run once the start of it going now (if any) has ended: a run with an item reopened while it went. */
+  async again(start: RunStart): Promise<RunEnd> {
+    await this.#active.get(`${start.agent.id}:${start.dueAt}`)?.catch(() => undefined);
+    return this.start(start);
   }
 
   /** Whether a condition holds over the item's results; a condition that cannot be read fails the item. */
@@ -598,6 +635,33 @@ export class RunExecutor {
     const session = await this.#host.newSession();
     this.#host.runs.update(run.agentId, run.dueAt, { detail: { sessions: { ...sessions, [key]: session } } });
     return session;
+  }
+}
+
+/**
+ * A decided action as the do step that held it ends: approved and ran (its result, what later steps read as `done`),
+ * approved but failed (the item goes on, as after any failed call), or declined or expired (the item stops there).
+ */
+export function actedOf(view: Pick<PendingActionView, "status" | "result">): ActedStep {
+  switch (view.status) {
+    case "done": {
+      const result = view.result ?? "";
+      let value: unknown = result;
+      try {
+        value = JSON.parse(result);
+      } catch {
+        // Not JSON (or cut short): later steps read it as text.
+      }
+      return { ok: true, detail: `approved: ${excerpt(result, DETAIL_CHARS)}`, value };
+    }
+    case "failed":
+      return { ok: false, detail: `approved, but failed: ${view.result ?? "no reason given"}` };
+    case "declined":
+      return { ok: false, stopped: true, detail: "you declined it" };
+    case "expired":
+      return { ok: false, stopped: true, detail: "it expired before you decided" };
+    default:
+      return { ok: false, waiting: true, detail: "it waits for you" };
   }
 }
 
