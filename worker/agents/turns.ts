@@ -6,6 +6,7 @@ import type { EntryRecord } from "@earendil-works/pi-durable";
 import { TOOL_SEARCH_TOOL_NAME } from "@earendil-works/pi-durable/tool-search";
 import { CHAT_AGENT_KIND, MAX_HOPS, speakerLabel, type AgentDefinition, type ChatAgentReplyData } from "../../shared/agents.ts";
 import { textOf } from "../../shared/canonical.ts";
+import { MEMORY_RECALL_TOOL } from "../../shared/memory.ts";
 import { CHAT_CONTEXT_KIND, CHAT_COPY_KIND, type ChatCopyData } from "../../shared/chat-kinds.ts";
 import { entryItems, mergeItems, type ItemRef } from "../../shared/items.ts";
 import { AGENT_NAME, calledNames, type Mention } from "../../shared/mentions.ts";
@@ -217,11 +218,11 @@ export function askOf(speaker: Parameters<typeof speakerLabel>[0], text: string,
 /** Tools an agent's session never has: they act for pi in the log (reactions). */
 const NEVER_FOR_AGENTS = ["react"];
 /**
- * The app's tools a turn its owner did not ask for may use: reading the pages of the chat and the owner's skills, and
- * loading a deferred tool it may use. Every other tool of the app writes, runs code, reads the owner's private files,
+ * The app's tools a turn its owner did not ask for may use: reading the pages of the chat and the owner's skills, the
+ * memory notes the session reads anyway, and loading a deferred tool it may use. Every other tool of the app writes, runs code, reads the owner's private files,
  * or lists the owner's servers and sign-ins, and a tool added later is left out until it is named here.
  */
-const READ_TOOLS = ["artifact_read", "artifact_history", "artifact_diff", "activate_skill", "read_skill_resource", TOOL_SEARCH_TOOL_NAME];
+const READ_TOOLS = ["artifact_read", "artifact_history", "artifact_diff", "activate_skill", "read_skill_resource", MEMORY_RECALL_TOOL, TOOL_SEARCH_TOOL_NAME];
 
 /**
  * The tools a turn may use, by name, of `tools` (every tool installed), as an allow-list: a tool installed after the

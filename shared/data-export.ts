@@ -1,4 +1,5 @@
 import type { AgentDefinition, AgentInput, AgentOrigin } from "./agents.ts";
+import type { ExportedNote } from "./memory.ts";
 import type { ModelSetting } from "./models.ts";
 import { ID_PATTERN, type ArtifactVersion } from "./protocol.ts";
 import type { SkillFileInfo } from "./skill-files.ts";
@@ -73,6 +74,8 @@ export interface ExportedAccount {
   skills: ExportedSkill[];
   /** None in an export made before agents. */
   agents?: ExportedAgent[];
+  /** The memory notes (shared/memory.ts); none in an export made before them. Never one of a chat off the record. */
+  memory?: ExportedNote[];
   pageValues: ExportedPageValues[];
 }
 
@@ -226,6 +229,7 @@ export function checkManifest(value: unknown): ExportManifest | { error: string 
   const lists = [manifest.chats, manifest.artifacts, manifest.files, manifest.sharedWithMe];
   if (typeof manifest.uid !== "string" || !manifest.account || !lists.every(Array.isArray)) return { error: "The export's manifest is damaged." };
   if (manifest.account.agents !== undefined && !Array.isArray(manifest.account.agents)) return { error: "The export's manifest is damaged." };
+  if (manifest.account.memory !== undefined && !Array.isArray(manifest.account.memory)) return { error: "The export's manifest is damaged." };
   // Ids and skill names go into request paths: only ones this app makes.
   const ids = [...manifest.chats!.flatMap((chat) => [chat?.id]), ...manifest.artifacts!.flatMap((artifact) => [artifact?.id, artifact?.chatId])];
   const skills = Array.isArray(manifest.account.skills) ? manifest.account.skills : [];

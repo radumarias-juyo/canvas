@@ -23,6 +23,7 @@ import {
   type ImportPlanRequest,
 } from "../shared/data-export.ts";
 import { AGENT_ID_PATTERN } from "../shared/agents.ts";
+import { MAX_NOTES } from "../shared/memory.ts";
 import { ID_PATTERN, isOwnedBy } from "../shared/protocol.ts";
 import { MAX_SKILL_FILE_BYTES, MAX_SKILL_FILES } from "../shared/skill-files.ts";
 import { SKILL_NAME_PATTERN } from "../shared/skills.ts";
@@ -62,6 +63,8 @@ type Directory = DurableObjectStub<UserDirectory>;
  *                                             puts it in the user's list
  *   POST /api/me/import/artifacts/:id/versions one version, in order (ArtifactVersionImport)
  *   POST /api/me/import/page-values           what pages saved ([ExportedPageValues]), for pages that saved nothing here
+ *   POST /api/me/import/memory                {notes, agents}: the memory notes, after the chats and agents they name;
+ *                                             `agents` maps the export's agent ids to theirs here. Answers each one's result
  * Imports add to what is here and never replace it, so an import that stopped part way is run again from the start.
  * JSON bodies take a JSON content type only, and a file comes by PUT: neither can be sent by another site's form.
  * Returns null for any other path.
@@ -98,6 +101,14 @@ export async function dataRoute(request: Request, uid: string, directory: Direct
     return json(result, "error" in result ? 400 : 200);
   }
   if (path === "/api/me/import/page-values") return importPageValues(request, uid, directory, storage);
+  if (path === "/api/me/import/memory") {
+    const body = await readJson<{ notes?: unknown; agents?: unknown }>(request);
+    if (!Array.isArray(body?.notes) || body.notes.length > MAX_NOTES) return json({ error: `Expected {notes: [up to ${MAX_NOTES} notes], agents?}.` }, 400);
+    const agents = isObject(body.agents) ? (Object.fromEntries(Object.entries(body.agents).filter(([, id]) => typeof id === "string" && AGENT_ID_PATTERN.test(id))) as Record<string, string>) : {};
+    const results = [];
+    for (const note of body.notes) results.push(await directory.importNote(note, agents));
+    return json(results);
+  }
   return null;
 }
 

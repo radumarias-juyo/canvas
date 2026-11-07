@@ -15,6 +15,7 @@ import { MenuButton, opensElsewhere } from "../layout.tsx";
 import { stateLabel } from "./glance.ts";
 import { agentPath, NEW_AGENT, type AgentPlace } from "./nav.ts";
 import { SetupTab } from "./SetupTab.tsx";
+import { KnowsTab } from "../memory/KnowsTab.tsx";
 import { dropAgent, putAgent, reloadAgents, useAgents } from "./store.ts";
 
 /**
@@ -68,6 +69,7 @@ export const TABS: AgentTab[] = [
     fields: ["name", "job", "instructions", "avatar", "color", "model", "effort", "servers", "sharedServers"],
     Component: SetupTab,
   },
+  { id: "knows", label: "Knows", fields: [], Component: KnowsTab },
 ];
 
 /** The tab a place opens: the one asked for, else the one that edits its field, else the first. */
