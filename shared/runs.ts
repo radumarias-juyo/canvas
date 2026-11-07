@@ -69,6 +69,17 @@ export interface RunDelivery {
    * notification, or "its chat" among the chats), else the first chat it went to. Where its owner answers it.
    */
   chat?: ChatRef;
+  /** The ids of every chat it was posted into (a chat post's, or a notification's: its home chat). */
+  chats?: string[];
+}
+
+/**
+ * The chats a delivery posted its report into, which the people in them saw: a chat post's, or a notification's (in
+ * its home chat); none for one not sent. A delivery from before `chats` was kept names its one `chat`.
+ */
+export function postedInto(delivery: RunDelivery): string[] {
+  if ((delivery.kind !== "chat" && delivery.kind !== "notify") || delivery.status !== "sent" || !delivery.text) return [];
+  return delivery.chats ?? (delivery.chat ? [delivery.chat.id] : []);
 }
 
 /** One item of a run: an element of its scope's list, or the run itself when it has no scope. */

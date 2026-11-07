@@ -35,6 +35,7 @@ import {
 import type { PendingActionView } from "../../../shared/limits.ts";
 import { clip, errorMessage, mapLimit, plural } from "../../../shared/util.ts";
 import { describeSchedule } from "./schedule.ts";
+import { isQuiet, postDayStart, postsUsedLine, worthPostingLine } from "./pacing.ts";
 import { actedMark, turnedOff, type ActedStep, type AgentRuns, type ItemKept, type KeptElement, type RunRecord } from "./store.ts";
 
 /** How much of a read's result goes into the run's session (the rest is cut, with a note); a do result is kept up to it. */
@@ -239,13 +240,14 @@ export async function readFor(host: Pick<RunHost, "read">, agent: AgentDefinitio
 }
 
 /** What a work step's prompt says around the step's own words. */
-function workPrompt(step: Extract<AgentStep, { kind: "work" }>, when: string, item?: { label: string; value: Value }): string {
+function workPrompt(step: Extract<AgentStep, { kind: "work" }>, when: string, item?: { label: string; value: Value }, bar?: string): string {
   return [
     `Your schedule started this run (${when}).${item ? ` This run is for ${item.label}: ${excerpt(jsonOf(item.value), 2_000)}` : ""}`,
     "The results of the run's reads are above. Do this step:",
     step.prompt,
     ...(step.skill ? [`Use the skill "${step.skill}" for it (activate_skill).`] : []),
-    "Answer with the report itself, briefly: it is sent as you write it. If there is nothing worth reporting, say so in one line.",
+    "Answer with the report itself, briefly: it is sent as you write it." +
+      (bar ? `\n${bar}` : " If there is nothing worth reporting, say so in one line."),
   ].join("\n\n");
 }
 
@@ -717,7 +719,8 @@ export class RunExecutor {
             // Only a record: a failed read leaves the count as it is.
             if (this.#host.notesRead) this.#usedNotes(state, await this.#host.notesRead(state.session).catch(() => []));
           }
-          const result = await this.#host.work(state.session, workPrompt(step, state.when, state.element), `${opId(state)}:work:${key}`);
+          const prompt = workPrompt(step, state.when, state.element, worthPostingLine(state.agent));
+          const result = await this.#host.work(state.session, prompt, `${opId(state)}:work:${key}`);
           state.cost += result.cost;
           if (result.model) this.#usedModel(state, result.model);
           const label = `${STEP_LABELS.work}: ${firstLine(step.prompt)}${step.skill ? `, with ${step.skill}` : ""}`;
@@ -726,6 +729,11 @@ export class RunExecutor {
             throw new Error(`The work step ended without an answer: ${result.reason ?? "no reason given"}.`);
           }
           const text = (result.text ?? "").trim();
+          // Nothing met the agent's bar for a post: a quiet line in its record, and nothing sent.
+          if (isQuiet(text)) {
+            record(label, true, "nothing worth a post", result.cost);
+            return { status: "not_today", reason: "nothing met its bar for a post" };
+          }
           state.scope.answer = text;
           if (text) state.texts.push(text);
           record(label, true, firstLine(text), result.cost);
@@ -892,7 +900,9 @@ export class RunExecutor {
     const acted = items.filter((item) => item.status === "acted");
     const deliveries = [...run.detail.deliveries];
     const sent = new Set(run.detail.sent ?? []);
-    for (const { key, step } of deliverySteps(workflowOf(agent))) {
+    // Past the agent's posts for the day, a run on its own sends nothing: a quiet line in its record instead.
+    const quiet = this.#postsUsed(agent, run);
+    for (const { key, step } of quiet ? [] : deliverySteps(workflowOf(agent))) {
       const parts = items.filter((item) => item.reached?.includes(key)).map((item) => ({ label: item.label, text: item.textAt?.[key] ?? item.text }));
       if (!parts.length || sent.has(key)) continue;
       const text = reportOf(parts);
@@ -929,18 +939,21 @@ export class RunExecutor {
     // And one whose report went out to nobody (every send failed) failed, even with items acted: nobody heard.
     const undelivered = deliveries.find((delivery) => delivery.status === "failed" || delivery.status === "refused");
     const blocked = items.filter((item) => item.status === "blocked");
-    // Never "sent" for a write that was refused: with nothing acted on or sent, a refused one says so (blocked).
-    const status: RunStatus = delivered
-      ? "sent"
-      : undelivered
-        ? "failed"
-        : acted.length
-          ? "sent"
-          : failed.length
-            ? "failed"
-            : blocked.length
-              ? "blocked"
-              : "not_today";
+    // Kept quiet (its posts for the day were used): not today, whatever its items reached, as it posted nothing. Never
+    // "sent" for a write that was refused: with nothing acted on or sent, a refused one says so (blocked).
+    const status: RunStatus = quiet
+      ? "not_today"
+      : delivered
+        ? "sent"
+        : undelivered
+          ? "failed"
+          : acted.length
+            ? "sent"
+            : failed.length
+              ? "failed"
+              : blocked.length
+                ? "blocked"
+                : "not_today";
     const first = deliveries.find((delivery) => delivery.text)?.text ?? acted.find((item) => item.text)?.text;
     const summary =
       status === "sent"
@@ -949,11 +962,27 @@ export class RunExecutor {
           ? `Failed: ${(undelivered ? undelivered.detail : failed[0]?.reason) ?? "a step failed"}`
           : status === "blocked"
             ? `Blocked: ${blocked[0]?.reason ?? "a change was refused"}`
-            : `Not today: ${items[0]?.reason ?? "nothing to report"}`;
+            : `Not today: ${quiet ?? items[0]?.reason ?? "nothing to report"}`;
     runs.update(agent.id, run.dueAt, { status, summary });
     // It went: older runs still waiting for a sign-in would only post after it.
     if (status !== "failed") runs.skipReplaced(agent.id, run.dueAt, run.test);
     return status;
+  }
+
+  /**
+   * Why a run on its own (its schedule's, its watch's) may post nothing more today: its agent posted as many times as
+   * it may (postsPerDay) since the day began; undefined when it may. A test, or a run someone asked for, always may.
+   */
+  #postsUsed(agent: AgentDefinition, run: RunRecord): string | undefined {
+    const limit = agent.postsPerDay;
+    if (limit === undefined || run.test || (run.why !== "schedule" && run.why !== "watch")) return undefined;
+    // Kept once decided, so a run that goes on after a restart decides as it did.
+    if (run.detail.quiet) return run.detail.quiet;
+    if (run.detail.sent?.length) return undefined;
+    if (this.#host.runs.postedSince(agent.id, postDayStart(agent, run.dueAt), run.dueAt) < limit) return undefined;
+    const quiet = postsUsedLine(limit);
+    this.#host.runs.update(agent.id, run.dueAt, { detail: { quiet } });
+    return quiet;
   }
 
   /** A delivery's own session (a page rebuild's), made once and kept in the run's row before it is used. */

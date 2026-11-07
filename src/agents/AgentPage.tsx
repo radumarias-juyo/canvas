@@ -75,7 +75,7 @@ export const TABS: AgentTab[] = [
     fields: SETUP_FIELDS,
     Component: SetupTab,
   },
-  { id: "workflow", label: "Workflow", fields: ["trigger", "scope", "workflow"], Component: WorkflowTab },
+  { id: "workflow", label: "Workflow", fields: ["trigger", "scope", "workflow", "worthPosting", "postsPerDay"], Component: WorkflowTab },
   { id: "runs", label: "Runs", fields: [], Component: RunsTab },
   { id: "limits", label: "Limits", fields: LIMIT_FIELDS, Component: LimitsTab },
   { id: "knows", label: "Knows", fields: [], Component: KnowsTab },
