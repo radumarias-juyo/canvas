@@ -4,6 +4,7 @@ import { CHAT_AGENT_KIND, CHAT_TURN_KIND, proposedBy, type ChatAgentReplyData } 
 import { entryItems, mergeItems, type ItemRef } from "../../shared/items.ts";
 import { CHAT_MESSAGE_KIND, CHAT_PEOPLE_KIND, publishedBy, type ChatMessageData, type ChatPeopleData } from "../../shared/protocol.ts";
 import { CHAT_COPY_KIND, CHAT_EVENT_KIND, type ChatCopyData } from "../../shared/chat-kinds.ts";
+import { CHAT_CHECKLIST_KIND, checklistOf, type ChatChecklistData } from "../../shared/checklist.ts";
 
 /** When an entry was sent, for one that has a time: messages from before chats kept `sentAt` have only the time pi wrote them, and asides not even that. */
 export function sentAt(entry: EntryRecord): number | undefined {
@@ -18,13 +19,15 @@ export function sentAt(entry: EntryRecord): number | undefined {
 
 /**
  * Entries the app shows something for; the others (such as asides for the model) do not end an agent's reply, or start
- * one. Another agent's reply (`chat.agent`) shows as its own message.
+ * one. Another agent's reply (`chat.agent`) shows as its own message. A checklist's entries show as one card, where it
+ * was first posted (inReply says which of them end a reply).
  */
 export function shown(entry: EntryRecord): boolean {
   return (
     entry.kind === CHAT_MESSAGE_KIND ||
     entry.kind === CHAT_PEOPLE_KIND ||
     entry.kind === CHAT_AGENT_KIND ||
+    entry.kind === CHAT_CHECKLIST_KIND ||
     entry.kind === CHAT_EVENT_KIND ||
     entry.kind === CHAT_COPY_KIND ||
     entry.kind === "pi.user" ||
@@ -34,6 +37,28 @@ export function shown(entry: EntryRecord): boolean {
 
 export function isAgent(entry: EntryRecord): boolean {
   return entry.kind === "pi.assistant" || entry.kind === "pi.tool-result";
+}
+
+/**
+ * For a checklist entry, met in the log's order: the checklist it first posts, whose card shows there, or null for one
+ * that draws nothing (a later entry updates the card drawn earlier). `posted` holds the checklists met so far.
+ */
+export function checklistPost(entry: Pick<EntryRecord, "kind" | "data">, posted: Set<string>): ChatChecklistData | null {
+  const data = checklistOf(entry);
+  if (!data || posted.has(data.id)) return null;
+  posted.add(data.id);
+  return data;
+}
+
+/**
+ * Whether a shown entry sits in pi's reply without ending it (or starting one): a checklist's later entry, which draws
+ * nothing, and pi's own plan, a part of its reply. Another agent's plan shows as a card of its own, as its reply would.
+ * `posted` as for checklistPost.
+ */
+export function inReply(entry: Pick<EntryRecord, "kind" | "data">, posted: Set<string>): boolean {
+  if (entry.kind !== CHAT_CHECKLIST_KIND) return false;
+  const post = checklistPost(entry, posted);
+  return post === null || post.by.agentId === undefined;
 }
 
 /** The artifact a publish's result made, which shows as a card. */

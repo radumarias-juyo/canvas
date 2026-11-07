@@ -1,6 +1,7 @@
 import type { AssistantMessage, ToolCall, ToolResultMessage } from "@earendil-works/pi-ai";
 import type { EntryRecord } from "@earendil-works/pi-durable";
-import { showsAsCard, shown } from "./entries.ts";
+import { CHAT_CHECKLIST_KIND } from "../../shared/checklist.ts";
+import { checklistPost, showsAsCard, shown } from "./entries.ts";
 
 /** One step of the agent's: a tool call, or a thought. `key` stays the same once a streamed message lands. */
 export type StepItem = { kind: "tool"; key: string; call: ToolCall; streaming: boolean } | { kind: "thought"; key: string; text: string };
@@ -60,18 +61,24 @@ function placeSteps(message: AssistantMessage, entry: number, streaming: boolean
 
 /**
  * Groups the agent's steps into runs: the steps one after the other with nothing shown between them (text, a message,
- * an artifact card, or what the chat draws over an entry in `breaks`: a day, the "New" line), across the messages of a
- * reply. Each run shows where its first step is. A message that places the same steps as in `prev` keeps its places
- * from it, so it is not drawn again.
+ * an artifact card, a checklist where it was first posted, or what the chat draws over an entry in `breaks`: a day, the
+ * "New" line), across the messages of a reply. A checklist's later entries draw nothing, so they end no run. Each run
+ * shows where its first step is. A message that places the same steps as in `prev` keeps its places from it, so it is
+ * not drawn again.
  */
 export function stepRuns(entries: readonly EntryRecord[], breaks: ReadonlySet<number>, prev?: StepRuns): StepRuns {
   const byEntry = new Map<number, MessageSteps>();
   const calls = new Set<string>();
+  const posted = new Set<string>();
   let run: OpenRun | undefined;
   for (const entry of entries) {
     if (!shown(entry)) continue;
     const id = entry.id as number;
     if (breaks.has(id)) run = undefined;
+    if (entry.kind === CHAT_CHECKLIST_KIND) {
+      if (checklistPost(entry, posted)) run = undefined;
+      continue;
+    }
     const message = entry.model?.[0];
     if (entry.kind === "pi.assistant" && message?.role === "assistant") {
       for (const block of message.content) if (block?.type === "toolCall") calls.add(block.id);

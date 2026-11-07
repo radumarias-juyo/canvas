@@ -54,6 +54,8 @@ import { ComposerMore } from "./ComposerMore.tsx";
 import { Dictation } from "./Dictation.tsx";
 import { ownMessages, useHistory } from "./history.ts";
 import { AgentReply } from "./AgentReply.tsx";
+import { ChecklistCard } from "./ChecklistCard.tsx";
+import { CHAT_CHECKLIST_KIND, checklistAt, foldChecklists, type ChatChecklistData } from "../../shared/checklist.ts";
 import { ArtifactCard } from "./ArtifactCard.tsx";
 import { Markdown } from "./Markdown.tsx";
 import { MentionList, MentionText, useMentions } from "./Mentions.tsx";
@@ -63,7 +65,7 @@ import { OrphanResult, StepRun, StepsProvider, stepLabel } from "./Steps.tsx";
 import { endedEarly, stepRuns, streamingSteps, type MessageSteps, type StepRuns, type StreamingSteps } from "./stepRuns.ts";
 import { Thinking } from "./Thinking.tsx";
 import { useRevealedText } from "./reveal.ts";
-import { blocks, firstNew, isAgent, openHints, published, replyItems, sentAt, shown, showsAsCard, userText } from "./entries.ts";
+import { blocks, firstNew, inReply, isAgent, openHints, published, replyItems, sentAt, shown, showsAsCard, userText } from "./entries.ts";
 import { answersEveryMessage, CHAT_COPY_KIND, CHAT_EVENT_KIND, legacyKind, type ChatCopyData, type ChatEventData } from "../../shared/chat-kinds.ts";
 import { BranchOff, ChatEventNotice, EntryOf, KindChip, TagCard } from "./ChatKinds.tsx";
 
@@ -312,6 +314,8 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
   // pi's replies' item chips: the records its tool results held, under the reply built on them.
   const itemsBefore = useRef<ReadonlyMap<number, ItemRef[]>>(undefined);
   const items = useMemo(() => (itemsBefore.current = replyItems(state.entries, itemsBefore.current)), [state.entries]);
+  // Each plan an agent posted, as its latest entry says, drawn where it was first posted: only that entry draws again.
+  const checklists = useMemo(() => foldChecklists(state.entries), [state.entries]);
   // The agents working now, each with its live steps, its time and its own Stop; then who waits for a turn.
   const liveTurns = useMemo(() => shownLive(live, agents, state.entries), [live, agents, state.entries]);
   const waiting = useMemo(() => queueLines(agents), [agents]);
@@ -377,6 +381,7 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
                               onOpenChat={onOpenChat}
                               chatId={chatId}
                               items={items.get(entry.id as number)}
+                              checklist={checklistAt(checklists, entry)}
                             />
                           </EntryOf.Provider>
                           {spend && <PromptCost spend={spend} />}
@@ -584,6 +589,7 @@ const Entry = memo(function Entry({
   onOpenChat,
   chatId,
   items,
+  checklist,
 }: {
   entry: EntryRecord;
   /** Where an agent message's steps show (stepRuns.ts). */
@@ -604,6 +610,8 @@ const Entry = memo(function Entry({
   chatId: string;
   /** For one of pi's replies: the records its tool results held, as chips under it. */
   items?: ItemRef[];
+  /** For the entry a checklist was first posted at: its latest state (the same object until it changes). */
+  checklist?: ChatChecklistData;
 }) {
   const people = useSharedChat();
   const reactions = useMessageReactions(isReactable(entry) ? entry.id : undefined, byEmoji);
@@ -650,6 +658,8 @@ const Entry = memo(function Entry({
     const copied = { role: "assistant", content: [{ type: "text", text: data.text }], timestamp: data.sentAt ?? 0, stopReason: "stop" } as unknown as AssistantMessage;
     return <Assistant message={copied} reactions={reactions} onReply={answer} />;
   }
+  // A checklist's later entries draw nothing: its card, where it was first posted, shows what they say.
+  if (entry.kind === CHAT_CHECKLIST_KIND) return checklist ? <ChecklistCard data={checklist} /> : null;
   if (entry.kind === CHAT_AGENT_KIND) {
     return <AgentReply data={entry.data as unknown as ChatAgentReplyData} reactions={reactions} onReply={answer} onOpen={onOpen} />;
   }
@@ -711,12 +721,16 @@ function useNewInView(list: RefObject<HTMLDivElement | null>, following: RefObje
   }, [list, following, newAt, since]);
 }
 
-/** The agent's entries that start one of its replies: the first of its own after anything else the chat shows. */
+/**
+ * The agent's entries that start one of its replies: the first of its own after anything else the chat shows. Its own
+ * plan, and a plan's later entries, which draw nothing, do not end a reply (inReply).
+ */
 function agentTurns(entries: readonly EntryRecord[]): Set<number> {
   const starts = new Set<number>();
+  const posted = new Set<string>();
   let inTurn = false;
   for (const entry of entries) {
-    if (!shown(entry)) continue;
+    if (!shown(entry) || inReply(entry, posted)) continue;
     if (isAgent(entry) && !inTurn) starts.add(entry.id as number);
     inTurn = isAgent(entry);
   }
@@ -724,7 +738,9 @@ function agentTurns(entries: readonly EntryRecord[]): Set<number> {
 }
 
 function endsInAgentTurn(entries: readonly EntryRecord[]): boolean {
-  const last = entries.findLast(shown);
+  const posted = new Set<string>();
+  let last: EntryRecord | undefined;
+  for (const entry of entries) if (shown(entry) && !inReply(entry, posted)) last = entry;
   return last !== undefined && isAgent(last);
 }
 
