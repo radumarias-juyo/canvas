@@ -73,7 +73,8 @@ function RunList({ agent, chat, navigate }: { agent: AgentDefinition; chat?: str
   const { value, error, again } = useRead<AgentRunList>(
     () => api.agentRuns(agent.id),
     agent.id,
-    agent.id,
+    // Read again on a new version too (turned on or off, a new time): its next run moves with it.
+    `${agent.id}:${agent.version}`,
     (read) => read.runs.some((run) => run.status === "running"),
   );
   const [testing, setTesting] = useState(false);
@@ -99,7 +100,7 @@ function RunList({ agent, chat, navigate }: { agent: AgentDefinition; chat?: str
         <div className="agent-runs-when">
           <strong>{runs ? runs.value : "Runs only when asked"}</strong>
           {runs?.note && <small>{runs.note}</small>}
-          {value?.nextRunAt && <small>Next run {aheadLabel(value.nextRunAt, now)}</small>}
+          {agent.enabled && value?.nextRunAt && <small>Next run {aheadLabel(value.nextRunAt, now)}</small>}
           {runs && !agent.enabled && <small>Off: it runs again once you turn it on.</small>}
         </div>
         <div className="agent-runs-actions">
@@ -212,7 +213,8 @@ function RunPage({ agent, dueAt, chat, navigate }: { agent: AgentDefinition; due
               </a>
             </span>
           ))}
-          . The run goes on by itself once you do; if several mornings waited, only the newest goes.
+          . The run goes on by itself once you do; if several mornings waited, only the newest goes. Signed in to it before
+          and no access any more? Disconnect it under Sign-ins in the account menu, and runs go on without it.
         </p>
       )}
       {run.status === "failed" && run.summary && <p className="form-error">{run.summary}</p>}
