@@ -3469,8 +3469,7 @@ export class ChatAgent extends DurableObject<Env> {
             agent,
             turnLevel(turn).level === 4,
             (server) => this.hub.server(server)?.auth === "oauth",
-            !!turn.calledBy.unprompted,
-            !this.members.hasAny(),
+            { unprompted: !!turn.calledBy.unprompted, alone: !this.members.hasAny() },
           );
     await this.#configureSession(session, this.#agentChoice(agent), agentInstructions(agent, this.#nameOf(entry.ownerUid)), allowed);
   }

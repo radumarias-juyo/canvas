@@ -299,7 +299,7 @@ const DISPLAY_TOOLS = [CHECKLIST_TOOL];
  * tools (READ_TOOLS), the display ones (DISPLAY_TOOLS) and the read-only MCP tools of its servers for shared chats. Its
  * owner then approves any write in their own view. A turn nobody asked for (`unprompted`) gets no display tools either:
  * it may still answer PASS, and then nothing of it shows. In a chat with nobody but its owner (`alone`), where only
- * they see what it reads, such a turn reads as a run does: every read-only MCP tool of its servers (runTools).
+ * they see what it reads, such a turn reads every read-only MCP tool of its servers, as a run does (runTools).
  *
  * `servers`: the agent's own list (every server when absent); `sharedServers`: the one for shared chats (when absent,
  * those of its servers that do not sign in each user, `signsIn`).
@@ -310,8 +310,7 @@ export function allowedTools(
   agent: Pick<AgentDefinition, "servers" | "sharedServers">,
   byOwner: boolean,
   signsIn: (server: string) => boolean,
-  unprompted = false,
-  alone = false,
+  { unprompted = false, alone = false }: { unprompted?: boolean; alone?: boolean } = {},
 ): string[] {
   const own = (server: string) => mayUseServer(agent, server);
   const shared = (server: string) => own(server) && (alone || (agent.sharedServers ? agent.sharedServers.includes(server) : !signsIn(server)));

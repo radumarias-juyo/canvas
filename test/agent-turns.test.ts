@@ -492,11 +492,11 @@ describe("allowedTools", () => {
 
   it("lets a turn its owner did not give read its sign-in servers too when nobody but the owner is in the chat", () => {
     // A routed turn in the owner's private chat: "how are my open deals?" reads mail (signs in each user) as a run does.
-    expect(allowedTools(tools, mcp, agent, false, signsIn, false, true)).toEqual([...reads, "crm__list_deals", "mail__search"]);
+    expect(allowedTools(tools, mcp, agent, false, signsIn, { alone: true })).toEqual([...reads, "crm__list_deals", "mail__search"]);
     // With others in the chat, only the servers whose results everyone shares.
     expect(allowedTools(tools, mcp, agent, false, signsIn)).toEqual([...reads, "crm__list_deals"]);
     // Never a write, alone or not.
-    expect(allowedTools(tools, mcp, agent, false, signsIn, false, true)).not.toContain("crm__update_deal");
+    expect(allowedTools(tools, mcp, agent, false, signsIn, { alone: true })).not.toContain("crm__update_deal");
   });
 
   it("gives a run only reading tools: the app's and those of all its own servers, sign-in ones too", () => {
@@ -508,7 +508,7 @@ describe("allowedTools", () => {
     expect(allowedTools([...tools, "checklist"], mcp, agent, false, signsIn)).toContain("checklist");
     expect(allowedTools([...tools, "checklist"], mcp, agent, true, signsIn)).toContain("checklist");
     // Speaking up, it may still PASS: then nothing of it may show.
-    expect(allowedTools([...tools, "checklist"], mcp, agent, false, signsIn, true)).toEqual(allowedTools(tools, mcp, agent, false, signsIn));
+    expect(allowedTools([...tools, "checklist"], mcp, agent, false, signsIn, { unprompted: true })).toEqual(allowedTools(tools, mcp, agent, false, signsIn));
     expect(runTools([...tools, "checklist"], mcp, agent)).not.toContain("checklist");
   });
 

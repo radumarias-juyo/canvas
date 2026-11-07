@@ -270,6 +270,24 @@ function setMissing(scope: Record<string, Value>, name: string, why: string): vo
 /** Where an item stopped before its last step, and why. */
 type ItemStop = { status: "not_today" | "waiting"; reason: string };
 
+/** Why a run going on stops: its item's reason, the run's, and how it ends unless something went out. */
+type RunStop = { item: string; why: string; otherwise: "failed" | "not_today" };
+
+/**
+ * Why a run going on stops with its agent as it is now (null: deleted), or null when it goes on: its workflow or scope
+ * changed since it began, or it was turned off (a test's apart).
+ */
+function whyStop(agent: AgentDefinition | null, name: string, run: RunRecord): RunStop | null {
+  if (agent && run.detail.shape !== undefined && run.detail.shape !== shapeOf(agent)) {
+    const why = `@${name}'s workflow changed while this run waited, so it did nothing more and sent nothing`;
+    return { item: "Its workflow changed while it waited: it stopped there.", why, otherwise: "failed" };
+  }
+  if (!run.test && !agent?.enabled) {
+    return { item: `@${name} was turned off: it stopped there.`, why: `@${name} was turned off, so it did nothing more and sent nothing`, otherwise: "not_today" };
+  }
+  return null;
+}
+
 /** One item's way through the steps. */
 interface ItemRun {
   agent: AgentDefinition;
@@ -371,7 +389,7 @@ export class RunExecutor {
       ]);
       if (capped) {
         // A run going on (a held call decided, a sign-in come) has items open: they end with it, not left running.
-        runs.stop(agent.id, dueAt, { item: capped, status: "failed", summary: capped });
+        runs.stop(agent.id, dueAt, { status: "failed", summary: capped });
         return { status: "failed", started };
       }
       let missing = needed;
@@ -399,10 +417,9 @@ export class RunExecutor {
         // An item decided during the pass before goes through with the agent as it is now: not once it was turned
         // off or its workflow changed meanwhile.
         if (pass++ > 0) {
-          const now = await this.#host.definition(agent.id).catch(() => current);
-          const changed = this.#stopIfChanged(now ?? { ...current, enabled: false }, run);
-          if (changed) return { status: changed, started };
-          if (now) current = now;
+          const now = await this.#recheck(current, run);
+          if (typeof now === "string") return { status: now, started };
+          current = now;
         }
         await mapLimit(elements, RUN_CONCURRENCY, (element) => this.#item(current, run, element, when));
         outcomes = this.#outcomes(agent.id, dueAt, elements);
@@ -410,10 +427,9 @@ export class RunExecutor {
       // A run that went on (a decision, a restart, a second pass) checks the agent once more before it sends: turned
       // off or changed meanwhile, it sends nothing.
       if (!started || pass > 1) {
-        const now = await this.#host.definition(agent.id).catch(() => current);
-        const changed = this.#stopIfChanged(now ?? { ...current, enabled: false }, run);
-        if (changed) return { status: changed, started };
-        if (now) current = now;
+        const now = await this.#recheck(current, run);
+        if (typeof now === "string") return { status: now, started };
+        current = now;
       }
       const held = outcomes.filter((item) => item.status === "waiting");
       if (held.length) {
@@ -428,7 +444,7 @@ export class RunExecutor {
       if (error instanceof SignInNeeded) return (await this.#turnedOffNow(agent, run)) ?? this.#waitForSignIn(agent, run, [error.server]);
       // A run going on has items open: they end with it, not left running or waiting for good.
       const summary = `Failed: ${errorMessage(error)}`;
-      runs.stop(agent.id, dueAt, { item: summary, status: "failed", summary });
+      runs.stop(agent.id, dueAt, { status: "failed", summary });
       return { status: "failed", started };
     } finally {
       this.#host.changed(agent.id);
@@ -454,27 +470,26 @@ export class RunExecutor {
       this.#host.runs.update(run.agentId, run.dueAt, { detail: { shape } });
       run.detail.shape = shape;
     }
-    if (run.detail.shape !== undefined && run.detail.shape !== shape) {
-      const why = `@${agent.name}'s workflow changed while this run waited, so it did nothing more and sent nothing`;
-      return this.#stop(agent, run, "Its workflow changed while it waited: it stopped there.", why, "failed");
-    }
-    if (!run.test && !agent.enabled) {
-      const why = `@${agent.name} was turned off, so it did nothing more and sent nothing`;
-      return this.#stop(agent, run, `@${agent.name} was turned off: it stopped there.`, why, "not_today");
-    }
-    return null;
+    const stop = whyStop(agent, agent.name, run);
+    return stop && this.#stop(agent, run, stop);
+  }
+
+  /** The agent as it is now for a run going on (gone reads as turned off), or how the run stopped for it. */
+  async #recheck(current: AgentDefinition, run: RunRecord): Promise<AgentDefinition | RunStatus> {
+    const now = await this.#host.definition(current.id).catch(() => current);
+    return this.#stopIfChanged(now ?? { ...current, enabled: false }, run) ?? now ?? current;
   }
 
   /** Whether a run went into its items: it listed its scope, or has an item's row. */
   #wentIn(run: RunRecord): boolean {
-    return run.detail.listed === true || this.#host.runs.items(run.agentId, run.dueAt).length > 0;
+    return run.detail.listed === true || this.#host.runs.hasItems(run.agentId, run.dueAt);
   }
 
   /**
    * A run that goes on no more (its agent changed or was turned off while it waited): its open items stop, nothing more
    * is sent, and it says why, ending as `otherwise`, or as sent when a restart cut it off while it sent (what went out went).
    */
-  #stop(agent: AgentDefinition, run: RunRecord, item: string, why: string, otherwise: "failed" | "not_today"): RunStatus {
+  #stop(agent: AgentDefinition, run: RunRecord, { item, why, otherwise }: RunStop): RunStatus {
     const sent = run.detail.deliveries.some((delivery) => delivery.status === "sent");
     const status = sent ? "sent" : otherwise;
     this.#host.runs.stop(agent.id, run.dueAt, { item, status, summary: sent ? `Stopped part way: ${why} more.` : `Stopped: ${why}.` });
@@ -524,7 +539,7 @@ export class RunExecutor {
     if (now?.enabled) return null;
     const summary = now ? turnedOff(agent) : `Skipped: @${agent.name} was deleted.`;
     // Its items that did not end (one waiting at a held call, when it goes on) end with it.
-    this.#host.runs.stop(run.agentId, run.dueAt, { item: summary, status: "not_today", summary });
+    this.#host.runs.stop(run.agentId, run.dueAt, { status: "not_today", summary });
     return { status: "not_today", started: true };
   }
 
@@ -572,11 +587,9 @@ export class RunExecutor {
     if (!started && !run.test) {
       // Going on (reopened by a decision, or cut off by a restart), maybe after the pass began: with the agent as it is
       // now. Turned off, deleted or changed since, it stops here.
-      const now = await this.#host.definition(agent.id).catch(() => agent);
-      const changed = now && run.detail.shape !== undefined && shapeOf(now) !== run.detail.shape;
-      if (!now?.enabled || changed) {
-        const reason = changed ? "Its workflow changed while it waited: it stopped there." : `@${agent.name} was turned off: it stopped there.`;
-        runs.endItem(agent.id, run.dueAt, element.key, { status: changed ? "failed" : "not_today", steps: view.steps, reason, cost: 0 });
+      const stop = whyStop(await this.#host.definition(agent.id).catch(() => agent), agent.name, run);
+      if (stop) {
+        runs.endItem(agent.id, run.dueAt, element.key, { status: stop.otherwise, steps: view.steps, reason: stop.item, cost: 0 });
         this.#host.changed(agent.id);
         return;
       }

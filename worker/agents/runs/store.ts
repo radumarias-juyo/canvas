@@ -492,8 +492,8 @@ export class AgentRuns {
   }
 
   /** A run stops where it is: its items that did not end end as not today (`item`: why), and the run as `status`. */
-  stop(agentId: string, dueAt: number, end: { item: string; status: EndedRunStatus; summary: string }): void {
-    this.stopItems(agentId, dueAt, end.item);
+  stop(agentId: string, dueAt: number, end: { item?: string; status: EndedRunStatus; summary: string }): void {
+    this.stopItems(agentId, dueAt, end.item ?? end.summary);
     this.update(agentId, dueAt, { status: end.status, summary: end.summary });
   }
 
@@ -529,6 +529,11 @@ export class AgentRuns {
 
   items(agentId: string, dueAt: number): RunItemView[] {
     return this.#rows("agent_id = ? AND due_at = ? AND item != '' ORDER BY started_at, item", agentId, dueAt).map(itemOf);
+  }
+
+  /** Whether a run has any item's row. */
+  hasItems(agentId: string, dueAt: number): boolean {
+    return this.#sql.exec("SELECT 1 FROM agent_runs WHERE agent_id = ? AND due_at = ? AND item != '' LIMIT 1", agentId, dueAt).toArray().length > 0;
   }
 
   /** The counts and cost of runs' items, by due time. */
