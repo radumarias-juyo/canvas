@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import {
   inputOf,
+  MAX_POSTS_PER_DAY,
   MAX_WATCH_MINUTES,
+  MAX_WORTH_POSTING,
   MIN_WATCH_MINUTES,
   STEP_KINDS,
   WEEKDAYS,
@@ -36,15 +38,20 @@ interface Form {
   watch: LookStep;
   everyMinutes: number;
   condition: string;
+  /** The watch keeps its interval however much its owner's day of model calls cost. */
+  urgent: boolean;
   each: boolean;
   list: LookStep;
   steps: Keyed[];
+  /** What is worth a post (worthPosting), and at most how many a day ("" for no limit). */
+  worthPosting: string;
+  postsPerDay: string;
 }
 
 const EMPTY_LOOK = newStep("look") as LookStep;
 
 /** The fields this tab edits (and what of them the model guessed); the page's save keeps the rest. */
-type WorkflowFields = Pick<AgentInput, "trigger" | "scope" | "workflow" | "assumed">;
+type WorkflowFields = Pick<AgentInput, "trigger" | "scope" | "workflow" | "assumed" | "worthPosting" | "postsPerDay">;
 
 function formOf(agent: WorkflowFields): Form {
   const schedule = agent.trigger?.kind === "schedule" ? agent.trigger : undefined;
@@ -57,24 +64,30 @@ function formOf(agent: WorkflowFields): Form {
     watch: watch?.step ?? EMPTY_LOOK,
     everyMinutes: watch?.everyMinutes ?? 60,
     condition: watch?.when ?? "",
+    urgent: watch?.urgent === true,
     each: Boolean(agent.scope),
     list: agent.scope?.list ?? EMPTY_LOOK,
     steps: withKeys(agent.workflow ?? []),
+    worthPosting: agent.worthPosting ?? "",
+    postsPerDay: agent.postsPerDay === undefined ? "" : String(agent.postsPerDay),
   };
 }
 
 function triggerOf(form: Form): AgentTrigger | undefined {
   if (form.when === "schedule") return { kind: "schedule", at: form.at, tz: form.tz, ...(form.days.length < 7 && { days: form.days }) };
-  if (form.when === "watch") return { kind: "watch", step: form.watch, everyMinutes: form.everyMinutes, when: form.condition };
+  if (form.when === "watch")
+    return { kind: "watch", step: form.watch, everyMinutes: form.everyMinutes, when: form.condition, ...(form.urgent && { urgent: true as const }) };
   return undefined;
 }
 
 /** What a save of `form` sends for the parts this tab edits. */
-function partsOf(form: Form): Pick<AgentInput, "trigger" | "scope" | "workflow"> {
+function partsOf(form: Form): Pick<AgentInput, "trigger" | "scope" | "workflow" | "worthPosting" | "postsPerDay"> {
   return {
     trigger: triggerOf(form),
     scope: form.each ? { list: form.list, each: true } : undefined,
     workflow: form.steps.length ? withoutKeys(form.steps) : undefined,
+    worthPosting: form.worthPosting.trim() || undefined,
+    postsPerDay: form.postsPerDay === "" ? undefined : Number(form.postsPerDay),
   };
 }
 
@@ -265,6 +278,10 @@ function WorkflowForm({
               </Field>
             </div>
             {conditionError && <p className="form-error">{conditionError}</p>}
+            <label className="workflow-choice">
+              <input type="checkbox" checked={form.urgent} onChange={(e) => change({ urgent: e.target.checked })} />
+              Urgent: keep checking this often. Otherwise it checks less often as your day of model calls nears its cap.
+            </label>
           </>
         )}
         {schedule && (
@@ -273,6 +290,39 @@ function WorkflowForm({
             {schedule.note && ` · ${schedule.note}`}
           </p>
         )}
+      </fieldset>
+
+      <fieldset className="workflow-section" disabled={readOnly}>
+        <legend className="agent-label">
+          What is worth a post
+          <small>When a run finds nothing that meets it, it posts nothing and keeps a quiet line in its record.</small>
+        </legend>
+        <div className="agent-form-row">
+          <Field label="Post only" hint="in your words; any report when empty" grow>
+            {(id) => (
+              <input
+                id={id}
+                value={form.worthPosting}
+                maxLength={MAX_WORTH_POSTING}
+                placeholder="a drop of more than 5%, or a deal that closed"
+                onChange={(e) => change({ worthPosting: e.target.value })}
+              />
+            )}
+          </Field>
+          <Field label="At most a day" hint="runs on their own">
+            {(id) => (
+              <input
+                id={id}
+                type="number"
+                min={1}
+                max={MAX_POSTS_PER_DAY}
+                value={form.postsPerDay}
+                placeholder="no limit"
+                onChange={(e) => change({ postsPerDay: e.target.value })}
+              />
+            )}
+          </Field>
+        </div>
       </fieldset>
 
       <fieldset className="workflow-section" disabled={readOnly}>

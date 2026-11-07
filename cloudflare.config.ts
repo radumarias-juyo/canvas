@@ -91,6 +91,11 @@ export default defineConfig({
       // conversation, or a question nobody answered, is to each agent's job (worker/agents/funnel.ts). Empty: no agent
       // posts unprompted.
       INTEREST_MODEL: bindings.text(process.env.PI_OFFLINE === "1" ? "" : "@cf/baai/bge-m3"),
+      // Background model jobs nobody waits on, such as an agent's nightly look back over its memory notes ("dreaming"): a
+      // small, cheap model with tool calling, by the picker's id. gpt-oss-20b on Workers AI: tool calling, 128k context,
+      // about $0.20 / $0.30 per million tokens in / out, no provider key (worker/models.ts, internalModel). Empty: the
+      // default there.
+      DREAM_MODEL: bindings.text("@cf/openai/gpt-oss-20b"),
       // What one user's model calls in their chats may cost a day (UTC), in dollars, before their scheduled runs and their
       // agents' unprompted posts stop for the day (a notice tells them). Their own messages are never stopped by it.
       // Counted in their UserDirectory. Empty or 0: no cap.
@@ -177,10 +182,6 @@ export default defineConfig({
       // small, cheap model reads its source and lists bugs, security holes and simpler code; the agent fixes them before
       // publishing. A comma-separated list of the picker's model ids, tried in order, as PAGE_AI_MODEL. Empty: no review.
       REVIEW_MODEL: bindings.text(process.env.PI_OFFLINE === "1" ? "" : "@cf/openai/gpt-oss-120b,google-ai-studio/gemini-flash-lite-latest"),
-      // The nightly dream of agents and pi (worker/memory/dream.ts): one call a night per subject that learns overnight,
-      // on the first of these models (the picker's ids, a small cheap one first) this deployment can run, else the agent's
-      // own model at low effort. Empty: only the agent's own model.
-      DREAM_MODEL: bindings.text(process.env.PI_OFFLINE === "1" ? "" : "@cf/openai/gpt-oss-120b,google-ai-studio/gemini-flash-lite-latest"),
       // Agents' metrics in Workers Analytics Engine (worker/metrics.ts): turns, runs, router picks, the funnel of
       // unprompted posts, budgets, and the hub's read cache per agent. The dataset is made on the first write.
       METRICS: bindings.analyticsEngineDataset({ name: "pi_artifacts_metrics" }),

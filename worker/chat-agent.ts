@@ -190,6 +190,8 @@ import { answeredIn, reportContext, runInstructions, RUN_STEP_KIND, workSpend, t
 import { publishedAlready, publishFindings, publishRebuilt, readOnlyDeclaration, runMark } from "./agents/runs/page.ts";
 import { compileWorkflow } from "./agents/runs/compile.ts";
 import { sourceName } from "./agents/runs/source.ts";
+import { makeNote, parseMake, type MakeKind } from "../shared/make.ts";
+import { postedRunDetail, postedRunView, postIn } from "./agents/runs/posted.ts";
 import type { Value } from "../shared/conditions.ts";
 import { runRef, type AgentRunDetail, type AgentRunList, type RunDelivery, type RunRef } from "../shared/runs.ts";
 import type { RoomLink, RoomRef, SeatBatch, SeatLink, SeatResult, SeatTurn } from "./agents/seats/link.ts";
@@ -200,6 +202,8 @@ import { NOT_YOUR_AGENT, ownWindowEntry, roomWindowSessions } from "./agents/win
 import { MAX_WINDOW_TEXT, WINDOW_ENTRIES, windowText, type AgentWindowView, type SteerResult } from "../shared/agent-window.ts";
 import { addRefusal, mayRemove, mayShare, seatedEntry, type ChatRules } from "./agents/seats/rules.ts";
 import { AgentSeats, type SeatHost } from "./agents/seats/seat.ts";
+import { postedBy, SeatLeaves, seatLeftovers, type SeatKeeps, type SeatLeave } from "./agents/seats/leaving.ts";
+import { SEAT_CHAT_PATTERN } from "../shared/protocol.ts";
 import { agentsExtension } from "./agents/tools.ts";
 import { historyExtension, HISTORY_SCAN_ENTRIES, searchHistory, type HistoryQuery } from "./agents/history.ts";
 import { ChatMemory, runAskedByOwner, type Whose } from "./memory/chat.ts";
@@ -278,6 +282,8 @@ import { CHAT_CHECKLIST_KIND, checklistEntry, type ChecklistAuthor, type Checkli
 
 /** Artifacts from the owner's other chats one chat remembers as named with "@" (see ChatAgent.#broughtIn). */
 const MAX_BROUGHT_IN = 200;
+/** How long a chat being deleted waits before each ask of a member's agent's seat to clean up (none before the first). */
+const SEAT_LEAVE_TRIES = [0, 1_000, 5_000];
 /** How many pages of 100 log entries a read of another person's page looks back through for the replies that posted it. */
 const MAX_POSTED_PAGES = 20;
 /** How many bytes of skill files a chat object keeps in memory: a design library or two. */
@@ -538,6 +544,8 @@ export class ChatAgent extends DurableObject<Env> {
   readonly turns = new AgentTurns(this.#turnHost());
   /** The seats of this user's agents in other people's chats, when this object is where one of them runs (worker/agents/seats/). */
   readonly seats = new AgentSeats(this.ctx.storage.sql, this.#seatHost());
+  /** The seats of members' agents that left this chat, still to be cleaned up in their owners' objects (leaving.ts). */
+  readonly seatLeaves = new SeatLeaves(this.ctx.storage.sql);
   /** The router that picks agents for a message naming nobody (AGENT_ROUTER_MODEL); undefined: none picks. */
   readonly #agentRouter = agentRouterModel(this.env.AGENT_ROUTER_MODEL);
   /** Agents that speak up (worker/agents/speak-up.ts). */
@@ -608,7 +616,7 @@ export class ChatAgent extends DurableObject<Env> {
     peopleFor: (uid) => this.peopleFor(uid),
     queued: (ids) => this.queued(ids),
     incoming: () => this.incoming(),
-    prompt: (text, author, attachments, mentions, replyTo) => this.prompt(text, author, attachments, mentions, replyTo),
+    prompt: (text, author, attachments, mentions, replyTo, make) => this.prompt(text, author, attachments, mentions, replyTo, false, make),
     takeOffer: (author, entry) => this.takeOffer(author, entry),
     abort: (by, agent) => this.abort(by, agent),
     agents: () => this.agentViews(),
@@ -638,6 +646,8 @@ export class ChatAgent extends DurableObject<Env> {
       watch: (payload: WatchAlarm) => this.#onAlarm(() => this.runner.watchTick(payload)),
       // A seat's results its rooms have not taken yet go again (AgentSeats.#report).
       seats: () => this.#onAlarm(async () => this.seats.wake()),
+      // The seats of agents that left this chat that could not be cleaned up yet are asked again (#flushSeatLeaves).
+      seatLeaves: () => this.#onAlarm(() => this.#flushSeatLeaves()),
       expire: (payload: { id: string }) => this.#onAlarm(() => this.#expireAction(payload.id)),
       // Agents that speak up (worker/agents/speak-up.ts): after a pause in the chat, and once a question waited long.
       pause: () => this.#onAlarm(() => this.#afterPause()),
@@ -754,7 +764,7 @@ export class ChatAgent extends DurableObject<Env> {
       heldIn: (chatId, artifactId) => this.#heldIn(chatId, artifactId),
       chatPage: (meta, session) => this.#chatPage(meta, session),
       proposeSkill: (skill) => this.#directory.saveSkill(skill, "agent", false),
-      proposeAgent: (input) => this.#directory.saveAgent(input, "agent", false),
+      proposeAgent: (input) => this.#directory.saveAgent(input, "agent", false, { proposedIn: this.chatId }),
       checkPage: (input, signal) =>
         this.#checkBrowser.withPage((page) => checkPage(page, input, this.#checkBridge(input.manifest)), { timeoutMs: CHECK_MS, signal }),
       chatArtifacts: () => this.#directory.listChatArtifacts(this.chatId),
@@ -1606,13 +1616,14 @@ export class ChatAgent extends DurableObject<Env> {
     mentionInputs: readonly MentionInput[] = [],
     replyTo?: number,
     drafts = false,
+    make?: MakeKind,
   ): Promise<void> {
     // When it came in: the refreshes and copies below can take seconds. Never the same as another's, which would make
     // two messages of one person, sent in the same millisecond, one incoming message (incomingKey).
     const sentAt = (this.#lastSentAt = Math.max(Date.now(), this.#lastSentAt + 1));
     let placed = false;
     try {
-      placed = await this.#prompt(text, author, attachments, mentionInputs, replyTo, sentAt, drafts);
+      placed = await this.#prompt(text, author, attachments, mentionInputs, replyTo, sentAt, drafts, make);
     } finally {
       const key = incomingKey({ uid: author.uid, sentAt });
       if (this.#incoming.delete(key)) this.sockets.broadcast({ type: "incoming", incoming: this.incoming(), ...(placed && { placed: key }) });
@@ -1713,6 +1724,7 @@ export class ChatAgent extends DurableObject<Env> {
     replyTo: number | undefined,
     sentAt: number,
     drafts: boolean,
+    make?: MakeKind,
   ): Promise<boolean> {
     this.#requireInChat(author);
     const shared = this.members.hasAny();
@@ -1838,7 +1850,10 @@ export class ChatAgent extends DurableObject<Env> {
     if (!text && !attached) return false;
     this.#bringIn(broughtIn);
     const written = [quote && replyLine(quote), text, note].filter(Boolean).join("\n\n");
-    const said = shared ? `${author.name}: ${written}` : written;
+    // What they chose to make (or what Auto read the message as), for pi only, when its run answers this message: a line
+    // after what they wrote, never part of it (shared/make.ts). Not for a Yes, which only drafts.
+    const chose = summoned && !drafts ? makeNote(make, text) : "";
+    const said = [shared ? `${author.name}: ${written}` : written, chose].filter(Boolean).join("\n\n");
     const content = attached ? [...attached.content, ...(written ? [{ type: "text" as const, text: said }] : [])] : said;
     const dataWith = (auto?: AutoPick, tools?: ToolPickNote) =>
       ({
@@ -2852,14 +2867,11 @@ export class ChatAgent extends DurableObject<Env> {
       const toDelete = traces.files.filter((path) => confirmed.has(path));
       const members = this.#listingMembers();
       this.sockets.disconnect();
-      // Members' agents run in their owners' objects: their seats for this chat go, and their indexes forget it.
+      // Members' agents run in their owners' objects: their seats for this chat are cleaned up (what they posted here
+      // stays theirs), and their indexes forget it.
       const seated = this.roster.list().filter((entry) => entry.seat !== undefined);
       await Promise.all([
-        ...seated.map((entry) =>
-          this.#seatLink(entry)
-            .drop()
-            .catch((error: unknown) => console.error("delete, seat:", errorMessage(error))),
-        ),
+        this.#seatLeavesBeforeGone(seated).catch((error: unknown) => console.error("delete, seats:", errorMessage(error))),
         ...seated.map((entry) => this.#noteAgentChat(entry, false)),
         ...members.map((member) => this.#index(member.uid).removeSharedChat(this.chatId, this.uid)),
         // The store checks each is this chat's: the transcript's ids come from tool results.
@@ -3177,12 +3189,66 @@ export class ChatAgent extends DurableObject<Env> {
       this.sockets.sendTo(entry.ownerUid, { type: "actions", actions: this.#actionsFor(entry.ownerUid) });
     }
     await Promise.all([
-      entry.seat !== undefined &&
-        this.#seatLink(entry)
-          .drop()
-          .catch((error: unknown) => console.error("agent seat:", errorMessage(error))),
+      // A member's agent: its seat for this chat is cleaned up, asked again until it is (#seatLeave). Its owner's index
+      // drops the followers it had through this chat there; one of the owner's here, now.
+      entry.seat !== undefined
+        ? this.#seatLeave(entry).catch((error: unknown) => console.error("agent seat:", errorMessage(error)))
+        : this.#index(entry.ownerUid)
+            .agentLeftChat(entry.agentId, this.uid, this.chatId)
+            .catch((error: unknown) => console.error("agent followers:", errorMessage(error))),
       index && this.#noteAgentChat(entry, false),
     ]);
+  }
+
+  /**
+   * A member's agent left: what its seat for this chat keeps (the pages and files its replies posted here: postedBy) goes
+   * into the outbox (SeatLeaves), which asks its seat to clean up now and, when it cannot be reached, again later.
+   */
+  async #seatLeave(entry: RosterEntry): Promise<void> {
+    if (entry.seat === undefined) return;
+    this.seatLeaves.add({ ownerUid: entry.ownerUid, agentId: entry.agentId, seat: entry.seat, keeps: await this.#postedBy(entry) });
+    await this.#flushSeatLeaves();
+  }
+
+  /** The pages and files the replies of a roster agent posted in this chat's log. */
+  async #postedBy(entry: Pick<RosterEntry, "agentId" | "ownerUid">): Promise<SeatKeeps> {
+    let keeps: SeatKeeps = { pages: [], files: [] };
+    for await (const page of this.#log({ order: "descending" }, 500)) keeps = postedBy(page, entry.agentId, entry.ownerUid, keeps);
+    return keeps;
+  }
+
+  /** Ask each seat in the outbox to clean up; those that cannot be reached are asked again later (leaveRetryMs). */
+  async #flushSeatLeaves(): Promise<void> {
+    const next = await this.seatLeaves.flush((leave) => this.#leaveSeat(leave));
+    if (next !== undefined && !this.#gone) await this.scheduler.set(new Date(Date.now() + next), "seatLeaves", {});
+  }
+
+  /** One seat's cleanup, in its owner's object (ChatAgent.seatDrop). */
+  #leaveSeat(leave: Pick<SeatLeave, "ownerUid" | "agentId" | "seat" | "keeps">): Promise<void> {
+    return exports.ChatAgent.getByName(chatAgentName(leave.ownerUid, leave.seat)).seatDrop(this.#room, leave.agentId, leave.keeps);
+  }
+
+  /**
+   * The chat is being deleted, and its outbox with it: each member's agent's seat is asked to clean up now, a few times
+   * (SEAT_LEAVE_TRIES); one that still cannot be reached keeps its leftovers, which no room reaches any more.
+   */
+  async #seatLeavesBeforeGone(seated: readonly RosterEntry[]): Promise<void> {
+    const leaves = await Promise.all(
+      seated.flatMap((entry) => (entry.seat === undefined ? [] : [(async () => ({ ...entry, seat: entry.seat!, keeps: await this.#postedBy(entry) }))()])),
+    );
+    await Promise.all(
+      leaves.map(async (leave) => {
+        for (const [i, wait] of SEAT_LEAVE_TRIES.entries()) {
+          if (wait) await new Promise((resolve) => setTimeout(resolve, wait));
+          try {
+            await this.#leaveSeat(leave);
+            return;
+          } catch (error) {
+            if (i === SEAT_LEAVE_TRIES.length - 1) console.error("delete, seat:", errorMessage(error));
+          }
+        }
+      }),
+    );
   }
 
   /**
@@ -3878,7 +3944,7 @@ export class ChatAgent extends DurableObject<Env> {
   }
 
   /** The seat of a member's agent: its owner's object for it in this room (seatChatId), reached by RPC. */
-  #seatLink(entry: RosterEntry): SeatLink & { drop(): Promise<void> } {
+  #seatLink(entry: RosterEntry): SeatLink {
     if (entry.seat === undefined) throw new Error(`@${entry.name} has no seat: it runs here.`);
     const seat = exports.ChatAgent.getByName(chatAgentName(entry.ownerUid, entry.seat));
     const room = this.#room;
@@ -3889,7 +3955,6 @@ export class ChatAgent extends DurableObject<Env> {
       wake: () => seat.seatWake(room),
       kind: (kind) => seat.seatKind(room, kind),
       decide: (id, decision) => seat.seatDecide(room, id, decision),
-      drop: () => seat.seatDrop(room, entry.agentId),
     };
   }
 
@@ -4102,8 +4167,12 @@ export class ChatAgent extends DurableObject<Env> {
     this.ctx.waitUntil(told.catch((error: unknown) => console.error("agent seat, action:", errorMessage(error))));
   }
 
-  /** (RPC, from a room) An agent of this user's left the room: its seat there goes. */
-  async seatDrop(room: RoomRef, agentId: string): Promise<void> {
+  /**
+   * (RPC, from a room) An agent of this user's left the room: its seat there goes, what it held expires, its followers
+   * through that room stop, and, once this seat object (one per agent and room: seatChatId) has no seat left, what it
+   * made for the room that `keeps` does not name (cleanSeatChat). Idempotent: the room asks again until it answers.
+   */
+  async seatDrop(room: RoomRef, agentId: string, keeps?: SeatKeeps): Promise<void> {
     await this.seats.drop(room, agentId);
     // What it held there waits no more: nobody can decide it in a room it left (expired, never run).
     const held = this.actions.list().filter((view) => {
@@ -4114,6 +4183,30 @@ export class ChatAgent extends DurableObject<Env> {
       await this.#cancelExpiry(view.id);
       await this.#expireAction(view.id);
     }
+    await this.#directory.agentLeftChat(agentId, room.ownerUid, room.chatId);
+    // Without `keeps` (a room from before them), nothing it made goes.
+    if (keeps && SEAT_CHAT_PATTERN.test(this.chatId) && this.seats.publishKind() === null) await this.#cleanSeatChat(keeps);
+  }
+
+  /**
+   * What this seat object made for the room it served, that the room never saw: the pages and files no reply posted
+   * there (seatLeftovers), and all its drafts, saved tool results and sandbox. What was posted stays its owner's.
+   */
+  async #cleanSeatChat(keeps: SeatKeeps): Promise<void> {
+    const made = await this.#traces();
+    const gone = seatLeftovers({ pages: made.artifacts, files: made.files }, keeps);
+    await Promise.all([
+      ...gone.pages.map(async (id) => {
+        // One gone already (an earlier ask that did not answer) is not deleted again.
+        const meta = await this.storage.artifacts.readMeta(id);
+        if (meta && isOwnedBy(meta, this.uid, this.chatId)) await this.storage.artifacts.delete(id, this.uid, this.chatId);
+      }),
+      gone.files.length && this.scope.files().then((store) => store.delete(gone.files)),
+      this.scope.toolResults().then((results) => results.deleteAll()),
+      this.scope.drafts().then((drafts) => drafts.deleteAll()),
+      this.env.SANDBOX_ENABLED === "true" && exports.Sandbox.getByName(sandboxName(this.uid, this.chatId)).destroy(),
+    ]);
+    if (gone.pages.length) await this.#directory.forgetArtifacts(this.chatId, gone.pages);
   }
 
   // ---- An agent's window, for its owner alone (shared/agent-window.ts) ----
@@ -4450,6 +4543,8 @@ export class ChatAgent extends DurableObject<Env> {
       ...(member && seat && { seat, ownerFrom: newestId + 1, ...(name !== agent.name && { aliasOf: agent.name }) }),
     });
     if (refused) return refused;
+    // Back in a room it left: its seat there is in use again, and is not cleaned up after all.
+    if (member && seat) this.seatLeaves.done({ ownerUid, agentId: agent.id, seat });
     // The first agent: pi's answers from now on are read for the agents they name, none before.
     if (first) this.ctx.storage.kv.put(PI_SCAN_KEY, { through: newestId } satisfies PiScan);
     this.#broadcastAgents();
@@ -4475,8 +4570,12 @@ export class ChatAgent extends DurableObject<Env> {
   runDetail(uid: string, agentId: string, dueAt: number): AgentRunDetail | ChatRefusal {
     const refused = this.#ownRuns(uid, agentId);
     if (refused) return refused;
+    return this.#runDetail(agentId, dueAt) ?? refuse(404, "No such run.");
+  }
+
+  #runDetail(agentId: string, dueAt: number): AgentRunDetail | null {
     const run = this.runs.get(agentId, dueAt);
-    if (!run) return refuse(404, "No such run.");
+    if (!run) return null;
     return {
       ...this.runs.view(run),
       when: run.detail.when ?? "",
@@ -4484,6 +4583,30 @@ export class ChatAgent extends DurableObject<Env> {
       deliveries: run.detail.deliveries,
       used: { skills: [], servers: [], models: [], ...run.detail.used, notes: run.detail.used?.notes?.length ?? 0 },
     };
+  }
+
+  /**
+   * A shared agent's runs as someone in `chatId` sees them (the Worker checked they are in it and the agent is shared
+   * there): only those that posted their report into it, and of each only that post (worker/agents/runs/posted.ts).
+   */
+  postedRuns(agentId: string, chatId: string): AgentRunList | ChatRefusal {
+    if (this.#gone) return refuse(404, DELETED);
+    if (!AGENT_ID_PATTERN.test(agentId)) return refuse(400, "No such agent.");
+    const deliveries = new Map<number, RunDelivery[]>();
+    const posted = (run: RunRecord) => {
+      deliveries.set(run.dueAt, run.detail.deliveries);
+      return postIn(run.detail.deliveries, chatId) !== undefined;
+    };
+    const runs = this.runs.list(agentId, 50, posted).flatMap((view) => postedRunView(view, deliveries.get(view.dueAt) ?? [], chatId) ?? []);
+    return { runs, nextRunAt: this.runner.nextRun(agentId), homeChatId: null };
+  }
+
+  /** One run as someone in `chatId` sees it (postedRuns): refused as no such run when it posted nothing there. */
+  postedRun(agentId: string, dueAt: number, chatId: string): AgentRunDetail | ChatRefusal {
+    if (this.#gone) return refuse(404, DELETED);
+    if (!AGENT_ID_PATTERN.test(agentId)) return refuse(400, "No such agent.");
+    const run = this.#runDetail(agentId, dueAt);
+    return (run && postedRunDetail(run, chatId)) ?? refuse(404, "No such run in this chat.");
   }
 
   /** The entries of one item's session in a run, oldest first: the trace the run detail draws with the chat's step rows. */
@@ -4675,6 +4798,13 @@ export class ChatAgent extends DurableObject<Env> {
       },
       alarmAt: async (at, payload) => (await this.scheduler.set(new Date(at), "run", payload)).id,
       alarmEvery: async (seconds, payload) => (await this.scheduler.every(seconds, "watch", payload)).id,
+      watchAt: async (at, payload) => (await this.scheduler.set(new Date(at), "watch", payload)).id,
+      // The owner's day of model calls against their cap for runs: what paces their watches (worker/agents/runs/pacing.ts).
+      spend: async () => {
+        const capUsd = Number(this.env.RUNS_DAILY_USD);
+        if (!Number.isFinite(capUsd) || capUsd <= 0) return undefined;
+        return { spentUsd: (await this.#index(this.uid).modelSpentToday()).costUsd, capUsd };
+      },
       cancelAlarm: async (id) => {
         await this.scheduler.cancel(id);
       },
@@ -4816,6 +4946,7 @@ export class ChatAgent extends DurableObject<Env> {
         status: "sent",
         sentAt,
         chat: this.#chatRef(),
+        chats: [this.chatId],
         ...(others.length && { detail: `not ${others.join(", ")}: at Inform, an agent notifies only its owner` }),
       };
     }
@@ -4849,6 +4980,7 @@ export class ChatAgent extends DurableObject<Env> {
       text: request.text,
       status: sent.length ? "sent" : "refused",
       ...(answered && { sentAt: answered.at, chat: answered.chat }),
+      ...(placed.length && { chats: placed.map((outcome) => outcome.chat.id) }),
       ...(refused.length && { detail: `not posted to ${refused.join(", ")}` }),
     };
   }
@@ -5484,7 +5616,14 @@ interface ChatSession {
   peopleFor(uid: string): ChatPeopleView;
   queued(ids: readonly number[]): Promise<QueuedMessage[]>;
   incoming(): IncomingMessage[];
-  prompt(text: string, author: Person, attachments: readonly AttachmentInput[], mentions: readonly MentionInput[], replyTo?: number): Promise<void>;
+  prompt(
+    text: string,
+    author: Person,
+    attachments: readonly AttachmentInput[],
+    mentions: readonly MentionInput[],
+    replyTo?: number,
+    make?: MakeKind,
+  ): Promise<void>;
   /** The owner's Yes to the next step a reply offers. */
   takeOffer(author: Person, entry: unknown): Promise<void>;
   abort(by: Person, agent?: string): Promise<void>;
@@ -5666,7 +5805,7 @@ class ChatSockets extends LifecycleCapability implements DurableObjectCapability
         const mentions = parseMentions(message.mentions);
         const text = String(message.text ?? "").trim().slice(0, 20_000);
         const replyTo = typeof message.replyTo === "number" ? message.replyTo : undefined;
-        if (text || attachments.length) await this.#chat.prompt(text, person, attachments, mentions, replyTo);
+        if (text || attachments.length) await this.#chat.prompt(text, person, attachments, mentions, replyTo, parseMake(message.make));
       } else if (message.type === "offer_yes") await this.#chat.takeOffer(person, message.entry);
       else if (message.type === "abort") await this.#chat.abort(person, typeof message.agent === "string" ? message.agent : undefined);
       else if (message.type === "model") await this.#chat.setModel(message, person);

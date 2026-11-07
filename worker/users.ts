@@ -561,6 +561,37 @@ export class UserDirectory extends DurableObject<Env> {
     this.ctx.waitUntil(sent.catch((error: unknown) => console.error("feed fan-out:", errorMessage(error))));
   }
 
+  /**
+   * One of this user's agents left `chatOwner`'s chat `chatId`: whoever follows it through that chat may no longer open
+   * it, so they follow it no more (each told now, rather than at its next post). Its followers through other chats stay.
+   */
+  agentLeftChat(agentId: string, chatOwner: string, chatId: string): void {
+    const owner = this.ctx.id.name!;
+    const uids = this.#follows.dropFollowersThrough("agent", agentId, chatOwner, chatId);
+    if (!uids.length) return;
+    this.ctx.waitUntil(
+      mapLimit(uids, FAN_OUT, (uid) => exports.UserDirectory.getByName(uid).followGone("agent", agentId, owner)).catch((error: unknown) =>
+        console.error("feed:", errorMessage(error)),
+      ),
+    );
+  }
+
+  /**
+   * Some of the pages this user published from their chat `chatId` are gone (a member's agent's seat cleaned up what it
+   * never posted): out of the lists, the values viewers saved on them, and whoever followed them stops.
+   */
+  forgetArtifacts(chatId: string, ids: readonly string[]): void {
+    const mine = new Set(this.chatArtifactIds(chatId));
+    const gone = ids.filter((id) => mine.has(id));
+    if (!gone.length) return;
+    for (const id of gone) {
+      this.ctx.storage.sql.exec("DELETE FROM page_values WHERE artifact_id = ?", id);
+      this.#targetGone("page", id);
+      this.ctx.storage.sql.exec("DELETE FROM artifacts WHERE id = ? AND chat_id = ?", id, chatId);
+    }
+    this.#changed("artifacts");
+  }
+
   /** One of this user's pages or agents is gone: its followers stop following it. */
   #targetGone(kind: FollowKind, id: string): void {
     const owner = this.ctx.id.name!;
@@ -1296,6 +1327,11 @@ export class UserDirectory extends DurableObject<Env> {
    * proposes is saved off, for the user to review and turn on.
    */
   saveAgent(input: unknown, origin: AgentOrigin, enabled?: boolean, save?: AgentSave): AgentResult {
+    // The model proposing again, in the chat it proposed it in, an agent that is still its draft: that draft is
+    // revised (AgentStore.proposalSave), never one the user saved or turned on.
+    const target = origin === "agent" ? this.#agents.proposalSave(input, save) : save;
+    const draft = target?.id !== undefined && target.id !== save?.id;
+    save = target;
     if (origin === "agent") {
       const signIn = new Set(oauthServerNames(this.env));
       input = withoutSignInShares(input, (server) => signIn.has(server));
@@ -1324,8 +1360,8 @@ export class UserDirectory extends DurableObject<Env> {
         open: { to: "agent", agentId: saved.id },
         aboutAgent: saved.id,
       });
-    } else if (origin !== "agent" && !saved.assumed?.length) {
-      // The user saved it with nothing left guessed: what the item asked is done.
+    } else if (!saved.assumed?.length && (origin !== "agent" || draft)) {
+      // The user saved it, or the model revised its draft, with nothing left guessed: what the item asked is done.
       this.resolveFeed(assumptionRef(saved.id));
     }
     return saved;

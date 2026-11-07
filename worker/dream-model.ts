@@ -3,7 +3,7 @@ import { calculateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import { askPageModel } from "./artifacts/page-features.ts";
 import { SCRIPT_MODEL } from "./dev-model.ts";
 import { GeminiCompat } from "./gemini.ts";
-import { catalogSource, gatewayAI, loadCatalog, modelsNamed, piModels } from "./models.ts";
+import { catalogSource, gatewayAI, internalModel, loadCatalog, piModels } from "./models.ts";
 import { Storage } from "./storage/index.ts";
 import type { DreamAnswer } from "./memory/dream.ts";
 
@@ -14,8 +14,8 @@ const DREAM_TOKENS = 2_000;
 let made: Models | undefined;
 
 /**
- * One dream's model call: the first of DREAM_MODEL's models (a comma-separated list of the picker's ids, a small cheap
- * one first) this deployment can run, else the agent's own model, at low effort (askPageModel). Null when there is none.
+ * One dream's model call: the deployment's background model (DREAM_MODEL, read through internalModel: a small, cheap
+ * one) when this deployment can run it, else the agent's own model, at low effort (askPageModel). Null when there is none.
  * Nothing it answers is followed: the dream reads its answer as JSON data (checkDreamOutput) and places every note itself.
  */
 export async function completeDream(env: Env, ownModel: string | undefined, system: string, prompt: string): Promise<DreamAnswer | null> {
@@ -25,7 +25,8 @@ export async function completeDream(env: Env, ownModel: string | undefined, syst
     made = piModels(gatewayAI(env, gemini).provider, gemini, { scripted: source.scripted });
   }
   const catalog = await loadCatalog(source);
-  const named = modelsNamed(env.DREAM_MODEL ?? "", catalog);
+  const background = catalog.model(internalModel(env.DREAM_MODEL));
+  const named = background ? [background] : [];
   const own = ownModel ? catalog.model(ownModel) : undefined;
   const scripted = source.scripted ? catalog.model(SCRIPT_MODEL) : undefined;
   const candidates = [...named, ...(own ? [own] : []), ...(scripted ? [scripted] : [])] as Model<Api>[];

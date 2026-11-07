@@ -941,6 +941,14 @@ a.mention-chip:hover { text-decoration: underline; }
 .composer-more-menu .composer-history-item { align-items: baseline; }
 .composer-history-text { flex: 1; min-width: 0; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
 .composer-history-item small { flex: none; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.make-button { display: inline-flex; align-items: center; gap: 5px; height: 26px; margin-left: 2px; padding: 0 8px; border: 1px solid transparent; border-radius: 999px; background: none; color: var(--muted); font-size: 13px; }
+.make-button:hover, .make-button[aria-expanded="true"] { background: var(--surface-2); color: var(--text); }
+.make-button.chosen { border-color: color-mix(in srgb, var(--accent) 35%, transparent); background: var(--accent-soft); color: var(--accent); }
+.make-menu { min-width: 260px; }
+.make-menu button[aria-checked="true"] { background: var(--accent-soft); }
+.make-menu button[aria-checked="true"] .composer-more-glyph { color: var(--accent); }
+.make-choice { display: flex; flex-direction: column; gap: 1px; }
+.make-choice small { color: var(--muted); font-size: 12px; }
 .composer-model { margin-left: auto; }
 .composer-model .spinner { flex: none; width: 14px; height: 14px; margin-right: 6px; border-top-color: var(--text); }
 .dictation-error, .dictation-status { min-width: 0; padding: 0 6px; font-size: 13px; color: var(--error); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1373,7 +1381,42 @@ a.mention-chip:hover { text-decoration: underline; }
 .agent-glance-value { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; overflow-wrap: anywhere; }
 .agent-glance-row.assumed .agent-glance-value { text-decoration: underline dashed var(--working); text-underline-offset: 3px; }
 .agent-glance-row dd small { display: block; color: var(--muted); font-size: 12px; }
-.agent-glance-change { color: var(--accent); font-size: 13px; }
+.agent-glance-change { font-size: 13px; }
+/* Editing the draft in place: a word of the instructions that names a row, and that row, light up together. */
+/* The lit row's tint reaches a little past its text on both sides (box-shadow), so the rows' lines stay where they are. */
+.agent-glance-row { --lit: transparent; background: var(--lit); box-shadow: -8px 0 0 var(--lit), 8px 0 0 var(--lit); transition: background-color 120ms ease, box-shadow 120ms ease; }
+.agent-glance-row.lit { --lit: color-mix(in srgb, var(--accent-soft) 70%, transparent); }
+.agent-glance-row.assumed.lit { --lit: color-mix(in srgb, var(--working-soft) 80%, transparent); }
+.agent-glance-row.open { --lit: transparent; }
+.agent-link { padding: 0; border: 0; background: none; color: inherit; font: inherit; line-height: inherit; text-align: inherit; cursor: pointer;
+  text-decoration: underline solid var(--accent); text-decoration-thickness: 1px; text-underline-offset: 3px; border-radius: 3px; }
+.agent-link.assumed { text-decoration-style: dashed; text-decoration-color: var(--working); }
+.agent-link.lit, .agent-link:hover { background: var(--accent-soft); box-shadow: 0 0 0 2px var(--accent-soft); }
+.agent-link.assumed.lit, .agent-link.assumed:hover { background: var(--working-soft); box-shadow: 0 0 0 2px var(--working-soft); }
+.agent-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.agent-step-change { margin-left: 2px; color: var(--muted); font-size: 12px; opacity: 0; }
+.agent-card-steps li:hover .agent-step-change, .agent-card-text:hover .agent-step-change, .agent-step-change:focus-visible { opacity: 1; }
+@media (hover: none) { .agent-step-change { opacity: 1; } }
+.agent-step-edit { display: flex; flex-direction: column; gap: 6px; margin: 2px 0 6px; }
+.agent-step-edit textarea { width: 100%; padding: 6px 8px; border: 1px solid var(--accent); border-radius: 8px; background: var(--surface); color: var(--text); font: inherit; resize: vertical; }
+.row-picker { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 10px; margin-top: 4px; padding: 10px 12px; border-radius: var(--radius); background: var(--surface-2); font-size: 13px; }
+.row-picker-fields { display: flex; flex-direction: column; gap: 8px; }
+.row-picker-choices { display: flex; flex-direction: column; gap: 4px; }
+.row-picker-choices label, .row-picker-check { display: inline-flex; align-items: center; gap: 6px; }
+.row-picker-check small { color: var(--muted); }
+.row-picker-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 4px 12px; padding-left: 22px; }
+.row-picker-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; }
+.row-picker-line label { display: inline-flex; align-items: center; gap: 6px; }
+.row-picker-line small, .row-picker > small, .row-picker-fields > small:not(.form-error) { color: var(--muted); }
+.row-picker-line.wide input { flex: 1 1 14em; min-width: 0; }
+.row-picker-line input[inputmode="numeric"] { width: 5em; }
+.row-picker-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.row-picker-chips button { padding: 2px 10px; border-radius: 999px; font-size: 12px; }
+.row-picker-chips button[aria-pressed="true"] { border-color: var(--accent); background: var(--accent); color: var(--accent-text); }
+.row-picker-actions { display: flex; gap: 6px; }
+.row-picker-actions button { padding: 4px 12px; font-size: 13px; }
+.row-picker-empty { margin: 0; color: var(--muted); }
+@media (prefers-reduced-motion: reduce) { .agent-glance-row { transition: none; } }
 /* Runs of an agent on its own (src/agents/RunsTab.tsx, WorkflowTab.tsx), its home chat in the sidebar, a run's post. */
 .sidebar nav .nav-contact { display: flex; align-items: center; gap: 8px; }
 .sidebar nav .nav-contact span { padding: 0; }
