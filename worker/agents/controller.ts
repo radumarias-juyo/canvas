@@ -3,7 +3,11 @@ import { MAX_HOPS, type AgentDefinition, type ChatAgentReplyData, type ChatTurnD
 import { AGENT_NAME } from "../../shared/mentions.ts";
 import { errorMessage, serial } from "../../shared/util.ts";
 import type { AgentTurn, ChatRoster, RosterEntry, TurnRequest } from "./roster.ts";
-import { askOf, CatchUp, entryAskKey, handOffs, MAX_ASK_CHARS, publishedIn, turnAskKey, turnInput } from "./turns.ts";
+import { askOf, CatchUp, entryAskKey, handOffs, itemsIn, MAX_ASK_CHARS, publishedIn, turnAskKey, turnInput } from "./turns.ts";
+
+/** What a turn left in its session for its reply to show. */
+type Outputs = Required<Pick<ChatAgentReplyData, "published" | "items">>;
+const NO_OUTPUTS: Outputs = { published: [], items: [] };
 
 /** How one operation in an agent's session ended, as PiHarness.wait says. */
 export interface TurnResult {
@@ -180,7 +184,7 @@ export class AgentTurns {
       const done = result.status === "done";
       const text = (result.text ?? "").trim();
       // Only a turn whose input went in has outputs in its session.
-      const published = now.submitted ? await this.#published(sessionOf(entry, turn), turn.id) : [];
+      const { published, items } = now.submitted ? await this.#outputs(sessionOf(entry, turn), turn.id) : NO_OUTPUTS;
       const current = roster.get(entry.agentId) ?? entry;
       const reply: ChatAgentReplyData = {
         agentId: entry.agentId,
@@ -197,6 +201,7 @@ export class AgentTurns {
         ...(!done && { failed: result.reason ?? "it ended without an answer" }),
         ...(published.length && { published }),
         ...(turn.run && { run: turn.run }),
+        ...(items.length && { items }),
       };
       // Who it hands work to, within what the chain may still make.
       const left = MAX_HOPS - roster.handOffsFrom(turn.root);
@@ -215,13 +220,14 @@ export class AgentTurns {
     await delivering;
   }
 
-  /** The artifacts a turn published, as its session's entries say; none when they cannot be read. */
-  async #published(session: string, turn: number): Promise<NonNullable<ChatAgentReplyData["published"]>> {
+  /** The artifacts a turn published and the records its tool results held, as its session's entries say; none when they cannot be read. */
+  async #outputs(session: string, turn: number): Promise<Outputs> {
     try {
-      return publishedIn(await this.#host.turnEntries(session, turn));
+      const entries = await this.#host.turnEntries(session, turn);
+      return { published: publishedIn(entries), items: itemsIn(entries) };
     } catch (error) {
       console.error("agent turn, outputs:", errorMessage(error));
-      return [];
+      return NO_OUTPUTS;
     }
   }
 

@@ -6,6 +6,7 @@
 
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { conditionProblem, MAX_CONDITION } from "./conditions.ts";
+import type { ItemRef } from "./items.ts";
 import { AGENT_NAME } from "./mentions.ts";
 import { EFFORT_LABELS } from "./models.ts";
 import type { RunRef } from "./runs.ts";
@@ -377,6 +378,12 @@ export interface ChatAgentView {
   queued?: number;
   /** Its owner turned it off since it was added: it does not answer until they turn it on again. */
   off?: true;
+  /** The turn it works on now (with `busy`): who gave it, how many hand-offs led to it, and how long it has run, as of this view. */
+  running?: { turn: number; calledBy: ChatAgentReplyData["calledBy"]; hop: number; elapsedMs: number };
+  /** The oldest turn waiting for it (with `queued`): who gave it, and how many hand-offs led to it. */
+  next?: { calledBy: ChatAgentReplyData["calledBy"]; hop: number };
+  /** Its latest turn that ended, and how: a stopped one posts no reply, so the chat says it stopped. */
+  ended?: { turn: number; status: Exclude<AgentTurnStatus, "queued" | "running"> };
   /** Its owner shares it with the people of this chat: they can open it read-only, and copy it (SharedAgentView). */
   shared?: true;
 }
@@ -498,6 +505,8 @@ export type ChatAgentReplyData = {
   published?: { artifactId: string; title: string; version: number }[];
   /** Set on a run's report (calledBy.schedule): which run, so a reply to it continues that run (shared/runs.ts). */
   run?: RunRef;
+  /** The records its tool results held (shared/items.ts), as chips under the reply: from the servers, never its text. */
+  items?: ItemRef[];
 };
 
 export type AgentTurnStatus = "queued" | "running" | "done" | "failed" | "stopped";

@@ -142,6 +142,7 @@ import {
   type SharedAgentView,
 } from "../shared/agents.ts";
 import { AgentTurns, sessionOf, type TurnHost } from "./agents/controller.ts";
+import { isTurnEntry, TurnFilter } from "./agents/live.ts";
 import { ChatRoster, type AgentTurn, type RosterEntry } from "./agents/roster.ts";
 import { reportOf, SignInNeeded, whenOf, type DeliveryRequest } from "./agents/runs/executor.ts";
 import { AgentRunner, type RunAlarm, type RunnerHost, type WatchAlarm } from "./agents/runs/runner.ts";
@@ -349,6 +350,9 @@ export class ChatAgent extends DurableObject<Env> {
     prompt: (text, author, attachments, mentions, replyTo) => this.prompt(text, author, attachments, mentions, replyTo),
     abort: (by, agent) => this.abort(by, agent),
     agents: () => this.agentViews(),
+    runningAgents: () => this.roster.runningSessions(),
+    agentEvents: (session) => this.harness.session(session).events(),
+    turnInputId: (session, turn) => this.#turnInputId(session, turn),
     setModel: (input, by) => this.setModel(input, by),
     auto: () => this.#auto(),
     reactions: () => this.reactions.all(),
@@ -2054,6 +2058,8 @@ export class ChatAgent extends DurableObject<Env> {
     queueMicrotask(() => {
       this.#agentsChanged = false;
       this.sockets.broadcast({ type: "agents", agents: this.agentViews() });
+      // A turn started or ended: every socket follows the agents working now, and lets go of the others.
+      this.sockets.followAgents();
     });
   }
 
@@ -2199,11 +2205,21 @@ export class ChatAgent extends DurableObject<Env> {
     await Promise.all([this.refreshMcpTools(), this.refreshSkills(this.#skillsForTurn(ask)), this.refreshFiles(), this.refreshUserPrompt()]);
   }
 
+  /** The entry id of turn `turn`'s input in agent session `session`, from the newest entries back; none while it is not placed. */
+  async #turnInputId(session: string, turn: number): Promise<number | undefined> {
+    const conversation = await this.harness.conversation(session);
+    if (!conversation) return undefined;
+    for await (const page of entryPages(conversation, { order: "descending" }, 100, 10)) {
+      const input = page.find((entry) => isTurnEntry(entry, turn));
+      if (input) return input.id as number;
+    }
+    return undefined;
+  }
+
   /** What the turn controller needs of this chat (worker/agents/controller.ts). */
   #turnHost(): TurnHost {
     // The entries after the turn's input: the input itself is the first of #entriesFrom's.
-    const turnEntries = async (session: string, turn: number) =>
-      (await this.#entriesFrom(await this.#conversation(session), (entry) => entry.kind === CHAT_TURN_KIND && (entry.data as ChatTurnData | undefined)?.turn === turn)).slice(1);
+    const turnEntries = async (session: string, turn: number) => (await this.#entriesFrom(await this.#conversation(session), (entry) => isTurnEntry(entry, turn))).slice(1);
     return {
       roster: this.roster,
       definition: (entry) => this.#index(entry.ownerUid).getAgent(entry.agentId),
@@ -2959,6 +2975,12 @@ interface ChatSession {
   abort(by: Person, agent?: string): Promise<void>;
   /** The chat's agents besides pi, as everyone sees them. */
   agents(): ChatAgentView[];
+  /** The agents' turns running now, each with its session: what the sockets follow live. */
+  runningAgents(): { agentId: string; session: string; turn: number }[];
+  /** An agent's session's events: a snapshot, then one batch per commit. */
+  agentEvents(session: string): Promise<AgentEventStream>;
+  /** The entry id of turn `turn`'s input in an agent's session, once it is placed (a compaction may have cut it from the snapshot). */
+  turnInputId(session: string, turn: number): Promise<number | undefined>;
   setModel(input: { model?: unknown; thinkingLevel?: unknown }, by: Person): Promise<void>;
   /** Whether the chat is on Auto. */
   auto(): boolean;
@@ -2979,6 +3001,9 @@ const REATTACH_MS = 10_000;
 /** An attach that did not send its snapshot in time. */
 class AttachStalled extends Error {}
 
+/** One agent's turn a socket follows live: which turn, and the stream of its session. */
+type AgentFollow = { turn: number; stream: Promise<AgentEventStream> };
+
 /**
  * A chat socket's hibernation attachment: whose socket it is, and a digest of the last snapshot it was sent (see
  * ChatSockets.#attach).
@@ -2996,6 +3021,8 @@ class ChatSockets extends LifecycleCapability implements DurableObjectCapability
   readonly #streams = new Map<WebSocket, Promise<AgentEventStream>>();
   /** When each socket was last attached again because pi ended its stream (see REATTACH_MS). */
   readonly #reattached = new WeakMap<WebSocket, number>();
+  /** Per socket, the agents' turns it follows live (see #followAgents), by agent id. */
+  readonly #agentStreams = new Map<WebSocket, Map<string, AgentFollow>>();
 
   constructor(chat: ChatSession) {
     super("chat-sockets");
@@ -3153,6 +3180,8 @@ class ChatSockets extends LifecycleCapability implements DurableObjectCapability
         if (end.reason === "stopped" || this.#streams.get(ws) !== attached) return;
         const cause = "error" in end ? `: ${errorMessage(end.error)}` : "";
         this.#streams.delete(ws);
+        // Followed again as it attaches again, or with the socket's next message.
+        void this.#unfollowAgents(ws);
         const now = Date.now();
         const again = ws.readyState === WebSocket.OPEN && now - (this.#reattached.get(ws) ?? -Infinity) >= REATTACH_MS;
         const next = again ? "attaching again" : "waiting for the socket's next message";
@@ -3169,6 +3198,7 @@ class ChatSockets extends LifecycleCapability implements DurableObjectCapability
       send(ws, { type: "auto", on: this.#chat.auto() });
       send(ws, { type: "incoming", incoming: this.#chat.incoming() });
       send(ws, { type: "agents", agents: this.#chat.agents() });
+      this.#followAgents(ws);
       // Timed only once it is to be sent: a wake attaches every socket again, and most find their snapshot already sent.
       const snapshot = await this.#events([events.snapshot], false);
       const sent = await sha256Hex(JSON.stringify([snapshot.events, snapshot.queued]));
@@ -3191,6 +3221,7 @@ class ChatSockets extends LifecycleCapability implements DurableObjectCapability
       // Detached, or replaced as pi ended the stream it was opening: the socket has nothing more to hear from this one.
       if (this.#streams.get(ws) !== attached) return;
       this.#streams.delete(ws);
+      void this.#unfollowAgents(ws);
       if (error instanceof AttachStalled) {
         console.error("chat socket:", error.message);
         close(ws, 1011, "Reconnect");
@@ -3232,7 +3263,95 @@ class ChatSockets extends LifecycleCapability implements DurableObjectCapability
   async #detach(ws: WebSocket): Promise<void> {
     const stream = this.#streams.get(ws);
     this.#streams.delete(ws);
-    if (stream) await (await stream.catch(() => undefined))?.stop();
+    await Promise.all([this.#unfollowAgents(ws), (await stream?.catch(() => undefined))?.stop()]);
+  }
+
+  /** Let go of the agents' turns `ws` follows: its pi stream is gone (detached, ended, or never sent its snapshot). */
+  async #unfollowAgents(ws: WebSocket): Promise<void> {
+    // Cleared too: a stream still opening checks it before it sends anything.
+    const following = this.#agentStreams.get(ws);
+    const agents = [...(following?.values() ?? [])];
+    following?.clear();
+    this.#agentStreams.delete(ws);
+    await Promise.all(agents.map(async (follow) => (await follow.stream.catch(() => undefined))?.stop()));
+  }
+
+  /** Every open socket follows the agents' turns running now, and lets go of those that ended (see #followAgents). */
+  followAgents(): void {
+    const sockets = this.lifecycle.sockets.get(SOCKET_TAG).filter((ws) => this.#person(ws) && this.#streams.has(ws));
+    if (!sockets.length) return;
+    const running = this.#chat.runningAgents();
+    for (const ws of sockets) this.#followAgents(ws, running);
+  }
+
+  /**
+   * Follow, for `ws`, each agent's session while it has a turn: only that turn's events reach the socket (TurnFilter), so
+   * one that attaches mid-turn gets the turn's entries, not the agent's whole history. A stream whose turn ended, or
+   * whose agent left, stops; one that ends by itself is let go, and the next change of the roster follows it again.
+   */
+  #followAgents(ws: WebSocket, runs = this.#chat.runningAgents()): void {
+    // A socket detached while its attach was opening (it closed, or was removed) follows nothing: #detach has already
+    // let go of its streams, and none started now would ever be stopped.
+    if (!this.#streams.has(ws)) return;
+    const following = this.#agentStreams.get(ws) ?? new Map<string, AgentFollow>();
+    this.#agentStreams.set(ws, following);
+    const running = new Map(runs.map((run) => [run.agentId, run]));
+    for (const [agent, follow] of following) {
+      if (running.get(agent)?.turn === follow.turn) continue;
+      following.delete(agent);
+      void follow.stream.then((events) => events.stop()).catch(() => {});
+    }
+    for (const run of running.values()) {
+      if (following.has(run.agentId)) continue;
+      const follow = { turn: run.turn } as AgentFollow;
+      following.set(run.agentId, follow);
+      const current = () => following.get(run.agentId) === follow;
+      const letGo = () => current() && following.delete(run.agentId);
+      follow.stream = this.#streamTurn(ws, run, current, letGo);
+      follow.stream.catch((error: unknown) => {
+        console.error("agent socket:", errorMessage(error));
+        letGo();
+      });
+    }
+  }
+
+  /**
+   * Send `ws` one agent's turn as it goes: a snapshot of it, then each batch, while `current` says the socket still
+   * follows it. `letGo` when the stream ends by itself.
+   */
+  async #streamTurn(ws: WebSocket, run: { agentId: string; session: string; turn: number }, current: () => boolean, letGo: () => void) {
+    const message = (events: readonly AgentEvent[]) => ({
+      type: "agentEvents" as const,
+      agent: run.agentId,
+      turn: run.turn,
+      events: events.map((event) => withoutImageData(withoutSystemPrompt(event))),
+    });
+    const events = await this.#chat.agentEvents(run.session);
+    const now = Date.now();
+    // A snapshot without the turn's input: not placed yet, or a compaction cut it out of the context. Its id says which.
+    const placed = events.snapshot.entries.some((entry) => isTurnEntry(entry, run.turn));
+    const [started, inputId] = await Promise.all([
+      this.#chat.toolsStartedAt(events.snapshot),
+      placed ? undefined : this.#chat.turnInputId(run.session, run.turn).catch(() => undefined),
+    ]);
+    const filter = new TurnFilter(run.turn, inputId);
+    // Let go meanwhile (its turn ended, or the socket closed): nothing more to send.
+    if (!current()) {
+      await events.stop();
+      return events;
+    }
+    const toolsElapsedMs = Object.fromEntries(Object.entries(started).map(([id, at]) => [id, Math.max(0, now - at)]));
+    send(ws, { ...message(filter.pass([events.snapshot])), toolsElapsedMs });
+    events.start(async (batch) => {
+      const passed = filter.pass(batch);
+      // A socket that cannot be sent to is gone: stop following for it, as its pi stream does.
+      if (passed.length && current() && !send(ws, message(passed))) {
+        letGo();
+        await events.stop();
+      }
+    });
+    void events.closed.then(letGo);
+    return events;
   }
 }
 

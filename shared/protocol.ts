@@ -579,6 +579,12 @@ export type ChatServerMessage =
   | { type: "callHint"; entry: number }
   /** The chat's agents besides pi (shared/agents.ts): on connect, and whenever one is added, removed, starts or ends a turn. */
   | { type: "agents"; agents: ChatAgentView[] }
+  /**
+   * One agent's session while it has a turn (`agent`, by its id; `turn`, the turn's id): pi-durable AgentEvents as for
+   * pi's, only those of that turn. A snapshot first (its entries from the turn's input on), with how long each running
+   * call has run; then one batch per commit, until the turn ends (the `agents` message says so).
+   */
+  | { type: "agentEvents"; agent: string; turn: number; events: unknown[]; toolsElapsedMs?: Record<string, number> }
   /** A run of the agent whose home this chat is started, moved on or ended: its runs list is read again. */
   | { type: "runs"; agentId: string }
   /** Sent just before the chat closes a removed person's socket, in case the close code is lost on the way. */
