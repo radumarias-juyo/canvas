@@ -350,7 +350,10 @@ export class UserDirectory extends DurableObject<Env> {
     const had = this.#follows.find(kind, id, chatId);
     if (had) {
       this.#dropFollow(had);
-      await exports.UserDirectory.getByName(had.ownerUid).removeFollower(kind, id, this.ctx.id.name!);
+      // Not told, the owner forgets them at its next post (addFeed answers false): the follow is gone here either way.
+      await exports.UserDirectory.getByName(had.ownerUid)
+        .removeFollower(kind, id, this.ctx.id.name!)
+        .catch((error: unknown) => console.error("feed:", errorMessage(error)));
     }
     return this.#follows.list();
   }
@@ -361,9 +364,14 @@ export class UserDirectory extends DurableObject<Env> {
     if (had) this.#dropFollow(had);
   }
 
-  #dropFollow(follow: FollowRecord): void {
-    this.#follows.unfollow(follow.kind, follow.id, follow.ownerUid);
-    if (this.#feed.forgetAbout(aboutOf(follow.kind, follow.id, follow.ownerUid))) this.#changed("feed");
+  /** Drop follows here, with their items; the open apps hear of it once. */
+  #dropFollow(...follows: FollowRecord[]): void {
+    let items = 0;
+    for (const follow of follows) {
+      this.#follows.unfollow(follow.kind, follow.id, follow.ownerUid);
+      items += this.#feed.forgetAbout(aboutOf(follow.kind, follow.id, follow.ownerUid));
+    }
+    if (items) this.#changed("feed");
     this.#changed("follows");
   }
 
@@ -371,7 +379,7 @@ export class UserDirectory extends DurableObject<Env> {
   #leftChat(chatOwner: string, chatId: string): void {
     const gone = this.#follows.through(chatOwner, chatId);
     if (!gone.length) return;
-    for (const follow of gone) this.#dropFollow(follow);
+    this.#dropFollow(...gone);
     const uid = this.ctx.id.name!;
     this.ctx.waitUntil(
       mapLimit(gone, FAN_OUT, (follow) => exports.UserDirectory.getByName(follow.ownerUid).removeFollower(follow.kind, follow.id, uid)).catch(
@@ -731,21 +739,22 @@ export class UserDirectory extends DurableObject<Env> {
    * `named`: the title was just cut from this message.
    */
   touchSharedChat(id: string, ownerUid: string, title: string, byOther: boolean, tag?: Tag, named = false): void {
-    this.#touch(id, ownerUid, title, byOther, tag, named);
+    this.#touch(id, ownerUid, title, byOther, tag, named, !byOther);
   }
 
   /**
    * Bump a chat. With `tag`, the message tagged this user: the chat is marked so until they look, and the open apps hear
-   * it (MentionNotice), with the chat's title unless the chat is named after this very message (`named`).
+   * it (MentionNotice), with the chat's title unless the chat is named after this very message (`named`). `wrote`: this
+   * user wrote it (also as the owner's second seat, which is someone else to the sidebar), answering what waited on them.
    */
-  #touch(id: string, ownerUid: string, title: string, byOther: boolean, tag?: Tag, named = false): void {
+  #touch(id: string, ownerUid: string, title: string, byOther: boolean, tag: Tag | undefined, named: boolean, wrote: boolean): void {
     // This object's own clock for the row, as every other write to it uses: a tag's time comes from the chat, and could
     // put activity_at back behind a later write. The notice keeps the tag's time, which windows share.
     const now = Date.now();
     const set = "title = ?, updated_at = ?, activity_at = CASE WHEN ? THEN ? ELSE activity_at END, mentioned_at = CASE WHEN ? THEN ? ELSE mentioned_at END";
     const listed = this.#updateChat(id, ownerUid, set, title, now, byOther ? 1 : 0, now, tag ? 1 : 0, now);
     // This user wrote in it: what waited there for their reply (an agent's question, a report that asks) is answered.
-    if (listed && !byOther && this.#feed.resolveReplies(id)) this.#changed("feed");
+    if (listed && wrote && this.#feed.resolveReplies(id)) this.#changed("feed");
     if (!listed || !tag) return;
     // A tag opens the chat again for someone who closed it.
     this.#rows.reopen(id);
@@ -798,14 +807,15 @@ export class UserDirectory extends DurableObject<Env> {
 
   /**
    * Bump a chat to the top. A chat still unnamed is named after the prompt, so the first prompt names it (`named`), until
-   * a model gives it a better title (nameChat). `byOther`: someone other than this user wrote it. Returns its title.
+   * a model gives it a better title (nameChat). `byOther`: someone other than this user wrote it; `wrote`: this user
+   * did, as themselves or from their second seat (by default, when nobody else did). Returns its title.
    */
-  touchChat(id: string, prompt: string, byOther: boolean, tag?: Tag): { title: string; named: boolean } {
+  touchChat(id: string, prompt: string, byOther: boolean, tag?: Tag, wrote = !byOther): { title: string; named: boolean } {
     this.#notePreview(id, prompt);
     const before = this.chatTitle(id);
     const named = before === UNNAMED_CHAT;
     const title = named || before === null ? titleFromMessage(prompt) : before;
-    this.#touch(id, this.ctx.id.name!, title, byOther, tag, named);
+    this.#touch(id, this.ctx.id.name!, title, byOther, tag, named, wrote);
     return { title, named };
   }
 

@@ -1644,7 +1644,9 @@ export class ChatAgent extends DurableObject<Env> {
     const tagged = new Set(tags.filter((uid) => uid !== author.uid));
     const tag: Tag = { from: author.name, text: excerpt(text), at: now, key, kind: this.kinds.kind(), ...(run && { run: true }) };
     const tagOf = (uid: string) => (tagged.has(uid) ? tag : undefined);
-    const { title, named } = await this.#directory.touchChat(this.chatId, titleFrom, author.uid !== this.uid, tagOf(this.uid));
+    // The owner's second seat writes as the owner: what waits on the owner here for a reply is answered by it too.
+    const byOwner = this.#account(author.uid) === this.uid;
+    const { title, named } = await this.#directory.touchChat(this.chatId, titleFrom, author.uid !== this.uid, tagOf(this.uid), byOwner);
     if (named && titleFrom) void this.#nameChat(titleFrom, title).catch((error: unknown) => console.error("chat title:", errorMessage(error)));
     const all = title !== this.#membersTouched.title || now - this.#membersTouched.at >= MEMBERS_TOUCH_MS;
     if (all) this.#membersTouched = { title, at: now };
@@ -3258,7 +3260,16 @@ export class ChatAgent extends DurableObject<Env> {
     const scope: PublishScope = {
       ...this.scope,
       chatId: meta.chatId,
-      onPublished: (artifact) => this.#directory.recordArtifact({ ...artifact, chatId: meta.chatId }),
+      // The page's chat says its kind, as a publish there does (the owner's row of it can lag); unasked, nothing leaves.
+      onPublished: async (artifact) => {
+        const kind =
+          meta.chatId === this.chatId
+            ? this.kinds.kind()
+            : await exports.ChatAgent.getByName(chatAgentName(this.uid, meta.chatId))
+                .chatKind()
+                .catch((): ChatKind => "off_record");
+        await this.#directory.recordArtifact({ ...artifact, chatId: meta.chatId }, false, kind);
+      },
     };
     const mark = runMark(request.run.dueAt, request.key);
     // A run that goes on after a restart publishes once: a version with its mark is the one it sent.

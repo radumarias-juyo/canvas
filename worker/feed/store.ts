@@ -145,9 +145,10 @@ export class FeedStore {
     return this.#sql.exec("DELETE FROM feed WHERE about = ?", about).rowsWritten;
   }
 
-  /** At most MAX_FEED_ITEMS: the oldest read ones go first, then the oldest. */
+  /** At most MAX_FEED_ITEMS: the oldest read ones that wait on nothing go first, then the oldest. */
   #prune(): void {
-    this.#sql.exec("DELETE FROM feed WHERE id IN (SELECT id FROM feed ORDER BY read ASC, at DESC, id DESC LIMIT -1 OFFSET ?)", MAX_FEED_ITEMS);
+    const keep = "(needs > 0) DESC, read ASC, at DESC, id DESC";
+    this.#sql.exec(`DELETE FROM feed WHERE id IN (SELECT id FROM feed ORDER BY ${keep} LIMIT -1 OFFSET ?)`, MAX_FEED_ITEMS);
   }
 }
 

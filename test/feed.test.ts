@@ -124,6 +124,16 @@ describe("feed: keeping items", () => {
     expect(titles[0]).toBe(`ann mentioned you in Signups (${MAX_FEED_ITEMS})`);
   });
 
+  it("keeps what still waits on the person when pruning, read or not", () => {
+    const feed = new FeedStore(memorySql());
+    feed.add({ kind: "approval", ref: "approval:old", at: T0 - 1, title: "@brief wants to post", open: { to: "chat", chatId: "c1" } });
+    for (let n = 0; n < MAX_FEED_ITEMS; n++) feed.add(tag(n));
+    feed.mark("all");
+    feed.add(tag(MAX_FEED_ITEMS));
+    expect(feed.list({ needsYou: true }).items.map((item) => item.title)).toEqual(["@brief wants to post"]);
+    expect(feed.counts().needsYou).toBe(1);
+  });
+
   it("opens each kind of item where it belongs", () => {
     expect(feedPath({ to: "chat", chatId: "c1" })).toBe("/c/c1");
     expect(feedPath({ to: "page", artifactId: "p1" })).toBe("/a/p1");
