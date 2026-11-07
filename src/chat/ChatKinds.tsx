@@ -5,7 +5,6 @@ import {
   KIND_TEXT,
   narrows,
   widens,
-  type ChatCopyData,
   type ChatEventData,
   type ChatKind,
   type ChatPage,
@@ -14,7 +13,8 @@ import { AGENT_TOKEN, AGENT_NAME } from "../../shared/mentions.ts";
 import type { Person } from "../../shared/protocol.ts";
 import { errorMessage } from "../../shared/util.ts";
 import { api } from "../api.ts";
-import { useDismiss } from "../layout.tsx";
+import { opensElsewhere, useDismiss } from "../layout.tsx";
+import type { Outsider } from "./Mentions.tsx";
 
 /** Branch off a new chat from a transcript entry (ChatView provides it), and the entry a message's actions are for. */
 export const BranchOff = createContext<((entry: number) => void) | null>(null);
@@ -170,7 +170,7 @@ export function ChatEventNotice({ data, uid, onOpenChat }: { data: ChatEventData
     <a
       href={`/c/${chatId}`}
       onClick={(event) => {
-        if (!onOpenChat) return;
+        if (!onOpenChat || opensElsewhere(event)) return;
         event.preventDefault();
         onOpenChat(chatId);
       }}
@@ -217,11 +217,6 @@ export function ChatEventNotice({ data, uid, onOpenChat }: { data: ChatEventData
   );
 }
 
-/** The pi reply a branch copied, as its text, for the transcript to show as a reply (ChatView). */
-export function copiedText(data: ChatCopyData): string | undefined {
-  return data.from === "pi" ? data.text : undefined;
-}
-
 /**
  * Over the composer, once the user tagged someone who is not in the chat: adding them shows them everything said so
  * far. The owner adds them here; anyone else can start a new chat with them, with none of this one's messages.
@@ -235,7 +230,7 @@ export function TagCard({
   onNewChat,
   onInvite,
 }: {
-  person: Person | { name: string; invite: true };
+  person: Outsider;
   isOwner: boolean;
   onNotNow: () => void;
   onAdd: () => Promise<void>;

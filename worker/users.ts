@@ -1,6 +1,6 @@
 import { DurableObject, exports } from "cloudflare:workers";
 import type { ModelSetting } from "../shared/models.ts";
-import { PAGE_STORAGE_LIMITS, SOCKET_PING, type ArtifactSummary, type ChatStatus, type ChatSummary, type MentionNotice, type Person, type SidebarList } from "../shared/protocol.ts";
+import { PAGE_STORAGE_LIMITS, SOCKET_PING, type ArtifactSummary, type ChatStatus, type ChatSummary, type ChatRowChange, type MentionNotice, type Person, type SidebarList, MAX_CHAT_TITLE } from "../shared/protocol.ts";
 import type { ExportedChat, ExportedPageValues, ExportedSkill, ExportStart, ImportedSettings } from "../shared/data-export.ts";
 import type { SkillFileInfo } from "../shared/skill-files.ts";
 import { checkSystemPrompt, type ChatSystemPrompt } from "../shared/system-prompt.ts";
@@ -10,7 +10,8 @@ import { titleFromMessage, UNNAMED_CHAT } from "./agent/title.ts";
 import { applyAuthChange, type McpAuthChange, type McpAuthRecord, type McpAuthStore } from "./mcp/oauth.ts";
 import { mcpServers } from "./mcp/servers.ts";
 import { AgentStore, type AgentSave } from "./agents/store.ts";
-import { ChatRows, type ChatRowChange } from "./chat-rows.ts";
+import { ChatRows } from "./chat-rows.ts";
+import { addColumns } from "./members.ts";
 import type { ChatKind } from "../shared/chat-kinds.ts";
 import type { AgentDefinition, AgentOrigin, AgentResult } from "../shared/agents.ts";
 
@@ -87,19 +88,16 @@ export class UserDirectory extends DurableObject<Env> {
     // Added later: what the chat's agent is doing (ChatStatus), when something last came in that this user did not
     // write, and when they last saw the chat. activity_at > seen_at is unread. Then: when someone last tagged them in
     // it; mentioned_at > seen_at is a tag they have not seen.
-    for (const table of ["chats", "shared_chats"]) {
-      this.#addColumn(table, "status", "TEXT");
-      this.#addColumn(table, "activity_at", "INTEGER NOT NULL DEFAULT 0");
-      this.#addColumn(table, "seen_at", "INTEGER NOT NULL DEFAULT 0");
-      this.#addColumn(table, "mentioned_at", "INTEGER NOT NULL DEFAULT 0");
-    }
-    // Whether this user's own chat has members: the chat tells (setChatShared) when that changes, and when it opens.
-    this.#addColumn("chats", "shared", "INTEGER NOT NULL DEFAULT 0");
+    const sql = ctx.storage.sql;
+    const read = { status: "TEXT", activity_at: "INTEGER NOT NULL DEFAULT 0", seen_at: "INTEGER NOT NULL DEFAULT 0", mentioned_at: "INTEGER NOT NULL DEFAULT 0" };
+    // With, in the user's own chats, whether the chat has members: it tells (setChatShared) when that changes, and when it opens.
+    addColumns(sql, "chats", { ...read, shared: "INTEGER NOT NULL DEFAULT 0" });
+    addColumns(sql, "shared_chats", read);
     this.#rows = new ChatRows(ctx.storage.sql);
     // The files of a skill imported as a package (SkillPackageFiles as JSON).
-    this.#addColumn("skills", "files", "TEXT");
+    addColumns(sql, "skills", { files: "TEXT" });
     // The newest version of each artifact its owner opened. Artifacts from before count as seen.
-    if (this.#addColumn("artifacts", "seen", "INTEGER NOT NULL DEFAULT 0")) ctx.storage.sql.exec("UPDATE artifacts SET seen = latest");
+    if (addColumns(sql, "artifacts", { seen: "INTEGER NOT NULL DEFAULT 0" }).length) sql.exec("UPDATE artifacts SET seen = latest");
     // A sidebar's socket stays open for hours: answer its keep-alive pings without waking this object.
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair(SOCKET_PING.request, SOCKET_PING.response));
     // Forget sign-ins to servers this deployment no longer has, tokens included.
@@ -108,13 +106,6 @@ export class UserDirectory extends DurableObject<Env> {
     ctx.storage.sql.exec(`DELETE FROM mcp_auth${configured.length ? ` WHERE server NOT IN (${placeholders})` : ""}`, ...configured);
   }
 
-  /** Add a column a table made before it lacks; true when it was added. `table`, `column` and `type` are written here, never input. */
-  #addColumn(table: string, column: string, type: string): boolean {
-    const columns = this.ctx.storage.sql.exec<{ name: string }>(`SELECT name FROM pragma_table_info('${table}')`).toArray();
-    if (columns.some((row) => row.name === column)) return false;
-    this.ctx.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
-    return true;
-  }
 
   /** This user's OAuth state for one MCP server (worker/mcp/oauth.ts): registration, tokens, a sign-in in progress. */
   mcpAuth(server: string): McpAuthRecord {
@@ -331,7 +322,7 @@ export class UserDirectory extends DurableObject<Env> {
   /** A new chat of this user's: unnamed (named after its first message), or with `title` (a branch, a page's chat). */
   createChat(id: string, made: { title?: string; kind?: ChatKind } = {}): ChatSummary {
     const now = Date.now();
-    const title = made.title?.slice(0, 200) || UNNAMED_CHAT;
+    const title = made.title?.slice(0, MAX_CHAT_TITLE) || UNNAMED_CHAT;
     const kind = made.kind ?? "private";
     this.ctx.storage.sql.exec("INSERT INTO chats (id, title, created_at, updated_at, kind) VALUES (?, ?, ?, ?, ?)", id, title, now, now, kind);
     this.#changed("chats");

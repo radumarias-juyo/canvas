@@ -25,15 +25,8 @@ const BRANCHES_KEY = "branches";
 /** The chat storage keys an export carries (with the chat's other settings, worker/chat-dump.ts). */
 export const KIND_KV = [KIND_KEY, PAGE_KEY, BRANCHED_FROM_KEY, BRANCHES_KEY];
 
-/** Branches one chat remembers, newest kept. */
+/** The most branches one chat has. */
 export const MAX_BRANCHES = 100;
-
-/** A chat branched off from this one: where, and when. */
-export interface Branch {
-  chatId: string;
-  entry: number;
-  at: number;
-}
 
 /**
  * One chat's kind (shared/chat-kinds.ts), the page it discusses and where it branched off from, in the chat object's
@@ -79,12 +72,13 @@ export class ChatKindState {
     this.#kv.put(BRANCHED_FROM_KEY, from);
   }
 
-  branches(): Branch[] {
-    return this.#kv.get<Branch[]>(BRANCHES_KEY) ?? [];
+  /** How many chats branched off from this one. */
+  branchCount(): number {
+    return this.#kv.get<number>(BRANCHES_KEY) ?? 0;
   }
 
-  addBranch(branch: Branch): void {
-    this.#kv.put(BRANCHES_KEY, [...this.branches(), branch].slice(-MAX_BRANCHES));
+  countBranch(): void {
+    this.#kv.put(BRANCHES_KEY, this.branchCount() + 1);
   }
 }
 

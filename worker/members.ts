@@ -11,6 +11,17 @@ export interface Sql {
   exec(query: string, ...bindings: (string | number | null)[]): { toArray(): Record<string, unknown>[]; rowsWritten: number };
 }
 
+/**
+ * Add the columns (name to type) a table made before lacks, reading the table's columns once; the names of those added.
+ * `table` and the columns are written in the code, never input.
+ */
+export function addColumns(sql: Sql, table: string, columns: Record<string, string>): string[] {
+  const have = new Set(sql.exec(`SELECT name FROM pragma_table_info('${table}')`).toArray().map((row) => row.name));
+  const added = Object.keys(columns).filter((column) => !have.has(column));
+  for (const column of added) sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${columns[column]}`);
+  return added;
+}
+
 /** An invite link's token: the chat it opens and a secret the chat keeps only the hash of. */
 interface InviteToken {
   ownerUid: string;
@@ -49,8 +60,7 @@ export class ChatMembers {
       CREATE TABLE IF NOT EXISTS chat_owner (uid TEXT PRIMARY KEY, name TEXT NOT NULL);
     `);
     // Added later: how each member joined (JoinedVia), which narrowing the chat's kind reads. Members from before joined by invite.
-    const columns = sql.exec("SELECT name FROM pragma_table_info('chat_members')").toArray();
-    if (!columns.some((row) => row.name === "via")) sql.exec("ALTER TABLE chat_members ADD COLUMN via TEXT NOT NULL DEFAULT 'invite'");
+    addColumns(sql, "chat_members", { via: "TEXT NOT NULL DEFAULT 'invite'" });
   }
 
   /** The owner's name as they last showed it; their uid if they never did. */

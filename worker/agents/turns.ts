@@ -56,7 +56,7 @@ export function assistantText(message: AssistantMessage): string {
   return textOf(message.content.filter(Boolean), "").trim();
 }
 
-function userText(message: UserMessage): string {
+export function userText(message: UserMessage): string {
   return typeof message.content === "string" ? message.content : textOf(message.content, "");
 }
 

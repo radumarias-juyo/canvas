@@ -1,3 +1,4 @@
+import { calendarDay } from "./SentTime.tsx";
 import { CHAT_KINDS, KIND_TEXT } from "../../shared/chat-kinds.ts";
 import type { ChatSummary } from "../../shared/protocol.ts";
 
@@ -22,13 +23,13 @@ export const hasUnread = (chat: ChatSummary) => Boolean(chat.unread || chat.ment
 
 const DAY_MS = 24 * 60 * 60_000;
 
-/** The heading a chat goes under by date: how many calendar days before `now` it was last active. */
+/** The heading a chat goes under by date: how many calendar days before `now` it was last active (as the transcript counts them). */
 function dateGroup(at: number, now: number): { key: string; label: string } {
-  const startOfToday = new Date(now).setHours(0, 0, 0, 0);
-  if (at >= startOfToday) return { key: "today", label: "Today" };
-  if (at >= startOfToday - DAY_MS) return { key: "yesterday", label: "Yesterday" };
-  if (at >= startOfToday - 7 * DAY_MS) return { key: "week", label: "Previous 7 days" };
-  if (at >= startOfToday - 30 * DAY_MS) return { key: "month", label: "Previous 30 days" };
+  const days = Math.round((calendarDay(now) - calendarDay(at)) / DAY_MS);
+  if (days <= 0) return { key: "today", label: "Today" };
+  if (days === 1) return { key: "yesterday", label: "Yesterday" };
+  if (days <= 7) return { key: "week", label: "Previous 7 days" };
+  if (days <= 30) return { key: "month", label: "Previous 30 days" };
   return { key: "older", label: "Older" };
 }
 

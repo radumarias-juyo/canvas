@@ -30,6 +30,7 @@ import {
   type ChatContents,
   type ChatDeletion,
   type ChatPeopleView,
+  type ChatRowChange,
   type Person,
   type ChatSummary,
   type CloneAccess,
@@ -156,7 +157,7 @@ export const api = {
   /** The people the user shares chats with: whom "@" offers to add. */
   people: () => request<Person[]>("/api/me/people"),
   /** This user's own sidebar row for a chat: pinned, closed, marked unread, their own name for it. */
-  changeChatRow: (chatId: string, change: { pinned?: boolean; closed?: boolean; unread?: boolean; title?: string }) =>
+  changeChatRow: (chatId: string, change: ChatRowChange) =>
     request<object>(`/api/chats/${chatId}`, send("PATCH", change)),
   /** (owner) Who would lose access if the chat became `kind`. */
   kindPreview: (chatId: string, kind: ChatKind) => {

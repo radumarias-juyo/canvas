@@ -18,7 +18,7 @@ import {
 import { CHAT_MESSAGE_KIND, PUBLISH_TOOL } from "../shared/protocol.ts";
 import { askLine } from "../worker/agents/turns.ts";
 import { BRANCH_CONTEXT_CHARS, branchContext, branchCopies } from "../worker/branch.ts";
-import { ChatKindState, MAX_BRANCHES, planKindChange, type Kv } from "../worker/chat-kind.ts";
+import { ChatKindState, planKindChange, type Kv } from "../worker/chat-kind.ts";
 import { ChatRows, MAX_KNOWN_PEOPLE, parseRowChange } from "../worker/chat-rows.ts";
 import { ChatMembers } from "../worker/members.ts";
 import { orderChats } from "../src/chat/chat-order.ts";
@@ -139,15 +139,14 @@ describe("ChatKindState", () => {
     expect(state.kind()).toBe("off_record");
   });
 
-  it("keeps the page, where it branched from, and its newest branches", () => {
+  it("keeps the page, where it branched from, and how many branches it has", () => {
     const state = new ChatKindState(memoryKv(), () => false);
     state.setPage({ id: "page0001", title: "Signups", version: 2 });
     state.setBranchedFrom({ chatId: "chat0001", title: "Plans", entry: 7 });
-    for (let i = 0; i < MAX_BRANCHES + 3; i++) state.addBranch({ chatId: `b${i}`, entry: i, at: T0 + i });
+    for (let i = 0; i < 3; i++) state.countBranch();
     expect(state.page()).toEqual({ id: "page0001", title: "Signups", version: 2 });
     expect(state.branchedFrom()).toEqual({ chatId: "chat0001", title: "Plans", entry: 7 });
-    expect(state.branches()).toHaveLength(MAX_BRANCHES);
-    expect(state.branches()[0].chatId).toBe("b3");
+    expect(state.branchCount()).toBe(3);
   });
 });
 

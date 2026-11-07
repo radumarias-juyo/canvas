@@ -286,6 +286,7 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, naviga
     return () => document.removeEventListener("keydown", onKey);
   }, [menuOpen]);
   const openMenu = useCallback(() => setMenuOpen(true), []);
+  const openChat = useCallback((id: string) => navigate(`/c/${id}`), [navigate]);
 
   const openFile = useCallback((file: string) => setPreview({ file }), []);
   const chatFileBase = guestChat && chatFileRoute(guestChat);
@@ -499,7 +500,7 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, naviga
               onArtifact={onArtifact}
               onActivity={onActivity}
               onLeft={() => navigate("/")}
-              onOpenChat={(id) => navigate(`/c/${id}`)}
+              onOpenChat={openChat}
             />
           </ErrorBoundary>
         ) : (

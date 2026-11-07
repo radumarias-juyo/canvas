@@ -4,7 +4,7 @@ import { CHAT_AGENT_KIND } from "../shared/agents.ts";
 import { textOf } from "../shared/canonical.ts";
 import { CHAT_COPY_KIND, type ChatCopyData } from "../shared/chat-kinds.ts";
 import { CHAT_MESSAGE_KIND, publishedBy, type ChatMessageData, type Person } from "../shared/protocol.ts";
-import { askLine, assistantText } from "./agents/turns.ts";
+import { askLine, assistantText, userText } from "./agents/turns.ts";
 
 /** A display-only entry a branch writes into its log: as it was in the chat it branched off from, or a copy of pi's reply. */
 export interface CopiedEntry {
@@ -33,7 +33,7 @@ export function branchCopies(entries: readonly EntryRecord[], owner: Person): Co
     } else if (entry.kind === CHAT_AGENT_KIND || entry.kind === CHAT_COPY_KIND) {
       copies.push({ kind: entry.kind, data: entry.data as JsonObject });
     } else if (entry.kind === "pi.user" && message?.role === "user") {
-      const text = typeof message.content === "string" ? message.content : textOf(message.content, "");
+      const text = userText(message);
       if (text) copies.push({ kind: CHAT_MESSAGE_KIND, data: { ...owner, text, sentAt: message.timestamp } satisfies ChatMessageData as unknown as JsonObject });
     } else if (entry.kind === "pi.assistant" && message?.role === "assistant") {
       const text = assistantText(message);

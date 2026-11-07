@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ChatSummary } from "../../shared/protocol.ts";
+import { MAX_CHAT_TITLE, type ChatSummary } from "../../shared/protocol.ts";
 import { errorMessage } from "../../shared/util.ts";
 import { api } from "../api.ts";
 import { Icon } from "../Icon.tsx";
@@ -175,7 +175,7 @@ export function ChatsHeading({ order }: { order: ReturnType<typeof useChatOrder>
         </Icon>
       </button>
       {open && (
-        <div className="row-menu chats-order-menu" role="group" aria-label="Order the chats">
+        <div className="row-menu" role="group" aria-label="Order the chats">
           <label>
             <input type="checkbox" checked={order.unreadFirst} onChange={(e) => order.setUnreadFirst(e.target.checked)} /> Unread first
           </label>
@@ -330,19 +330,20 @@ function RenameChat({ chat, onDone }: { chat: ChatSummary; onDone: (title?: stri
   const [title, setTitle] = useState(chat.title);
   const input = useRef<HTMLInputElement>(null);
   useEffect(() => input.current?.select(), []);
+  const save = () => onDone(title.trim() === chat.title ? undefined : title.trim());
   return (
     <input
       ref={input}
       className="chat-rename"
       value={title}
-      maxLength={200}
+      maxLength={MAX_CHAT_TITLE}
       aria-label="Your name for this chat"
       onChange={(e) => setTitle(e.target.value)}
-      onBlur={() => onDone(title.trim() === chat.title ? undefined : title.trim())}
+      onBlur={save}
       onKeyDown={(e) => {
         if (e.key === "Enter") {
           e.preventDefault();
-          onDone(title.trim() === chat.title ? undefined : title.trim());
+          save();
         } else if (e.key === "Escape") {
           e.preventDefault();
           onDone();

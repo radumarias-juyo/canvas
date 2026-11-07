@@ -58,7 +58,7 @@ import { endedEarly, stepRuns, streamingSteps, type MessageSteps, type StepRuns,
 import { Thinking } from "./Thinking.tsx";
 import { useRevealedText } from "./reveal.ts";
 import { blocks, firstNew, isAgent, openHints, published, sentAt, shown, userText } from "./entries.ts";
-import { CHAT_COPY_KIND, CHAT_EVENT_KIND, type ChatCopyData, type ChatEventData } from "../../shared/chat-kinds.ts";
+import { answersEveryMessage, CHAT_COPY_KIND, CHAT_EVENT_KIND, legacyKind, type ChatCopyData, type ChatEventData } from "../../shared/chat-kinds.ts";
 import { BranchOff, ChatEventNotice, EntryOf, KindChip, TagCard } from "./ChatKinds.tsx";
 
 interface Props {
@@ -110,7 +110,7 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
   const inChat = useMemo(() => (people ? everyone(people) : []), [people]);
   const mentions = useMentions(chatId, draft, setDraft, input, shared, uid, outside, inChat);
   // Agents answer only messages that call them, unless the chat is private.
-  const callsOnly = shared !== null || (people?.kind !== undefined && people.kind !== "private");
+  const callsOnly = !answersEveryMessage(people?.kind ?? legacyKind(shared !== null));
   // The viewer's own earlier messages, to bring back into the composer (Up, or the "more" menu). Who owns the chat must be
   // known first: a plain `pi.user` entry is the owner's.
   const history = useMemo(() => (people ? ownMessages(state.entries, uid, isOwner) : []), [people, state.entries, uid, isOwner]);
@@ -327,19 +327,22 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
                         {dayStart !== undefined && <DaySeparator at={dayStart} />}
                         {entry.id === newAt && <NewDivider />}
                         {bylines.has(entry.id) && <AgentByline />}
-                        <Entry
-                          entry={entry}
-                          steps={streamed?.grown?.entry === entry.id ? streamed.grown.steps : runs.byEntry.get(entry.id as number)}
-                          reactions={reactions[entry.id]}
-                          uid={uid}
-                          ownerName={ownerName}
-                          onOpen={onArtifact}
-                          onReply={reply}
-                          hinted={hinted.has(entry.id as number)}
-                          onAskAgent={askAgent}
-                          onNoHint={dropHint}
-                          onOpenChat={onOpenChat}
-                        />
+                        {/* A message's actions branch off from it (BranchOff). */}
+                        <EntryOf.Provider value={entry.id as number}>
+                          <Entry
+                            entry={entry}
+                            steps={streamed?.grown?.entry === entry.id ? streamed.grown.steps : runs.byEntry.get(entry.id as number)}
+                            reactions={reactions[entry.id]}
+                            uid={uid}
+                            ownerName={ownerName}
+                            onOpen={onArtifact}
+                            onReply={reply}
+                            hinted={hinted.has(entry.id as number)}
+                            onAskAgent={askAgent}
+                            onNoHint={dropHint}
+                            onOpenChat={onOpenChat}
+                          />
+                        </EntryOf.Provider>
                         {spend && <PromptCost spend={spend} />}
                       </Fragment>
                     );
@@ -547,39 +550,6 @@ const Entry = memo(function Entry({
   onNoHint: (entry: number) => void;
   onOpenChat?: (chatId: string) => void;
 }) {
-  // A message's actions branch off from it (BranchOff).
-  return (
-    <EntryOf.Provider value={entry.id as number}>
-      <EntryBody
-        entry={entry}
-        steps={steps}
-        reactions={byEmoji}
-        uid={uid}
-        ownerName={ownerName}
-        onOpen={onOpen}
-        onReply={onReply}
-        hinted={hinted}
-        onAskAgent={onAskAgent}
-        onNoHint={onNoHint}
-        onOpenChat={onOpenChat}
-      />
-    </EntryOf.Provider>
-  );
-});
-
-function EntryBody({
-  entry,
-  steps,
-  reactions: byEmoji,
-  uid,
-  ownerName,
-  onOpen,
-  onReply,
-  hinted,
-  onAskAgent,
-  onNoHint,
-  onOpenChat,
-}: Parameters<typeof Entry>[0]) {
   const people = useSharedChat();
   const reactions = useMessageReactions(isReactable(entry) ? entry.id : undefined, byEmoji);
   const message = entry.model?.[0];
@@ -637,7 +607,7 @@ function EntryBody({
     return <OrphanResult message={message} />;
   }
   return null;
-}
+});
 
 /** The entries that start a day, the first of each day the conversation has messages on, with their time. */
 function dayStartsOf(entries: readonly EntryRecord[]): Map<number, number> {

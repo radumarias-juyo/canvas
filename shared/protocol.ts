@@ -8,7 +8,7 @@ import type { EntryReactions, Reactions } from "./reactions.ts";
 import type { Attachment, AttachmentInput } from "./attachments.ts";
 import type { Mention, MentionInput } from "./mentions.ts";
 import type { ChatAgentView } from "./agents.ts";
-import type { BranchedFrom, ChatKind, ChatPage } from "./chat-kinds.ts";
+import type { ChatKind, ChatPage } from "./chat-kinds.ts";
 
 export type McpErrorCode =
   | "server_not_connected"
@@ -313,6 +313,20 @@ export interface ChatSummary {
   closed?: true;
 }
 
+/** The longest name someone gives a chat for themselves. */
+export const MAX_CHAT_TITLE = 200;
+
+/** What one person changes about a chat in their own sidebar (PATCH /api/chats/:id); each field left out stays as it is. */
+export interface ChatRowChange {
+  pinned?: boolean;
+  /** Hidden from their list until someone tags them in it again (or they open it from the closed ones). */
+  closed?: boolean;
+  /** Bold again, as if something new came in, until they next look at it. */
+  unread?: boolean;
+  /** Their own name for it; empty goes back to the chat's own. */
+  title?: string;
+}
+
 /**
  * What the sidebar's socket (GET /api/me/ws) sends: the name of a list that changed, so the app reads it again. A
  * MentionNotice comes as JSON.
@@ -387,7 +401,7 @@ export interface ChatInvite {
  * What one person's app is told about a chat's people: everyone in it, and for its owner the invites still open; the
  * chat's kind, the page it discusses, and the chat it branched off from, if any.
  */
-export type ChatPeopleView = ChatPeople & { invites?: ChatInvite[]; kind?: ChatKind; page?: ChatPage; branchedFrom?: BranchedFrom };
+export type ChatPeopleView = ChatPeople & { invites?: ChatInvite[]; kind?: ChatKind; page?: ChatPage };
 
 /** POST /api/chats/:id/invites: a single-use link to the chat. */
 export interface CreatedInvite extends ChatInvite {

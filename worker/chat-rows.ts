@@ -1,28 +1,14 @@
 import { isChatKind, legacyKind, type ChatKind } from "../shared/chat-kinds.ts";
-import type { ChatStatus, ChatSummary, Person } from "../shared/protocol.ts";
-import type { Sql } from "./members.ts";
+import { MAX_CHAT_TITLE, type ChatRowChange, type ChatStatus, type ChatSummary, type Person } from "../shared/protocol.ts";
+import { isObject } from "../shared/util.ts";
+import { addColumns, type Sql } from "./members.ts";
 
 /** The most people a sidebar remembers sharing chats with (ChatRows.knowPeople), newest kept. */
 export const MAX_KNOWN_PEOPLE = 500;
 
-/** The longest name someone gives a chat for themselves. */
-export const MAX_CHAT_TITLE = 200;
-
-/** What one person changes about a chat in their own sidebar; each field left out stays as it is. */
-export interface ChatRowChange {
-  pinned?: boolean;
-  /** Hidden from their list until someone tags them in it again (or they open it from the closed ones). */
-  closed?: boolean;
-  /** Bold again, as if something new came in, until they next look at it. */
-  unread?: boolean;
-  /** Their own name for it; empty goes back to the chat's own. */
-  title?: string;
-}
-
 /** A change as the browser sends it, checked for shape; null when it holds nothing valid. */
-export function parseRowChange(raw: unknown): ChatRowChange | null {
-  if (!raw || typeof raw !== "object") return null;
-  const given = raw as Record<string, unknown>;
+export function parseRowChange(given: unknown): ChatRowChange | null {
+  if (!isObject(given)) return null;
   const change: ChatRowChange = {};
   for (const key of ["pinned", "closed", "unread"] as const) if (typeof given[key] === "boolean") change[key] = given[key];
   if (typeof given.title === "string") change.title = given.title.trim().slice(0, MAX_CHAT_TITLE);
@@ -57,22 +43,18 @@ export class ChatRows {
     this.#sql = sql;
     for (const table of ["chats", "shared_chats"]) {
       // Copied from the chat (setKind); null in a row from before kinds, which kindOf reads as the chat was.
-      this.#addColumn(table, "kind", "TEXT");
-      this.#addColumn(table, "pinned_at", "INTEGER NOT NULL DEFAULT 0");
-      this.#addColumn(table, "closed_at", "INTEGER NOT NULL DEFAULT 0");
-      this.#addColumn(table, "marked_unread", "INTEGER NOT NULL DEFAULT 0");
-      this.#addColumn(table, "own_title", "TEXT");
+      addColumns(sql, table, {
+        kind: "TEXT",
+        pinned_at: "INTEGER NOT NULL DEFAULT 0",
+        closed_at: "INTEGER NOT NULL DEFAULT 0",
+        marked_unread: "INTEGER NOT NULL DEFAULT 0",
+        own_title: "TEXT",
+      });
     }
     sql.exec(`
       CREATE TABLE IF NOT EXISTS page_chats (artifact_id TEXT PRIMARY KEY, chat_id TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS people (uid TEXT PRIMARY KEY, name TEXT NOT NULL, met_at INTEGER NOT NULL);
     `);
-  }
-
-  /** `table`, `column` and `type` are written here, never input. */
-  #addColumn(table: string, column: string, type: string): void {
-    const columns = this.#sql.exec(`SELECT name FROM pragma_table_info('${table}')`).toArray();
-    if (!columns.some((row) => row.name === column)) this.#sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
   }
 
   /** The user's own chats and the ones shared with them, most recent first, as their sidebar shows them. */
@@ -176,7 +158,8 @@ export class ChatRows {
         now,
       );
     }
-    this.#sql.exec("DELETE FROM people WHERE uid NOT IN (SELECT uid FROM people ORDER BY met_at DESC LIMIT ?)", MAX_KNOWN_PEOPLE);
+    const known = this.#sql.exec("SELECT COUNT(*) AS n FROM people").toArray()[0]?.n as number;
+    if (known > MAX_KNOWN_PEOPLE) this.#sql.exec("DELETE FROM people WHERE uid NOT IN (SELECT uid FROM people ORDER BY met_at DESC LIMIT ?)", MAX_KNOWN_PEOPLE);
   }
 
   /** The people this user shares chats with, most recently met first. */
