@@ -80,6 +80,8 @@ export interface RunEnded {
   chatKind: ChatKind;
   /** The report it posted (in a chat or as a notification), if it did: what its followers may read. */
   post?: string;
+  /** When it was posted: an answer its owner wrote after it, before the run ended, answers it. */
+  postedAt?: number;
   /** Its post ends on a question to its owner. */
   asks?: boolean;
 }
@@ -444,7 +446,8 @@ export class UserDirectory extends DurableObject<Env> {
     this.addFeed({
       kind: "run",
       ref: `run:${agent.id}:${run.dueAt}`,
-      at: Date.now(),
+      // When it asked, if it did: an answer its owner wrote since, while the run went on, answers it (FeedStore.add).
+      at: run.postedAt ?? Date.now(),
       title: `@${agent.name} ${run.asks ? "asks you something" : RUN_FEED_TEXT[run.status]}`,
       ...(text && { text }),
       from,
@@ -548,9 +551,9 @@ export class UserDirectory extends DurableObject<Env> {
     const sql = own
       ? this.ctx.storage.sql.exec("UPDATE chats SET kind = ? WHERE id = ? AND kind IS NOT ?", kind, id, kind)
       : this.ctx.storage.sql.exec("UPDATE shared_chats SET kind = ? WHERE id = ? AND owner_uid = ? AND kind IS NOT ?", kind, id, ownerUid, kind);
-    if (!sql.rowsWritten) return;
-    this.#changed("chats");
-    // Off the record now: what the feed kept of it leaves too.
+    if (sql.rowsWritten) this.#changed("chats");
+    // Off the record: what the feed kept of it leaves too, whether or not this row had heard it already (another write
+    // may have set the row without dropping them).
     if (!mayLeave({ what: "feed" }, kind) && this.#feed.forgetChat(id)) this.#changed("feed");
   }
 
@@ -743,8 +746,8 @@ export class UserDirectory extends DurableObject<Env> {
    * Bump a shared chat to the top with its current title, as touchChat does for the owner. `byOther`: someone else wrote.
    * `named`: the title was just cut from this message.
    */
-  touchSharedChat(id: string, ownerUid: string, title: string, byOther: boolean, tag?: Tag, named = false): void {
-    this.#touch(id, ownerUid, title, byOther, tag, named, !byOther);
+  touchSharedChat(id: string, ownerUid: string, title: string, byOther: boolean, tag?: Tag, named = false, answered: readonly string[] = []): void {
+    this.#touch(id, ownerUid, title, byOther, tag, named, answered);
   }
 
   /**
@@ -752,14 +755,14 @@ export class UserDirectory extends DurableObject<Env> {
    * it (MentionNotice), with the chat's title unless the chat is named after this very message (`named`). `wrote`: this
    * user wrote it (also as the owner's second seat, which is someone else to the sidebar), answering what waited on them.
    */
-  #touch(id: string, ownerUid: string, title: string, byOther: boolean, tag: Tag | undefined, named: boolean, wrote: boolean): void {
+  #touch(id: string, ownerUid: string, title: string, byOther: boolean, tag: Tag | undefined, named: boolean, answered: readonly string[]): void {
     // This object's own clock for the row, as every other write to it uses: a tag's time comes from the chat, and could
     // put activity_at back behind a later write. The notice keeps the tag's time, which windows share.
     const now = Date.now();
     const set = "title = ?, updated_at = ?, activity_at = CASE WHEN ? THEN ? ELSE activity_at END, mentioned_at = CASE WHEN ? THEN ? ELSE mentioned_at END";
     const listed = this.#updateChat(id, ownerUid, set, title, now, byOther ? 1 : 0, now, tag ? 1 : 0, now);
-    // This user wrote in it: what waited there for their reply (an agent's question, a report that asks) is answered.
-    if (listed && wrote && this.#feed.resolveReplies(id)) this.#changed("feed");
+    // This user wrote in it to `answered` (the agents the message reached): what those agents asked them there is answered.
+    if (listed && this.#feed.resolveReplies(id, answered)) this.#changed("feed");
     if (!listed || !tag) return;
     // A tag opens the chat again for someone who closed it.
     this.#rows.reopen(id);
@@ -815,12 +818,12 @@ export class UserDirectory extends DurableObject<Env> {
    * a model gives it a better title (nameChat). `byOther`: someone other than this user wrote it; `wrote`: this user
    * did, as themselves or from their second seat (by default, when nobody else did). Returns its title.
    */
-  touchChat(id: string, prompt: string, byOther: boolean, tag?: Tag, wrote = !byOther): { title: string; named: boolean } {
+  touchChat(id: string, prompt: string, byOther: boolean, tag?: Tag, answered: readonly string[] = []): { title: string; named: boolean } {
     this.#notePreview(id, prompt);
     const before = this.chatTitle(id);
     const named = before === UNNAMED_CHAT;
     const title = named || before === null ? titleFromMessage(prompt) : before;
-    this.#touch(id, this.ctx.id.name!, title, byOther, tag, named, wrote);
+    this.#touch(id, this.ctx.id.name!, title, byOther, tag, named, answered);
     return { title, named };
   }
 
@@ -1073,6 +1076,8 @@ export class UserDirectory extends DurableObject<Env> {
     if (!("error" in result) && result.version !== before) this.#agentChanged(id);
     // Turning it on confirms its guesses (AgentStore.setEnabled clears them).
     if (!("error" in result) && result.enabled) this.resolveFeed(assumptionRef(id));
+    // Off, its runs wait on nothing more: no sign-in or answer is needed for a run that will not go on.
+    if (!("error" in result) && !result.enabled && this.#feed.resolveRuns(aboutOf("agent", id, this.ctx.id.name!))) this.#changed("feed");
     return result;
   }
 

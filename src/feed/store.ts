@@ -73,9 +73,12 @@ export function useFollows(): Loaded<FollowView[]> {
 /** Whether the user follows a page or agent, and a way to follow it or stop. */
 export function useFollow(kind: FollowKind, id: string, chatId?: string) {
   const { value, error } = useFollows();
-  const following = Boolean(value?.some((follow) => follow.kind === kind && follow.id === id && (!chatId || follow.chatId === chatId)));
-  const toggle = async () => follows.put(following ? await api.unfollow(kind, id, chatId) : await api.follow(kind, id, chatId));
-  return { known: value !== null, following, toggle, error };
+  // A follow of an agent belongs to the chat it was made from, and shows from any chat that shares it: stopping it
+  // stops that one. The one from this chat first, when two people's agents share an id.
+  const same = (follow: FollowView) => follow.kind === kind && follow.id === id;
+  const found = value?.find((follow) => same(follow) && follow.chatId === chatId) ?? value?.find(same);
+  const toggle = async () => follows.put(found ? await api.unfollow(kind, id, found.chatId) : await api.follow(kind, id, chatId));
+  return { known: value !== null, following: Boolean(found), toggle, error };
 }
 
 /** Put the follows as a change answered with them. */

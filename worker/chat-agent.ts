@@ -1491,7 +1491,9 @@ export class ChatAgent extends DurableObject<Env> {
     // The sidebars are only a convenience: update them off the prompt's path, and let a failure be.
     // Only a tag whose "@name" is in the text: one sent without it would notify someone of nothing they can see.
     const tags = taggedPeople(keptMentions(text, mentions));
-    void this.#touchIndexes(title, author, tags, text, `${author.uid}:${sentAt}`).catch((error) => console.error("chat index:", errorMessage(error)));
+    void this.#touchIndexes(title, author, tags, text, `${author.uid}:${sentAt}`, { reached: speakers }).catch((error) =>
+      console.error("chat index:", errorMessage(error)),
+    );
     return true;
   }
 
@@ -1648,8 +1650,17 @@ export class ChatAgent extends DurableObject<Env> {
    * another object. The author's own always is, and so is everyone the message tagged (`tags`), who hears of it at once
    * (a Tag). `titleFrom` names an unnamed chat: the message's text, or its files' names. `key` names the message (the
    * same one placed again tags nobody twice in the feed); `run`: it is a run's report, which its owner's feed has already.
+   * `reached`: the agents a person's message reached (called, replied to, or the chat's own), whose questions to its
+   * author it answers in their feed.
    */
-  async #touchIndexes(titleFrom: string, author: Person, tags: readonly string[], text: string, key: string, run = false): Promise<void> {
+  async #touchIndexes(
+    titleFrom: string,
+    author: Person,
+    tags: readonly string[],
+    text: string,
+    key: string,
+    { run = false, reached = [] }: { run?: boolean; reached?: readonly string[] } = {},
+  ): Promise<void> {
     const now = Date.now();
     // Someone tagging themselves is told nothing; anyone else tagged is, owner or member.
     const tagged = new Set(tags.filter((uid) => uid !== author.uid));
@@ -1657,13 +1668,16 @@ export class ChatAgent extends DurableObject<Env> {
     const tagOf = (uid: string) => (tagged.has(uid) ? tag : undefined);
     // The owner's second seat writes as the owner: what waits on the owner here for a reply is answered by it too.
     const byOwner = this.#account(author.uid) === this.uid;
-    const { title, named } = await this.#directory.touchChat(this.chatId, titleFrom, author.uid !== this.uid, tagOf(this.uid), byOwner);
+    const { title, named } = await this.#directory.touchChat(this.chatId, titleFrom, author.uid !== this.uid, tagOf(this.uid), byOwner ? reached : []);
     if (named && titleFrom) void this.#nameChat(titleFrom, title).catch((error: unknown) => console.error("chat title:", errorMessage(error)));
     const all = title !== this.#membersTouched.title || now - this.#membersTouched.at >= MEMBERS_TOUCH_MS;
     if (all) this.#membersTouched = { title, at: now };
     const members = this.#listingMembers().filter((member) => all || member.uid === author.uid || tagged.has(member.uid));
     await Promise.allSettled(
-      members.map((member) => this.#index(member.uid).touchSharedChat(this.chatId, this.uid, title, member.uid !== author.uid, tagOf(member.uid), named)),
+      members.map((member) => {
+        const answered = member.uid === author.uid ? reached : [];
+        return this.#index(member.uid).touchSharedChat(this.chatId, this.uid, title, member.uid !== author.uid, tagOf(member.uid), named, answered);
+      }),
     );
   }
 
@@ -2714,7 +2728,7 @@ export class ChatAgent extends DurableObject<Env> {
   async #postAgentReply(reply: ChatAgentReplyData, requestId: string, tags: readonly string[] = []): Promise<void> {
     await (await this.#root()).submit({ type: "write", requestId, entry: { kind: CHAT_AGENT_KIND, data: reply } }, BACKGROUND_CONTEXT);
     const author = { uid: `agent:${reply.agentId}`, name: reply.name };
-    void this.#touchIndexes(reply.text || reply.name, author, tags, reply.text, requestId, Boolean(reply.run)).catch((error) =>
+    void this.#touchIndexes(reply.text || reply.name, author, tags, reply.text, requestId, { run: Boolean(reply.run) }).catch((error) =>
       console.error("chat index:", errorMessage(error)),
     );
     this.#feedQuestion(reply, requestId);
@@ -3219,7 +3233,7 @@ export class ChatAgent extends DurableObject<Env> {
       ...(run.summary && { summary: run.summary }),
       chatId: this.chatId,
       chatKind: this.kinds.kind(),
-      ...(posted?.text && { post: posted.text, ...(asksUser(posted.text) && { asks: true }) }),
+      ...(posted?.text && { post: posted.text, ...(posted.sentAt && { postedAt: posted.sentAt }), ...(asksUser(posted.text) && { asks: true }) }),
     });
     this.ctx.waitUntil(ended.catch((error: unknown) => console.error("feed:", errorMessage(error))));
   }
@@ -3269,12 +3283,14 @@ export class ChatAgent extends DurableObject<Env> {
       if (others.length === step.to.length)
         return { kind: "notify", to: step.to.join(", "), status: "refused", detail: "at Inform, an agent notifies only its owner" };
       // Posted here, tagging the owner: their sidebar's notice, and a browser notification when they allow one.
+      const sentAt = Date.now();
       await this.#placeRun(this.#runReply(request), context, `run-post:${agent.id}:${request.run.dueAt}:${request.key}`, this.roster.get(agent.id), [this.uid]);
       return {
         kind: "notify",
         to: "you",
         text: request.text,
         status: "sent",
+        sentAt,
         ...(others.length && { detail: `not ${others.join(", ")}: at Inform, an agent notifies only its owner` }),
       };
     }
@@ -3282,6 +3298,7 @@ export class ChatAgent extends DurableObject<Env> {
     // The owner's names ("owner", "me", "@agent") are one place: the report goes there once.
     const targets = [...new Set(step.to.map((to) => to.trim()).map((to) => (isOwner(to) ? "owner" : to)))];
     const chats = targets.every(isOwner) ? [] : (await this.#directory.listChats()).filter((chat) => !chat.sharedBy);
+    const sentAt = Date.now();
     const outcomes = await Promise.all(
       targets.map(async (target): Promise<{ sent: string } | { refused: string }> => {
         const requestId = `run-post:${agent.id}:${request.run.dueAt}:${request.key}:${target}`;
@@ -3302,6 +3319,7 @@ export class ChatAgent extends DurableObject<Env> {
       to: [...sent, ...refused].join(", ") || step.to.join(", "),
       text: request.text,
       status: sent.length ? "sent" : "refused",
+      ...(sent.length && { sentAt }),
       ...(refused.length && { detail: `not posted to ${refused.join(", ")}` }),
     };
   }

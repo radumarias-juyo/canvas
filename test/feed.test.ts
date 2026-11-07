@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { feedPath, MAX_FEED_ITEMS, MAX_FOLLOWERS, MAX_FOLLOWS, type FeedInput } from "../shared/feed.ts";
+import { agentFrom, feedPath, MAX_FEED_ITEMS, MAX_FOLLOWERS, MAX_FOLLOWS, type FeedInput } from "../shared/feed.ts";
 import { aboutOf, fanOut, FeedStore, followersAllowed, FollowStore, postsReachFollowers, type FanOutHost, type Follower } from "../worker/feed/store.ts";
 import { memorySql } from "./fakes.ts";
 
@@ -76,28 +76,61 @@ describe("feed: keeping items", () => {
     expect(feed.counts().unread).toBe(0);
   });
 
-  it("keeps a question waiting until the person writes in its chat, read or not", () => {
+  it("keeps a question waiting until the person writes to the agent that asked, read or not", () => {
     const feed = new FeedStore(memorySql());
-    const question = (chatId: string, n: number): FeedInput => ({
+    const brief = { id: "b1", name: "brief", avatar: "br", color: "teal" as const };
+    const question = (chatId: string, n: number, agent = brief): FeedInput => ({
       kind: "question",
       ref: `question:${chatId}:${n}`,
       at: T0 + n,
-      title: "@brief asks you something",
+      title: `@${agent.name} asks you something`,
+      from: agentFrom(agent),
       open: { to: "chat", chatId },
       chat: { id: chatId, kind: "group" },
     });
     feed.add(question("c1", 1));
     feed.add(question("c2", 2));
-    feed.add({ kind: "run", ref: "run:a1:1", at: T0 + 3, title: "@brief asks you something", status: "sent", needsYou: "reply", open: { to: "chat", chatId: "c1" }, chat: { id: "c1", kind: "group" } });
+    feed.add(question("c1", 3, { ...brief, id: "s1", name: "signups" }));
     // Opening the chat reads them; they still wait for an answer.
     feed.markChatRead("c1");
     expect(feed.counts()).toEqual({ unread: 1, needsYou: 3 });
-    expect(feed.resolveReplies("c1")).toBe(2);
+    // An aside to the people in the chat reaches no agent, and answers nothing.
+    expect(feed.resolveReplies("c1", [], T0 + 10)).toBe(0);
+    // A message to @signups answers @signups only.
+    expect(feed.resolveReplies("c1", ["s1"], T0 + 11)).toBe(1);
+    expect(feed.list({ needsYou: true }).items.map((item) => item.title)).toEqual(["@brief asks you something", "@brief asks you something"]);
+    expect(feed.resolveReplies("c1", ["b1"], T0 + 12)).toBe(1);
     expect(feed.list({ needsYou: true }).items.map((item) => item.open)).toEqual([{ to: "chat", chatId: "c2" }]);
     // An approval or a guess is not answered by a message.
-    feed.add({ kind: "approval", ref: "approval:x", at: T0 + 4, title: "@brief wants to post", open: { to: "chat", chatId: "c2" }, chat: { id: "c2", kind: "group" } });
-    expect(feed.resolveReplies("c2")).toBe(1);
+    const approval: FeedInput = { kind: "approval", ref: "approval:x", at: T0 + 4, title: "@brief wants to post", from: agentFrom(brief), open: { to: "chat", chatId: "c2" } };
+    feed.add({ ...approval, chat: { id: "c2", kind: "group" } });
+    expect(feed.resolveReplies("c2", ["b1"], T0 + 13)).toBe(1);
     expect(feed.list({ needsYou: true }).items.map((item) => item.kind)).toEqual(["approval"]);
+  });
+
+  it("takes a report's question as answered when the owner wrote to its agent after it was posted, before the run ended", () => {
+    const feed = new FeedStore(memorySql());
+    const report = (n: number): FeedInput => ({
+      kind: "run",
+      ref: `run:b1:${n}`,
+      at: T0 + n,
+      title: "@brief asks you something",
+      status: "sent",
+      needsYou: "reply",
+      from: agentFrom({ id: "b1", name: "brief", avatar: "br", color: "teal" }),
+      open: { to: "chat", chatId: "home" },
+      chat: { id: "home", kind: "private" },
+    });
+    // Posted at +1, answered at +5, and the run ended (its item added) after.
+    feed.resolveReplies("home", ["b1"], T0 + 5);
+    feed.add(report(1));
+    // Posted at +9, after the last answer: it waits.
+    feed.add(report(9));
+    expect(feed.list({ needsYou: true }).items.map((item) => item.at)).toEqual([T0 + 9]);
+    expect(feed.counts()).toEqual({ unread: 1, needsYou: 1 });
+    // Turned off, its agent's runs wait on nothing.
+    feed.add({ ...report(20), ref: "run:b1:20", needsYou: true }, null, aboutOf("agent", "b1", "ann"));
+    expect(feed.resolveRuns(aboutOf("agent", "b1", "ann"))).toBe(1);
   });
 
   it("lets a chat, or a page or agent, take its items along when it goes", () => {
@@ -122,6 +155,19 @@ describe("feed: keeping items", () => {
     expect(titles).toContain("ann mentioned you in Signups (0)");
     expect(titles).not.toContain("ann mentioned you in Signups (1)");
     expect(titles[0]).toBe(`ann mentioned you in Signups (${MAX_FEED_ITEMS})`);
+  });
+
+  it("keeps room for new items when what waits on the person fills the feed", () => {
+    const feed = new FeedStore(memorySql());
+    for (let n = 0; n < MAX_FEED_ITEMS; n++) {
+      feed.add({ kind: "assumption", ref: `assumption:a${n}`, at: T0 + n, title: `Confirm a${n}`, open: { to: "agent", agentId: `a${n}` } });
+    }
+    expect(feed.add(tag(MAX_FEED_ITEMS * 2))).toBe("added");
+    const items = feed.list({}, MAX_FEED_ITEMS + 10).items;
+    expect(items[0].kind).toBe("tag");
+    // Half the feed at most waits; the oldest waiting went first.
+    expect(feed.counts().needsYou).toBe(MAX_FEED_ITEMS / 2);
+    expect(items.some((item) => item.title === "Confirm a0")).toBe(false);
   });
 
   it("keeps what still waits on the person when pruning, read or not", () => {

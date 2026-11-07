@@ -183,6 +183,9 @@ function FeedIcon({ item }: { item: FeedItem }) {
   );
 }
 
+/** One follow among the user's: two people's agents can share an id, followed from different chats. */
+const followKey = (follow: FollowView) => `${follow.kind}:${follow.id}:${follow.chatId ?? ""}`;
+
 /** What the user follows: each page and agent, with a way to stop. */
 function Following() {
   const { value: follows, error } = useFollows();
@@ -197,7 +200,7 @@ function Following() {
     );
   }
   const stop = async (follow: FollowView) => {
-    setBusy(`${follow.kind}:${follow.id}`);
+    setBusy(followKey(follow));
     setFailed(null);
     try {
       putFollows(await api.unfollow(follow.kind, follow.id, follow.chatId));
@@ -215,7 +218,7 @@ function Following() {
       {(error || failed) && <p className="form-error">{failed ?? error}</p>}
       <ul>
         {(follows ?? []).map((follow) => (
-          <li key={`${follow.kind}:${follow.id}`}>
+          <li key={followKey(follow)}>
             <a
               href={feedPath(follow.kind === "page" ? { to: "page", artifactId: follow.id } : { to: "agent", agentId: follow.id, ...(follow.chatId && { chatId: follow.chatId }) })}
               target={follow.kind === "page" ? "_blank" : undefined}
@@ -224,7 +227,7 @@ function Following() {
               {follow.title}
             </a>
             <small>{follow.kind === "page" ? "page" : "agent"}</small>
-            <button type="button" disabled={busy === `${follow.kind}:${follow.id}`} onClick={() => void stop(follow)}>
+            <button type="button" disabled={busy === followKey(follow)} onClick={() => void stop(follow)}>
               Unfollow
             </button>
           </li>

@@ -33,6 +33,9 @@ export function aboutOf(kind: FollowKind, id: string, ownerUid: string): string 
   return `${kind}:${ownerUid}:${id}`;
 }
 
+/** The most items one feed keeps waiting on the person: half of it, the rest for what comes in. */
+const MAX_WAITING = MAX_FEED_ITEMS / 2;
+
 /** The `needs` column: nothing waits, it waits until resolved by ref, or until the person writes in its chat. */
 const NEEDS = { none: 0, resolve: 1, reply: 2 } as const;
 
@@ -41,7 +44,9 @@ export type FeedAdded = "added" | "updated" | "same" | "refused";
 
 /**
  * A person's feed (`feed`): one row per item, unique by its ref. Items about a chat keep its id (`chat_id`), and items
- * about a followed page or agent what they are about (`about`), so either going takes them along.
+ * about a followed page or agent what they are about (`about`), so either going takes them along. An item waiting for
+ * the person's reply keeps the agent that asked (`waits_on`); `answered` keeps when they last wrote to each agent in
+ * each chat, so a question that reaches the feed after its answer (a run's report, added when the run ends) is answered.
  */
 export class FeedStore {
   readonly #sql: Sql;
@@ -50,9 +55,10 @@ export class FeedStore {
     this.#sql = sql;
     sql.exec(`
       CREATE TABLE IF NOT EXISTS feed (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, ref TEXT NOT NULL UNIQUE, at INTEGER NOT NULL,
-        read INTEGER NOT NULL DEFAULT 0, needs INTEGER NOT NULL DEFAULT 0, chat_id TEXT, about TEXT, data TEXT NOT NULL);
+        read INTEGER NOT NULL DEFAULT 0, needs INTEGER NOT NULL DEFAULT 0, chat_id TEXT, about TEXT, waits_on TEXT, data TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS feed_by_at ON feed (at);
       CREATE INDEX IF NOT EXISTS feed_by_chat ON feed (chat_id) WHERE chat_id IS NOT NULL;
+      CREATE TABLE IF NOT EXISTS feed_answered (chat_id TEXT NOT NULL, agent_id TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (chat_id, agent_id));
     `);
   }
 
@@ -76,15 +82,19 @@ export class FeedStore {
     };
     const json = JSON.stringify(data);
     const waits = input.needsYou ?? NEEDS_YOU[input.kind];
-    const needs = waits === "reply" ? NEEDS.reply : waits ? NEEDS.resolve : NEEDS.none;
-    const read = input.quiet ? 1 : 0;
     const chatId = input.chat?.id ?? (input.open.to === "chat" ? input.open.chatId : null);
+    // A reply answers the agent that asked: one with no agent, or in no chat, waits until resolved by its ref.
+    const waitsOn = waits === "reply" && chatId ? (input.from?.agent?.id ?? null) : null;
+    const answered = waitsOn !== null && this.#answeredAt(chatId!, waitsOn) >= input.at;
+    let needs: number = waitsOn !== null ? NEEDS.reply : waits ? NEEDS.resolve : NEEDS.none;
+    if (answered) needs = NEEDS.none;
+    const read = input.quiet || answered ? 1 : 0;
     const before = this.#sql.exec("SELECT data FROM feed WHERE ref = ?", input.ref).toArray()[0] as { data: string } | undefined;
     if (before?.data === json) return "same";
     this.#sql.exec(
-      `INSERT INTO feed (kind, ref, at, read, needs, chat_id, about, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO feed (kind, ref, at, read, needs, chat_id, about, waits_on, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(ref) DO UPDATE SET kind = excluded.kind, at = excluded.at, read = excluded.read, needs = excluded.needs,
-         chat_id = excluded.chat_id, about = excluded.about, data = excluded.data`,
+         chat_id = excluded.chat_id, about = excluded.about, waits_on = excluded.waits_on, data = excluded.data`,
       input.kind,
       input.ref,
       input.at,
@@ -92,6 +102,7 @@ export class FeedStore {
       needs,
       chatId,
       about ?? null,
+      waitsOn,
       json,
     );
     if (!before) this.#prune();
@@ -130,13 +141,37 @@ export class FeedStore {
     return this.#sql.exec("UPDATE feed SET needs = 0, read = 1 WHERE ref = ? AND (needs > 0 OR read = 0)", ref).rowsWritten;
   }
 
-  /** The person wrote in chat `chatId`: what waited there for their reply (a question) is answered. */
-  resolveReplies(chatId: string): number {
-    return this.#sql.exec("UPDATE feed SET needs = 0, read = 1 WHERE chat_id = ? AND needs = ?", chatId, NEEDS.reply).rowsWritten;
+  /**
+   * The person wrote in chat `chatId` to `agents` (those the message reached: called, replied to, or the chat's own):
+   * what those agents waited there for their reply is answered. An aside, or a message to another agent, answers nothing.
+   */
+  resolveReplies(chatId: string, agents: readonly string[], now = Date.now()): number {
+    if (!agents.length) return 0;
+    for (const agent of agents) {
+      this.#sql.exec(
+        "INSERT INTO feed_answered (chat_id, agent_id, at) VALUES (?, ?, ?) ON CONFLICT(chat_id, agent_id) DO UPDATE SET at = MAX(at, excluded.at)",
+        chatId,
+        agent,
+        now,
+      );
+    }
+    const sql = "UPDATE feed SET needs = 0, read = 1 WHERE chat_id = ? AND needs = ? AND waits_on IN (SELECT value FROM json_each(?))";
+    return this.#sql.exec(sql, chatId, NEEDS.reply, JSON.stringify(agents)).rowsWritten;
+  }
+
+  /** When the person last wrote to `agent` in chat `chatId`; 0 for never. */
+  #answeredAt(chatId: string, agent: string): number {
+    return Number(this.#sql.exec("SELECT at FROM feed_answered WHERE chat_id = ? AND agent_id = ?", chatId, agent).toArray()[0]?.at ?? 0);
+  }
+
+  /** One of the person's agents was turned off: its runs' items wait on them no more (a sign-in, a question). */
+  resolveRuns(about: string): number {
+    return this.#sql.exec("UPDATE feed SET needs = 0 WHERE about = ? AND kind = 'run' AND needs > 0", about).rowsWritten;
   }
 
   /** A chat is gone, or the person is out of it: its items go. */
   forgetChat(chatId: string): number {
+    this.#sql.exec("DELETE FROM feed_answered WHERE chat_id = ?", chatId);
     return this.#sql.exec("DELETE FROM feed WHERE chat_id = ?", chatId).rowsWritten;
   }
 
@@ -145,8 +180,12 @@ export class FeedStore {
     return this.#sql.exec("DELETE FROM feed WHERE about = ?", about).rowsWritten;
   }
 
-  /** At most MAX_FEED_ITEMS: the oldest read ones that wait on nothing go first, then the oldest. */
+  /**
+   * At most MAX_FEED_ITEMS: what waits on the person is kept before the rest, but only up to MAX_WAITING of it (the
+   * oldest waiting go first), so there is always room for what comes in; then the oldest read ones go, then the oldest.
+   */
   #prune(): void {
+    this.#sql.exec("DELETE FROM feed WHERE id IN (SELECT id FROM feed WHERE needs > 0 ORDER BY at DESC, id DESC LIMIT -1 OFFSET ?)", MAX_WAITING);
     const keep = "(needs > 0) DESC, read ASC, at DESC, id DESC";
     this.#sql.exec(`DELETE FROM feed WHERE id IN (SELECT id FROM feed ORDER BY ${keep} LIMIT -1 OFFSET ?)`, MAX_FEED_ITEMS);
   }

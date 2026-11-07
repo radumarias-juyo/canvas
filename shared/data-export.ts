@@ -240,6 +240,7 @@ export function checkManifest(value: unknown): ExportManifest | { error: string 
   const lists = [manifest.chats, manifest.artifacts, manifest.files, manifest.sharedWithMe];
   if (typeof manifest.uid !== "string" || !manifest.account || !lists.every(Array.isArray)) return { error: "The export's manifest is damaged." };
   if (manifest.account.agents !== undefined && !Array.isArray(manifest.account.agents)) return { error: "The export's manifest is damaged." };
+  if (manifest.account.follows !== undefined && !Array.isArray(manifest.account.follows)) return { error: "The export's manifest is damaged." };
   // Ids and skill names go into request paths: only ones this app makes.
   const ids = [...manifest.chats!.flatMap((chat) => [chat?.id]), ...manifest.artifacts!.flatMap((artifact) => [artifact?.id, artifact?.chatId])];
   const skills = Array.isArray(manifest.account.skills) ? manifest.account.skills : [];
