@@ -6065,8 +6065,10 @@ function close(ws: WebSocket, code: number, reason: string): void {
   }
 }
 
-/** An event as a socket gets it: no prompt, no image data, and for someone other than the owner no notes (withoutNoteResults). */
-/** What a socket gets of one of pi's events: `reach` is what pi reads for whom, for a batch that may carry a tool's result. */
+/**
+ * An event as a socket gets it: no prompt, no image data, for someone other than the owner no notes (withoutNoteResults),
+ * and of pi's, what it read for the owner alone as `reach` says (shownPiEvent; none for an agent's session).
+ */
 function shownEvent(event: AgentEvent, member: boolean, reach: Reach | undefined): AgentEvent {
   const shown = withoutImageData(withoutSystemPrompt(event));
   const piShown = reach ? shownPiEvent(shown, reach, !member) : shown;

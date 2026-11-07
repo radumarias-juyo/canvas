@@ -15,6 +15,7 @@ import {
   privateResult,
   reachExtension,
   shownPiEvent,
+  showsResults,
   withHeld,
   withoutHeld,
   withoutPrivate,
@@ -221,6 +222,9 @@ describe("what others' screens show of pi's steps", () => {
     const streamed = { type: "message_update", usage: {}, changes: [{ type: "text_delta", contentIndex: 0, delta: "bank" }] } as unknown as AgentEvent;
     expect(JSON.stringify(shownPiEvent(streamed, { ...r, held }, false))).not.toContain("bank");
     expect(JSON.stringify(shownPiEvent(streamed, { ...r, held }, true))).toContain("bank");
+    // A batch of streamed tokens alone is read with the chat's reach too, so the hold applies to it.
+    expect(showsResults(streamed)).toBe(true);
+    expect(showsResults({ type: "run_start", inputs: [] } as AgentEvent)).toBe(false);
     // Once the run ended, a later reply is not held.
     expect(heldIn([{ from: 10, through: 30 }], 40)).toBe(false);
   });

@@ -310,9 +310,12 @@ function shownEntry(entry: EntryRecord, reach: Reach, owner: boolean): EntryReco
 /** What pi reads for whom when the chat cannot tell: nothing is shared, so others' screens show no tool's result. */
 export const CLOSED_REACH: Reach = { mcp: new Map(), shares: () => false, chatFile: () => false };
 
-/** Whether an event may carry a tool's result (shownPiEvent changes nothing else). */
+/** The events shownPiEvent may change: those that carry a tool's result, or a reply as it streams (held for the owner). */
+const SHOWN_TYPES = new Set(["snapshot", "message_start", "message_update", "message_end", "entry_appended", "tool_execution_end", "tool_execution_update"]);
+
+/** Whether shownPiEvent may change an event: a batch with none needs no reach. */
 export function showsResults(event: AgentEvent): boolean {
-  return ["snapshot", "message_start", "message_end", "entry_appended", "tool_execution_end", "tool_execution_update"].includes(event.type);
+  return SHOWN_TYPES.has(event.type);
 }
 
 /** Whether a running call's output may hold what only the owner sees, by its tool alone (its server, or a file tool). */
