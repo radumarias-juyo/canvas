@@ -7,6 +7,7 @@ import { tookFor } from "./Steps.tsx";
 /** Who gave a turn, as a line names them: a person by name, an agent by its handle, or the agent's schedule. */
 export function callerName(calledBy: AgentTurnView["calledBy"]): string {
   if (calledBy.schedule) return "its schedule";
+  if (calledBy.unprompted === "speak-up") return "nobody";
   return calledBy.agentId ? `@${calledBy.name}` : calledBy.name;
 }
 
@@ -36,7 +37,13 @@ const STATUS_WORDS: Record<AgentTurnView["status"], string> = { queued: "waiting
 
 /** One past turn in an agent's runs list: who asked, how long it took, and how it ended ("Ana asked · 14s · done"). */
 export function turnLine(turn: AgentTurnView, now: number): string {
-  const who = turn.calledBy.schedule ? "on its schedule" : `${callerName(turn.calledBy)} ${turn.hop > 0 ? "handed it on" : "asked"}`;
+  const who = turn.calledBy.schedule
+    ? "on its schedule"
+    : turn.calledBy.unprompted === "speak-up"
+      ? "spoke up unasked"
+      : turn.calledBy.unprompted === "follow-up"
+        ? `followed up ${turn.calledBy.name}'s question`
+        : `${callerName(turn.calledBy)} ${turn.hop > 0 ? "handed it on" : turn.calledBy.routed ? "asked (picked: nobody named)" : "asked"}`;
   const took =
     turn.startedAt === undefined ? undefined : turn.endedAt !== undefined ? tookFor(turn.endedAt - turn.startedAt) : formatElapsed(now - turn.startedAt);
   return [who, took, STATUS_WORDS[turn.status]].filter(Boolean).join(" · ");

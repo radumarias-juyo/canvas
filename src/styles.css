@@ -605,6 +605,22 @@ button.reaction:hover { border-color: var(--muted); }
 .agent-menu-state, .agent-menu-empty { color: var(--muted); font-size: 13px; }
 .agent-menu .section-head { padding: 4px 0 0; }
 .agent-menu .danger { align-self: flex-start; }
+.agent-menu > button:not(.danger):not(.icon-button) { align-self: flex-start; }
+/* The chat's agent settings, under the owner's list of agents to add. */
+.agent-settings { display: flex; flex-direction: column; gap: 10px; padding-top: 6px; border-top: 1px solid var(--border); }
+.agent-settings .skill-toggle { align-items: flex-start; }
+.agent-settings .skill-toggle > span, .agent-budget label, .agent-servers-here legend { display: flex; flex-direction: column; gap: 2px; }
+.agent-settings small { color: var(--muted); font-size: 12px; }
+.agent-budget { display: flex; flex-direction: column; gap: 6px; margin: 0; }
+.agent-budget-row { display: flex; gap: 6px; }
+.agent-budget-row input { flex: 1; min-width: 0; }
+.agent-budget-row input[aria-invalid="true"] { border-color: var(--error); }
+.agent-servers-here { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; border: 0; }
+.agent-servers-here legend { padding: 0 0 4px; }
+/* Under an agent's reply nobody asked for: the mark, and Mute. */
+.mute-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
+.pill.unprompted { border-color: transparent; background: var(--working-soft); color: var(--working); }
+.budget-notice { color: var(--working); }
 .agent-runs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .agent-run { display: flex; align-items: baseline; gap: 8px; font-size: 13px; }
 .agent-run .sent-time { margin-left: auto; flex: none; opacity: 1; }

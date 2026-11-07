@@ -96,7 +96,7 @@ const GROWS_ITSELF = CSS.supports("field-sizing", "content");
 const atBottom = (el: HTMLElement) => el.scrollHeight - el.scrollTop - el.clientHeight < 80;
 
 export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity, onLeft, onMenu, onOpenChat }: Props) {
-  const { state, connected, people, online, prompt, abort, setModel, auto, reactions, react, hints, dropHint, agents, live } = useChat(chatId);
+  const { state, connected, people, online, prompt, abort, setModel, auto, reactions, react, hints, dropHint, agents, agentSettings, live } = useChat(chatId);
   // pi, or an agent of the chat, is working or has turns waiting: Stop stops them all.
   const working = state.busy || agents.some((agent) => agent.busy || agent.queued);
   const chatReactions = useMemo(() => ({ uid, react }), [uid, react]);
@@ -347,7 +347,7 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
               {people?.kind && <KindChip chatId={chatId} kind={people.kind} page={people.page} isOwner={isOwner} />}
               {!group && <span className="chat-people">{mine > 1 && `Open in ${mine} of your windows`}</span>}
               {people && (group || isOwner) && (
-                <PeopleBar chatId={chatId} people={people} online={online} uid={uid} piWorking={state.busy} agents={agents} live={live} bar={group !== null} />
+                <PeopleBar chatId={chatId} people={people} online={online} uid={uid} piWorking={state.busy} agents={agents} live={live} settings={agentSettings} bar={group !== null} />
               )}
               <ChatCost usage={state.usage} entries={state.entries} time={time} />
               {shared && <NotifyButton />}
@@ -687,6 +687,7 @@ const Entry = memo(function Entry({
         onOpen={onOpen}
         entry={entry.id as number}
         onOfferYes={offerYes}
+        chatId={chatId}
       />
     );
   }

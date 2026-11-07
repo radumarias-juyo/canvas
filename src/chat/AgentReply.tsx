@@ -1,7 +1,9 @@
-import { useMemo, useRef } from "react";
+import { useMemo, useRef, useState } from "react";
 import type { ChatAgentReplyData } from "../../shared/agents.ts";
 import { offerOf } from "../../shared/offers.ts";
 import { everyone, type PublishedDetails } from "../../shared/protocol.ts";
+import { errorMessage } from "../../shared/util.ts";
+import { api } from "../api.ts";
 import { callerName } from "./agentLines.ts";
 import { ArtifactCard } from "./ArtifactCard.tsx";
 import { Markdown } from "./Markdown.tsx";
@@ -14,7 +16,10 @@ import { SentTime } from "./SentTime.tsx";
 
 /** Who gave an agent the turn it answers, as its byline says it. */
 function calledByLabel(calledBy: ChatAgentReplyData["calledBy"]): string {
-  return calledBy.schedule ? "on its schedule" : `for ${callerName(calledBy)}`;
+  if (calledBy.schedule) return "on its schedule";
+  if (calledBy.unprompted === "speak-up") return "unprompted";
+  if (calledBy.unprompted === "follow-up") return `following up for ${calledBy.name}`;
+  return calledBy.routed ? `for ${callerName(calledBy)} · picked, as nobody was named` : `for ${callerName(calledBy)}`;
 }
 
 /**
@@ -29,6 +34,7 @@ export function AgentReply({
   onOpen,
   entry,
   onOfferYes,
+  chatId,
 }: {
   data: ChatAgentReplyData;
   reactions: MessageReactions | null;
@@ -38,6 +44,8 @@ export function AgentReply({
   entry?: number;
   /** On the chat's latest offer, for its owner: what Yes does (OfferRow). */
   onOfferYes?: () => boolean;
+  /** The chat it is in: a reply nobody asked for offers to mute its agent there. */
+  chatId?: string;
 }) {
   const content = useRef<HTMLDivElement>(null);
   const people = useSharedChat();
@@ -62,6 +70,7 @@ export function AgentReply({
       ))}
       {offered && <OfferRow offer={offered.offer} entry={entry} onYes={onOfferYes} />}
       {data.failed && <div className="chat-error">{data.failed}</div>}
+      {data.calledBy.unprompted && chatId && <MuteRow chatId={chatId} agentId={data.agentId} name={data.name} />}
       {data.text && (
         <>
           <ReactionChips reactions={reactions} />
@@ -71,6 +80,39 @@ export function AgentReply({
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+/**
+ * Under a reply nobody asked for: Mute, for anyone in the chat, so the agent posts nothing unprompted here again. Its
+ * owner, or the chat's, can unmute it from its menu in the people bar or the chat's agent settings.
+ */
+function MuteRow({ chatId, agentId, name }: { chatId: string; agentId: string; name: string }) {
+  const [state, setState] = useState<"idle" | "muting" | "muted">("idle");
+  const [error, setError] = useState<string>();
+  const mute = async () => {
+    setState("muting");
+    setError(undefined);
+    try {
+      await api.muteChatAgent(chatId, agentId, true);
+      setState("muted");
+    } catch (e) {
+      setError(errorMessage(e));
+      setState("idle");
+    }
+  };
+  return (
+    <div className="mute-row">
+      <span className="pill unprompted">Nobody asked</span>
+      {state === "muted" ? (
+        <span>@{name} won't speak up unasked here again.</span>
+      ) : (
+        <button type="button" className="link-button" onClick={mute} disabled={state === "muting"}>
+          {state === "muting" ? "Muting…" : `Mute @${name} here`}
+        </button>
+      )}
+      {error && <span className="chat-error">{error}</span>}
     </div>
   );
 }
