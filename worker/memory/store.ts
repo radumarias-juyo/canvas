@@ -53,7 +53,10 @@ function noteOf(row: NoteRow): MemoryNote {
 
 /** A note to keep: where it goes, what it says, and how it came. */
 export type NoteFields = Pick<MemoryNote, "scope" | "text" | "source" | "kind" | "confirmed"> &
-  Partial<Pick<MemoryNote, "agentId" | "chatId" | "learnedBy" | "pinned">>;
+  Partial<Pick<MemoryNote, "agentId" | "chatId" | "learnedBy" | "pinned">> & {
+    /** False for a save in a turn the owner did not ask for (MemoryWriter.byOwner): see add. */
+    byOwner?: boolean;
+  };
 
 /** What adding a note did: the note, and whether it was one already kept (the same text, for the same reader). */
 export type NoteAdded = { note: MemoryNote; existed?: true } | { error: string };
@@ -73,7 +76,7 @@ export class MemoryStore {
       CREATE TABLE IF NOT EXISTS memory (
         id TEXT PRIMARY KEY, scope TEXT NOT NULL, agent_id TEXT, chat_id TEXT, text TEXT NOT NULL, source TEXT NOT NULL, kind TEXT NOT NULL,
         learned_by TEXT, uses INTEGER NOT NULL DEFAULT 0, pinned INTEGER NOT NULL DEFAULT 0, confirmed INTEGER NOT NULL, forgotten_at INTEGER,
-        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, by_owner INTEGER NOT NULL DEFAULT 1
       );
     `);
   }
@@ -106,10 +109,10 @@ export class MemoryStore {
   }
 
   /** Write `note` as a new row. */
-  #insert(note: MemoryNote): void {
+  #insert(note: MemoryNote, byOwner = true): void {
     this.#sql.exec(
-      `INSERT INTO memory (id, scope, agent_id, chat_id, text, source, kind, learned_by, uses, pinned, confirmed, forgotten_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO memory (id, scope, agent_id, chat_id, text, source, kind, learned_by, uses, pinned, confirmed, forgotten_at, created_at, updated_at, by_owner)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       note.id,
       note.scope,
       note.agentId ?? null,
@@ -124,31 +127,35 @@ export class MemoryStore {
       note.forgottenAt ?? null,
       note.createdAt,
       note.updatedAt,
+      byOwner ? 1 : 0,
     );
   }
 
   /**
    * Keep a note. One with the same text for the same reader (scope, agent, chat) that is in use is not kept twice:
-   * it is returned (`existed`), confirmed when the new save confirms it (confirmsKept). Within MAX_NOTES; waiting at
-   * once, MAX_UNCONFIRMED in the chat it was learned in (so nobody in one chat fills another's), MAX_UNCONFIRMED_ALL in all.
+   * it is returned (`existed`), confirmed when the new save confirms it (confirmsKept). Waiting at once, MAX_UNCONFIRMED
+   * in the chat it was learned in (so nobody in one chat fills another's). Saves the owner did not ask for wait only in
+   * their chat's room: they never take the owner's (MAX_NOTES for the rest, MAX_UNCONFIRMED_ALL for the owner's own).
    */
   add(fields: NoteFields): NoteAdded {
-    const same = this.#same(fields);
+    const { byOwner = true, ...kept } = fields;
+    const same = this.#same(kept);
     if (same) {
-      if (confirmsKept(fields, same)) this.#sql.exec("UPDATE memory SET confirmed = 1, updated_at = ? WHERE id = ?", this.#at(same), same.id);
+      if (confirmsKept(kept, same)) this.#sql.exec("UPDATE memory SET confirmed = 1, updated_at = ? WHERE id = ?", this.#at(same), same.id);
       return { note: this.get(same.id)!, existed: true };
     }
-    if (this.#count() >= MAX_NOTES) return { error: `There are ${MAX_NOTES} memory notes, the most there can be; the owner deletes some first.` };
-    if (!fields.confirmed) {
-      const waiting = "WHERE confirmed = 0 AND forgotten_at IS NULL";
-      if (this.#count(`${waiting} AND chat_id IS ?`, fields.chatId ?? null) >= MAX_UNCONFIRMED)
+    const waiting = "confirmed = 0 AND forgotten_at IS NULL";
+    if (this.#count(byOwner ? `WHERE NOT (by_owner = 0 AND ${waiting})` : "") >= MAX_NOTES)
+      return { error: `There are ${MAX_NOTES} memory notes, the most there can be; the owner deletes some first.` };
+    if (!kept.confirmed) {
+      if (this.#count(`WHERE ${waiting} AND chat_id IS ?`, kept.chatId ?? null) >= MAX_UNCONFIRMED)
         return { error: `${MAX_UNCONFIRMED} notes from this chat already wait for the owner to confirm them; ask them to look at Memory first.` };
-      if (this.#count(waiting) >= MAX_UNCONFIRMED_ALL)
+      if (byOwner && this.#count(`WHERE ${waiting} AND by_owner = 1`) >= MAX_UNCONFIRMED_ALL)
         return { error: `${MAX_UNCONFIRMED_ALL} notes already wait for the owner to confirm them; ask them to look at Memory first.` };
     }
     const now = this.#now();
-    const note: MemoryNote = { ...fields, id: randomHex(6), uses: 0, pinned: fields.pinned === true, createdAt: now, updatedAt: now };
-    this.#insert(note);
+    const note: MemoryNote = { ...kept, id: randomHex(6), uses: 0, pinned: kept.pinned === true, createdAt: now, updatedAt: now };
+    this.#insert(note, byOwner);
     return { note: this.get(note.id)! };
   }
 

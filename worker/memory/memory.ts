@@ -16,6 +16,7 @@ import {
   type MemoryReader,
   type MemoryScope,
   type MemoryWriter,
+  type Recalled,
   dismisses,
 } from "../../shared/memory.ts";
 import { searchWords } from "../../shared/util.ts";
@@ -104,7 +105,7 @@ export class UserMemory {
     if (typeof text !== "string") return text;
     const place = placeNote(this.#checked(writer), input.scope, input.kind);
     if ("error" in place) return place;
-    const added = this.store.add({ ...place, text, source: "learned", kind: input.kind, learnedBy: writer.learnedBy });
+    const added = this.store.add({ ...place, text, source: "learned", kind: input.kind, learnedBy: writer.learnedBy, byOwner: writer.byOwner });
     if ("error" in added) return added;
     this.#deps.changed();
     return { ...added, ...(place.narrowed && { narrowed: true as const }) };
@@ -131,19 +132,20 @@ export class UserMemory {
   }
 
   /**
-   * The notes `reader` reads that hold every word of `query` (all for none), up to MAX_RECALLED: those not among
-   * `shown` (the ones its prompt holds) first, then by rank.
+   * The notes `reader` reads that hold every word of `query` (all for none), MAX_RECALLED of them from `offset`: those
+   * not among `shown` (the ones its prompt holds) first, then by rank. With how many match in all.
    */
-  recall(reader: MemoryReader, query: string, shown: readonly string[]): MemoryNote[] {
+  recall(reader: MemoryReader, query: string, shown: readonly string[], offset = 0): Recalled {
     const words = searchWords(query);
     const inPrompt = new Set(shown);
-    const found = this.store
+    const matching = this.store
       .readable(this.#checked(reader))
       .filter((note) => words.every((word) => note.text.toLowerCase().includes(word)))
-      .sort((a, b) => Number(inPrompt.has(a.id)) - Number(inPrompt.has(b.id)) || byRank(a, b))
-      .slice(0, MAX_RECALLED);
-    this.use(found.map((note) => note.id));
-    return found;
+      .sort((a, b) => Number(inPrompt.has(a.id)) - Number(inPrompt.has(b.id)) || byRank(a, b));
+    const start = Math.max(0, Math.floor(offset) || 0);
+    const notes = matching.slice(start, start + MAX_RECALLED);
+    this.use(notes.map((note) => note.id));
+    return { notes, total: matching.length };
   }
 
   /**

@@ -1,5 +1,5 @@
 import type { ChatKind } from "../../shared/chat-kinds.ts";
-import { memorySection, readsOwnNotes, type MemoryNote, type MemoryReader, type MemoryWriter } from "../../shared/memory.ts";
+import { memorySection, readsOwnNotes, type MemoryNote, type MemoryReader, type MemoryWriter, type Recalled } from "../../shared/memory.ts";
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { CHAT_TURN_KIND } from "../../shared/agents.ts";
 import { AGENT_NAME } from "../../shared/mentions.ts";
@@ -15,7 +15,7 @@ export type NotesRead = { notes: MemoryNote[]; more: number; off?: true };
 export interface NotesDirectory {
   readNotes(reader: MemoryReader): NotesRead | Promise<NotesRead>;
   useNotes(ids: readonly string[]): void | Promise<void>;
-  recallNotes(reader: MemoryReader, query: string, shown: readonly string[]): MemoryNote[] | Promise<MemoryNote[]>;
+  recallNotes(reader: MemoryReader, query: string, shown: readonly string[], offset?: number): Recalled | Promise<Recalled>;
   learnNote(writer: MemoryWriter, note: LearnedNote): Learned | Promise<Learned>;
   forgetNoteFor(writer: MemoryWriter, id: string): MemoryNote | { error: string } | Promise<MemoryNote | { error: string }>;
 }
@@ -258,12 +258,12 @@ export class ChatMemory {
         return this.#directory(agent).learnNote(await this.#writer(agent), note);
       },
       // The notes the prompt does not hold first: those it holds the model has already.
-      recall: async (conversation, query) => {
+      recall: async (conversation, query, offset) => {
         const who = this.#who(conversation);
         const { ids } = await this.#section(who);
-        const found = await this.#directory(who.agent).recallNotes(this.#reader(who.agent), query, ids);
+        const found = await this.#directory(who.agent).recallNotes(this.#reader(who.agent), query, ids, offset);
         // Now in the transcript too: left out once the chat has more readers (freshPrompt).
-        if (found.some((note) => note.scope === "user")) this.#markOwn(who.key);
+        if (found.notes.some((note) => note.scope === "user")) this.#markOwn(who.key);
         return found;
       },
       forget: async (conversation, id) => {

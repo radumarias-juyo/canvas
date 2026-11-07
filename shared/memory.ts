@@ -26,12 +26,18 @@ export const MAX_NOTE_CHARS = 500;
 export const MAX_NOTES = 500;
 /** How many notes learned in conversations may wait to be confirmed at once. */
 export const MAX_UNCONFIRMED = 20;
-/** And in all the owner's chats together, so the waiting ones never crowd out the owner's own notes (MAX_NOTES). */
+/** And of the owner's own saves (in turns they asked for) in all their chats together. */
 export const MAX_UNCONFIRMED_ALL = 100;
 /** How much of a prompt the notes take at most: the rest are found with memory_recall. */
 export const PROMPT_NOTES_CHARS = 4_000;
-/** How many notes memory_recall returns at most. */
+/** How many notes memory_recall returns at most at once (an offset pages through the rest). */
 export const MAX_RECALLED = 20;
+
+/** What memory_recall found: one page of the notes that match (from an offset), and how many match in all. */
+export interface Recalled {
+  notes: MemoryNote[];
+  total: number;
+}
 
 export const MEMORY_NOTE_TOOL = "memory_note";
 export const MEMORY_RECALL_TOOL = "memory_recall";

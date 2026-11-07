@@ -10,6 +10,7 @@ import {
   type MemoryKind,
   type MemoryNote,
   type MemoryScope,
+  type Recalled,
 } from "../../shared/memory.ts";
 import { text } from "../agent/output.ts";
 import type { Learned, LearnedNote } from "./memory.ts";
@@ -21,10 +22,18 @@ import type { Learned, LearnedNote } from "./memory.ts";
  */
 export interface MemoryHost {
   note(conversation: string, note: LearnedNote): Promise<Learned>;
-  recall(conversation: string, query: string): Promise<MemoryNote[]>;
+  recall(conversation: string, query: string, offset?: number): Promise<Recalled>;
   forget(conversation: string, id: string): Promise<MemoryNote | { error: string }>;
   /** The prompt's memory section for the conversation: its notes as they were when its turn started. */
   section(conversation: string): Promise<string>;
+}
+
+/** What memory_recall says it found: `notes`, the matches from `offset` of `total`, and how to see the rest. */
+export function recalledText(notes: readonly MemoryNote[], total: number, offset: number): string {
+  if (!notes.length) return total ? `No notes from offset ${offset}: ${total} match in all.` : "No notes found.";
+  const more = total - offset - notes.length;
+  const rest = more > 0 ? `\n(${more} more match: call again with offset ${offset + notes.length}.)` : "";
+  return notes.map(noteLine).join("\n") + rest;
 }
 
 /** What memory_note says it saved. */
@@ -71,11 +80,15 @@ export function memoryExtension(host: MemoryHost): Extension {
       }),
       defineTool({
         name: MEMORY_RECALL_TOOL,
-        description: `Look through the memory notes this conversation may read: those holding every word of query (any, for an empty one), up to ${MAX_RECALLED}, the ones not in your instructions first.`,
-        parameters: Type.Object({ query: Type.Optional(Type.String({ description: "Words to look for." })) }),
+        description: `Look through the memory notes this conversation may read: those holding every word of query (any, for an empty one), ${MAX_RECALLED} at a time, the ones not in your instructions first. It says how many more match; pass offset to see them.`,
+        parameters: Type.Object({
+          query: Type.Optional(Type.String({ description: "Words to look for." })),
+          offset: Type.Optional(Type.Integer({ minimum: 0, description: "How many of the matching notes to skip (0 for the first)." })),
+        }),
         execute: async (args, api) => {
-          const found = await host.recall(String(api.conversationId), args.query ?? "");
-          return { output: text(found.length ? found.map(noteLine).join("\n") : "No notes found.") };
+          const offset = args.offset ?? 0;
+          const { notes, total } = await host.recall(String(api.conversationId), args.query ?? "", offset);
+          return { output: text(recalledText(notes, total, offset)) };
         },
       }),
       defineTool({

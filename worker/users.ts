@@ -18,7 +18,7 @@ import { mcpTokensKey } from "./storage/index.ts";
 import type { McpSignInView, SignInNotice } from "../shared/sign-ins.ts";
 import { AgentStore, type AgentSave } from "./agents/store.ts";
 import { UserMemory, type Learned, type LearnedNote } from "./memory/memory.ts";
-import type { MemoryNote, MemoryNoteView, MemoryReader, MemoryWriter, ServerCoverage } from "../shared/memory.ts";
+import type { MemoryNote, MemoryNoteView, MemoryReader, MemoryWriter, Recalled, ServerCoverage } from "../shared/memory.ts";
 import { ChatRows } from "./chat-rows.ts";
 import { addColumns } from "./members.ts";
 import type { ChatKind } from "../shared/chat-kinds.ts";
@@ -842,8 +842,8 @@ export class UserDirectory extends DurableObject<Env> {
     this.#memory.use(ids);
   }
 
-  recallNotes(reader: MemoryReader, query: string, shown: readonly string[]): MemoryNote[] {
-    return this.#memory.recall(reader, query, shown);
+  recallNotes(reader: MemoryReader, query: string, shown: readonly string[], offset?: number): Recalled {
+    return this.#memory.recall(reader, query, shown, offset);
   }
 
   /** The model forgets a note in a conversation (UserMemory.forgetFor). */

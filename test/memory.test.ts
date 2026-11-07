@@ -5,7 +5,10 @@ import {
   checkNoteChange,
   checkNoteInput,
   MAX_NOTE_CHARS,
+  MAX_NOTES,
+  MAX_RECALLED,
   MAX_UNCONFIRMED,
+  MAX_UNCONFIRMED_ALL,
   MEMORY_FORGET_TOOL,
   MEMORY_NOTE_TOOL,
   MEMORY_RECALL_TOOL,
@@ -26,6 +29,7 @@ import { CHAT_MESSAGE_KIND } from "../shared/protocol.ts";
 import { ChatMemory, runAskedByOwner, type MemoryAgent } from "../worker/memory/chat.ts";
 import { coverageOf } from "../worker/memory/coverage.ts";
 import { UserMemory } from "../worker/memory/memory.ts";
+import { recalledText } from "../worker/memory/tools.ts";
 import { memorySql } from "./fakes.ts";
 
 const T0 = 1_000_000;
@@ -190,7 +194,7 @@ describe("UserMemory", () => {
     expect(learned.note).toMatchObject({ confirmed: false, source: "learned", learnedBy: "pi", chatId: PRIVATE });
     const here = reader(PRIVATE, "private", true);
     expect(memory.read(here).notes).toEqual([]);
-    expect(memory.recall(here, "target", [])).toEqual([]);
+    expect(memory.recall(here, "target", []).notes).toEqual([]);
     saved(memory.change(learned.note.id, { confirmed: true }));
     expect(memory.read(here).notes.map((each) => each.text)).toEqual(["The Q3 target is 1.2M."]);
   });
@@ -202,8 +206,8 @@ describe("UserMemory", () => {
     saved(memory.add({ text: "Cite sources.", scope: "agent", agentId: RESEARCH }));
     const member = reader(GROUP, "group", false, RESEARCH);
     expect(memory.read(member).notes.map((each) => each.text)).toEqual(["Standup is at nine.", "Cite sources."]);
-    expect(memory.recall(member, "salary", [])).toEqual([]);
-    expect(memory.recall(reader(GROUP, "group", false), "", [])).toHaveLength(1);
+    expect(memory.recall(member, "salary", []).notes).toEqual([]);
+    expect(memory.recall(reader(GROUP, "group", false), "", []).notes).toHaveLength(1);
   });
 
   it("forgets, shows the forgotten note, and brings it back", () => {
@@ -258,6 +262,10 @@ describe("UserMemory", () => {
     expect(
       saved(memory.learn(writer(PRIVATE, "private", true, true), { text: "The target is 40.", scope: "user", kind: "fact" })).note.confirmed,
     ).toBe(false);
+    // Nor does saving it as a preference: only the owner's own word confirms a fact.
+    expect(
+      saved(memory.learn(writer(PRIVATE, "private", true, true), { text: "The target is 40.", scope: "user", kind: "preference" })).note,
+    ).toMatchObject({ id: fact.note.id, confirmed: false });
     expect(saved(memory.add({ text: "The target is 40.", scope: "user" })).id).toBe(fact.note.id);
     expect(memory.store.get(fact.note.id)?.confirmed).toBe(true);
   });
@@ -273,6 +281,22 @@ describe("UserMemory", () => {
     expect(fact.note.confirmed).toBe(false);
     saved(memory.forget(fact.note.id));
     expect(memory.store.get(fact.note.id)).toBeNull();
+  });
+
+  it("never lets saves the owner did not ask for take the owner's room", () => {
+    const pages = Array.from({ length: MAX_UNCONFIRMED_ALL / MAX_UNCONFIRMED + 1 }, (_, i) => `page${i}`);
+    const { memory } = directory({ [PRIVATE]: "private", spare: "page", ...Object.fromEntries(pages.map((id) => [id, "page" as const])) });
+    // Joiners of a few page chats fill each one's waiting room, more than MAX_UNCONFIRMED_ALL in all.
+    for (const page of pages)
+      for (let i = 0; i < MAX_UNCONFIRMED; i++)
+        saved(memory.learn(writer(page, "page", false, false), { text: `Said in ${page}: ${i}.`, scope: "chat", kind: "preference" }));
+    const fact = saved(memory.learn(writer(PRIVATE, "private", true, true), { text: "The target is 40.", scope: "user", kind: "fact" }));
+    expect(fact.note.confirmed).toBe(false);
+    // And the owner keeps MAX_NOTES of their own besides.
+    for (let i = 1; i < MAX_NOTES; i++) saved(memory.add({ text: `Rule ${i}.`, scope: "user" }));
+    expect(memory.add({ text: "One too many.", scope: "user" })).toHaveProperty("error");
+    // Theirs then wait no more: there is no room left.
+    expect(memory.learn(writer("spare", "page", false, false), { text: "Another.", scope: "chat", kind: "preference" })).toHaveProperty("error");
   });
 
   it("holds at most MAX_UNCONFIRMED notes waiting for a confirm", () => {
@@ -402,12 +426,14 @@ describe("the prompt's notes", () => {
   it("lets a new note in when the budget is full, whatever the older ones' uses", () => {
     const { memory } = directory();
     const old = saved(memory.add({ text: `Report in USD. ${"x".repeat(150)}`, scope: "user" }));
-    memory.use([old.id, old.id, old.id]);
+    // Three prompts held it (a use counts once per call).
+    for (let n = 0; n < 3; n++) memory.use([old.id]);
     for (let n = 0; n < 25; n++) {
       const each = saved(memory.add({ text: `Older note ${n}. ${"y".repeat(150)}`, scope: "user" }));
       memory.use([each.id]);
     }
-    const fresh = saved(memory.add({ text: "Report in EUR.", scope: "user" }));
+    // As long as the rest: it gets in only by its rank, not into room a longer one left.
+    const fresh = saved(memory.add({ text: `Report in EUR. ${"z".repeat(150)}`, scope: "user" }));
     const { notes, more } = memory.read(reader(PRIVATE, "private", true));
     expect(more).toBeGreaterThan(0);
     expect(notes.map((each) => each.id)).toContain(fresh.id);
@@ -451,7 +477,7 @@ describe("ChatMemory", () => {
           used = [...used, ...ids];
           owner.memory.use(ids);
         },
-        recallNotes: (reader, query, shown) => owner.memory.recall(reader, query, shown),
+        recallNotes: (reader, query, shown, offset) => owner.memory.recall(reader, query, shown, offset),
         learnNote: (writer, input) => owner.memory.learn(writer, input),
         forgetNoteFor: (writer, id) => owner.memory.forgetFor(writer, id),
       }),
@@ -483,7 +509,7 @@ describe("ChatMemory", () => {
     expect(await host.forget("s1", kept.note.id)).toHaveProperty("error");
     // A hand-off saves only what waits for a confirm.
     expect(saved(await host.note("s1", { text: "Prefer short answers.", scope: "agent", kind: "preference" })).note.confirmed).toBe(false);
-    expect(await host.recall("s1", "")).toEqual([expect.objectContaining({ text: "Cite sources." })]);
+    expect((await host.recall("s1", "")).notes).toEqual([expect.objectContaining({ text: "Cite sources." })]);
   });
 
   it("keeps a conversation's section for its turn, and counts a note's use once per conversation", async () => {
@@ -602,7 +628,20 @@ describe("ChatMemory", () => {
     const notShown = owner.memory.list().filter((note) => !section.includes(note.text)).length;
     expect(notShown).toBeGreaterThan(0);
     const found = await host.recall("root", "");
-    expect(found.slice(0, notShown).every((note) => !section.includes(note.text))).toBe(true);
+    expect(found.notes.slice(0, notShown).every((note) => !section.includes(note.text))).toBe(true);
+  });
+
+  it("pages through the notes that match, saying how many more there are", async () => {
+    const owner = directory();
+    for (let n = 0; n < MAX_RECALLED + 5; n++) saved(owner.memory.add({ text: `Note number ${n}.`, scope: "user" }));
+    const { host } = chat(PRIVATE, "private", true, owner);
+    const first = await host.recall("root", "note");
+    expect(first.total).toBe(MAX_RECALLED + 5);
+    expect(recalledText(first.notes, first.total, 0)).toContain(`5 more match: call again with offset ${MAX_RECALLED}.`);
+    const rest = await host.recall("root", "note", MAX_RECALLED);
+    expect(rest.notes).toHaveLength(5);
+    expect(new Set([...first.notes, ...rest.notes].map((note) => note.id)).size).toBe(MAX_RECALLED + 5);
+    expect(recalledText(rest.notes, rest.total, MAX_RECALLED)).not.toContain("more match");
   });
 
   it("says nothing is read or saved where the owner's directory refuses, as the tools do", async () => {
@@ -620,7 +659,7 @@ describe("ChatMemory", () => {
     expect(await host.section("root")).toContain("off the record");
     expect(await host.section("root")).not.toContain("euros");
     expect(await host.note("root", { text: "Secret plan.", scope: "chat", kind: "preference" })).toHaveProperty("error");
-    expect(await host.recall("root", "")).toEqual([]);
+    expect((await host.recall("root", "")).notes).toEqual([]);
   });
 });
 
