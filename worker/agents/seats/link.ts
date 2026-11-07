@@ -35,6 +35,8 @@ export interface SeatTurn extends ChatTurnData {
   ownerName: string;
   /** Its owner asked for it: the seat checks this against the asker itself before it offers any private server. */
   byOwner: boolean;
+  /** In a chain no person started (a run's hand-over): it only reads, whatever `byOwner` says. */
+  unattended?: true;
 }
 
 /** How a seat's turn ended, with what the app recorded of it (sources only from a fork): the room builds the reply from it. */

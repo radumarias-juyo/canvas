@@ -200,6 +200,8 @@ class Room implements TurnHost {
   readonly members = new Set<string>([ANA.uid, MIA.uid]);
   readonly objects = new Map<string, MemberObject>();
   readonly posts: ChatAgentReplyData[] = [];
+  /** The turns handed to pi. */
+  readonly handed: ChatTurnData[] = [];
   /** Whose drafts the controller said changed. */
   readonly told: string[] = [];
   readonly kept: Promise<unknown>[] = [];
@@ -295,7 +297,9 @@ class Room implements TurnHost {
     this.append({ kind: CHAT_AGENT_KIND, data: reply });
   }
   async tellPi() {}
-  async handToPi() {}
+  async handToPi(_input: string, data: ChatTurnData) {
+    this.handed.push(data);
+  }
   changed() {}
   waitUntil(promise: Promise<unknown>) {
     this.kept.push(promise);
@@ -475,7 +479,53 @@ describe("Member agents: a seat in the member's own object", () => {
     await ana.seats.give(ROOM, "p", turn(RADU.uid));
     await ana.seats.give(ROOM, "p", turn(ANA.uid, { turn: 8, hop: 1 }));
     await ana.seats.give(ROOM, "p", turn(ANA.uid, { turn: 9 }));
-    expect(ana.sessions.configured.map((configured) => configured.byOwner)).toEqual([false, false, true]);
+    await ana.seats.give(ROOM, "p", turn(ANA.uid, { turn: 10, unattended: true }));
+    expect(ana.sessions.configured.map((configured) => configured.byOwner)).toEqual([false, false, true, false]);
+  });
+
+  it("lets a requeued turn keep a run's session, and drop only a fork made for it", () => {
+    const chat = room();
+    const mine = chat.add(RADU, "planner");
+    const ask = { agentId: mine.agentId, hop: 0, calledBy: { name: RADU.name, uid: RADU.uid }, byOwner: true, ask: "go" };
+    const reply = chat.roster.enqueue({ ...ask, session: "run-fork" });
+    chat.roster.startNext(mine.agentId);
+    chat.roster.requeueUnsubmitted();
+    expect(chat.roster.turn(reply.id)).toMatchObject({ status: "queued", session: "run-fork" });
+    expect(chat.roster.turn(reply.id)).not.toHaveProperty("forked");
+    chat.roster.remove(mine.agentId);
+    const again = chat.add(RADU, "planner");
+    const plain = chat.roster.enqueue({ ...ask, agentId: again.agentId });
+    chat.roster.startNext(again.agentId);
+    chat.roster.setFork(plain.id, "private-fork");
+    expect(chat.roster.turn(plain.id)).toMatchObject({ session: "private-fork", forked: true });
+    chat.roster.requeueUnsubmitted();
+    expect(chat.roster.turn(plain.id)).not.toHaveProperty("session");
+    expect(chat.roster.turn(plain.id)).not.toHaveProperty("forked");
+  });
+
+  it("keeps a chain no person started read-only, in a seat and with private servers, and never hands pi a turn", async () => {
+    const chat = room();
+    const mine = chat.add(RADU, "planner", { servers: ["db", "calendar"] });
+    const hers = chat.add(ANA, "helper");
+    // A run's hand-over, even one that says its owner asked.
+    const caller: Caller = {
+      calledBy: { name: "watcher", agentId: "w", schedule: true },
+      ask: "[watcher · agent]: look",
+      byOwner: true,
+      unattended: true,
+      hop: 1,
+    };
+    const turns = chat.turns.call([mine.agentId, hers.agentId], caller);
+    expect(turns.map((turn) => turn.byOwner)).toEqual([false, false]);
+    await settle();
+    // No fork: the owner's agent runs in its own session, reading only.
+    expect(chat.sessions.configured).toEqual([{ session: mine.session, byOwner: false }]);
+    expect(chat.member(ANA.uid).sessions.configured.map((configured) => configured.byOwner)).toEqual([false]);
+    chat.sessions.finish(turns[0].id, "@pi have a look at this.");
+    await settle();
+    expect(chat.handed).toEqual([]);
+    expect(chat.posts).toEqual([expect.objectContaining({ turn: turns[0].id })]);
+    expect(chat.posts[0]).not.toHaveProperty("forked");
   });
 
   it("refuses a turn for an agent its owner deleted or turned off, and reports it as unanswered", async () => {

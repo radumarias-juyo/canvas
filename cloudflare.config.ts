@@ -108,7 +108,8 @@ export default defineConfig({
       ACCESS_AUD: bindings.text("21dcccf4fbfa5991beb76a9ac48ff0c0de86d3c1a55597c82e141559e3ebcdc9"),
       // 32+ random bytes, base64. Each user's files are encrypted with a key derived from it: losing it loses the files.
       FILES_MASTER_KEY: bindings.secret(),
-      // DEV_TOOLS=true (when running pnpm dev) enables POST /api/dev/chats/:id/publish. Never set it for a deploy.
+      // DEV_TOOLS=true (when running pnpm dev) enables POST /api/dev/chats/:id/publish and /api/dev/agents/:id/run. Never
+      // set it for a deploy.
       DEV_TOOLS: bindings.text(process.env.DEV_TOOLS === "true" ? "true" : "false"),
       // The MCP servers every chat connects to: just a name and a URL each (see mcpServerList above). The agent learns
       // what a server offers from the server, and you name servers and tools in chat. "oauth": each user signs in, from
@@ -168,6 +169,8 @@ export default defineConfig({
     exports: {
       ChatAgent: exports.durableObject({ storage: "sqlite" }),
       UserDirectory: exports.durableObject({ storage: "sqlite" }),
+      // A watched read shared by everyone watching it (worker/agents/runs/source.ts): polls once for all of them.
+      Source: exports.durableObject({ storage: "sqlite" }),
       Sandbox: withSandbox ? exports.durableObject({ storage: "sqlite", container: sandbox }) : exports.durableObject({ storage: "sqlite" }),
     },
   },

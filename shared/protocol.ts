@@ -7,7 +7,7 @@ import type { EntryRecord } from "@earendil-works/pi-durable";
 import type { EntryReactions, Reactions } from "./reactions.ts";
 import type { Attachment, AttachmentInput } from "./attachments.ts";
 import type { Mention, MentionInput } from "./mentions.ts";
-import type { AgentDraftView, ChatAgentView } from "./agents.ts";
+import type { AgentColor, AgentDraftView, ChatAgentView } from "./agents.ts";
 import type { ChatKind, ChatPage } from "./chat-kinds.ts";
 
 export type McpErrorCode =
@@ -305,6 +305,8 @@ export interface ChatSummary {
   unread?: true;
   /** Set when someone tagged this user ("@name") in a message they have not seen yet. */
   mentioned?: true;
+  /** Set on an agent's own conversation: the agent, shown like a contact (its badge and its last post). */
+  agent?: { id: string; name: string; avatar: string; color: AgentColor; preview?: string };
   /** Who sees it, when its agents answer, what may leave it (shared/chat-kinds.ts). */
   kind: ChatKind;
   /** When this user pinned it to the top of their list. */
@@ -613,6 +615,8 @@ export type ChatServerMessage =
    * call has run; then one batch per commit, until the turn ends (the `agents` message says so).
    */
   | { type: "agentEvents"; agent: string; turn: number; events: unknown[]; toolsElapsedMs?: Record<string, number> }
+  /** A run of the agent whose home this chat is started, moved on or ended: its runs list is read again. */
+  | { type: "runs"; agentId: string }
   /** Sent just before the chat closes a removed person's socket, in case the close code is lost on the way. */
   | { type: "removed" }
   /** Sent to everyone just before the chat closes their sockets, when its owner deleted it. */

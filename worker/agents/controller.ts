@@ -103,7 +103,8 @@ export class AgentTurns {
     const turns = agentIds.flatMap((agentId) => {
       const entry = this.#host.roster.get(agentId);
       if (!entry) return [];
-      const byOwner = caller.byOwner && (caller.calledBy.uid === undefined || caller.calledBy.uid === entry.ownerUid);
+      // Never in a chain no person started (a run's hand-over), whatever it says.
+      const byOwner = caller.byOwner && !caller.unattended && (caller.calledBy.uid === undefined || caller.calledBy.uid === entry.ownerUid);
       const ask = typeof caller.ask === "function" ? caller.ask(byOwner) : caller.ask;
       const turn = this.#host.roster.enqueue({ ...caller, agentId, byOwner, ask, hop: caller.hop ?? 0, root });
       root ??= turn.id;
@@ -169,15 +170,17 @@ export class AgentTurns {
             .catch((error: unknown) => console.error("agent stop:", errorMessage(error)));
         return;
       }
-      if (turn.byOwner && (await this.#host.forks(entry, agent, turn))) {
+      // A turn in a session of its own (a reply to a run's report) reads that session, not the chat: it catches up on
+      // nothing, and forks nothing.
+      if (turn.session === undefined && turn.byOwner && (await this.#host.forks(entry, agent, turn))) {
         // A fork sees the agent's session as it is when made: the catch-up goes in first.
         await this.#catchUp(entry, turn.id);
         const session = await this.#host.fork(entry.session);
         if (!live()) return;
-        roster.setSession(turn.id, session);
-        turn = { ...turn, session };
+        roster.setFork(turn.id, session);
+        turn = { ...turn, session, forked: true };
         await this.#host.configure(entry, agent, turn);
-      } else await Promise.all([this.#catchUp(entry, turn.id), this.#host.configure(entry, agent, turn)]);
+      } else await Promise.all([turn.session ? undefined : this.#catchUp(entry, turn.id), this.#host.configure(entry, agent, turn)]);
       if (!live()) return;
       await this.#host.submit(sessionOf(entry, turn), turnInput(turn), operationId(turn.id), {
         turn: turn.id,
@@ -209,6 +212,7 @@ export class AgentTurns {
       hop: turn.hop,
       input: turnInput(turn),
       byOwner: turn.byOwner,
+      ...(turn.unattended && { unattended: true }),
     });
     this.#host.roster.setMirrored(entry.agentId, delivered);
     this.#host.roster.markSubmitted(turn.id);
@@ -282,7 +286,7 @@ export class AgentTurns {
       const text = (result.text ?? "").trim();
       // Only a turn whose input went in has outputs in its session.
       const { published, items, sources, review, ...out } = outputs ?? (now.submitted ? await this.#outputs(entry, now) : NO_OUTPUTS);
-      const forked = out.forked === true || now.session !== undefined;
+      const forked = out.forked === true || now.forked === true;
       const current = roster.get(entry.agentId) ?? entry;
       const reply: ChatAgentReplyData = {
         agentId: entry.agentId,
@@ -298,6 +302,7 @@ export class AgentTurns {
         endedAt: roster.now(),
         ...(!done && { failed: result.reason ?? "it ended without an answer" }),
         ...(published.length && { published }),
+        ...(turn.run && { run: turn.run }),
         ...(items.length && { items }),
         ...(forked && { forked: true as const }),
         ...(sources.length && { sources }),
@@ -324,12 +329,14 @@ export class AgentTurns {
     const turn = roster.turn(id)!;
     const left = MAX_HOPS - roster.handOffsFrom(turn.root);
     const next = done && left > 0 ? handOffs(reply.text, reply.agentId, turn.hop, roster.list()).slice(0, left) : [];
-    roster.release(id, reply, next.includes(AGENT_NAME));
+    // A chain no person started never hands pi a turn: pi has the owner's full tools. It reads the reply instead.
+    roster.release(id, reply, !turn.unattended && next.includes(AGENT_NAME));
     const agents = next.filter((agentId) => agentId !== AGENT_NAME);
     // A hand-off can only read, whoever started the chain: agents cannot give each other permission.
     const ask = askOf({ name: reply.name, kind: "agent" }, reply.text, MAX_ASK_CHARS);
     const calledBy = { name: reply.name, agentId: reply.agentId };
-    if (agents.length) this.call(agents, { calledBy, ask, askKey: turnAskKey(id), byOwner: false, hop: turn.hop + 1, root: turn.root });
+    const hop = { calledBy, ask, askKey: turnAskKey(id), byOwner: false, hop: turn.hop + 1, root: turn.root, unattended: turn.unattended };
+    if (agents.length) this.call(agents, hop);
     return this.#deliver(id);
   }
 
@@ -379,7 +386,7 @@ export class AgentTurns {
   async #outputs(entry: RosterEntry, turn: AgentTurn): Promise<Outputs> {
     try {
       const entries = await this.#host.turnEntries(sessionOf(entry, turn), turn.id);
-      return await outputsOf(entries, turn.session !== undefined, () => this.#host.sources(entry, entries));
+      return await outputsOf(entries, turn.forked === true, () => this.#host.sources(entry, entries));
     } catch (error) {
       console.error("agent turn, outputs:", errorMessage(error));
       return NO_OUTPUTS;

@@ -7,6 +7,7 @@ import {
   type ChatAgentReplyData,
   type ChatAgentView,
 } from "../../shared/agents.ts";
+import type { RunRef } from "../../shared/runs.ts";
 import { addColumns, type Sql } from "../members.ts";
 
 /** One agent of a chat's roster: which definition it points at, and the pi session it runs in. */
@@ -49,10 +50,21 @@ export interface AgentTurn extends AgentTurnView {
   /** Its input reached its session (see ChatRoster.markSubmitted). */
   submitted?: true;
   /**
-   * A session of its own to run in, not its agent's: a fork of the agent's session for a turn its owner asked for that
-   * may reach a private server (see forksFor in turns.ts). Only its reply returns to the agent's session.
+   * A session of its own to run in, not its agent's: one that has what the turn is about (a reply to a run's report
+   * runs in a fork of the run's), which reads nothing of the chat, so it catches up on nothing; or, `forked`, a fork of
+   * the agent's session made as the turn started, for a turn its owner asked for that may reach a private server (see
+   * forksFor in turns.ts): only its reply returns to the agent's session.
    */
   session?: string;
+  /** Its session is a fork made for a private turn (`session`): it shows only its owner live, and its reply only shared records. */
+  forked?: true;
+  /** The run its reply carries, so a reply to that continues the run too. */
+  run?: RunRef;
+  /**
+   * In a chain no person started (a run's hand-over): it and its hand-offs never hand pi a turn, which would run with
+   * the owner's full tools; pi only reads their replies.
+   */
+  unattended?: true;
 }
 
 /**
@@ -60,7 +72,10 @@ export interface AgentTurn extends AgentTurnView {
  * leaves out what its input already says; absent when it is no entry of the log. Without a `root`, the turn starts a
  * chain of hand-offs of its own.
  */
-export type TurnRequest = Pick<AgentTurn, "agentId" | "hop" | "calledBy" | "byOwner" | "ask"> & { root?: number; askKey?: string };
+export type TurnRequest = Pick<AgentTurn, "agentId" | "hop" | "calledBy" | "byOwner" | "ask" | "session" | "run" | "unattended"> & {
+  root?: number;
+  askKey?: string;
+};
 
 /** What an ended turn still has to deliver: its reply to the log, and whether pi is handed a turn for it. */
 export interface Outbox {
@@ -104,6 +119,9 @@ type TurnRow = {
   delivered_at: number | null;
   session: string | null;
   held: number;
+  forked: number;
+  run: string | null;
+  unattended: number;
 };
 
 function entryOf(row: RosterRow): RosterEntry {
@@ -137,6 +155,9 @@ function turnOf(row: TurnRow): AgentTurn {
     ...(row.submitted_at !== null && { submitted: true }),
     ...(row.ended_at !== null && { endedAt: row.ended_at }),
     ...(row.session !== null && { session: row.session }),
+    ...(row.forked === 1 && { forked: true }),
+    ...(row.run !== null && { run: JSON.parse(row.run) as RunRef }),
+    ...(row.unattended === 1 && { unattended: true }),
   };
 }
 
@@ -182,7 +203,13 @@ export class ChatRoster {
     `);
     // Columns added later: a roster or turn table made before them lacks them.
     addColumns(sql, "chat_agents", { shared: "INTEGER NOT NULL DEFAULT 0", seat: "TEXT" });
-    addColumns(sql, "chat_agent_turns", { session: "TEXT", held: "INTEGER NOT NULL DEFAULT 0" });
+    addColumns(sql, "chat_agent_turns", {
+      session: "TEXT",
+      run: "TEXT",
+      unattended: "INTEGER NOT NULL DEFAULT 0",
+      held: "INTEGER NOT NULL DEFAULT 0",
+      forked: "INTEGER NOT NULL DEFAULT 0",
+    });
   }
 
   /** The roster's clock: what its turns' times are taken from. */
@@ -307,8 +334,8 @@ export class ChatRoster {
   enqueue(turn: TurnRequest): AgentTurn {
     const row = this.#sql
       .exec(
-        `INSERT INTO chat_agent_turns (agent_id, status, hop, called_by, by_owner, root, ask, ask_key, created_at)
-         VALUES (?, 'queued', ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
+        `INSERT INTO chat_agent_turns (agent_id, status, hop, called_by, by_owner, root, ask, ask_key, created_at, session, run, unattended)
+         VALUES (?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
         turn.agentId,
         turn.hop,
         JSON.stringify(turn.calledBy),
@@ -317,6 +344,9 @@ export class ChatRoster {
         turn.ask,
         turn.askKey ?? null,
         this.#now(),
+        turn.session ?? null,
+        turn.run ? JSON.stringify(turn.run) : null,
+        turn.unattended ? 1 : 0,
       )
       .toArray()[0] as TurnRow;
     return turnOf(row);
@@ -348,12 +378,13 @@ export class ChatRoster {
 
   /**
    * What the newest turns of an agent answered (askKey), the ones its session was given and `current`: its catch-up
-   * leaves them out, as their inputs carry them. A turn still waiting, or one stopped before it started, is read there.
+   * leaves them out, as their inputs carry them. A turn still waiting, or one stopped before it started, is read there,
+   * and so is one that ran in a session of its own (a reply to a run's report), which its own session never saw.
    */
   askKeys(agentId: string, current: number, limit = 50): Set<string> {
     const rows = this.#sql
       .exec(
-        "SELECT ask_key FROM chat_agent_turns WHERE agent_id = ? AND ask_key IS NOT NULL AND (submitted_at IS NOT NULL OR id = ?) ORDER BY id DESC LIMIT ?",
+        "SELECT ask_key FROM chat_agent_turns WHERE agent_id = ? AND ask_key IS NOT NULL AND ((submitted_at IS NOT NULL AND session IS NULL) OR id = ?) ORDER BY id DESC LIMIT ?",
         agentId,
         current,
         limit,
@@ -363,8 +394,8 @@ export class ChatRoster {
   }
 
   /** A turn runs in a session of its own (a fork of its agent's): set before its input goes in. */
-  setSession(id: number, session: string): void {
-    this.#sql.exec("UPDATE chat_agent_turns SET session = ? WHERE id = ? AND status = 'running'", session, id);
+  setFork(id: number, session: string): void {
+    this.#sql.exec("UPDATE chat_agent_turns SET session = ?, forked = 1 WHERE id = ? AND status = 'running'", session, id);
   }
 
   /** A running turn's input reached its session: a restart waits on it, where one not submitted yet starts again. */
@@ -376,7 +407,7 @@ export class ChatRoster {
   requeueUnsubmitted(): void {
     // A fork made for it before it went in is left: its next start decides again whether it forks, after its catch-up.
     this.#sql.exec(
-      "UPDATE chat_agent_turns SET status = 'queued', started_at = NULL, session = NULL WHERE status = 'running' AND submitted_at IS NULL",
+      "UPDATE chat_agent_turns SET status = 'queued', started_at = NULL, session = CASE WHEN forked = 1 THEN NULL ELSE session END, forked = 0 WHERE status = 'running' AND submitted_at IS NULL",
     );
   }
 
@@ -559,7 +590,9 @@ export class ChatRoster {
     return running.flatMap((turn) => {
       const entry = entries.get(turn.agentId);
       if (!entry || entry.seat !== undefined) return [];
-      return [{ agentId: turn.agentId, session: sessionOf(entry, turn), turn: turn.id, ...(turn.session !== undefined && { only: entry.ownerUid }) }];
+      // A run's reply turn works in its own session (a fork of the run's), not the agent's; a private turn in a fork
+      // shows only its owner.
+      return [{ agentId: turn.agentId, session: sessionOf(entry, turn), turn: turn.id, ...(turn.forked && { only: entry.ownerUid }) }];
     });
   }
 

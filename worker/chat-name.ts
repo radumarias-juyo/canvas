@@ -5,3 +5,9 @@
 export function chatAgentName(uid: string, chatId: string): string {
   return `${uid}:${chatId}`;
 }
+
+/** The uid and chat id a chat object's name was built from (see chatAgentName). */
+export function parseChatAgentName(name: string): { uid: string; chatId: string } {
+  const [uid, chatId] = name.split(":");
+  return { uid, chatId };
+}

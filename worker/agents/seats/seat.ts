@@ -155,7 +155,8 @@ export class AgentSeats {
     const agent = await this.#agent(agentId);
     const seat = await this.#ensure(ref, agentId, true);
     const delivered = batch ? await this.deliver(ref, agentId, batch) : seat.delivered;
-    const checked: SeatTurn = { ...turn, byOwner: turn.byOwner && turn.hop === 0 && turn.calledBy.uid === this.#host.uid && !turn.calledBy.agentId };
+    const byOwner = turn.byOwner && !turn.unattended && turn.hop === 0 && turn.calledBy.uid === this.#host.uid && !turn.calledBy.agentId;
+    const checked: SeatTurn = { ...turn, byOwner };
     const forked = checked.byOwner && (await this.#host.forks(agent, checked));
     const session = forked ? await this.#host.fork(seat.session) : seat.session;
     // Given meanwhile by a retry: that one runs.

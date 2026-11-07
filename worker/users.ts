@@ -16,12 +16,21 @@ import { PushSubscriptions, vapidKeys, type PushMessage } from "./push/subscript
 import type { PushSubscriptionKeys } from "./push/web-push.ts";
 import { mcpTokensKey } from "./storage/index.ts";
 import type { McpSignInView, SignInNotice } from "../shared/sign-ins.ts";
-import { memoAsync } from "../shared/util.ts";
 import { AgentStore, type AgentSave } from "./agents/store.ts";
 import { ChatRows } from "./chat-rows.ts";
 import { addColumns } from "./members.ts";
 import type { ChatKind } from "../shared/chat-kinds.ts";
-import { withoutSignInShares, type AgentChanges, type AgentChatUse, type AgentDefinition, type AgentInput, type AgentOrigin, type AgentResult } from "../shared/agents.ts";
+import {
+  withoutSignInShares,
+  type AgentChanges,
+  type AgentChatUse,
+  type AgentDefinition,
+  type AgentInput,
+  type AgentOrigin,
+  type AgentResult,
+} from "../shared/agents.ts";
+import { excerpt } from "../shared/replies.ts";
+import { errorMessage, memoAsync, randomHex } from "../shared/util.ts";
 
 /** One user's OAuth state for one MCP server. `uid` must come from a verified identity. */
 export function mcpAuthStore(uid: string, server: string): McpAuthStore {
@@ -263,7 +272,7 @@ export class UserDirectory extends DurableObject<Env> {
 
   /** The user's own chats and the ones shared with them, most recent first. */
   listChats(): ChatSummary[] {
-    return this.#rows.list();
+    return this.#rows.list((agentId, preview) => this.#contact(agentId, preview));
   }
 
   /** Change what of chat `id`'s row is this user's alone: pinned, closed, marked unread, their own name for it. */
@@ -322,6 +331,55 @@ export class UserDirectory extends DurableObject<Env> {
 
   knownPerson(uid: string): Person | null {
     return this.#rows.person(uid);
+  }
+
+  /** What an agent's home conversation shows of its agent in the list: its badge and last post. */
+  #contact(agentId: string | null, preview: string | null): Pick<ChatSummary, "agent"> {
+    const agent = agentId ? this.#agents.get(agentId) : null;
+    if (!agent) return {};
+    return { agent: { id: agent.id, name: agent.name, avatar: agent.avatar, color: agent.color, ...(preview && { preview }) } };
+  }
+
+  /** The chat that is an agent's own conversation; null when it has none yet. */
+  agentHome(agentId: string): string | null {
+    return this.ctx.storage.sql.exec<{ id: string }>("SELECT id FROM chats WHERE agent_id = ? ORDER BY created_at LIMIT 1", agentId).toArray()[0]?.id ?? null;
+  }
+
+  /**
+   * An agent's own conversation, made when it has none (it is turned on, or runs for the first time): an ordinary chat
+   * of this user's, named after it and marked with it, which it is told it is the home of. Null for no such agent.
+   */
+  ensureAgentHome(agentId: string): string | null {
+    const found = this.agentHome(agentId);
+    if (found) return found;
+    const agent = this.#agents.get(agentId);
+    if (!agent) return null;
+    const id = randomHex(8);
+    const now = Date.now();
+    this.ctx.storage.sql.exec("INSERT INTO chats (id, title, created_at, updated_at, agent_id) VALUES (?, ?, ?, ?, ?)", id, `@${agent.name}`, now, now, agentId);
+    this.#changed("chats");
+    this.#tellHome(id, agentId, agent);
+    return id;
+  }
+
+  /** Tell an agent's home conversation about it as it is now (null: deleted). Off the caller's path; a failure is logged. */
+  #tellHome(chatId: string, agentId: string, agent: AgentDefinition | null): void {
+    const chat = exports.ChatAgent.getByName(chatAgentName(this.ctx.id.name!, chatId));
+    this.ctx.waitUntil(chat.agentChanged(agentId, agent).catch((error: unknown) => console.error("agent home:", errorMessage(error))));
+  }
+
+  /** One of this user's agents was saved, turned on or off, or deleted: the lists and its home conversation follow. */
+  #agentChanged(agentId: string): void {
+    this.#changed("agents");
+    const agent = this.#agents.get(agentId);
+    const home = this.agentHome(agentId);
+    if (!home) {
+      if (agent?.enabled) this.ensureAgentHome(agentId);
+      return;
+    }
+    this.#tellHome(home, agentId, agent);
+    // A deleted agent's conversation stays, as an ordinary chat.
+    if (!agent && this.ctx.storage.sql.exec("UPDATE chats SET agent_id = NULL WHERE agent_id = ?", agentId).rowsWritten) this.#changed("chats");
   }
 
   /**
@@ -440,6 +498,11 @@ export class UserDirectory extends DurableObject<Env> {
     this.ctx.waitUntil(this.push({ title: "You were mentioned", body: "Someone mentioned you in a chat.", url: `/c/${id}`, tag: `mention:${id}` }));
   }
 
+  /** The last post of an agent's own conversation, as its contact row shows it. */
+  #notePreview(id: string, text: string): void {
+    this.ctx.storage.sql.exec("UPDATE chats SET preview = ? WHERE id = ? AND agent_id IS NOT NULL", excerpt(text, 120), id);
+  }
+
   removeSharedChat(id: string, ownerUid: string): void {
     if (!this.ctx.storage.sql.exec("DELETE FROM shared_chats WHERE id = ? AND owner_uid = ?", id, ownerUid).rowsWritten) return;
     // Out of the chat, this user shares it with nobody.
@@ -466,6 +529,7 @@ export class UserDirectory extends DurableObject<Env> {
    * a model gives it a better title (nameChat). `byOther`: someone other than this user wrote it. Returns its title.
    */
   touchChat(id: string, prompt: string, byOther: boolean, tag?: Tag): { title: string; named: boolean } {
+    this.#notePreview(id, prompt);
     const before = this.chatTitle(id);
     const named = before === UNNAMED_CHAT;
     const title = named || before === null ? titleFromMessage(prompt) : before;
@@ -484,6 +548,7 @@ export class UserDirectory extends DurableObject<Env> {
 
   /** Take a deleted chat, and the artifacts it published, out of this user's lists. The chat deletes the rest first. */
   forgetChat(id: string): void {
+    const home = this.ctx.storage.sql.exec<{ agent_id: string | null }>("SELECT agent_id FROM chats WHERE id = ?", id).toArray()[0]?.agent_id;
     this.#signIns.forgetChat(id);
     this.#agents.forgetChat(id);
     // The values its pages saved for this user, which were everyone's defaults.
@@ -491,6 +556,8 @@ export class UserDirectory extends DurableObject<Env> {
     if (this.ctx.storage.sql.exec("DELETE FROM artifacts WHERE chat_id = ?", id).rowsWritten) this.#changed("artifacts");
     this.#rows.forgetChat(id);
     if (this.ctx.storage.sql.exec("DELETE FROM chats WHERE id = ?", id).rowsWritten) this.#changed("chats");
+    // An agent's home deleted while the agent is on: it gets a new one, so its schedule and watches go on there.
+    if (home && this.#agents.get(home)?.enabled) this.ensureAgentHome(home);
   }
 
   listArtifacts(): ArtifactSummary[] {
@@ -667,7 +734,7 @@ export class UserDirectory extends DurableObject<Env> {
       input = withoutSignInShares(input, (server) => signIn.has(server));
     }
     const saved = this.#agents.save(input, origin, enabled, save);
-    if (!("error" in saved)) this.#changed("agents");
+    if (!("error" in saved)) this.#agentChanged(saved.id);
     return saved;
   }
 
@@ -675,13 +742,13 @@ export class UserDirectory extends DurableObject<Env> {
   setAgentEnabled(id: string, enabled: boolean, version?: number): AgentResult {
     const before = this.#agents.get(id)?.version;
     const result = this.#agents.setEnabled(id, enabled, version);
-    if (!("error" in result) && result.version !== before) this.#changed("agents");
+    if (!("error" in result) && result.version !== before) this.#agentChanged(id);
     return result;
   }
 
   deleteAgent(id: string): { error: string } | null {
     const refused = this.#agents.delete(id);
-    if (!refused) this.#changed("agents");
+    if (!refused) this.#agentChanged(id);
     return refused;
   }
 
