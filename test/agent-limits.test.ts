@@ -14,7 +14,7 @@ import {
   type PendingActionView,
 } from "../shared/limits.ts";
 import { CHAT_MESSAGE_KIND } from "../shared/protocol.ts";
-import { ChatActions, type NewAction } from "../worker/agents/limits/actions.ts";
+import { apartOrigin, ChatActions, noteResult, shownToMembers, type NewAction } from "../worker/agents/limits/actions.ts";
 import { LimitsDirectory } from "../worker/agents/limits/directory.ts";
 import { approvalEnd, approvalFeed, approvalRef } from "../worker/agents/limits/feed.ts";
 import { AgentRuns } from "../worker/agents/runs/store.ts";
@@ -109,6 +109,7 @@ describe("guardrail rules", () => {
     const email = rule({ kind: "never", arg: "to.email", value: ["*@rival.example"] });
     expect(violation(email, call({ to: "ceo@rival.example" }))).toMatch(/never allowed/);
     expect(violation(email, call({ to: ["ok@fine.com", { email: "ceo@rival.example" }] }))).toMatch(/never allowed/);
+    expect(violation(email, call({ to: [{ email: "ok@fine.com" }, "ceo@rival.example"] }))).toMatch(/never allowed/);
     expect(violation(email, call({ to: { email: "ok@fine.com" } }))).toBeNull();
     expect(violation(rule({ kind: "max", arg: "items.amount", value: 100 }), call({ items: 500 }))).toMatch(/500/);
     // Recipients kept as an object's keys.
@@ -569,6 +570,52 @@ describe("pending actions", () => {
     const two = after.add(action());
     after.move(two.id, "pending", "running");
     expect(after.move(two.id, "running", "done", "x".repeat(5_000))?.result).toHaveLength(2_000);
+  });
+
+  it("show anyone but the owner no result, and of one made apart from the chat not its call either", () => {
+    const actions = new ChatActions(
+      memorySql(),
+      () => "chat-1",
+      () => T0,
+    );
+    // Pi's own session and an agent's own are the chat's; a turn's fork, an unknown session and a run are apart.
+    const shared = (session: string) => session === "0" || session === "agent-own";
+    expect(apartOrigin({ session: "0" }, shared)).toBe(false);
+    expect(apartOrigin({ session: "agent-own" }, shared)).toBe(false);
+    expect(apartOrigin({ session: "agent-fork" }, shared)).toBe(true);
+    expect(apartOrigin({}, shared)).toBe(true);
+    expect(apartOrigin({ session: "0", run: { agentId: "a", dueAt: T0, why: "schedule", item: "", step: "1" } }, shared)).toBe(true);
+
+    const inChat = actions.add(action({ input: { discount: 5 } }));
+    const apart = actions.add(action({ input: { body: "Board dinner (private)" }, warnings: ["about the board"], origin: { session: "agent-fork", level: 4, apart: true } }));
+    for (const view of [inChat, apart]) {
+      actions.move(view.id, "pending", "running");
+      actions.move(view.id, "running", "done", '{"deal":"Private terms"}');
+    }
+    // The owner sees each whole.
+    expect(actions.list().map((view) => view.result)).toEqual(['{"deal":"Private terms"}', '{"deal":"Private terms"}']);
+    const members = actions.list("member");
+    const [shown, hidden] = [inChat, apart].map((made) => members.find((view) => view.id === made.id));
+    expect(shown).toMatchObject({ id: inChat.id, input: { discount: 5 }, status: "done" });
+    expect(shown).not.toHaveProperty("result");
+    expect(hidden).toMatchObject({ id: apart.id, server: "crm", tool: "update_deal", status: "done", input: {} });
+    expect(JSON.stringify(hidden)).not.toMatch(/Board dinner|board|Private terms/);
+    // Its card in the log is made the same way: it keeps none of the call.
+    expect(JSON.stringify(shownToMembers(actions.get(apart.id)!, true))).not.toMatch(/Board dinner|board|Private terms/);
+  });
+
+  it("tell an agent's own session what an approved call came to only from a server it shares", () => {
+    const view = { server: "crm", result: '{"deal":"Private terms"}' };
+    const shares = (server: string) => server === "db";
+    // pi's own session, and a session apart from the chat: the result.
+    expect(noteResult(view, { session: "0" }, "0", null)).toBe(view.result);
+    expect(noteResult(view, { session: "agent-fork", apart: true }, "0", null)).toBe(view.result);
+    // An agent's own session, which members' turns read: only from a server it shares.
+    expect(noteResult({ ...view, server: "db" }, { session: "agent-own" }, "0", shares)).toBe(view.result);
+    expect(noteResult(view, { session: "agent-own" }, "0", shares)).toBe("(not told here: crm is not shared in this chat)");
+    // Its agent cannot be read: not told.
+    expect(noteResult({ ...view, server: "db" }, { session: "agent-own" }, "0", null)).not.toContain("Private");
+    expect(noteResult({ server: "crm" }, { session: "agent-own" }, "0", shares)).toBeUndefined();
   });
 });
 

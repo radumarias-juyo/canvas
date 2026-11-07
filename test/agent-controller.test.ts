@@ -198,6 +198,10 @@ class FakeChat implements TurnHost {
   async newest() {
     return undefined;
   }
+  /** Mia is in the chat: a turn its owner did not ask for runs in the agent's own session. */
+  alone() {
+    return false;
+  }
   async sources(_entry: RosterEntry, entries: readonly EntryRecord[]) {
     return { items: itemsIn(entries), sources: [] };
   }
