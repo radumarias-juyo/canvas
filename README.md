@@ -749,9 +749,21 @@ pnpm dev        # cf dev: needs a Cloudflare login (cf auth login; the AI bindin
   # → {"artifactId":"…","version":1}; open http://localhost:5173/a/<artifactId>
   ```
 
+- **A scripted model:** with `DEV_TOOLS=true`, adding `DEV_MODEL=script` makes a scripted model (`worker/dev-model.ts`)
+  the default and the picker's only choice. A message's `/say <text>` is its reply, `/tool <name> <json>` (or
+  `server.tool`) makes one tool call, and anything else gets `ok:` and the message. An agent's instructions or a
+  workflow's work step can carry the same lines.
+
 Tests: `pnpm test` covers the hub, the broker, Access token checks and the storage rules (including a test that fails
 if code outside `worker/storage/` touches the bucket). `LIVE=1 pnpm test` also calls CoinGecko. Typecheck with
 `pnpm typecheck`.
+
+`pnpm e2e` (not part of `pnpm test`) runs the agents feature in a browser, as two people signed in with demo sign-in:
+editor and drafted agents, hand-offs, a shared chat, chat kinds, memory, scheduled runs, follows and the feed, a run
+that needs a sign-in, offers and checklists (`e2e/agents.spec.ts`). It starts stand-in MCP servers (`e2e/stand-in.ts`:
+`crm` with a read and a write tool, `vault` behind OAuth) and the dev server offline on the scripted model, with a
+local state that each run starts empty (`PI_STATE_DIR`), and writes a screenshot per flow to `e2e/screens/`. It uses
+the Chromium Playwright finds; `E2E_CHROMIUM` names another, and `E2E_PORT` and `E2E_MCP_PORT` move its ports.
 
 ## Deploy
 

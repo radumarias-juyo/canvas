@@ -5,8 +5,9 @@ import { AGENT_NAME } from "../../shared/mentions.ts";
 import { everyone, type ChatPeople, type Presence } from "../../shared/protocol.ts";
 import { errorMessage } from "../../shared/util.ts";
 import { api } from "../api.ts";
+import { agentPath } from "../agents/nav.ts";
 import { Icon } from "../Icon.tsx";
-import { useDismiss } from "../layout.tsx";
+import { AppLink, useDismiss } from "../layout.tsx";
 import { callerName, turnLine } from "./agentLines.ts";
 import { formatElapsed, useElapsed } from "./elapsed.ts";
 import { ownerLabel } from "./Mentions.tsx";
@@ -143,8 +144,9 @@ const ADDING = "+agents";
 const RUNS_SHOWN = 8;
 
 /**
- * An agent's menu, from its badge in the people bar: its job line and owner, what it is doing, its latest turns (who
- * asked, when, how long, how it ended), read when the menu opens, and for the chat's owner, Remove.
+ * An agent's menu, from its badge in the people bar: its job line and owner, a link to its page (for its owner, or
+ * read-only for the others when its owner shares it here), what it is doing, its latest turns (who asked, when, how
+ * long, how it ended), read when the menu opens, and for the chat's owner, Remove.
  */
 function AgentMenu({
   chatId,
@@ -178,8 +180,11 @@ function AgentMenu({
     };
   }, [chatId, agent.id, running, agent.queued]);
   const [muting, setMuting] = useState(false);
+  // Its page: its owner's to edit; anyone else's only when its owner shares it in this chat (the server checks).
+  const mine = agent.ownerUid === uid;
+  const pagePath = mine || agent.shared ? agentPath({ id: agent.id, chat: chatId }) : undefined;
   // Anyone in the chat may mute it; only its owner, or the chat's, may unmute it.
-  const mayUnmute = isOwner || agent.ownerUid === uid;
+  const mayUnmute = isOwner || mine;
   const toggleMute = async () => {
     setMuting(true);
     setError(undefined);
@@ -209,6 +214,11 @@ function AgentMenu({
         <span className="owner-pill">{ownerLabel(agent, uid)}</span>
       </div>
       <p className="agent-menu-job">{agent.job}</p>
+      {pagePath && (
+        <AppLink path={pagePath} className="agent-menu-page">
+          {mine ? "Open its page" : "See how it is set up"}
+        </AppLink>
+      )}
       <p className="agent-menu-state">
         {/* Keyed by its turn: a new turn counts from its own start, not the one before's. */}
         {agent.running ? <Working key={agent.running.turn} running={agent.running} startedAt={startedAt} /> : agentState(agent)}

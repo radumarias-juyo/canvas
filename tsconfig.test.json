@@ -24,6 +24,7 @@
   },
   "include": [
     "test",
+    "e2e",
     "src/artifact/broker.ts",
     "src/chat/useChat.ts",
     "src/chat/spend.ts",
@@ -98,6 +99,7 @@
     "worker/chat-traces.ts",
     "worker/agent/skills.ts",
     "worker/models.ts",
+    "worker/dev-model.ts",
     "worker/streams.ts",
     "worker/gemini.ts",
     "worker/cache-warmer.ts",

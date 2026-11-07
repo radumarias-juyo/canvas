@@ -602,6 +602,7 @@ button.reaction:hover { border-color: var(--muted); }
 .agent-menu-head .icon-button { margin-left: auto; }
 .agent-menu p { margin: 0; }
 .agent-menu-job { color: var(--text); }
+.agent-menu-page { align-self: flex-start; font-size: 13px; }
 .agent-menu-state, .agent-menu-empty { color: var(--muted); font-size: 13px; }
 .agent-menu .section-head { padding: 4px 0 0; }
 .agent-menu .danger { align-self: flex-start; }
@@ -1296,7 +1297,7 @@ a.mention-chip:hover { text-decoration: underline; }
 .agent-turns li { display: flex; justify-content: space-between; gap: 12px; padding: 3px 0; }
 .agent-turns small { color: var(--muted); white-space: nowrap; }
 
-/* The draft card pi's agent_propose leaves in the chat: indented as the agent's other parts are. */
+/* The draft card agent_propose leaves in the chat (pi's, or under an agent's reply): indented as the agent's other parts are. */
 .agent-card { margin: 4px 0 4px var(--gutter); padding: 14px 16px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-card); }
 .agent-card.compact { padding: 8px 12px; color: var(--muted); font-size: 14px; box-shadow: none; }
 .agent-card.compact p { margin: 0; }
