@@ -68,7 +68,10 @@ with `@cloudflare/vite-plugin`, pnpm; configured and deployed with the `cf` CLI 
   fork or a run holds shows anyone else only who asks for which tool (`shownToMembers`). A member's agent runs as a seat
   in the member's own object (`worker/agents/seats/`): the member's own turns and anyone's Yes to its offer run in a fork
   of the seat's session, its calls go through the member's write gate (`seatCaller`: only the member's own message
-  changes data), what it holds has its card in the room for the member alone, and it reads as the room's kind. A turn
+  changes data), what it holds has its card in the room for the member alone, and it reads as the room's kind. An
+  agent's owner alone opens its window (`shared/agent-window.ts`, `worker/agents/window.ts`; a seat's is read in the
+  member's own object): its sessions and transcripts, and steering (`AgentTurns.instruct`): into their own turn running
+  apart, else a turn of theirs, apart, whose ask is in no log or shared session. A turn
   ends with its reply in its row (an outbox),
   together with the hand-offs it queues; the reply is then posted as a `chat.agent` entry. The agents one person's message
   names (in order), then their hand-offs, go one after another, each once the reply before it is in the log
