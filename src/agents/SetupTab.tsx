@@ -41,6 +41,8 @@ interface Form {
   sharedServers: Set<string> | null;
   /** A reply built on a server it does not share with the chat shows first as a draft only its owner sees. */
   review: boolean;
+  /** It may post unprompted in chats that allow it (AgentDefinition.speaksUp). */
+  speaksUp: boolean;
   assumed: string[];
 }
 
@@ -75,6 +77,7 @@ function formOf(subject: AgentSubject): Form {
       servers: null,
       sharedServers: null,
       review: false,
+      speaksUp: false,
       assumed: [],
     };
   const { agent } = subject;
@@ -89,6 +92,7 @@ function formOf(subject: AgentSubject): Form {
     servers: agent.servers ? new Set(agent.servers) : null,
     sharedServers: agent.sharedServers ? new Set(agent.sharedServers) : null,
     review: "reviewBeforePosting" in agent && agent.reviewBeforePosting === true,
+    speaksUp: agent.speaksUp === true,
     assumed: subject.kind === "own" ? (subject.agent.assumed ?? []) : [],
   };
 }
@@ -115,6 +119,7 @@ function inputOf(form: Form): AgentInput {
     // A shared list names only servers the agent may use itself (any, when it lists none).
     ...(form.sharedServers && { sharedServers: sorted(form.sharedServers).filter((name) => !form.servers || form.servers.has(name)) }),
     ...(form.review && { reviewBeforePosting: true }),
+    ...(form.speaksUp && { speaksUp: true }),
     ...(form.assumed.length && { assumed: form.assumed }),
   };
 }
@@ -122,7 +127,7 @@ function inputOf(form: Form): AgentInput {
 const sameSet = (a: Set<string> | null, b: Set<string> | null) =>
   a === null || b === null ? a === b : a.size === b.size && [...a].every((x) => b.has(x));
 function changed(a: Form, b: Form): boolean {
-  const plain = (["name", "job", "instructions", "avatar", "color", "model", "effort", "review"] as const).some((key) => a[key] !== b[key]);
+  const plain = (["name", "job", "instructions", "avatar", "color", "model", "effort", "review", "speaksUp"] as const).some((key) => a[key] !== b[key]);
   return plain || !sameSet(a.servers, b.servers) || !sameSet(a.sharedServers, b.sharedServers) || a.assumed.join() !== b.assumed.join();
 }
 
@@ -371,6 +376,19 @@ export function SetupTab({ subject, field, save, notice, onDirty }: AgentTabProp
               discard it.
             </small>
           </span>
+        </label>
+      </div>
+      <div className="agent-field" data-field="speaksUp">
+        <span className="agent-label">
+          Speaking up
+          <small>
+            In a chat whose owner allows it, it may post when a conversation pauses on something close to its job, or offer to pick up a question
+            nobody answered: a few times a day at most, only reading, and anyone in the chat can mute it.
+          </small>
+        </span>
+        <label className="skill-toggle">
+          <input type="checkbox" checked={form.speaksUp} onChange={(e) => set("speaksUp", e.target.checked)} />
+          May speak up unprompted
         </label>
       </div>
       {error && <p className="form-error">{error}</p>}

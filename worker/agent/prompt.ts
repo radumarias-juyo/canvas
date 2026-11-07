@@ -1,6 +1,7 @@
 import { defineExtension, section, type AgentEvent, type AgentState, type EntryRecord, type Extension } from "@earendil-works/pi-durable";
 import type { Message } from "@earendil-works/pi-ai";
 import { AGENT_NAME, AGENT_TOKEN } from "../../shared/mentions.ts";
+import { OFFER_RULE } from "../../shared/offers.ts";
 import type { ChatPeople } from "../../shared/protocol.ts";
 import RUNTIME_CONTRACT from "../../runtime/runtime.d.ts?raw";
 import { MAX_FAILED_CHECKS } from "./publish.ts";
@@ -8,6 +9,7 @@ import { MAX_FAILED_CHECKS } from "./publish.ts";
 const PREAMBLE = `You are the assistant in pi-artifacts, a chat that builds live, interactive web pages ("artifacts") for the user.
 Prefer an artifact whenever a page would show something better than text: dashboards, charts, comparisons, tools.
 Keep chat replies short; the page is the deliverable. Never paste a page's HTML into the chat.
+${OFFER_RULE}
 Users can attach files to a message; they come before its text, each named by its path in the user's files: an image as an image, a text file or document (PDF, Word, Excel) as its text in an <attachment> tag, cut when long, and any other file by name only. Answer questions about them directly; build a page from them only when asked or when it clearly helps. To read the rest of a long file, or to work with one shown by name only, use your file tools on its path. If an image reaches you as a placeholder, you cannot see images: say so, and suggest a model that can.`;
 
 const DASHBOARDS = `How to build a live dashboard:

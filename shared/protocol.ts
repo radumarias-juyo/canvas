@@ -9,6 +9,7 @@ import type { Attachment, AttachmentInput } from "./attachments.ts";
 import type { Mention, MentionInput } from "./mentions.ts";
 import type { AgentColor, AgentDraftView, ChatAgentView } from "./agents.ts";
 import type { ChatKind, ChatPage } from "./chat-kinds.ts";
+import type { ChatAgentSettingsView } from "./agent-settings.ts";
 
 export type McpErrorCode =
   | "server_not_connected"
@@ -455,6 +456,8 @@ export interface ChatMessageData extends Person {
   auto?: AutoPick;
   /** Which MCP tools were offered to answer it, when the chat has enough of them to pick (worker/agent/tool-pick.ts). */
   tools?: ToolPickNote;
+  /** The owner's Yes to an offered next step (`offer_yes`): its run only reads and drafts, and the agents it names never hand pi a turn. */
+  drafts?: true;
 }
 
 /**
@@ -588,6 +591,9 @@ export type ChatClientMessage =
   // `mentions` are the files, artifacts and people picked with "@" whose text is still in `text`.
   // `replyTo` is the transcript entry of the message it answers: a person's message, or one of the agent's replies.
   | { type: "prompt"; text: string; attachments?: AttachmentInput[]; mentions?: MentionInput[]; replyTo?: number }
+  // The owner's Yes to the next step that the reply `entry` offers (shared/offers.ts): the chat writes the reply, and
+  // the turn it starts may only read and draft the routine.
+  | { type: "offer_yes"; entry: number }
   // Stop the chat: pi and every agent, with what waits for them; with `agent`, only that agent of the roster.
   | { type: "abort"; agent?: string }
   // Add (`on`) or take back a reaction (shared/reactions.ts) to a transcript entry: a person's message or the agent's reply.
@@ -627,6 +633,8 @@ export type ChatServerMessage =
   | { type: "agents"; agents: ChatAgentView[] }
   /** The replies of this person's agents held for them to review (reviewBeforePosting): only their sockets get it. */
   | { type: "agentDrafts"; drafts: AgentDraftView[] }
+  /** The chat's agent settings (shared/agent-settings.ts): on connect, and whenever its owner changes them or an agent is muted. */
+  | { type: "agentSettings"; settings: ChatAgentSettingsView }
   /**
    * One agent's session while it has a turn (`agent`, by its id; `turn`, the turn's id): pi-durable AgentEvents as for
    * pi's, only those of that turn. A snapshot first (its entries from the turn's input on), with how long each running

@@ -3,6 +3,7 @@ import { MAX_HOPS, type AgentDefinition, type AgentDraftView, type ChatAgentRepl
 import { AGENT_NAME } from "../../shared/mentions.ts";
 import { errorMessage, isObject, serial } from "../../shared/util.ts";
 import { sessionOf, type AgentTurn, type ChatRoster, type RosterEntry, type TurnRequest } from "./roster.ts";
+import { isPass } from "./funnel.ts";
 import type { SeatBatch, SeatLink, SeatResult } from "./seats/link.ts";
 import { chatTraces } from "../chat-traces.ts";
 import {
@@ -84,6 +85,17 @@ export interface TurnHost {
   drafted(ownerUid: string): void;
   /** Keep the object alive for work that outlives the call that started it. */
   waitUntil(promise: Promise<unknown>): void;
+  /** Why no turn may start now (the chat's daily budget is used up), as the turn's reply says it; undefined when one may. */
+  refusal?(): string | undefined;
+  /** A turn ended: how, and whether a reply was posted for it (an unprompted turn that passed posts none). For the metrics. */
+  ended?(turn: AgentTurn, outcome: TurnOutcome): void;
+}
+
+/** How a turn ended, as the metrics count it. */
+export interface TurnOutcome {
+  status: "done" | "failed" | "passed";
+  startedAt: number;
+  endedAt: number;
 }
 
 /**
@@ -175,6 +187,11 @@ export class AgentTurns {
       const asker = turn.by ?? turn.calledBy.uid;
       if (asker !== undefined && !(await this.#host.mayCall(entry, asker))) {
         await this.#ended(entry, turn, { status: "unanswered", reason: `@${entry.name} was asked too often just now; try again in a minute` });
+        return;
+      }
+      const refused = this.#host.refusal?.();
+      if (refused) {
+        await this.#ended(entry, turn, { status: "unanswered", reason: refused });
         return;
       }
       if (!live()) return;
@@ -331,6 +348,16 @@ export class AgentTurns {
     if (now?.status === "running" || now?.status === "queued") {
       const done = result.status === "done";
       const text = (result.text ?? "").trim();
+      // A turn nobody asked for posts only an answer worth posting: none when it passed, or failed (nobody is waiting
+      // for it), and it hands nothing on.
+      if (turn.calledBy.unprompted && (!done || !text || isPass(text))) {
+        if (roster.end(turn.id, done ? "done" : "failed")) {
+          this.#host.ended?.(turn, { status: done ? "passed" : "failed", startedAt: now.startedAt ?? now.createdAt, endedAt: roster.now() });
+        }
+        this.#host.changed();
+        this.pump(entry.agentId);
+        return;
+      }
       // Only a turn whose input went in has outputs in its session.
       const { published, items, sources, review, saved, ...out } = outputs ?? (now.submitted ? await this.#outputs(entry, now) : NO_OUTPUTS);
       const forked = out.forked === true || now.forked === true;
@@ -364,8 +391,12 @@ export class AgentTurns {
       if (held) {
         // Its owner sees it first: nothing of it reaches the chat, pi or other agents until they post it. A failed or
         // empty one too: what its fork published or saved stays withheld until they post or discard it.
-        if (roster.end(turn.id, done ? "done" : "failed", { reply, toPi: false, held: true })) this.#host.drafted(current.ownerUid);
+        if (roster.end(turn.id, done ? "done" : "failed", { reply, toPi: false, held: true })) {
+          this.#host.ended?.(turn, { status: done ? "done" : "failed", startedAt: reply.startedAt, endedAt: reply.endedAt });
+          this.#host.drafted(current.ownerUid);
+        }
       } else if (roster.end(turn.id, done ? "done" : "failed", { reply, toPi: false })) {
+        this.#host.ended?.(turn, { status: done ? "done" : "failed", startedAt: reply.startedAt, endedAt: reply.endedAt });
         delivering = this.#release(turn.id, reply, done);
       }
     }
@@ -384,7 +415,8 @@ export class AgentTurns {
     const roster = this.#host.roster;
     const turn = roster.turn(id)!;
     const left = MAX_HOPS - roster.handOffsFrom(turn.root);
-    const next = done && left > 0 ? handOffs(reply.text, reply.agentId, turn.hop, roster.list()).slice(0, left) : [];
+    // A turn nobody asked for hands nothing on.
+    const next = done && left > 0 && !turn.calledBy.unprompted ? handOffs(reply.text, reply.agentId, turn.hop, roster.list()).slice(0, left) : [];
     // A chain no person started never hands pi a turn: pi has the owner's full tools. It reads the reply instead.
     roster.release(id, reply, !turn.unattended && next.includes(AGENT_NAME));
     const agents = next.filter((agentId) => agentId !== AGENT_NAME);
@@ -556,9 +588,10 @@ export class AgentTurns {
 
   /**
    * pi replied (entry `entry` of the log, `text`): the agents it names get turns, as hand-offs within the chain pi's turn
-   * was in (`root` and `hop` when another agent handed pi that turn; none when a person asked it).
+   * was in (`root` and `hop` when another agent handed pi that turn; none when a person asked it). `unattended`: a chain
+   * that may never hand pi a turn (a Yes's run).
    */
-  fromPi(text: string, entry: number, chain: { hop: number; root?: number; by?: string } = { hop: 0 }): void {
+  fromPi(text: string, entry: number, chain: PiChain = { hop: 0 }): void {
     const roster = this.#host.roster;
     const left = chain.root === undefined ? MAX_HOPS : MAX_HOPS - roster.handOffsFrom(chain.root);
     const agents = left > 0 ? handOffs(text, AGENT_NAME, chain.hop, roster.list()).slice(0, left) : [];
@@ -571,6 +604,7 @@ export class AgentTurns {
       hop: chain.hop + 1,
       ...(chain.root !== undefined && { root: chain.root }),
       ...(chain.by !== undefined && { by: chain.by }),
+      ...(chain.unattended && { unattended: true as const }),
     });
   }
 }
@@ -613,6 +647,12 @@ export async function outputsOf(
   const saved = [...chatTraces(entries).files];
   return { published, forked: true, ...(saved.length && { saved }), ...(await sources()) };
 }
+
+/**
+ * The chain pi's turn was in, as fromPi takes it: `root` and `hop` of a hand-off to pi, `unattended` for a Yes's run,
+ * and `by`, the person who started it, whom its turns count for.
+ */
+export type PiChain = { hop: number; root?: number; unattended?: true; by?: string };
 
 /** A turn's operation id in its agent's session: submitting it twice places it once. */
 export function operationId(turn: number): string {

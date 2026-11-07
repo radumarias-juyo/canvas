@@ -92,6 +92,18 @@ describe("built-in skills", () => {
     expect(builtinSkill(BUILTIN_SKILLS[0].name)).toBe(BUILTIN_SKILLS[0]);
     expect(builtinSkill("weekly-report")).toBeUndefined();
   });
+
+  it("include the app's own help, short and generic", () => {
+    expect(BUILTIN_SKILLS.map((s) => s.name)).toEqual(["analyze-files", "revise-artifact", "explore-mcp-server", "app-help"]);
+    const help = builtinSkill("app-help")!;
+    expect(help.description).toMatch(/what can we do in this chat/i);
+    expect(help.tools).toEqual([]);
+    expect(help.instructions.length).toBeLessThan(6_000);
+    for (const kind of ["Private", "Group", "On a page", "Off the record"]) expect(help.instructions).toContain(kind);
+    expect(help.instructions).toMatch(/Never invent features/);
+    expect(`${help.description}\n${help.instructions}`).not.toMatch(/claude|anthropic/i);
+    expect(parseSkillFile(formatSkillFile(help))).toEqual(help);
+  });
 });
 
 describe("skillSource", () => {

@@ -142,6 +142,7 @@ export class UserDirectory extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS page_values (artifact_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT, updated_at INTEGER NOT NULL, PRIMARY KEY (artifact_id, key));
       CREATE TABLE IF NOT EXISTS page_ai_spend (day TEXT PRIMARY KEY, calls INTEGER NOT NULL, input INTEGER NOT NULL, output INTEGER NOT NULL, cost REAL NOT NULL);
       CREATE TABLE IF NOT EXISTS dictation_use (day TEXT PRIMARY KEY, clips INTEGER NOT NULL, seconds REAL NOT NULL);
+      CREATE TABLE IF NOT EXISTS model_spend (day TEXT PRIMARY KEY, calls INTEGER NOT NULL, tokens INTEGER NOT NULL, cost REAL NOT NULL);
     `);
     // Added later: what the chat's agent is doing (ChatStatus), when something last came in that this user did not
     // write, and when they last saw the chat. activity_at > seen_at is unread. Then: when someone last tagged them in
@@ -1327,6 +1328,34 @@ export class UserDirectory extends DurableObject<Env> {
   }
 
   /**
+   * The daily meter of this user's model calls in their own chats (pi's, their agents', their runs'), counted by each
+   * chat as its answers end (worker/agents/spend.ts). Scheduled runs and unprompted posts stop once today's reaches the
+   * deployment's RUNS_DAILY_USD; a person's own messages are not stopped by it.
+   */
+  modelSpentToday(): { tokens: number; costUsd: number } {
+    const row = this.ctx.storage.sql.exec<{ tokens: number; cost: number }>("SELECT tokens, cost FROM model_spend WHERE day = ?", utcDay()).toArray()[0];
+    return { tokens: row?.tokens ?? 0, costUsd: row?.cost ?? 0 };
+  }
+
+  /** Count model calls against this user's day: `calls` answers that used `tokens` and cost `cost` dollars. */
+  recordModelSpend(spent: { calls: number; tokens: number; cost: number }): void {
+    const sql = this.ctx.storage.sql;
+    const day = utcDay();
+    // A month is kept, for a look back: older days go as a new one starts.
+    if (!sql.exec("SELECT 1 FROM model_spend WHERE day = ?", day).toArray().length) {
+      sql.exec("DELETE FROM model_spend WHERE day < ?", utcDay(Date.now() - 31 * 86_400_000));
+    }
+    sql.exec(
+      `INSERT INTO model_spend (day, calls, tokens, cost) VALUES (?, ?, ?, ?)
+       ON CONFLICT(day) DO UPDATE SET calls = calls + excluded.calls, tokens = tokens + excluded.tokens, cost = cost + excluded.cost`,
+      day,
+      spent.calls,
+      spent.tokens,
+      spent.cost,
+    );
+  }
+
+  /**
    * What an export of this user's data takes from here (shared/data-export.ts): their settings and skills, what pages
    * saved for them, what they follow, their own chats and artifacts, and by name the chats others shared with them. Not their sign-ins
    * to MCP servers (tokens, which belong to this deployment), nor what their pages' model calls cost.
@@ -1463,8 +1492,8 @@ const assumptionRef = (agentId: string) => `assumption:${agentId}`;
 class PageLimitError extends Error {}
 
 /** Today, as YYYY-MM-DD in UTC. */
-function utcDay(): string {
-  return new Date().toISOString().slice(0, 10);
+function utcDay(at = Date.now()): string {
+  return new Date(at).toISOString().slice(0, 10);
 }
 
 const packageFiles = (row: Pick<SkillRow, "files"> | undefined) => (row?.files ? (JSON.parse(row.files) as SkillPackageFiles) : null);

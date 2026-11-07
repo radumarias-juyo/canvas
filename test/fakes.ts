@@ -2,6 +2,7 @@ import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { DatabaseSync } from "node:sqlite";
 import type { DumpSql } from "../worker/chat-dump.ts";
+import type { Kv } from "../worker/chat-kind.ts";
 import type { Sql } from "../worker/members.ts";
 
 /** A FILES_MASTER_KEY for tests. */
@@ -11,6 +12,9 @@ export const MASTER_KEY = Buffer.from(new Uint8Array(32).fill(7)).toString("base
 export class FakeBucket {
   readonly objects = new Map<string, string>();
   readonly calls: { op: string; key?: string; prefix?: string; ssecKey?: unknown }[] = [];
+  /** When each object was put, by `clock` (0 unless a test sets it). */
+  readonly uploaded = new Map<string, number>();
+  clock: () => number = () => 0;
 
   constructor(keys: string[] = []) {
     for (const key of keys) this.objects.set(key, "");
@@ -26,7 +30,7 @@ export class FakeBucket {
     const page = keys.slice(0, limit);
     const truncated = limit < keys.length;
     return {
-      objects: page.map((key) => ({ key, size: new TextEncoder().encode(this.objects.get(key)!).byteLength, uploaded: new Date(0) })),
+      objects: page.map((key) => ({ key, size: new TextEncoder().encode(this.objects.get(key)!).byteLength, uploaded: new Date(this.uploaded.get(key) ?? 0) })),
       truncated,
       cursor: truncated ? page.at(-1) : undefined,
     };
@@ -42,12 +46,20 @@ export class FakeBucket {
     const start = range?.suffix !== undefined ? Math.max(0, bytes.byteLength - range.suffix) : (range?.offset ?? 0);
     if (range && start >= bytes.byteLength) throw new Error("The requested range is not satisfiable");
     const part = bytes.subarray(start, range?.length !== undefined ? start + range.length : undefined);
-    return { text: async () => value, json: async () => JSON.parse(value), arrayBuffer: async () => part.slice().buffer, size: bytes.byteLength, uploaded: new Date(0), body: new Blob([part]).stream() };
+    return {
+      text: async () => value,
+      json: async () => JSON.parse(value),
+      arrayBuffer: async () => part.slice().buffer,
+      size: bytes.byteLength,
+      uploaded: new Date(this.uploaded.get(key) ?? 0),
+      body: new Blob([part]).stream(),
+    };
   }
 
   async put(key: string, body: unknown, options?: { ssecKey?: unknown }) {
     this.calls.push({ op: "put", key, ssecKey: options?.ssecKey });
     this.objects.set(key, typeof body === "string" ? body : body instanceof Uint8Array ? new TextDecoder().decode(body) : "");
+    this.uploaded.set(key, this.clock());
   }
 
   async head(key: string) {
@@ -94,5 +106,16 @@ export function memorySql(): Sql & DumpSql & { db: DatabaseSync } {
       const { changes } = statement.run(...bindings);
       return { toArray: () => [], rowsWritten: Number(changes) };
     },
+  };
+}
+
+/** A KV store in memory, as a Durable Object's (`ctx.storage.kv`). */
+export function memoryKv(): Kv & { map: Map<string, unknown> } {
+  const map = new Map<string, unknown>();
+  return {
+    map,
+    get: <T>(key: string) => map.get(key) as T | undefined,
+    put: (key, value) => void map.set(key, value),
+    delete: (key) => map.delete(key),
   };
 }

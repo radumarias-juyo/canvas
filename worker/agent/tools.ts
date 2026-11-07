@@ -25,9 +25,9 @@ import { describeReport, type CheckReport } from "../artifacts/check.ts";
 import type { PageReview } from "../artifacts/review.ts";
 import { chatOutFolder, FILES_WRITE_TOOL, RUN_BASH_TOOL, RUN_PYTHON_TOOL, savedReport, wroteReport } from "../chat-traces.ts";
 import { MAX_RUN_STDERR, MAX_RUN_STDOUT, type SandboxFile, type SandboxRun } from "../sandbox.ts";
-import { literalPath, MAX_DRAFTS, normalisePath, type FileEntry, type UserFiles } from "../storage/index.ts";
+import { isToolResult, literalPath, MAX_DRAFTS, normalisePath, TOOL_RESULTS, type FileEntry, type ToolResults, type UserFiles } from "../storage/index.ts";
 import { checkDraft, draftLine, draftNamed, FailedChecks, publishDraft, readPageSource, reviewedRefusal, writeDraft, type PublishScope, type SessionRules } from "./publish.ts";
-import { FileRefError, MAX_SANDBOX_BYTES, outputPaths, resolveFile, resolveRef, sandboxLayout, saveFiles } from "./file-refs.ts";
+import { checkFolders, FileRefError, MAX_SANDBOX_BYTES, outputPaths, resolveFile, resolveRef, sandboxLayout, saveFiles } from "./file-refs.ts";
 import { clip, MAX_TOOL_TEXT, text } from "./output.ts";
 import { pagePart } from "./page-part.ts";
 import type { AgentsScope } from "../agents/tools.ts";
@@ -36,6 +36,8 @@ import type { AgentsScope } from "../agents/tools.ts";
 export interface ChatScope extends PublishScope, AgentsScope {
   /** This chat's user's files: scoped to the uid and encrypted with that user's key. */
   files: () => Promise<UserFiles>;
+  /** The tool results too long for a turn, kept whole for this chat (worker/storage/tool-results.ts). */
+  toolResults: () => Promise<ToolResults>;
   /** Whether the owner named this artifact from another of their chats with "@" here, so the agent may read it. */
   broughtIn(id: string): boolean;
   /** Save a skill for the user, turned off until they turn it on. */
@@ -98,10 +100,20 @@ export function filesExtension(scope: ChatScope): Extension {
         name: "files_read",
         description:
           `Read one of the user's files as UTF-8 text (the first ${MAX_TOOL_TEXT.toLocaleString("en")} characters). ` +
-          "Takes its path, or its name or the end of its path when only one file matches.",
-        parameters: Type.Object({ path: Type.String() }),
+          `Takes its path, or its name or the end of its path when only one file matches. Also reads a tool result saved whole (${TOOL_RESULTS}…), ` +
+          "from `offset` (characters) on.",
+        parameters: Type.Object({
+          path: Type.String(),
+          offset: Type.Optional(Type.Integer({ minimum: 0, description: `For a saved tool result (${TOOL_RESULTS}…): the character to start from.` })),
+        }),
         replay: "safe",
         execute: async (args) => {
+          if (isToolResult(args.path)) {
+            const saved = await (await savedResult(await scope.toolResults(), args.path)).text();
+            const from = Math.min(args.offset ?? 0, saved.length);
+            const part = clip(saved.slice(from));
+            return { output: text(`${args.path}, characters ${from.toLocaleString("en")} on of ${saved.length.toLocaleString("en")}:\n${part}`) };
+          }
           const files = await scope.files();
           // Only what clip() can show: at most 4 bytes per character.
           const range = { offset: 0, length: MAX_TOOL_TEXT * 4 };
@@ -127,6 +139,10 @@ export function filesExtension(scope: ChatScope): Extension {
           "Keep files you make for this chat, such as notes or an intermediate CSV, in this chat's folder under out/ (named with the user's files): the user's other chats save to their own.",
         parameters: Type.Object({ path: Type.String(), content: Type.String() }),
         execute: async (args, api, context) => {
+          // That name reads a saved tool result (files_read, run_python), never the file: one written there could not be read back.
+          if (isToolResult(literalPath(args.path) ?? args.path)) {
+            throw new FileRefError(`${args.path} is where tool results are saved: pick another name, or another folder.`);
+          }
           const files = await scope.files();
           const rules = await rulesOf(scope, api);
           if (rules?.reviewed && (await overwrites(files, rules, normalisePath(args.path)))) throw new Error(reviewedRefusal("file"));
@@ -190,6 +206,20 @@ async function sandboxInputs(files: UserFiles, refs: readonly string[], ownFolde
   );
 }
 
+/** The tool result saved at `path`: one gone (or never saved) is an error that says to call the tool again. */
+async function savedResult(results: ToolResults, path: string): Promise<R2ObjectBody> {
+  const saved = await results.get(path);
+  if (!saved) throw new Error(`There is no tool result ${path} (any more): call the tool again.`);
+  return saved;
+}
+
+/** The saved tool results `refs` name, for ./files/tool-results/. */
+async function savedResults(scope: ChatScope, refs: readonly string[]): Promise<SandboxFile[]> {
+  if (!refs.length) return [];
+  const results = await scope.toolResults();
+  return Promise.all([...new Set(refs)].map(async (ref) => ({ name: ref, bytes: await (await savedResult(results, ref)).arrayBuffer() })));
+}
+
 function tooMuch(bytes: number, maxBytes: number): string {
   return `Those files hold ${formatBytes(bytes)}; one run takes at most ${formatBytes(maxBytes)}${maxBytes < MAX_SANDBOX_BYTES ? " besides the skills" : ""}. Pass fewer.`;
 }
@@ -213,9 +243,24 @@ async function runInSandbox(
 ) {
   const files = await scope.files();
   const folder = chatOutFolder(scope.chatId);
-  // The skills first: their sizes are known before they are read, and the files get what they leave of the limit.
-  const skills = args.skills?.length ? await scope.skillFolders(args.skills, MAX_SANDBOX_BYTES) : [];
-  const inputs = await sandboxInputs(files, args.files ?? [], folder, MAX_SANDBOX_BYTES - skills.reduce((sum, file) => sum + file.bytes.byteLength, 0));
+  // The skills and saved results first: their sizes are known before the files are read, which get what they leave of the limit.
+  // Tool results saved whole (TOOL_RESULTS and the name put gave) come from their own store, to ./files/tool-results/.
+  const refs = args.files ?? [];
+  const [skills, results] = await Promise.all([
+    args.skills?.length ? scope.skillFolders(args.skills, MAX_SANDBOX_BYTES) : [],
+    savedResults(scope, refs.filter(isToolResult)),
+  ]);
+  const room = MAX_SANDBOX_BYTES - [...skills, ...results].reduce((sum, file) => sum + file.bytes.byteLength, 0);
+  if (room < 0) throw new Error(tooMuch(MAX_SANDBOX_BYTES - room, MAX_SANDBOX_BYTES));
+  const own = await sandboxInputs(files, refs.filter((ref) => !isToolResult(ref)), folder, room);
+  // The saved results land next to the user's files: neither may take a name, or a folder, the other needs.
+  const layout = new Map(own.map((file) => [file.name, file.name]));
+  for (const { name } of results) {
+    if (layout.has(name)) throw new FileRefError(`A file of yours and a saved tool result would both be ./files/${name}; pass them in separate runs.`);
+    layout.set(name, name);
+  }
+  checkFolders(layout);
+  const inputs = [...results, ...own];
   const result = await run(exports.Sandbox.getByName(sandboxName(scope.uid, scope.chatId)), inputs, skills);
   const { toSave, skipped } = outputPaths(folder, result.outputs);
   // A reviewed turn apart from the chat saves no file over one the chat has: those are left out, saying why.

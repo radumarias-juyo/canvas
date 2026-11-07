@@ -1,6 +1,7 @@
 import type { EntryRecord, UsageState } from "@earendil-works/pi-durable";
 import { memo, useMemo, useState } from "react";
 import {
+  AGENT_ROUTER_LEDGER_PREFIX,
   AUTO_LEDGER_PREFIX,
   effortLabel,
   HINT_LEDGER_PREFIX,
@@ -30,6 +31,7 @@ const PICKERS = [
   [HINT_LEDGER_PREFIX, `Spotting asks for ${AGENT_NAME}`],
   [TOOL_PICK_LEDGER_PREFIX, "Tool picks"],
   [REVIEW_LEDGER_PREFIX, "Page code reviews"],
+  [AGENT_ROUTER_LEDGER_PREFIX, "Agent picks"],
 ] as const;
 
 /** A ledger key's picker (its label, PICKERS) and model: the key itself, and no label, for a model's or a tool's own row. */
