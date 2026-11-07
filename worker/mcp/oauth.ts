@@ -220,12 +220,7 @@ function sameTokens(a: OAuthTokens | undefined, b: OAuthTokens | undefined): boo
  * can link to the sign-in route, and following such a link signs no one out.
  * A client registration made for this same redirect URL is kept.
  */
-export async function startSignIn(
-  serverUrl: string,
-  server: string,
-  store: McpAuthStore,
-  redirectUrl: string,
-): Promise<{ url: string } | { signedIn: true }> {
+export async function startSignIn(serverUrl: string, server: string, store: McpAuthStore, redirectUrl: string): Promise<{ url: string } | { signedIn: true }> {
   await store.update({ restart: redirectUrl });
   const client = new McpOAuthClient(store, server, { redirectUrl, interactive: true, newSignIn: true });
   const trace = tracedFetch();
@@ -238,8 +233,7 @@ export async function startSignIn(
 /** Finish a sign-in from the callback: check the state, exchange the code for tokens, clear the sign-in in progress. */
 export async function finishSignIn(serverUrl: string, server: string, store: McpAuthStore, code: string, state: string): Promise<void> {
   const record = await store.get();
-  if (!record.state || record.state !== state || !record.redirectUrl)
-    throw new Error("This sign-in did not start here, or a newer one replaced it. Open the sign-in link again.");
+  if (!record.state || record.state !== state || !record.redirectUrl) throw new Error("This sign-in did not start here, or a newer one replaced it. Open the sign-in link again.");
   const client = new McpOAuthClient(store, server, { redirectUrl: record.redirectUrl, interactive: true });
   const trace = tracedFetch();
   await auth(client, { serverUrl, authorizationCode: code, fetchFn: trace.fetch }).catch(trace.explain);

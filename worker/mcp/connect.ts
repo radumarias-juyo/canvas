@@ -29,11 +29,7 @@ export const REQUEST_TIMEOUT_MS = 90_000;
  * starts the sign-in; the agent passes it on to the user.
  */
 export function signInRequired(server: string): McpFailure {
-  return new McpFailure({
-    code: "auth_required",
-    server,
-    message: `Not signed in to ${server}. To sign in, open ${signInPath(server)} in this app, then ask again.`,
-  });
+  return new McpFailure({ code: "auth_required", server, message: `Not signed in to ${server}. To sign in, open ${signInPath(server)} in this app, then ask again.` });
 }
 
 /**
