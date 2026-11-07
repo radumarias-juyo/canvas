@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, 
 import { ID_PATTERN, secondSeatUid, type ChatContents } from "../shared/protocol.ts";
 import { chatFileRoute, MAX_LISTED } from "../shared/uploads.ts";
 import { isActive, type SkillInfo } from "../shared/skills.ts";
-import { errorMessage } from "../shared/util.ts";
+import { errorMessage, plural } from "../shared/util.ts";
 import { AccountMenu } from "./AccountMenu.tsx";
 import { BackToSite } from "./BackToSite.tsx";
 import { api, inSecondSeat, type ArtifactSummary, type FileInfo, type Me } from "./api.ts";
@@ -29,6 +29,8 @@ import { agentPlace, type AgentPlace } from "./agents/nav.ts";
 import { reloadAgents } from "./agents/store.ts";
 import { NeedsYou } from "./NeedsYou.tsx";
 import type { NeedsYouItem } from "../shared/limits.ts";
+import { MemoryView } from "./memory/MemoryView.tsx";
+import { reloadMemory, toConfirm, useMemory } from "./memory/store.ts";
 import { FeedNav } from "./feed/FeedNav.tsx";
 import { FeedView } from "./feed/FeedView.tsx";
 import { reloadFeed, reloadFollows } from "./feed/store.ts";
@@ -91,6 +93,7 @@ export function App() {
       secondSeat={chatId !== undefined && inSecondSeat(url.search)}
       opening={chatId && opening && ID_PATTERN.test(opening) ? opening : undefined}
       showSkills={path === "/skills"}
+      showMemory={path === "/memory"}
       showFeed={path === "/feed"}
       agentPage={agentPlace(url) ?? undefined}
       navigate={navigate}
@@ -206,6 +209,8 @@ interface WorkspaceProps {
   opening: string | undefined;
   /** The skills page in place of a chat. */
   showSkills: boolean;
+  /** The memory page in place of a chat. */
+  showMemory: boolean;
   /** The feed in place of a chat. */
   showFeed: boolean;
   /** An agent's page in place of a chat. */
@@ -232,7 +237,7 @@ const PREVIEW_MIN = 360;
 /** Phones and narrow windows: one column, the sidebar a menu that slides in over it (styles.css, the same width). */
 const NARROW = "(max-width: 900px)";
 
-function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, showFeed, agentPage, navigate, onSignOut }: WorkspaceProps) {
+function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, showFeed, showMemory, agentPage, navigate, onSignOut }: WorkspaceProps) {
   const { chats, load: loadChats, newSince } = useChatList(chatId);
   const [artifacts, loadArtifacts] = useLatest<ArtifactSummary[]>(api.artifacts, []);
   const [files, loadFiles] = useLatest<FileInfo[]>(api.files, []);
@@ -295,6 +300,7 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, showFe
       "needs-you": loadNeedsYou,
       feed: reloadFeed,
       follows: reloadFollows,
+      memory: reloadMemory,
     },
     notices.onMention,
     onSignIn,
@@ -321,7 +327,7 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, showFe
 
   // The menu closes once the user picked something in it: a chat, the skills, a file or an artifact to preview; and when
   // the window widens past NARROW, so it does not open again by itself when it narrows.
-  useEffect(() => setMenuOpen(false), [chatId, showSkills, showFeed, agentPage?.id, preview, narrow]);
+  useEffect(() => setMenuOpen(false), [chatId, showSkills, showFeed, showMemory, agentPage?.id, preview, narrow]);
   useEffect(() => {
     if (!menuOpen) return;
     const onKey = (event: KeyboardEvent) => event.key === "Escape" && setMenuOpen(false);
@@ -354,6 +360,10 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, showFe
 
   // Skills the agent proposed in a chat wait, off, for the user to review.
   const proposed = (skills ?? []).filter((s) => s.origin === "agent" && !s.enabled).length;
+  // Facts agents learned wait for the user to confirm them.
+  const memory = useMemory();
+  const confirming = toConfirm(memory.notes);
+  const noteCount = (memory.notes ?? []).filter((note) => note.forgottenAt === undefined).length;
 
   const newChat = async () => {
     const chat = await api.createChat();
@@ -490,6 +500,23 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, showFe
                 {proposed > 0 && <UnreadDot label="Proposed skills to review" />}
               </a>
             </nav>
+            <h3>Memory</h3>
+            <nav>
+              <a
+                href="/memory"
+                className={["nav-item", showMemory && "active", confirming > 0 && "unread"].filter(Boolean).join(" ")}
+                onClick={(e) => {
+                  e.preventDefault();
+                  navigate("/memory");
+                }}
+              >
+                <span className="nav-title">
+                  {plural(noteCount, "note")}
+                  {confirming > 0 && <small> · {confirming} to confirm</small>}
+                </span>
+                {confirming > 0 && <UnreadDot label="Notes to confirm" />}
+              </a>
+            </nav>
           </section>
           <FilesNav
             files={files}
@@ -514,7 +541,7 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, showFe
       {narrow && menuOpen && <div className="drawer-backdrop" onClick={() => setMenuOpen(false)} aria-hidden="true" />}
       <main className="main" ref={chatRef}>
         {/* A chat has its own header, with the menu button in it. */}
-        {narrow && (showSkills || !chatId) && !agentPage && !showFeed && (
+        {narrow && (showSkills || !chatId) && !agentPage && !showFeed && !showMemory && (
           <header className="chat-header">
             <MenuButton onClick={openMenu} />
             <h1 className="chat-title">{showSkills ? "Skills" : "Chats"}</h1>
@@ -528,6 +555,10 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, showFe
         ) : showFeed ? (
           <ErrorBoundary key="feed" what="the feed">
             <FeedView navigate={navigate} onMenu={narrow ? openMenu : undefined} />
+          </ErrorBoundary>
+        ) : showMemory ? (
+          <ErrorBoundary what="memory">
+            <MemoryView chats={chats} onMenu={narrow ? openMenu : undefined} />
           </ErrorBoundary>
         ) : showSkills ? (
           <ErrorBoundary what="skills">
