@@ -7,7 +7,7 @@ import { AgentAvatar, Avatar } from "../chat/people.tsx";
 import { sentLabel } from "../chat/SentTime.tsx";
 import { Icon } from "../Icon.tsx";
 import { isBoolean, MenuButton, opensElsewhere, useStoredState } from "../layout.tsx";
-import { putFollows, reloadFeed, useFeedCounts, useFollows } from "./store.ts";
+import { putFeedCounts, putFollows, reloadFeed, useFeedCounts, useFollows } from "./store.ts";
 
 /** What each kind says in its small label, beside the time. */
 const KIND_LABEL: Record<FeedKind, string> = {
@@ -46,23 +46,20 @@ export function FeedView({ navigate, onMenu }: { navigate: (path: string) => voi
   }, [unread, needsYou, version]);
 
   const mark = useCallback(async (ids: readonly number[] | "all", read = true) => {
-    // Shown at once; the counts (and with them this list) are read again after.
+    // Shown at once; the counts it answers with move the version, and this list is read again.
     setList((shown) => shown && { ...shown, items: shown.items.map((item) => (ids === "all" || ids.includes(item.id) ? withRead(item, read) : item)) });
     try {
-      await api.markFeed(ids, read);
+      putFeedCounts(await api.markFeed(ids, read));
     } catch (e) {
       setError(errorMessage(e));
+      void reloadFeed();
     }
-    void reloadFeed();
   }, []);
 
   const open = async (item: FeedItem, event: MouseEvent) => {
-    if (opensElsewhere(event)) {
-      if (!item.read) void mark([item.id]);
-      return;
-    }
-    event.preventDefault();
     if (!item.read) void mark([item.id]);
+    if (opensElsewhere(event)) return;
+    event.preventDefault();
     if (item.open.to === "discuss") {
       // Joining the page's chat is what opening it means: the page's own chat, as Discuss on the page does.
       try {
@@ -207,7 +204,7 @@ function Following() {
       <ul>
         {(follows ?? []).map((follow) => (
           <li key={`${follow.kind}:${follow.id}`}>
-            <a href={follow.kind === "page" ? `/a/${follow.id}` : `/agents/${follow.id}${follow.chatId ? `?chat=${follow.chatId}` : ""}`} target={follow.kind === "page" ? "_blank" : undefined} rel="noreferrer">
+            <a href={feedPath(follow.kind === "page" ? { to: "page", artifactId: follow.id } : { to: "agent", agentId: follow.id, ...(follow.chatId && { chatId: follow.chatId }) })} target={follow.kind === "page" ? "_blank" : undefined} rel="noreferrer">
               {follow.title}
             </a>
             <small>{follow.kind === "page" ? "page" : "agent"}</small>

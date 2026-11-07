@@ -32,7 +32,7 @@ export async function feedRoute(request: Request, uid: string, directory: Durabl
     const body = await readJson<{ ids?: unknown; all?: unknown; read?: unknown }>(request);
     const ids = Array.isArray(body?.ids) && body.ids.length <= 500 && body.ids.every((id) => Number.isSafeInteger(id)) ? (body.ids as number[]) : null;
     if (!body || (body.all !== true && !ids)) return json({ error: "Expected {ids: [numbers]} or {all: true}." }, 400);
-    return json({ unread: await directory.markFeed(body.all === true ? "all" : ids!, body.read !== false) });
+    return json(await directory.markFeed(body.all === true ? "all" : ids!, body.read !== false));
   }
   if (path === "/api/follows" && method === "GET") return json(await directory.listFollows());
   if (path === "/api/follows" && method === "POST") {

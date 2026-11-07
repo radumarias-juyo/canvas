@@ -265,10 +265,10 @@ export const api = {
   testAgent: (id: string) => request<unknown>(`/api/agents/${id}/test`, post({})),
   /** The feed's newest items: all, only unread ones, only those needing the user; with the counts. */
   feed: (filter: { unread?: boolean; needsYou?: boolean } = {}) =>
-    request<FeedList>(`/api/feed${filter.unread || filter.needsYou ? `?${[filter.unread && "unread", filter.needsYou && "needs"].filter(Boolean).join("&")}` : ""}`),
+    request<FeedList>(`/api/feed?${new URLSearchParams({ ...(filter.unread && { unread: "1" }), ...(filter.needsYou && { needs: "1" }) })}`),
   feedCounts: () => request<Pick<FeedList, "unread" | "needsYou">>("/api/feed/counts"),
   /** Mark feed items read (or with `read` false, unread again): by id, or all of them. */
-  markFeed: (ids: readonly number[] | "all", read = true) => request<{ unread: number }>("/api/feed/read", post(ids === "all" ? { all: true, read } : { ids, read })),
+  markFeed: (ids: readonly number[] | "all", read = true) => request<Pick<FeedList, "unread" | "needsYou">>("/api/feed/read", post(ids === "all" ? { all: true, read } : { ids, read })),
   follows: () => request<FollowView[]>("/api/follows"),
   /** Follow someone else's page, or an agent shared in a chat (`chatId`). */
   follow: (kind: FollowKind, id: string, chatId?: string) => request<FollowView[]>("/api/follows", post({ kind, id, ...(chatId && { chatId }) })),

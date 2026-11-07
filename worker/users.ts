@@ -20,9 +20,9 @@ import { AgentStore, type AgentSave } from "./agents/store.ts";
 import { ChatRows } from "./chat-rows.ts";
 import { addColumns } from "./members.ts";
 import { mayLeave, type ChatKind } from "../shared/chat-kinds.ts";
-import { NEEDS_YOU_KINDS, RUN_FEED_TEXT, type FeedInput, type FeedList, type FeedOpen, type FollowKind, type FollowView } from "../shared/feed.ts";
+import { agentFrom, NEEDS_YOU_KINDS, RUN_FEED_TEXT, type FeedInput, type FeedList, type FeedOpen, type FollowKind, type FollowView } from "../shared/feed.ts";
 import type { RunStatus } from "../shared/runs.ts";
-import { aboutOf, fanOut, FeedStore, FollowStore, postsReachFollowers, type Follower, type FollowRecord } from "./feed/store.ts";
+import { aboutOf, FAN_OUT, fanOut, FeedStore, FollowStore, postsReachFollowers, type Follower, type FollowRecord } from "./feed/store.ts";
 import { mcpServers } from "./mcp/servers.ts";
 import {
   withoutSignInShares,
@@ -76,9 +76,6 @@ export interface RunEnded {
   /** Its post ends on a question to its owner. */
   asks?: boolean;
 }
-
-/** How many followers' directories one fan-out writes to at a time. */
-const FAN_OUT = 8;
 
 type ArtifactRow = { id: string; title: string; chat_id: string; latest: number; updated_at: number; seen: number };
 
@@ -269,10 +266,10 @@ export class UserDirectory extends DurableObject<Env> {
    */
   addFeed(input: FeedInput, follow?: { kind: FollowKind; id: string; ownerUid: string; title?: string }): boolean {
     if (follow && !this.#follows.follows(follow.kind, follow.id, follow.ownerUid)) return false;
-    if (follow?.title) this.#follows.retitle(follow.kind, follow.id, follow.ownerUid, follow.title);
+    if (follow?.title && this.#follows.retitle(follow.kind, follow.id, follow.ownerUid, follow.title)) this.#changed("follows");
     const known = input.chat ? this.#rows.kindOf(input.chat.id) : null;
     // What it is about goes with it: a page or agent unfollowed or gone, or one of this user's agents deleted.
-    const about = follow ? aboutOf(follow.kind, follow.id) : input.open.to === "agent" ? aboutOf("agent", input.open.agentId) : undefined;
+    const about = follow ? aboutOf(follow.kind, follow.id) : input.aboutAgent && aboutOf("agent", input.aboutAgent);
     const added = this.#feed.add(input, known, about);
     if (added === "same" || added === "refused") return true;
     this.#changed("feed");
@@ -293,19 +290,14 @@ export class UserDirectory extends DurableObject<Env> {
   }
 
   /** Mark feed items read (or unread again): by id, or all. */
-  markFeed(ids: readonly number[] | "all", read: boolean): FeedList["unread"] {
+  markFeed(ids: readonly number[] | "all", read: boolean): Pick<FeedList, "unread" | "needsYou"> {
     if (this.#feed.mark(ids, read)) this.#changed("feed");
-    return this.#feed.counts().unread;
+    return this.#feed.counts();
   }
 
   /** What this user follows, newest first. */
   listFollows(): FollowView[] {
     return this.#follows.list();
-  }
-
-  /** The follow of a target, with whose it is (for the Worker to tell its owner), or null. */
-  followOf(kind: FollowKind, id: string): FollowRecord | null {
-    return this.#follows.get(kind, id);
   }
 
   /** Follow someone else's page or agent: the Worker checked this user may open it, and tells its owner (addFollower). */
@@ -376,7 +368,7 @@ export class UserDirectory extends DurableObject<Env> {
   runEnded(run: RunEnded): void {
     const agent = this.#agents.get(run.agentId);
     if (!agent) return;
-    const from = { name: `@${agent.name}`, agent: { id: agent.id, name: agent.name, avatar: agent.avatar, color: agent.color } };
+    const from = agentFrom(agent);
     const text = run.post ?? run.summary;
     const open: FeedOpen = { to: "agent", agentId: agent.id, tab: "runs" };
     this.addFeed({
@@ -391,6 +383,7 @@ export class UserDirectory extends DurableObject<Env> {
       status: run.status,
       ...((run.status === "needs_sign_in" || run.asks) && { needsYou: true }),
       ...(run.status === "not_today" && { quiet: true }),
+      aboutAgent: agent.id,
     });
     if (!run.post || !mayLeave({ what: "feed" }, run.chatKind, this.#rows.kindOf(run.chatId))) return;
     const signIn = new Set(oauthServers(this.env).map((server) => server.name));
@@ -821,7 +814,7 @@ export class UserDirectory extends DurableObject<Env> {
         ref: `version:${artifact.id}:${artifact.latest}`,
         at: Date.now(),
         title: `${artifact.title} has version ${artifact.latest}`,
-        open: { to: "page", artifactId: artifact.id, version: artifact.latest },
+        open: { to: "page", artifactId: artifact.id },
       },
       artifact.title,
     );
@@ -970,8 +963,9 @@ export class UserDirectory extends DurableObject<Env> {
         at: Date.now(),
         title: `Confirm what @${saved.name}'s draft guessed`,
         text: `Assumed: ${saved.assumed.join(", ")}`,
-        from: { name: `@${saved.name}`, agent: { id: saved.id, name: saved.name, avatar: saved.avatar, color: saved.color } },
+        from: agentFrom(saved),
         open: { to: "agent", agentId: saved.id },
+        aboutAgent: saved.id,
       });
     }
     return saved;

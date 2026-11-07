@@ -17,7 +17,7 @@ import {
   type FollowKind,
   type FollowView,
 } from "../../shared/feed.ts";
-import { clip } from "../../shared/util.ts";
+import { clip, mapLimit } from "../../shared/util.ts";
 import type { Sql } from "../members.ts";
 
 type FeedRow = { id: number; kind: FeedKind; at: number; read: number; needs: number; data: string };
@@ -110,9 +110,7 @@ export class FeedStore {
   mark(ids: readonly number[] | "all", read = true): number {
     const flag = read ? 1 : 0;
     if (ids === "all") return this.#sql.exec("UPDATE feed SET read = ? WHERE read != ?", flag, flag).rowsWritten;
-    let changed = 0;
-    for (const id of ids) changed += this.#sql.exec("UPDATE feed SET read = ? WHERE id = ? AND read != ?", flag, id, flag).rowsWritten;
-    return changed;
+    return this.#sql.exec("UPDATE feed SET read = ? WHERE read != ? AND id IN (SELECT value FROM json_each(?))", flag, flag, JSON.stringify(ids)).rowsWritten;
   }
 
   /** The person saw chat `chatId`: what its items told them of (tags, questions, runs posted there) is read. */
@@ -137,9 +135,7 @@ export class FeedStore {
 
   /** At most MAX_FEED_ITEMS: the oldest read ones go first, then the oldest. */
   #prune(): void {
-    const n = Number(this.#sql.exec("SELECT COUNT(*) AS n FROM feed").toArray()[0]?.n ?? 0);
-    if (n <= MAX_FEED_ITEMS) return;
-    this.#sql.exec("DELETE FROM feed WHERE id IN (SELECT id FROM feed ORDER BY read DESC, at ASC, id ASC LIMIT ?)", n - MAX_FEED_ITEMS);
+    this.#sql.exec("DELETE FROM feed WHERE id IN (SELECT id FROM feed ORDER BY read ASC, at DESC, id DESC LIMIT -1 OFFSET ?)", MAX_FEED_ITEMS);
   }
 }
 
@@ -229,8 +225,8 @@ export class FollowStore {
   }
 
   /** A followed target's title changed (a page published under a new one), as an item from it says. */
-  retitle(kind: FollowKind, id: string, ownerUid: string, title: string): void {
-    this.#sql.exec("UPDATE follows SET title = ? WHERE kind = ? AND target_id = ? AND owner_uid = ?", title, kind, id, ownerUid);
+  retitle(kind: FollowKind, id: string, ownerUid: string, title: string): boolean {
+    return this.#sql.exec("UPDATE follows SET title = ? WHERE kind = ? AND target_id = ? AND owner_uid = ? AND title != ?", title, kind, id, ownerUid, title).rowsWritten > 0;
   }
 
   /** Someone follows one of this person's targets. Refused past MAX_FOLLOWERS. */
@@ -329,32 +325,25 @@ export interface FanOutHost {
  * one without such a chat gets nothing. A follower who no longer follows it is forgotten; a failed delivery is not.
  * Returns who got it.
  */
-export async function fanOut(kind: FollowKind, followers: readonly Follower[], host: FanOutHost, limit = 8): Promise<string[]> {
-  const allowed: string[] = [];
-  for (const group of byChat(followers)) {
-    if (kind === "page") allowed.push(...group.uids);
-    else if (group.via) allowed.push(...(await host.stillIn(group.via, group.uids).catch(() => [] as string[])).filter((uid) => group.uids.includes(uid)));
-  }
-  const got = await Promise.all(
-    chunks(allowed, limit).map(async (chunk) => {
-      const kept: string[] = [];
-      for (const uid of chunk) {
-        const delivered = await host.deliver(uid).catch(() => null);
-        if (delivered === false) host.forget(uid);
-        else if (delivered) kept.push(uid);
-      }
-      return kept;
-    }),
-  );
-  return got.flat();
+export async function fanOut(kind: FollowKind, followers: readonly Follower[], host: FanOutHost, limit = FAN_OUT): Promise<string[]> {
+  const allowed =
+    kind === "page"
+      ? followers.map((follower) => follower.uid)
+      : (
+          await mapLimit(byChat(followers), limit, async ({ via, uids }) =>
+            via ? (await host.stillIn(via, uids).catch(() => [] as string[])).filter((uid) => uids.includes(uid)) : [],
+          )
+        ).flat();
+  const delivered = await mapLimit(allowed, limit, async (uid) => {
+    const got = await host.deliver(uid).catch(() => null);
+    if (got === false) host.forget(uid);
+    return got ? uid : null;
+  });
+  return delivered.filter((uid) => uid !== null);
 }
 
-/** `items` dealt into `n` lists, for `n` deliveries at a time each working through its own. */
-function chunks<T>(items: readonly T[], n: number): T[][] {
-  const lists: T[][] = Array.from({ length: Math.min(n, items.length) }, () => []);
-  items.forEach((item, i) => lists[i % lists.length].push(item));
-  return lists;
-}
+/** How many followers' directories (or chats checking them) one fan-out calls at a time. */
+export const FAN_OUT = 8;
 
 /**
  * Of `uids`, those who may follow `ownerUid`'s agent from a chat: the chat is there, the agent is on its roster as that

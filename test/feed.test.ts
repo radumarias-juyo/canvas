@@ -71,7 +71,7 @@ describe("feed: keeping items", () => {
   it("lets a chat, or a page or agent, take its items along when it goes", () => {
     const feed = new FeedStore(memorySql());
     feed.add(tag(1, { id: "c1", kind: "group" }));
-    feed.add({ kind: "page_version", ref: "version:p1:2", at: T0, title: "Weekly has version 2", open: { to: "page", artifactId: "p1", version: 2 } }, null, aboutOf("page", "p1"));
+    feed.add({ kind: "page_version", ref: "version:p1:2", at: T0, title: "Weekly has version 2", open: { to: "page", artifactId: "p1" } }, null, aboutOf("page", "p1"));
     expect(feed.forgetAbout(aboutOf("page", "p1"))).toBe(1);
     expect(feed.forgetChat("c1")).toBe(1);
     expect(feed.list().items).toEqual([]);
@@ -94,7 +94,7 @@ describe("feed: keeping items", () => {
 
   it("opens each kind of item where it belongs", () => {
     expect(feedPath({ to: "chat", chatId: "c1" })).toBe("/c/c1");
-    expect(feedPath({ to: "page", artifactId: "p1", version: 3 })).toBe("/a/p1");
+    expect(feedPath({ to: "page", artifactId: "p1" })).toBe("/a/p1");
     expect(feedPath({ to: "discuss", artifactId: "p1" })).toBe("/a/p1");
     expect(feedPath({ to: "agent", agentId: "a1", tab: "runs" })).toBe("/agents/a1?tab=runs");
     expect(feedPath({ to: "agent", agentId: "a1", chatId: "c1" })).toBe("/agents/a1?chat=c1");

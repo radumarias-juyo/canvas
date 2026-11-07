@@ -57,6 +57,8 @@ const follows = shared<FollowView[]>(api.follows);
 
 /** Read the feed's counts again, and with them tell open feed views to read their lists (the sidebar socket's "feed"). */
 export const reloadFeed = counts.load;
+/** Put the counts as a change of the feed answered with them: open feed views read their lists again. */
+export const putFeedCounts = counts.put;
 export const reloadFollows = follows.load;
 
 /** How many feed items are unread, and of them how many need the user; `version` moves with each read. */

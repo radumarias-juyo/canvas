@@ -74,7 +74,7 @@ import { filesIndex } from "./agent/file-refs.ts";
 import { resolveMentions } from "./agent/mentions.ts";
 import { AGENT_REACTOR, isReactable, isReaction, type Reaction, type Reactions } from "../shared/reactions.ts";
 import { excerpt, replyLine, replyQuote } from "../shared/replies.ts";
-import { MAX_FEED_TEXT } from "../shared/feed.ts";
+import { agentFrom, MAX_FEED_TEXT } from "../shared/feed.ts";
 import { followersAllowed } from "./feed/store.ts";
 import { peopleExtension, promptExtension, systemPromptExtension, withoutSystemPrompt, type UserPrompts } from "./agent/prompt.ts";
 import { skillClassifier, skillMessage, type SkillChoice, type SkillClassifier } from "./agent/skill-pick.ts";
@@ -167,7 +167,6 @@ import {
   kindAfterJoin,
   legacyKind,
   losesAccess,
-  mayLeave,
   type BranchedFrom,
   type ChatEventData,
   type ChatKind,
@@ -401,7 +400,7 @@ export class ChatAgent extends DurableObject<Env> {
     react: (by, entry, emoji, on) => this.react(by, entry, emoji, on),
   });
   /** The runs of the agent whose home this chat is, its schedules and watches (worker/agents/runs/). */
-  readonly runs = new AgentRuns(this.ctx.storage.sql);
+  readonly runs = new AgentRuns(this.ctx.storage.sql, Date.now, (run) => this.#runEnded(run));
   readonly runner = new AgentRunner(this.#runnerHost(), this.ctx.storage.sql);
   /** Shares the object's alarm with pi: runs at local times, watches on intervals. */
   readonly scheduler = new Scheduler({
@@ -2691,17 +2690,16 @@ export class ChatAgent extends DurableObject<Env> {
   #feedQuestion(reply: ChatAgentReplyData, requestId: string): void {
     const asker = reply.calledBy.uid;
     if (reply.run || reply.failed || !asker || reply.calledBy.agentId || !asksUser(reply.text) || !this.isInChat(asker)) return;
-    const kind = this.kinds.kind();
-    if (!mayLeave({ what: "feed" }, kind)) return;
+    // Refused by the asker's feed when the chat is off the record (FeedStore.add reads `chat`).
     const added = this.#index(asker).addFeed({
       kind: "question",
       ref: `question:${this.chatId}:${requestId}`,
       at: reply.endedAt,
       title: `@${reply.name} asks you something`,
       text: excerpt(reply.text, MAX_FEED_TEXT),
-      from: { name: `@${reply.name}`, agent: { id: reply.agentId, name: reply.name, avatar: reply.avatar, color: reply.color } },
+      from: agentFrom({ id: reply.agentId, name: reply.name, avatar: reply.avatar, color: reply.color }),
       open: { to: "chat", chatId: this.chatId },
-      chat: { id: this.chatId, kind },
+      chat: { id: this.chatId, kind: this.kinds.kind() },
     });
     this.ctx.waitUntil(added.catch((error: unknown) => console.error("feed:", errorMessage(error))));
   }
@@ -3059,7 +3057,6 @@ export class ChatAgent extends DurableObject<Env> {
       },
       deliver: (request) => this.#deliverRun(request),
       changed: (agentId) => this.sockets.broadcast({ type: "runs", agentId }),
-      ended: (agent, run) => this.#runEnded(agent, run),
       alarmAt: async (at, payload) => (await this.scheduler.set(new Date(at), "run", payload)).id,
       alarmEvery: async (seconds, payload) => (await this.scheduler.every(seconds, "watch", payload)).id,
       cancelAlarm: async (id) => {
@@ -3123,11 +3120,11 @@ export class ChatAgent extends DurableObject<Env> {
    * A run ended: its owner's feed hears how, with the report it posted here or as a notification (what the agent's
    * followers may read, the directory decides: postsReachFollowers). Off the caller's path.
    */
-  #runEnded(agent: AgentDefinition, run: RunRecord): void {
+  #runEnded(run: RunRecord): void {
     if (run.status === "running") return;
     const posted = run.status === "sent" ? run.detail.deliveries.find((delivery) => (delivery.kind === "chat" || delivery.kind === "notify") && delivery.status === "sent" && delivery.text) : undefined;
     const ended = this.#directory.runEnded({
-      agentId: agent.id,
+      agentId: run.agentId,
       dueAt: run.dueAt,
       status: run.status,
       ...(run.summary && { summary: run.summary }),

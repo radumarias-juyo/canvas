@@ -4,7 +4,7 @@
 // them, an assumption to confirm, an approval waiting) and how their own agents' runs went. Off-the-record chats never
 // reach it (mayLeave in shared/chat-kinds.ts).
 
-import type { AgentColor } from "./agents.ts";
+import type { ChatAgentView } from "./agents.ts";
 import type { RunStatus } from "./runs.ts";
 
 /** What can be followed: a page (an artifact) or an agent, someone else's either way. */
@@ -47,14 +47,19 @@ export type FeedKind = "tag" | "agent_post" | "approval" | "assumption" | "quest
 /** Where opening an item goes: a chat, a page (a version of it), a page's chat (joined on the way), an agent's page. */
 export type FeedOpen =
   | { to: "chat"; chatId: string }
-  | { to: "page"; artifactId: string; version?: number }
+  | { to: "page"; artifactId: string }
   | { to: "discuss"; artifactId: string }
   | { to: "agent"; agentId: string; chatId?: string; tab?: string };
 
 /** Who an item comes from: a person by name, or an agent, shown with its badge. */
 export interface FeedFrom {
   name: string;
-  agent?: { id: string; name: string; avatar: string; color: AgentColor };
+  agent?: Pick<ChatAgentView, "id" | "name" | "avatar" | "color">;
+}
+
+/** An item from an agent: its @name, with its badge. */
+export function agentFrom({ id, name, avatar, color }: Pick<ChatAgentView, "id" | "name" | "avatar" | "color">): FeedFrom {
+  return { name: `@${name}`, agent: { id, name, avatar, color } };
 }
 
 /** An item as the code that adds it gives it (UserDirectory.addFeed). */
@@ -83,6 +88,8 @@ export interface FeedInput {
   status?: RunStatus;
   /** Shown as read from the start: a quiet run (not today) is in the feed, but nothing to look at. */
   quiet?: boolean;
+  /** The receiver's own agent it is about (its run, its draft): deleting that agent takes the item along. */
+  aboutAgent?: string;
 }
 
 /** An item in the feed, as the app lists it. */
@@ -123,7 +130,6 @@ export function feedPath(open: FeedOpen): string {
     case "chat":
       return `/c/${open.chatId}`;
     case "page":
-      return `/a/${open.artifactId}`;
     case "discuss":
       return `/a/${open.artifactId}`;
     case "agent": {

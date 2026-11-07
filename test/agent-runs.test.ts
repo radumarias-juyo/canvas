@@ -8,7 +8,7 @@ import { publishedAlready, publishFindings, publishRebuilt, runMark } from "../w
 import { findingsEdit, FINDINGS_END, FINDINGS_START, reportHtml, workSpend } from "../worker/agents/runs/report.ts";
 import { AgentRunner, type RunAlarm, type RunnerHost, type WatchAlarm } from "../worker/agents/runs/runner.ts";
 import { sourceName, SourceCore, type Subscriber } from "../worker/agents/runs/source.ts";
-import { AgentRuns, type RunRecord } from "../worker/agents/runs/store.ts";
+import { AgentRuns } from "../worker/agents/runs/store.ts";
 import { writeDraft, type PublishScope } from "../worker/agent/publish.ts";
 import type { CheckReport } from "../worker/artifacts/check.ts";
 import type { McpHub } from "../worker/mcp/hub.ts";
@@ -47,7 +47,9 @@ function agent(over: Partial<AgentDefinition> = {}): AgentDefinition {
 class FakeHome implements RunnerHost {
   readonly clock = { now: T0 };
   readonly sql = memorySql();
-  readonly runs = new AgentRuns(this.sql, () => this.clock.now);
+  /** How each run ended, as the feed hears it: `<dueAt>:<status>`. */
+  readonly endings: string[] = [];
+  readonly runs = new AgentRuns(this.sql, () => this.clock.now, (run) => this.endings.push(`${run.dueAt}:${run.status}`));
   readonly definitions = new Map<string, AgentDefinition>();
   readonly values = new Map<string, Value | ((input: StepInput) => Value)>([["crm.weekly_sales", { total: 940, lastYear: 1000 }]]);
   readonly reads: { call: string; input: StepInput }[] = [];
@@ -112,11 +114,6 @@ class FakeHome implements RunnerHost {
     return { kind: "chat", to: request.step.kind === "tell" ? request.step.to.join(", ") : "", text: request.text, status: "sent" };
   }
   changed() {}
-  /** How each run ended, as the feed hears it: `<dueAt>:<status>`. */
-  readonly endings: string[] = [];
-  ended(_agent: AgentDefinition, run: RunRecord) {
-    this.endings.push(`${run.dueAt}:${run.status}`);
-  }
   async alarmAt(at: number, payload: RunAlarm) {
     const id = `alarm-${++this.#alarmIds}`;
     this.alarms.set(id, { at, payload });
