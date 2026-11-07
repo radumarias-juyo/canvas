@@ -11,12 +11,18 @@ import type { Sql } from "../../members.ts";
 /**
  * Where an action came from, so its outcome goes back there: the pi session whose tool call it was (told by a passive
  * write), or the run and step that made it. `level`: the level of the caller, kept so nothing it leads to goes above it.
+ * `seat`: the session is a seat's (a member's agent in someone else's chat): its card is in that room, for this
+ * object's owner alone, and its view names the room's chat.
  */
 export interface ActionOrigin {
   session?: string;
   run?: RunRef & { agentId: string; item: string; step: string };
+  seat?: SeatOrigin;
   level: AutonomyLevel;
 }
+
+/** The room a seat's action was made for (its chat's owner and id), and the agent seated there. */
+export type SeatOrigin = { ownerUid: string; chatId: string; agentId: string };
 
 /** A new action, as the gate holds a call. */
 export interface NewAction {
@@ -81,7 +87,8 @@ export class ChatActions {
     const origin = JSON.parse(row.origin) as ActionOrigin;
     return {
       id: row.id,
-      chatId: this.#chatId(),
+      chatId: origin.seat?.chatId ?? this.#chatId(),
+      ...(origin.seat && { seat: true as const }),
       kind: row.kind,
       actor: JSON.parse(row.actor) as ActionActor,
       server: row.server,

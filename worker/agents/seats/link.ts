@@ -5,6 +5,7 @@
 
 import type { ChatTurnData } from "../../../shared/agents.ts";
 import type { ChatKind } from "../../../shared/chat-kinds.ts";
+import type { PendingActionView } from "../../../shared/limits.ts";
 import type { Outputs, TurnResult } from "../controller.ts";
 
 /** Which room a seat is for: the chat's owner and id, from which its object's name is built. */
@@ -59,6 +60,13 @@ export interface SeatLink {
   abort(turn: number): Promise<void>;
   /** Have the seat send again the results of the turns it ended that the room has not taken (after a restart of either). */
   wake(): Promise<void>;
+  /** The room's kind changed: what its turns there read as (memory notes) from now on. */
+  kind(kind: ChatKind): Promise<void>;
+  /**
+   * The agent's owner decides an action its seat held for them (its card in the room): run as they decided it in their
+   * own object, exactly as it was held. The action after, or why not.
+   */
+  decide(id: string, decision: "approve" | "decline"): Promise<PendingActionView | { error: string; status: 400 | 403 | 404 | 409 }>;
 }
 
 /** What a seat calls on its room. */
@@ -67,4 +75,6 @@ export interface RoomLink {
   log(after: number, turn: number): Promise<SeatBatch>;
   /** A turn ended. True once the room took it (also when it had already, or the turn is gone): the seat lets it go. */
   ended(turn: number, result: SeatResult): Promise<boolean>;
+  /** An action one of its turns held is new or changed: its card in the room, for the agent's owner alone. */
+  action(view: PendingActionView): Promise<void>;
 }

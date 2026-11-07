@@ -561,8 +561,10 @@ export function actorName(actor: Pick<ActionActor, "name" | "agentId">): string 
  */
 export interface PendingActionView {
   id: string;
-  /** The chat it came from (and runs in). */
+  /** The chat it came from (and runs in); for a seat's, the room (the chat its turn was in), whose card only its agent's owner sees. */
   chatId: string;
+  /** A member's agent made it in its seat (worker/agents/seats/): it runs in the member's own object, and only they decide it. */
+  seat?: true;
   kind: ActionKind;
   actor: ActionActor;
   server: string;
