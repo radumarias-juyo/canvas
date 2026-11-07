@@ -1842,6 +1842,7 @@ describe("a run's page step", () => {
       hub: { servers: () => [] } as unknown as McpHub,
       artifacts: {
         readHtml: async () => page,
+        readMeta: async () => null,
         publishVersion: async (input: { html: string; title: string; message?: string }) => {
           published.push(input.html);
           messages.push(input.message ?? "");
