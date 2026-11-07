@@ -226,6 +226,14 @@ export function reduce(state: ChatState, action: Action): ChatState {
   return withoutShown(action.queued ? { ...next, queued: action.queued } : next);
 }
 
+/**
+ * A session as one snapshot event shows it (an agent's window reads one at a time): `reduce` from nothing, with how long
+ * its run and calls went, from the server, applied to this clock at `at`.
+ */
+export function snapshotState(snapshot: AgentEvent, at: number, runElapsedMs?: number, toolsElapsedMs?: Record<string, number>): ChatState {
+  return reduce(initial, { type: "events", events: [snapshot], at, runElapsedMs, toolsElapsedMs });
+}
+
 /** `state` without the incoming messages that are in its transcript or queue by now. */
 function withoutShown(state: ChatState): ChatState {
   if (!state.incoming.length) return state;

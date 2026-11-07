@@ -7,6 +7,7 @@ import {
   type ChatAgentReplyData,
   type ChatAgentView,
 } from "../../shared/agents.ts";
+import { AGENT_NAME } from "../../shared/mentions.ts";
 import type { ArtifactMeta } from "../../shared/protocol.ts";
 import type { RunRef } from "../../shared/runs.ts";
 import { addColumns, type Sql } from "../members.ts";
@@ -261,6 +262,12 @@ function turnOf(row: TurnRow): AgentTurn {
   };
 }
 
+/**
+ * The agent id of pi's place in a chain (a turn row of its own, which no roster entry has): it holds the chain's later
+ * speakers until pi's answer is in the log, as an agent's turn does (AgentTurns, ChatAgent's #piScan).
+ */
+export const PI_TURN = AGENT_NAME;
+
 /** Turns kept per agent once ended: the newest, for the runs list; older ones go. */
 const KEPT_TURNS = 200;
 /** A turn not ended yet. */
@@ -505,13 +512,19 @@ export class ChatRoster {
     this.#sql.exec("UPDATE chat_agents SET mirrored = MAX(mirrored, ?) WHERE agent_id = ?", through, agentId);
   }
 
-  /** Queue a turn for an agent. */
-  enqueue(turn: TurnRequest): AgentTurn {
+  /**
+   * Queue a turn for an agent, or for pi (`PI_TURN`: its place in a chain). `placed`: its input is in already (pi's for
+   * a message that named it first): it runs from now on.
+   */
+  enqueue(turn: TurnRequest, placed = false): AgentTurn {
+    const now = placed ? this.#now() : null;
     const row = this.#sql
       .exec(
-        `INSERT INTO chat_agent_turns (agent_id, status, hop, called_by, by_owner, root, ask, ask_key, created_at, session, run, unattended, by_uid)
-         VALUES (?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
+        `INSERT INTO chat_agent_turns (agent_id, status, hop, called_by, by_owner, root, ask, ask_key, created_at, session, run, unattended, by_uid,
+           started_at, submitted_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
         turn.agentId,
+        placed ? "running" : "queued",
         turn.hop,
         JSON.stringify(turn.calledBy),
         turn.byOwner ? 1 : 0,
@@ -523,9 +536,31 @@ export class ChatRoster {
         turn.run ? JSON.stringify(turn.run) : null,
         turn.unattended ? 1 : 0,
         turn.by ?? null,
+        now,
+        now,
       )
       .toArray()[0] as TurnRow;
     return turnOf(row);
+  }
+
+  /** When the router last picked an agent here (its newest routed turn); undefined when it never did. */
+  lastRoutedAt(agentId: string): number | undefined {
+    const at = this.#sql
+      .exec("SELECT MAX(created_at) AS at FROM chat_agent_turns WHERE agent_id = ? AND json_extract(called_by, '$.routed') IS NOT NULL", agentId)
+      .toArray()[0]?.at;
+    return typeof at === "number" ? at : undefined;
+  }
+
+  /** pi's place, not ended, in the chain of the message whose ask key is `askKey` (enqueue's `placed`); null for none. */
+  piTurnFor(askKey: string): AgentTurn | null {
+    return this.#turns(`agent_id = ? AND ask_key = ? AND ${OPEN} ORDER BY id LIMIT 1`, PI_TURN, askKey)[0] ?? null;
+  }
+
+  /** The turn that handed pi its place `id` (a hand-off's ask key names it); null for one a person's message gave. */
+  handedBy(id: number): number | null {
+    const key = this.#sql.exec("SELECT ask_key FROM chat_agent_turns WHERE id = ?", id).toArray()[0]?.ask_key;
+    const handing = typeof key === "string" ? /^turn:(\d+)$/.exec(key) : null;
+    return handing ? Number(handing[1]) : null;
   }
 
   /**
@@ -548,8 +583,9 @@ export class ChatRoster {
    * within MAX_HOPS, however they branch.
    */
   handOffsFrom(root: number): number {
-    return this.#sql.exec("SELECT COALESCE(SUM((hop > 0) + to_pi), 0) AS n FROM chat_agent_turns WHERE root = ? OR id = ?", root, root).toArray()[0]
-      .n as number;
+    // pi's place in the chain is counted on the turn that handed it (to_pi), not again as a hop of its own.
+    const sum = "SELECT COALESCE(SUM((hop > 0 AND agent_id != ?) + to_pi), 0) AS n FROM chat_agent_turns WHERE root = ? OR id = ?";
+    return this.#sql.exec(sum, PI_TURN, root, root).toArray()[0].n as number;
   }
 
   /** How many tokens the turns of the chain that `root` started used, as each ended (`end`). */

@@ -2,7 +2,8 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import { assistantOffer } from "../../shared/offers.ts";
-import { CHAT_AGENT_KIND, proposedBy, type ChatAgentReplyData, type ChatAgentView } from "../../shared/agents.ts";
+import { CHAT_AGENT_KIND, CHAT_TURN_KIND, proposedBy, type ChatAgentReplyData, type ChatAgentView } from "../../shared/agents.ts";
+import { AgentWindow } from "./AgentWindow.tsx";
 import { DraftCard } from "../agents/DraftCard.tsx";
 import type { ItemRef } from "../../shared/items.ts";
 import { baseName, imageBudget, MAX_ATTACHMENTS, type Attachment } from "../../shared/attachments.ts";
@@ -13,6 +14,7 @@ import { Icon } from "../Icon.tsx";
 import { carriesFiles } from "../files/pick.ts";
 import { attachmentInput, pastedName, type Pending } from "./attach.ts";
 import {
+  CHAT_ASIDE_KIND,
   CHAT_MESSAGE_KIND,
   CHAT_PEOPLE_KIND,
   everyone,
@@ -46,7 +48,7 @@ import { ContextMeter } from "./Context.tsx";
 import { ChatPromptButton } from "../SystemPrompt.tsx";
 import { SharePanel } from "./SharePanel.tsx";
 import { promptSpend, totalTime } from "./spend.ts";
-import { shownLive, useChat, waitingOnModel, type AgentLive } from "./useChat.ts";
+import { shownLive, useChat, waitingOnModel, type AgentLive, type ChatState } from "./useChat.ts";
 import { PeopleBar, Since } from "./AgentsBar.tsx";
 import { queueLines } from "./agentLines.ts";
 import { Fold, FoldScope, ItemChips } from "./Fold.tsx";
@@ -130,6 +132,8 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
   const chatReactions = useMemo(() => ({ uid, react }), [uid, react]);
   const [draft, setDraft] = useState("");
   const [sharing, setSharing] = useState(false);
+  // The agent whose window its owner has open (AgentWindow), by id.
+  const [windowOf, setWindowOf] = useState<string | null>(null);
   const shareButton = useRef<HTMLButtonElement>(null);
   // Closed from inside the panel: back to the button that opens it, so the keyboard does not lose its place.
   const closeSharing = () => {
@@ -367,6 +371,8 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
   const waiting = useMemo(() => queueLines(agents), [agents]);
   // The held calls' cards: their live state, and whether the viewer decides them.
   const chatActions = useMemo(() => ({ actions, isOwner, ownerName: people?.owner.name }), [actions, isOwner, people]);
+  // Only an agent of the viewer's own has a window for them (the server checks too).
+  const windowAgent = windowOf === null ? undefined : agents.find((agent) => agent.id === windowOf && agent.ownerUid === uid);
   // What the viewer's own agents held in their seats here: their cards, which no one else gets, under the transcript.
   const seatActions = useMemo(() => [...actions.values()].filter((action) => action.seat).sort((a, b) => a.createdAt - b.createdAt), [actions]);
   return (
@@ -385,7 +391,18 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
               {people?.kind && <KindChip chatId={chatId} kind={people.kind} page={people.page} isOwner={isOwner} />}
               {!group && <span className="chat-people">{mine > 1 && `Open in ${mine} of your windows`}</span>}
               {people && (group || isOwner) && (
-                <PeopleBar chatId={chatId} people={people} online={online} uid={uid} piWorking={state.busy} agents={agents} live={live} settings={agentSettings} bar={group !== null} />
+                <PeopleBar
+                  chatId={chatId}
+                  people={people}
+                  online={online}
+                  uid={uid}
+                  piWorking={state.busy}
+                  agents={agents}
+                  live={live}
+                  settings={agentSettings}
+                  bar={group !== null}
+                  onWindow={setWindowOf}
+                />
               )}
               <ChatCost usage={state.usage} entries={state.entries} time={time} />
               {shared && <NotifyButton />}
@@ -398,6 +415,16 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
               )}
             </header>
             {sharing && people && <SharePanel chatId={chatId} uid={uid} isOwner={isOwner} people={people} onLeft={onLeft} onClose={closeSharing} />}
+            {windowAgent && (
+              <AgentWindow
+                key={windowAgent.id}
+                chatId={chatId}
+                agent={windowAgent}
+                onClose={() => setWindowOf(null)}
+                onStop={connected ? () => abort(windowAgent.id) : undefined}
+                transcript={windowTranscript}
+              />
+            )}
             <StepsProvider entries={state.entries} tools={state.tools} busy={state.busy}>
               <Compact.Provider value={compact}>
                 <div className="messages" ref={list} onScroll={onScroll} data-compact={compact || undefined}>
@@ -452,6 +479,7 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
                         live={turn}
                         onStop={connected ? () => abort(turn.agent.id) : undefined}
                         onGrow={follow}
+                        onWindow={turn.agent.ownerUid === uid ? () => setWindowOf(turn.agent.id) : undefined}
                       />
                     ))}
                     {waiting.map((line) => (
@@ -1222,12 +1250,66 @@ function Assistant({
 /** No breaks: an agent's live turn draws no day or "New" line between its steps. */
 const NO_BREAKS: ReadonlySet<number> = new Set();
 
+/** An agent's window draws a session's state (AgentWindow's `transcript`). */
+const windowTranscript = (state: ChatState) => <WindowTranscript state={state} />;
+
+/** What an input in an agent's session was, as its window labels it. */
+function inputLabel(entry: EntryRecord, text: string): string {
+  if (entry.kind === CHAT_TURN_KIND) return "Its turn";
+  if (entry.kind === CHAT_ASIDE_KIND) return text.includes("steering this turn from your window") ? "You, steering" : "What it was told";
+  return "Input";
+}
+
+/**
+ * A session's whole transcript, for its agent's owner (AgentWindow): what came in (its turns, the chat's lines, their own
+ * steering), and its thoughts, tool calls and replies as the chat's steps draw them, with the reply it is writing now.
+ */
+function WindowTranscript({ state }: { state: ChatState }) {
+  const runs = useMemo(() => stepRuns(state.entries, NO_BREAKS), [state.entries]);
+  const streamed = useMemo(() => state.partial && streamingSteps(runs, state.partial), [runs, state.partial]);
+  return (
+    <StepsProvider entries={state.entries} tools={state.tools} busy={state.busy}>
+      {state.entries.map((entry) => {
+        const message = entry.model?.[0];
+        if (entry.kind === "pi.assistant" && message?.role === "assistant") {
+          const steps = streamed?.grown?.entry === entry.id ? streamed.grown.steps : runs.byEntry.get(entry.id as number);
+          return <Assistant key={entry.id} message={message} steps={steps} bare />;
+        }
+        if (entry.kind === "pi.tool-result" && message?.role === "toolResult" && !showsAsCard(entry)) return <OrphanResult key={entry.id} message={message} />;
+        if (message?.role !== "user") return null;
+        const text = userText(message);
+        if (!text.trim()) return null;
+        return (
+          <div key={entry.id} className="agent-window-input">
+            <small>{inputLabel(entry, text)}</small>
+            <Fold foldKey={`window:${entry.id}`}>
+              <div className="bubble">{text}</div>
+            </Fold>
+          </div>
+        );
+      })}
+      {state.partial && <Assistant message={state.partial} steps={streamed?.steps} bare />}
+    </StepsProvider>
+  );
+}
+
 /**
  * An agent working on a turn, under the conversation, as pi's run shows: a working line with its badge, how long it has
  * worked and its step's short phrase, and its own Stop (`onStop`, absent while not connected); then its steps and text
  * as they come, from its own session. Once its reply is posted the reply shows instead (shownLive).
  */
-function AgentTurnLive({ live, onStop, onGrow }: { live: AgentLive & { agent: ChatAgentView }; onStop?: () => void; onGrow?: () => void }) {
+function AgentTurnLive({
+  live,
+  onStop,
+  onGrow,
+  onWindow,
+}: {
+  live: AgentLive & { agent: ChatAgentView };
+  onStop?: () => void;
+  onGrow?: () => void;
+  /** Open its window, to steer it: for its owner. */
+  onWindow?: () => void;
+}) {
   const { agent, state, startedAt, endedAt, ended } = live;
   const running = endedAt === undefined;
   const runs = useMemo(() => stepRuns(state.entries, NO_BREAKS), [state.entries]);
@@ -1248,6 +1330,11 @@ function AgentTurnLive({ live, onStop, onGrow }: { live: AgentLive & { agent: Ch
           )}
           {phrase && ` · ${phrase}`}
         </small>
+        {running && onWindow && (
+          <button type="button" className="working-stop" onClick={onWindow} title={`Open @${agent.name}'s window, to see and steer it: only you`}>
+            Steer
+          </button>
+        )}
         {running && onStop && (
           <button type="button" className="working-stop" onClick={onStop} title={`Stop @${agent.name} only`}>
             Stop

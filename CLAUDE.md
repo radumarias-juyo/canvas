@@ -59,7 +59,8 @@ with `@cloudflare/vite-plugin`, pnpm; configured and deployed with the `cf` CLI 
   pi's reach too (`worker/agent/reach.ts`): a run that answers anyone but the owner reads only the servers that do not sign
   in each user and the chat's files, and what pi read for the owner alone is left out of its requests and, with its
   calls' output, of others' screens; a run alone with the owner that read such a result and ends after someone joined
-  has its replies held for the owner (Show to the chat). Keep it that way.
+  has its replies held for the owner (Show to the chat), which no agent's catch-up or `chat_history` reads and which hand
+  nothing on. Keep it that way.
 - Agents (`shared/agents.ts`, `worker/agents/`): definitions per user in `UserDirectory` (`AgentStore`); a chat's roster
   and durable turn queue (`ChatRoster`) and the turn controller (`AgentTurns`) run each roster agent in its own pi
   session of the chat object, configured per turn (`#configureAgent`: the session's tools are an allow-list,
@@ -70,16 +71,24 @@ with `@cloudflare/vite-plugin`, pnpm; configured and deployed with the `cf` CLI 
   starts with nobody but the owner in the chat run apart, in a fork of the agent's session (`runsApart`): only the posted
   reply goes back, and one built on a private server is held for the owner when someone joined meanwhile. A call such a
   fork or a run holds shows anyone else only who asks for which tool (`shownToMembers`). A member's agent runs as a seat
-  in the member's own object (`worker/agents/seats/`): the member's own turns and anyone's Yes to its offer run in a fork
+  in the member's own object, one per room (`seatChatId`: what a chat object keeps, its pages, drafts, files, sandbox and
+  held actions, never passes between rooms) (`worker/agents/seats/`): the member's own turns and anyone's Yes to its offer run in a fork
   of the seat's session, its calls go through the member's write gate (`seatCaller`: only the member's own message
-  changes data), what it holds has its card in the room for the member alone, and it reads as the room's kind. A turn
+  changes data), what it holds has its card in the room for the member alone, and it reads as the room's kind. An
+  agent's owner alone opens its window (`shared/agent-window.ts`, `worker/agents/window.ts`; a seat's is read in the
+  member's own object): its sessions and transcripts, and steering (`AgentTurns.instruct`): into their own turn running
+  apart, else a turn of theirs, apart, whose ask is in no log or shared session. A turn
   ends with its reply in its row (an outbox),
   together with the hand-offs it queues; the reply is then posted as a `chat.agent` entry. The agents one person's message
   names (in order), then their hand-offs, go one after another, each once the reply before it is in the log
-  (`ChatRoster.startNext`); another message's chain may run alongside. `@name` hands off (MAX_HOPS
+  (`ChatRoster.startNext`), pi among them (`PI_TURN`, its place in the chain, which ends once its answer is in the log;
+  pi alone with no agent called goes as ever); another message's chain may run alongside. `@name` hands off (MAX_HOPS
   per person's message, a hand-off to pi counted on the handing turn; the chain stops past the chat's token budget per
   message, `messageTokens`, seats' spend counted); pi's own answers are read from its log for the
-  agents they name (`#piScan`, from a cursor).
+  agents they name (`#piScan`, from a cursor). An agent speaks up unasked only through the funnel (`worker/agents/funnel.ts`):
+  gates, then the limits the chat's owner and the agent's set, the stricter of each (`shared/speak-up.ts`; with others in
+  the chat the router keeps to the messages limit too), a pause, interest (raised a while after a mute or a PASS), then a
+  read-only turn that may PASS.
   Agents that run on their own (`worker/agents/runs/`): each has a home conversation (a chat marked with it in
   `UserDirectory`) whose chat object schedules its runs (agents' `Scheduler`) and runs its workflow step by step
   (`RunExecutor`); only `work` steps call the model, and conditions are parsed by `shared/conditions.ts`, never eval'd.

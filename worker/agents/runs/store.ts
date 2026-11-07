@@ -570,11 +570,25 @@ export class AgentRuns {
     };
   }
 
-  /** An agent's runs, newest first. */
-  list(agentId: string, limit = 50): AgentRunView[] {
-    const runs = this.#rows("agent_id = ? AND item = '' ORDER BY due_at DESC LIMIT ?", agentId, limit).map(recordOf);
+  /** An agent's runs, newest first; with `keep`, only those it keeps (of the KEPT_RUNS kept, up to `limit`). */
+  list(agentId: string, limit = 50, keep?: (run: RunRecord) => boolean): AgentRunView[] {
+    const runs = keep
+      ? this.#rows("agent_id = ? AND item = '' ORDER BY due_at DESC", agentId).map(recordOf).filter(keep).slice(0, limit)
+      : this.#rows("agent_id = ? AND item = '' ORDER BY due_at DESC LIMIT ?", agentId, limit).map(recordOf);
     const counts = this.#counts(agentId, runs.map((run) => run.dueAt));
     return runs.map((run) => this.view(run, counts.get(run.dueAt) ?? NO_ITEMS));
+  }
+
+  /**
+   * The sessions an agent's newest runs here worked in (an item's), newest first, with whether the run still goes: what
+   * its owner's window lists (shared/agent-window.ts). A reply's session is listed by its turn.
+   */
+  sessionsOf(agentId: string, limit = 20): { session: string; dueAt: number; running: boolean }[] {
+    return this.#rows("agent_id = ? AND session IS NOT NULL ORDER BY started_at DESC LIMIT ?", agentId, limit).map((row) => ({
+      session: row.session!,
+      dueAt: row.due_at,
+      running: row.status === "running",
+    }));
   }
 
   /**

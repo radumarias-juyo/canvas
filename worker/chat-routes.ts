@@ -14,6 +14,7 @@ import {
   type Person,
 } from "../shared/protocol.ts";
 import { chatAgentName, closedSocket, PERSON_HEADER, type ChatRefusal } from "./chat-agent.ts";
+import { windowObject } from "./agents/window.ts";
 import { serveChatFile, storeUpload } from "./files-routes.ts";
 import type { ChatSystemPrompt } from "../shared/system-prompt.ts";
 import { json, readJson } from "./http.ts";
@@ -58,6 +59,9 @@ import type { UserDirectory } from "./users.ts";
  *   POST   /api/chats/:id/agents/:agentId/draft  (the agent's owner) {turn, action: "post" | "discard", text?}: a reply held for review
  *   POST   /api/chats/:id/agents/:agentId/copy  {…fields, version}: someone's own copy of the version of a shared agent
  *   POST   /api/chats/:id/agents/:agentId/mute  {muted}: mute an agent here (anyone in the chat), or unmute it (its owner, the chat's)
+ *   GET    /api/chats/:id/agents/:agentId/window?session=  (the agent's owner) its window (AgentWindowView): its sessions here
+ *                                             and one's transcript; a member's from their own object, where its seat is
+ *   POST   /api/chats/:id/agents/:agentId/steer  (the agent's owner) {text}: steer its turn of theirs, or start one (SteerResult)
  *   PUT    /api/chats/:id/agent-settings    (owner) {router?, speakUp?, servers?, dailyTokens?, messageTokens?}: each given replaces, null clears;
  *                                             everyone in the chat gets the settings (ChatAgentSettingsView) over its socket
  *                                             they read (a newer one refuses), with their changes,
@@ -101,11 +105,11 @@ export async function chatRoute(
   }
 
   const match = url.pathname.match(
-    /^\/api\/chats\/([a-z0-9]+)(?:\/(ws|invites|members|attachments|mentions|contents|deletion|seen|seat|system-prompt|agent-settings|agents|kind|branch)(?:\/([a-z0-9-]+)(?:\/(copy|draft|mute))?)?)?$/,
+    /^\/api\/chats\/([a-z0-9]+)(?:\/(ws|invites|members|attachments|mentions|contents|deletion|seen|seat|system-prompt|agent-settings|agents|kind|branch)(?:\/([a-z0-9-]+)(?:\/(copy|draft|mute|window|steer))?)?)?$/,
   );
   if (!match || !ID_PATTERN.test(match[1])) return null;
   const [, chatId, what, item, sub] = match;
-  // Only an agent's copy, draft and mute have a part after its item.
+  // Only an agent's copy, draft, mute, window and steer have a part after its item.
   if (sub && what !== "agents") return null;
   const isSocket = what === "ws" && !item;
   if (isSocket && request.headers.get("upgrade") !== "websocket") return json({ error: "Expected a WebSocket upgrade" }, 426);
@@ -211,6 +215,22 @@ export async function chatRoute(
     if (method !== "POST" || !item) return null;
     const muted = await chat.setAgentMuted(person, item, (await readJson<{ muted?: unknown }>(request))?.muted);
     return "status" in muted ? answer(muted) : json(muted);
+  }
+  if (what === "agents" && sub === "window") {
+    if (method !== "GET" || !item) return null;
+    // The agent's owner only: theirs in this chat's object, a member's seat in their own object, named after them.
+    const session = url.searchParams.get("session") ?? undefined;
+    const where = await windowObject(ownerUid, person.uid, chatId, item);
+    const result =
+      "room" in where
+        ? await chat.agentWindow(person, item, session)
+        : await exports.ChatAgent.getByName(where.seat).seatWindow({ ownerUid, chatId }, item, session);
+    return "status" in result ? answer(result) : new Response(result.json, { headers: { "content-type": "application/json", "cache-control": "no-store" } });
+  }
+  if (what === "agents" && sub === "steer") {
+    if (method !== "POST" || !item) return null;
+    const result = await chat.steerAgent(person, item, (await readJson<{ text?: unknown }>(request))?.text);
+    return "status" in result ? answer(result) : json(result);
   }
   if (what === "agents" && sub === "copy") {
     if (method !== "POST" || !item) return null;

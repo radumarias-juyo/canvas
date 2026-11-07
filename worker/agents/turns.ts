@@ -7,6 +7,7 @@ import { TOOL_SEARCH_TOOL_NAME } from "@earendil-works/pi-durable/tool-search";
 import {
   AGENT_PROPOSE_TOOL,
   CHAT_AGENT_KIND,
+  CHAT_HISTORY_TOOL,
   CHAT_TURN_KIND,
   MAX_HOPS,
   mayUseServer,
@@ -54,6 +55,30 @@ export function speakersFor(
   const named = names.map((name) => roster.find((entry) => entry.name === name)!.agentId);
   if (replyToAgent && roster.some((entry) => entry.agentId === replyToAgent) && !named.includes(replyToAgent)) named.push(replyToAgent);
   return named;
+}
+
+/**
+ * Where pi goes among `speakers` (the agents a message calls, speakersFor) when it calls pi too: before the first one it
+ * did not name before "@pi", or last when it only replies to pi (the agent replied to goes after those named). Undefined
+ * when it does not call pi.
+ */
+export function piPlace(
+  text: string,
+  roster: readonly Pick<RosterEntry, "agentId" | "name">[],
+  mentions: readonly Mention[],
+  repliesToPi: boolean,
+  speakers: readonly string[],
+): number | undefined {
+  const names = calledNames(
+    text,
+    [...roster.map((entry) => entry.name), AGENT_NAME],
+    mentions,
+  );
+  const at = names.indexOf(AGENT_NAME);
+  if (at < 0) return repliesToPi ? speakers.length : undefined;
+  const before = new Set(names.slice(0, at).map((name) => roster.find((entry) => entry.name === name)?.agentId));
+  const index = speakers.findIndex((agentId) => !before.has(agentId));
+  return index < 0 ? speakers.length : index;
 }
 
 /**
@@ -328,6 +353,7 @@ const READ_TOOLS = [
   "read_skill_resource",
   MEMORY_RECALL_TOOL,
   TOOL_SEARCH_TOOL_NAME,
+  CHAT_HISTORY_TOOL,
 ];
 /** The tools that only show something in the chat (a plan as a checklist card: no data): for a turn, not a run, which nobody watches. */
 const DISPLAY_TOOLS = [CHECKLIST_TOOL];
@@ -444,7 +470,8 @@ export function turnSources(
  */
 export function runTools(tools: readonly string[], mcp: ReadonlyMap<string, McpToolInfo>, agent: Pick<AgentDefinition, "servers">): string[] {
   return tools.filter((name) => {
-    if (NEVER_FOR_AGENTS.includes(name)) return false;
+    // Nor the chat's log: a run's report reaches other chats, and its home chat is its owner's own conversation.
+    if (NEVER_FOR_AGENTS.includes(name) || name === CHAT_HISTORY_TOOL) return false;
     const info = mcp.get(name);
     return info ? info.readOnly && mayUseServer(agent, info.server) : READ_TOOLS.includes(name);
   });

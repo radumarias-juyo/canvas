@@ -1,5 +1,6 @@
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import type { ChatAgentSettings, ChatAgentSettingsView } from "../shared/agent-settings.ts";
+import type { AgentWindowView, SteerResult } from "../shared/agent-window.ts";
 import type {
   AgentChanges,
   AgentChatUse,
@@ -255,6 +256,11 @@ export const api = {
   /** (the agent's owner) Post a reply of theirs held for review, as edited (`text`), or discard it: the drafts left. */
   reviewAgentDraft: (chatId: string, draft: Pick<AgentDraftView, "agentId" | "turn">, action: "post" | "discard", text?: string) =>
     request<AgentDraftView[]>(chatPath(chatId, `/agents/${draft.agentId}/draft`), post({ turn: draft.turn, action, ...(text !== undefined && { text }) })),
+  /** (the agent's owner) Its window: its sessions in the chat, and one's transcript (`session`, else the busy one). */
+  agentWindow: (chatId: string, agentId: string, session?: string) =>
+    request<AgentWindowView>(chatPath(chatId, `/agents/${agentId}/window${session ? `?session=${encodeURIComponent(session)}` : ""}`)),
+  /** (the agent's owner) Their words to it from its window: a steer into their running turn, or a turn of their own. */
+  steerAgent: (chatId: string, agentId: string, text: string) => request<SteerResult>(chatPath(chatId, `/agents/${agentId}/steer`), post({ text })),
   /** Mute an agent in a chat (it posts nothing unprompted there), or unmute it (its owner, or the chat's). */
   muteChatAgent: (chatId: string, agentId: string, muted: boolean) => request<ChatAgentView[]>(chatPath(chatId, `/agents/${agentId}/mute`), post({ muted })),
   /** (owner) Change a chat's agent settings (router, speaking up, servers, daily budget): each field given replaces the stored one, null clears it. */
@@ -305,10 +311,14 @@ export const api = {
   serverTools: (server: string) => request<ToolInfo[]>(`/api/limits/tools?server=${encodeURIComponent(server)}`),
   /** A dry run of an agent on today's data, nothing sent or changed: the due time of the run it started. */
   testAgent: (id: string) => request<{ dueAt: number }>(`/api/agents/${id}/test`, post({})),
-  /** An agent's runs, newest first, when it runs next, and its own chat (null before its first run). */
-  agentRuns: (id: string) => request<AgentRunList>(`/api/agents/${id}/runs`),
-  /** One run of an agent in full: its items and their steps, what it sent, what it used. */
-  agentRun: (id: string, dueAt: number) => request<AgentRunDetail>(`/api/agents/${id}/runs/${dueAt}`),
+  /**
+   * An agent's runs, newest first, when it runs next, and its own chat (null before its first run). Someone else's agent
+   * shared in chat `from`: only the runs that posted there.
+   */
+  agentRuns: (id: string, from?: string) => request<AgentRunList>(`/api/agents/${id}/runs${from ? `?${new URLSearchParams({ chat: from })}` : ""}`),
+  /** One run of an agent in full: its items and their steps, what it sent, what it used; from a chat, only its post there. */
+  agentRun: (id: string, dueAt: number, from?: string) =>
+    request<AgentRunDetail>(`/api/agents/${id}/runs/${dueAt}${from ? `?${new URLSearchParams({ chat: from })}` : ""}`),
   /** The entries of one item's session in a run, oldest first: the full trace. */
   agentRunTrace: (id: string, dueAt: number, item: string) =>
     request<{ entries: EntryRecord[] }>(`/api/agents/${id}/runs/${dueAt}/trace?${new URLSearchParams({ item })}`),

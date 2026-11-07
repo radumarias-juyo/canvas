@@ -7,6 +7,7 @@ import { CHAT_TURN_KIND } from "../shared/agents.ts";
 import { heldIn, type PiHeld } from "../shared/protocol.ts";
 import { noteResult } from "../worker/agents/limits/actions.ts";
 import {
+  heldReply,
   MAX_PI_HELD,
   othersCall,
   ownersInput,
@@ -15,6 +16,7 @@ import {
   reachExtension,
   shownPiEvent,
   withHeld,
+  withoutHeld,
   withoutPrivate,
   type OthersCall,
   type Reach,
@@ -225,6 +227,20 @@ describe("what others' screens show of pi's steps", () => {
 });
 
 describe("pi's held replies", () => {
+  it("are not read into an agent's catch-up or chat_history, whose sessions members' questions reach", async () => {
+    const reply = (id: number, timestamp: number, said: string) =>
+      ({ id, conversationId: 0, kind: "pi.assistant", model: [{ ...fauxAssistantMessage(said), timestamp }] }) as unknown as EntryRecord;
+    const person = { id: 1, conversationId: 0, kind: "chat.message", data: { uid: "mia", name: "Mia", text: "hi" } } as unknown as EntryRecord;
+    async function* pages() {
+      yield [reply(3, 20, "Dinner with the bank."), person, reply(4, 40, "Signups 41.")];
+    }
+    const read: EntryRecord[] = [];
+    for await (const page of withoutHeld(pages(), () => [{ from: 10, through: 30 }])) read.push(...page);
+    expect(read.map((entry) => entry.id)).toEqual([1, 4]);
+    expect(heldReply(reply(3, 20, "x"), [{ from: 10 }])).toBe(true);
+    expect(heldReply(person, [{ from: 0 }])).toBe(false);
+  });
+
   it("are kept apart up to a cap, past which the two oldest are held as one", () => {
     let held: PiHeld[] = [];
     for (let i = 0; i < MAX_PI_HELD + 1; i++) held = withHeld(held, { from: i * 10, through: i * 10 + 5 });

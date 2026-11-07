@@ -80,6 +80,23 @@ export function withHeld(held: readonly PiHeld[], range: PiHeld): PiHeld[] {
   return all;
 }
 
+/** Whether a log entry is one of pi's held replies (heldIn, by when its message started). */
+export function heldReply(entry: Pick<EntryRecord, "kind" | "model">, held: readonly PiHeld[]): boolean {
+  const message = entry.model?.[0];
+  return entry.kind === "pi.assistant" && message?.role === "assistant" && heldIn(held, message.timestamp);
+}
+
+/**
+ * The log's pages without pi's held replies (`held`, read once per page): what the agents' catch-ups and chat_history
+ * read, whose sessions members' questions reach. Nothing is left out while nothing is held.
+ */
+export async function* withoutHeld(pages: AsyncIterable<readonly EntryRecord[]>, held: () => readonly PiHeld[]): AsyncGenerator<readonly EntryRecord[]> {
+  for await (const page of pages) {
+    const now = held();
+    yield now.length ? page.filter((entry) => !heldReply(entry, now)) : page;
+  }
+}
+
 /** Whether a held reply is still being written (a run that started alone with the owner goes on). */
 function holding(held: readonly PiHeld[] | undefined): boolean {
   return !!held?.some((range) => range.through === undefined);

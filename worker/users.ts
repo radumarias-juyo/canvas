@@ -1192,6 +1192,11 @@ export class UserDirectory extends DurableObject<Env> {
    * proposes is saved off, for the user to review and turn on.
    */
   saveAgent(input: unknown, origin: AgentOrigin, enabled?: boolean, save?: AgentSave): AgentResult {
+    // The model proposing again, in the chat it proposed it in, an agent that is still its draft: that draft is
+    // revised (AgentStore.proposalSave), never one the user saved or turned on.
+    const target = origin === "agent" ? this.#agents.proposalSave(input, save) : save;
+    const draft = target?.id !== undefined && target.id !== save?.id;
+    save = target;
     if (origin === "agent") {
       const signIn = new Set(oauthServerNames(this.env));
       input = withoutSignInShares(input, (server) => signIn.has(server));
@@ -1220,8 +1225,8 @@ export class UserDirectory extends DurableObject<Env> {
         open: { to: "agent", agentId: saved.id },
         aboutAgent: saved.id,
       });
-    } else if (origin !== "agent" && !saved.assumed?.length) {
-      // The user saved it with nothing left guessed: what the item asked is done.
+    } else if (!saved.assumed?.length && (origin !== "agent" || draft)) {
+      // The user saved it, or the model revised its draft, with nothing left guessed: what the item asked is done.
       this.resolveFeed(assumptionRef(saved.id));
     }
     return saved;

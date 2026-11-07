@@ -696,5 +696,10 @@ export const MIN_REFETCH_MS = 30_000;
 
 /** Lowercase hex ids: artifact ids and chat ids. */
 export const ID_PATTERN = /^[a-z0-9]{8,32}$/;
+/**
+ * The chat of a member's agent's seat for one room (seatChatId in worker/agents/seats/names.ts): its agent's id and a
+ * hash of the room. No route takes it (ID_PATTERN has no hyphen); what the seat keeps per chat (drafts) does.
+ */
+export const SEAT_CHAT_PATTERN = /^seat-[a-f0-9]{16}-[a-f0-9]{16}$/;
 /** User ids: the hashed Cloudflare Access subject, or in demo mode a slug of the name typed at sign-in. */
 export const UID_PATTERN = /^[a-z0-9][a-z0-9-]{1,31}$/;
