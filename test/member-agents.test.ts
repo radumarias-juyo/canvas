@@ -549,7 +549,7 @@ describe("Member agents: a seat in the member's own object", () => {
     for (const id of [1, 2, 3]) ana.sessions.finish(id, "Done.");
     await settle();
     expect(ana.seats.memoryAgent(shared)).toMatchObject({ byOwner: false, room: inRoom(null) });
-    expect(ana.seats.memoryAgent(fork)).toBeNull();
+    expect(ana.seats.memoryAgent(fork)).toBeUndefined();
   });
 
   it("keeps an agent id to whoever brought it first: another person's agent with the same id is refused", () => {

@@ -93,15 +93,20 @@ export class AgentSeats {
       );
     `);
     addColumns(sql, "agent_seat_turns", { kind: "TEXT", name: "TEXT" });
+    // memoryAgent looks a session up on every model request of every conversation in this object.
+    sql.exec(`
+      CREATE INDEX IF NOT EXISTS agent_seats_session ON agent_seats (session);
+      CREATE INDEX IF NOT EXISTS agent_seat_turns_session ON agent_seat_turns (session);
+    `);
   }
 
   /**
    * The seated agent whose session `session` is, for its memory notes (ChatMemory): it reads as its room, never as
    * this object's chat, and its turn is its owner's only while one they asked for runs in it (a fork of the seat's
-   * session: give checks who asked). Between turns the room's kind is not known, so nothing is read. Null for a session
-   * no seat has (any more: ChatMemory reads nothing in one nobody knows).
+   * session: give checks who asked). Between turns the room's kind is not known, so nothing is read. Undefined (never
+   * null, which Whose reads as pi's) for a session no seat has (any more: ChatMemory reads nothing in one nobody knows).
    */
-  memoryAgent(session: string): MemoryAgent | null {
+  memoryAgent(session: string): MemoryAgent | undefined {
     const [turn] = this.#sql
       .exec(
         "SELECT agent_id, room_chat, status, forked, kind, name FROM agent_seat_turns WHERE session = ? ORDER BY status = 'running' DESC, turn DESC LIMIT 1",
@@ -114,7 +119,7 @@ export class AgentSeats {
       (this.#sql.exec("SELECT agent_id, room_chat FROM agent_seats WHERE session = ? LIMIT 1", session).toArray()[0] as
         | Pick<SeatRow, "agent_id" | "room_chat">
         | undefined);
-    if (!seat) return null;
+    if (!seat) return undefined;
     return {
       agentId: seat.agent_id,
       ownerUid: this.#host.uid,
@@ -219,7 +224,8 @@ export class AgentSeats {
       turn.turn,
       session,
       forked ? 1 : 0,
-      turn.kind,
+      // From the room by RPC: one that sends none (older code mid-deploy) still gives its turn, read as no kind.
+      isChatKind(turn.kind) ? turn.kind : null,
       agent.name,
     );
     try {

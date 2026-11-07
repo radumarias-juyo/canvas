@@ -617,8 +617,9 @@ export class ChatAgent extends DurableObject<Env> {
     const ran = known === undefined || turn?.session !== undefined ? this.runs.agentOfSession(conversation) : null;
     const agentId = known ?? ran ?? undefined;
     if (agentId === undefined) return undefined;
-    // A run's agent is on its home roster; one taken off it still reads only its own notes, never pi's.
-    const entry = entries.find((each) => each.agentId === agentId);
+    // A run's agent is on its home roster; one taken off it still reads only its own notes, never pi's. Never a member's
+    // seat with the same id (agent ids are unique per user only): its sessions run in its owner's object, not here.
+    const entry = entries.find((each) => each.agentId === agentId && each.seat === undefined);
     return { agentId, ownerUid: entry?.ownerUid ?? this.uid, name: entry?.name ?? "agent", byOwner: turn?.byOwner === true, ...(ran && { run: true }) };
   }
 

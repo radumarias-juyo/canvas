@@ -469,7 +469,8 @@ describe("ChatMemory", () => {
       chatId,
       kind: () => state.kind,
       alone: () => state.alone,
-      agentFor: (conversation) => sessions.get(conversation) ?? null,
+      // As the chat object reads it: "root" is pi's, one in `sessions` an agent's, any other nobody's.
+      agentFor: (conversation) => (conversation === "root" ? null : sessions.get(conversation)),
       piByOwner: async () => state.piByOwner,
       freshPrompt: async (conversation) => {
         fresh.push(conversation);
@@ -563,24 +564,7 @@ describe("ChatMemory", () => {
     const owner = directory();
     saved(owner.memory.add({ text: "My salary is private.", scope: "user" }));
     saved(owner.memory.add({ text: "Standup is at nine.", scope: "chat", chatId: PRIVATE }));
-    const memory = new ChatMemory({
-      ownerUid: "owner",
-      chatId: PRIVATE,
-      kind: () => "private",
-      alone: () => true,
-      agentFor: (conversation) => (conversation === "root" ? null : undefined),
-      piByOwner: async () => true,
-      freshPrompt: async () => ({ placed: Promise.resolve() }),
-      directory: () => ({
-        readNotes: (reader) => owner.memory.read(reader),
-        useNotes: (ids) => owner.memory.use(ids),
-        recallNotes: (reader, query, shown, offset) => owner.memory.recall(reader, query, shown, offset),
-        learnNote: (writer, input) => owner.memory.learn(writer, input),
-        forgetNoteFor: (writer, id) => owner.memory.forgetFor(writer, id),
-      }),
-      kv: { get: () => undefined, put: () => {} },
-    });
-    const host = memory.host();
+    const { memory, host } = chat(PRIVATE, "private", true, owner);
     expect(await memory.refresh("old-fork")).toBe(UNKNOWN_SECTION);
     expect((await host.recall("old-fork", "")).notes).toEqual([]);
     expect(await host.note("old-fork", { text: "Use metric units.", scope: "user", kind: "preference" })).toHaveProperty("error");
