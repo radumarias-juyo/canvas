@@ -69,8 +69,9 @@ export function withoutNoteResults(event: AgentEvent): AgentEvent {
       const tools = event.tools.some((slot) => LEFT_OUT[slot.name]) ? event.tools.map((slot) => blankCall(slot, slot.name)) : event.tools;
       return entries === event.entries && tools === event.tools ? event : { ...event, entries, tools };
     }
+    // An entry's message starts whole, before its entry lands: a result's, and a compaction's summary.
     case "message_start": {
-      const message = leftOutResult(event.message);
+      const message = isSummary(event.message) ? leftOutSummary(event.message) : leftOutResult(event.message);
       return message ? { ...event, message } : event;
     }
     case "message_end":
@@ -118,13 +119,19 @@ const SUMMARY_LEFT_OUT = "(A summary of the earlier conversation is left out her
 /** How a compaction's summary starts in the model's context (pi-durable's CompactionTask; test/memory-prompt.test.ts checks it). */
 const SUMMARY_START = "The conversation history before this point was compacted into the following summary:";
 
+/** Whether `message` is a compaction's summary, as the model reads it. */
+function isSummary(message: Message): boolean {
+  if (message.role !== "user") return false;
+  const first = typeof message.content === "string" ? message.content : message.content.find((part) => part.type === "text")?.text;
+  return first?.startsWith(SUMMARY_START) === true;
+}
+
+/** A compaction's summary put in place of one that says it is left out. */
+const leftOutSummary = (message: Message): Message => ({ role: "user", content: SUMMARY_LEFT_OUT, timestamp: message.timestamp });
+
 /** `messages` with every compaction summary among them put in place of one that says it is left out. */
 export function withoutSummaries(messages: readonly Message[]): Message[] {
-  return messages.map((message) => {
-    if (message.role !== "user") return message;
-    const first = typeof message.content === "string" ? message.content : message.content.find((part) => part.type === "text")?.text;
-    return first?.startsWith(SUMMARY_START) ? { ...message, content: SUMMARY_LEFT_OUT } : message;
-  });
+  return messages.map((message) => (isSummary(message) ? leftOutSummary(message) : message));
 }
 
 /**

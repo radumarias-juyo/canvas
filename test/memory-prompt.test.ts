@@ -2,10 +2,21 @@ import { describe, expect, it } from "vitest";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall, Type, type AssistantMessage, type Message } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { createRegistry, defineExtension, defineTool, GenerationTask, Harness, hook, MemoryStorage, section } from "@earendil-works/pi-durable";
+import {
+  createRegistry,
+  defineExtension,
+  defineTool,
+  GenerationTask,
+  Harness,
+  hook,
+  MemoryStorage,
+  section,
+  watchEvents,
+  type AgentEvent,
+} from "@earendil-works/pi-durable";
 import { MEMORY_FORGET_TOOL, MEMORY_RECALL_TOOL } from "../shared/memory.ts";
 import { text } from "../worker/agent/output.ts";
-import { freshPrompt, withoutSummaries } from "../worker/memory/fresh.ts";
+import { freshPrompt, withoutNoteResults, withoutSummaries } from "../worker/memory/fresh.ts";
 
 /** Start a conversation's prompt afresh, and whether it ended sure no compaction read the notes (freshPrompt's `done`). */
 const freshDone = async (...args: Parameters<typeof freshPrompt>) => (await freshPrompt(...args)).done;
@@ -130,6 +141,36 @@ describe("a prompt that held the owner's own notes", () => {
       await ask("and now?");
       expect(JSON.stringify(requests.at(-1))).not.toContain("bonus");
     } finally {
+      await pi.close(BACKGROUND_CONTEXT);
+    }
+  });
+
+  it("sends a member's socket no note, of a recall or a summary, in the harness's own events", async () => {
+    const { pi, root, notes, ask } = await piWithMemory(
+      [fauxAssistantMessage(fauxToolCall(MEMORY_RECALL_TOOL, {}, { id: "c1" }), { stopReason: "toolUse" })],
+      {
+        summary: "Summary: the owner's bonus is private.",
+      },
+    );
+    const events: AgentEvent[] = [];
+    const stream = await watchEvents(pi, root.id, BACKGROUND_CONTEXT);
+    stream.start(async (batch) => void events.push(...batch));
+    try {
+      notes.text = "No notes yet.";
+      await ask(`what do you know? ${"words ".repeat(30_000)}`);
+      await ask(`second ${"words ".repeat(30_000)}`);
+      await pi.waitForTask(await root.compact(undefined, BACKGROUND_CONTEXT), BACKGROUND_CONTEXT);
+      await ask("third");
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      // The owner's socket gets them (a result as it starts, and the summary), a member's none of either.
+      const kinds = new Set(events.map((event) => event.type));
+      expect(kinds.has("message_start")).toBe(true);
+      expect(JSON.stringify(events)).toContain("My bonus");
+      expect(JSON.stringify(events)).toContain("the owner's bonus");
+      const shown = JSON.stringify([stream.snapshot, ...events].map(withoutNoteResults));
+      expect(shown).not.toContain("bonus");
+    } finally {
+      await stream.stop();
       await pi.close(BACKGROUND_CONTEXT);
     }
   });

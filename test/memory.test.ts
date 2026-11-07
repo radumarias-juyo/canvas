@@ -875,9 +875,18 @@ describe("what someone other than the owner sees of a chat's events", () => {
       id: 7,
       conversationId: "1",
       kind: "pi.compaction",
-      model: [{ role: "user", content: "The conversation history before this point was compacted: My salary is private.", timestamp: 0 }],
+      model: [
+        {
+          role: "user",
+          content: "The conversation history before this point was compacted into the following summary: My salary is private.",
+          timestamp: 0,
+        },
+      ],
     } as unknown as EntryRecord;
-    const shown = withoutNoteResults({ type: "entry_appended", entry: summary });
+    // In the harness's order: its message starts whole, then its entry lands.
+    const started = withoutNoteResults({ type: "message_start", message: summary.model![0]! });
+    expect(JSON.stringify(started)).not.toContain("salary");
+    const shown = withoutNoteResults({ type: "message_end", entry: summary });
     expect(JSON.stringify(shown)).not.toContain("salary");
     expect(shown).toMatchObject({ entry: { id: 7, kind: "pi.compaction" } });
   });
