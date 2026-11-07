@@ -134,9 +134,9 @@ import {
   type ChatTurnData,
   type SharedAgentView,
 } from "../shared/agents.ts";
-import { AgentTurns, type TurnHost } from "./agents/controller.ts";
+import { AgentTurns, type Outputs, type TurnHost } from "./agents/controller.ts";
 import { isTurnEntry, TurnFilter } from "./agents/live.ts";
-import { ChatRoster, type AgentTurn, type RosterEntry, type RunningTurn } from "./agents/roster.ts";
+import { ChatRoster, sessionOf, type AgentTurn, type RosterEntry, type RunningTurn } from "./agents/roster.ts";
 import type { RoomLink, RoomRef, SeatBatch, SeatLink, SeatResult, SeatTurn } from "./agents/seats/link.ts";
 import { memberAgentName, seatChatId } from "./agents/seats/names.ts";
 import { addRefusal, mayRemove, mayShare, seatedEntry, type ChatRules } from "./agents/seats/rules.ts";
@@ -175,6 +175,8 @@ function refuse(status: ChatRefusal["status"], error: string): ChatRefusal {
 }
 
 const DELETED = "This chat was deleted.";
+/** How long the refresh before a turn holds for the same ask (#refreshForTurn): the steps that set one turn up. */
+const REFRESHED_FOR = 10_000;
 const DELETING = "This chat is being deleted.";
 const GONE_KEY = "deleted";
 
@@ -401,6 +403,8 @@ export class ChatAgent extends DurableObject<Env> {
   #agentsChanged = false;
   /** The asking line the skill classifier last read for an agent's turn (#skillsForTurn). */
   #skillsAsked: string | undefined;
+  /** The last refresh before a turn (#refreshForTurn), for the ask it was for. */
+  #refreshed: { ask: string; at: number; done: Promise<void> } | undefined;
   /** See #oneShotModels. */
   #oneShot: Models | undefined;
   /** What tells whether an aside is meant for the agent (CALL_HINT_MODEL); undefined when hints are off. */
@@ -1373,10 +1377,11 @@ export class ChatAgent extends DurableObject<Env> {
       this.turns.call(speakers, {
         calledBy: { name: author.name, uid: author.uid },
         // The catch-up leaves the message out (askKey), so the input carries all of it a hand-off would. Each agent's
-        // owner is its own: a member's agent takes their messages as its owner's, and the chat owner's as anyone's.
+        // owner is its own: a member's agent takes their messages as its owner's, and the chat owner's as anyone's (`call`
+        // holds byOwner only for the agents of the person who asked).
         ask: (own) => `${askOf({ name: author.name, kind: "person", owner: own }, written, MAX_ASK_CHARS)}${files}`,
         askKey: messageAskKey({ uid: author.uid, sentAt }),
-        byOwner: (entry) => entry.ownerUid === author.uid,
+        byOwner: true,
       });
     }
     // The sidebars are only a convenience: update them off the prompt's path, and let a failure be.
@@ -2162,7 +2167,7 @@ export class ChatAgent extends DurableObject<Env> {
   /** The replies of `uid`'s agents held for them to review; only theirs. */
   draftsFor(uid: string): AgentDraftView[] {
     if (!this.isInChat(uid)) return [];
-    return this.roster.held(uid).map(({ turn, agentId, reply }) => ({ turn, agentId, reply }));
+    return this.roster.held(uid);
   }
 
   /** Tell `uid`'s sockets the replies of their agents held for review, as they are now. */
@@ -2185,10 +2190,8 @@ export class ChatAgent extends DurableObject<Env> {
       return refuse(400, 'Expected {turn, action: "post" | "discard", text?}.');
     }
     if (typeof text === "string" && text.length > MAX_ASK_CHARS) return refuse(400, `A reply is at most ${MAX_ASK_CHARS} characters.`);
-    const held = this.roster.held(by.uid).find((reply) => reply.turn === turn && reply.agentId === agentId);
-    if (!held) return refuse(404, "No such draft: it was posted or discarded already.");
-    const refused = await this.turns.post(by.uid, turn, action === "discard" ? "discard" : { ...(text !== undefined && { text }) });
-    if (refused) return refuse(409, refused.error);
+    const refused = action === "discard" ? this.turns.discard(by.uid, agentId, turn) : await this.turns.post(by.uid, agentId, turn, text);
+    if (refused) return refuse(404, refused.error);
     return this.draftsFor(by.uid);
   }
 
@@ -2268,9 +2271,18 @@ export class ChatAgent extends DurableObject<Env> {
     return { text: ask, recent: memoAsync(() => this.#recentEntries()) };
   }
 
-  /** The owner's tools, skills, files and prompt as they are now, before an agent's turn or one handed to pi (`ask`). */
-  async #refreshForTurn(ask: string): Promise<void> {
-    await Promise.all([this.refreshMcpTools(), this.refreshSkills(this.#skillsForTurn(ask)), this.refreshFiles(), this.refreshUserPrompt()]);
+  /**
+   * The owner's tools, skills, files and prompt as they are now, before an agent's turn or one handed to pi (`ask`).
+   * Once per ask: what sets one turn up (whether it forks, then its session) refreshes them once.
+   */
+  #refreshForTurn(ask: string): Promise<void> {
+    const now = Date.now();
+    if (this.#refreshed?.ask === ask && now - this.#refreshed.at < REFRESHED_FOR) return this.#refreshed.done;
+    const done = Promise.all([this.refreshMcpTools(), this.refreshSkills(this.#skillsForTurn(ask)), this.refreshFiles(), this.refreshUserPrompt()]).then(
+      () => {},
+    );
+    this.#refreshed = { ask, at: now, done };
+    return done;
   }
 
   /** The entry id of turn `turn`'s input in agent session `session`, from the newest entries back; none while it is not placed. */
@@ -2310,9 +2322,18 @@ export class ChatAgent extends DurableObject<Env> {
     await conversation.submit({ type: "write", requestId, entry: { kind: CHAT_ASIDE_KIND, model: [message] } }, BACKGROUND_CONTEXT);
   }
 
-  /** A new session that sees `session`'s history so far (an agent's private turn runs in one). */
+  /** A new session that sees `session`'s history so far (an agent's private turn runs in one); a new one when it has none yet. */
   async #fork(session: string): Promise<string> {
-    return (await this.harness.sessions.fork(session)).id;
+    const { items } = await (await this.#conversation(session)).entries({ order: "descending" }, 1, undefined, BACKGROUND_CONTEXT);
+    return (items.length ? await this.harness.sessions.fork(session) : await this.harness.sessions.create()).id;
+  }
+
+  async #submitTo(session: string, input: string, operationId: string, data: ChatTurnData): Promise<void> {
+    await this.harness.submit(input, { session, operationId, whenBusy: "followUp", entry: { kind: CHAT_TURN_KIND, data } });
+  }
+
+  async #abortSession(session: string): Promise<void> {
+    await this.harness.abort({ session });
   }
 
   /** Whether a server signs in each user: an agent reads it as its owner. */
@@ -2339,11 +2360,14 @@ export class ChatAgent extends DurableObject<Env> {
     return forksFor(allowed, this.#mcpTools, sharedServer(agent, this.#signsIn));
   }
 
-  /** What a forked turn's reply shows of its sources (turnSources), by the servers this object's tools are of. */
-  async #sources(agent: AgentDefinition, entries: readonly EntryRecord[]): Promise<ReturnType<typeof turnSources>> {
+  /**
+   * What a forked turn's reply shows of its sources (turnSources), by the servers this object's tools are of, and
+   * whether its owner reviews it before it is posted.
+   */
+  async #sources(agent: AgentDefinition, entries: readonly EntryRecord[]): Promise<Pick<Outputs, "items" | "sources" | "review">> {
     // After a restart the tools may not be listed yet: the map says which server each came from.
     if (!this.#mcpTools.size) await this.refreshMcpTools().catch(() => {});
-    return turnSources(entries, this.#mcpTools, sharedServer(agent, this.#signsIn));
+    return { ...turnSources(entries, this.#mcpTools, sharedServer(agent, this.#signsIn)), ...(agent.reviewBeforePosting && { review: true }) };
   }
 
   /** What the turn controller needs of this chat (worker/agents/controller.ts). */
@@ -2352,16 +2376,12 @@ export class ChatAgent extends DurableObject<Env> {
       roster: this.roster,
       definition: (entry) => this.#index(entry.ownerUid).getAgent(entry.agentId),
       configure: (entry, agent, turn) =>
-        this.#configureSession(turn.session ?? entry.session, agent, { ask: turn.ask, byOwner: turn.byOwner }, this.#nameOf(entry.ownerUid)),
+        this.#configureSession(sessionOf(entry, turn), agent, { ask: turn.ask, byOwner: turn.byOwner }, this.#nameOf(entry.ownerUid)),
       logSince: (after) => this.#log({ order: "descending", minEntryId: (after + 1) as EntryId }),
       write: (session, text, requestId) => this.#writeTo(session, text, requestId),
-      submit: async (session, input, operationId, data) => {
-        await this.harness.submit(input, { session, operationId, whenBusy: "followUp", entry: { kind: CHAT_TURN_KIND, data } });
-      },
+      submit: (session, input, operationId, data) => this.#submitTo(session, input, operationId, data),
       wait: (session, operationId) => this.harness.wait(operationId, { session }),
-      abort: async (session) => {
-        await this.harness.abort({ session });
-      },
+      abort: (session) => this.#abortSession(session),
       turnEntries: (session, turn) => this.#turnEntries(session, turn),
       // Request ids, so a reply posted again after a restart is placed once.
       post: async (reply) => {
@@ -2396,8 +2416,7 @@ export class ChatAgent extends DurableObject<Env> {
       fork: (session) => this.#fork(session),
       sources: async (entry, entries) => {
         const agent = await this.#index(entry.ownerUid).getAgent(entry.agentId);
-        if (!agent) return { items: [], sources: [] };
-        return { ...(await this.#sources(agent, entries)), ...(agent.reviewBeforePosting && { review: true }) };
+        return agent ? this.#sources(agent, entries) : { items: [], sources: [] };
       },
       seat: (entry) => this.#seatLink(entry),
       mayCall: async (entry, uid) => {
@@ -2418,8 +2437,7 @@ export class ChatAgent extends DurableObject<Env> {
     const seat = exports.ChatAgent.getByName(chatAgentName(entry.ownerUid, entry.seat ?? seatChatId(entry.agentId)));
     const room = this.#room;
     return {
-      deliver: (batch) => seat.seatDeliver(room, entry.agentId, batch),
-      give: (turn) => seat.seatGive(room, entry.agentId, { ...turn, ownerName: this.#nameOf(entry.ownerUid) }),
+      give: (batch, turn) => seat.seatGive(room, entry.agentId, { ...turn, ownerName: this.#nameOf(entry.ownerUid) }, batch),
       abort: (turn) => seat.seatAbort(room, turn),
       wake: () => seat.seatWake(room),
       drop: () => seat.seatDrop(room, entry.agentId),
@@ -2471,29 +2489,19 @@ export class ChatAgent extends DurableObject<Env> {
       write: (session, text, requestId) => this.#writeTo(session, text, requestId),
       forks: (agent, turn) => this.#forks(agent, turn.input),
       configure: (session, agent, turn) => this.#configureSession(session, agent, { ask: turn.input, byOwner: turn.byOwner }, turn.ownerName),
-      submit: async (session, input, operationId, data) => {
-        await this.harness.submit(input, { session, operationId, whenBusy: "followUp", entry: { kind: CHAT_TURN_KIND, data } });
-      },
+      submit: (session, input, operationId, data) => this.#submitTo(session, input, operationId, data),
       wait: (session, operationId) => this.harness.wait(operationId, { session }),
-      abort: async (session) => {
-        await this.harness.abort({ session });
-      },
+      abort: (session) => this.#abortSession(session),
       turnEntries: (session, turn) => this.#turnEntries(session, turn),
       sources: (agent, entries) => this.#sources(agent, entries),
       waitUntil: (promise) => this.ctx.waitUntil(promise),
     };
   }
 
-  /** (RPC, from a room) Lines of a room's log for one of this user's agents seated there. */
-  async seatDeliver(room: RoomRef, agentId: string, batch: SeatBatch): Promise<number> {
+  /** (RPC, from a room) A turn for one of this user's agents seated there, after the lines of the log said before it. */
+  async seatGive(room: RoomRef, agentId: string, turn: SeatTurn, batch: SeatBatch | null): Promise<number> {
     if (this.#gone) throw new Error(DELETED);
-    return this.seats.deliver(room, agentId, batch);
-  }
-
-  /** (RPC, from a room) A turn for one of this user's agents seated there. */
-  async seatGive(room: RoomRef, agentId: string, turn: SeatTurn): Promise<void> {
-    if (this.#gone) throw new Error(DELETED);
-    await this.seats.give(room, agentId, turn);
+    return this.seats.give(room, agentId, turn, batch);
   }
 
   /** (RPC, from a room) Stop a turn a seat here runs for it. */

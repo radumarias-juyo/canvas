@@ -181,6 +181,23 @@ class FakeChat implements TurnHost {
     this.changes++;
   }
 
+  // The owner's agents only, and no private servers: no turn forks, none is held, and anyone may call.
+  async forks(): Promise<boolean> {
+    return false;
+  }
+  async fork(): Promise<string> {
+    throw new Error("No turn forks here.");
+  }
+  async sources() {
+    return { items: [], sources: [] };
+  }
+  seat(): never {
+    throw new Error("No seats here.");
+  }
+  async mayCall(): Promise<boolean> {
+    return true;
+  }
+  drafted(): void {}
   waitUntil(promise: Promise<unknown>): void {
     this.kept.push(promise);
     void promise.then(
@@ -305,7 +322,9 @@ describe("AgentTurns: a turn", () => {
     // The catch-up and the set-up go at once; the input only after both.
     expect(chat.calls).toEqual(["read", `configure ${A}`, `write ${sessionOf(A)}`, `submit ${sessionOf(A)}`, `wait ${sessionOf(A)}`]);
     // The asking message is left out of the catch-up: the turn's input carries it.
-    expect(chat.writes).toEqual([{ session: sessionOf(A), requestId: `mirror:${idOf(A)}:2`, text: expect.stringContaining("[Mia · person]: Lunch at noon?") }]);
+    expect(chat.writes).toEqual([
+      { session: sessionOf(A), requestId: `mirror:${idOf(A)}:2`, text: expect.stringContaining("[Mia · person]: Lunch at noon?") },
+    ]);
     expect(chat.writes[0].text).not.toContain("sum up the week");
     expect(chat.configured).toEqual([
       {

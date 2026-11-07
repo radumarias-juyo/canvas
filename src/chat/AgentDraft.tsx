@@ -41,7 +41,7 @@ export function AgentDraft({ chatId, draft, onDone }: { chatId: string; draft: A
           value={editing}
           onChange={(event) => setEditing(event.target.value)}
           aria-label="Edit the reply before posting it"
-          rows={Math.min(12, Math.max(3, editing.split("\n").length + 1))}
+          rows={4}
           autoFocus
         />
       )}

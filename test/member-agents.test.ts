@@ -252,7 +252,7 @@ class Room implements TurnHost {
       calledBy: { name: who.name, uid: who.uid },
       ask: (own) => askOf({ name: who.name, kind: "person", owner: own }, text),
       askKey: messageAskKey({ uid: who.uid, sentAt }),
-      byOwner: (entry) => entry.ownerUid === who.uid,
+      byOwner: true,
     };
   }
 
@@ -313,8 +313,7 @@ class Room implements TurnHost {
   seat(entry: RosterEntry): SeatLink {
     const object = this.member(entry.ownerUid);
     return {
-      deliver: (batch) => object.seats.deliver(ROOM, entry.agentId, batch),
-      give: (turn) => object.seats.give(ROOM, entry.agentId, { ...turn, ownerName: entry.ownerUid }),
+      give: (batch, turn) => object.seats.give(ROOM, entry.agentId, { ...turn, ownerName: entry.ownerUid }, batch),
       abort: (turn) => object.seats.abort(ROOM, turn),
       wake: async () => object.seats.wake(ROOM),
     };
@@ -670,13 +669,13 @@ describe("Member agents: private turns run apart", () => {
     expect(chat.roster.held(RADU.uid)).toEqual([expect.objectContaining({ turn: turn.id, agentId: planner.agentId })]);
     // Nobody else's.
     expect(chat.roster.held(ANA.uid)).toEqual([]);
-    expect(await chat.turns.post(ANA.uid, turn.id, {})).toEqual({ error: expect.stringContaining("No such draft") });
+    expect(await chat.turns.post(ANA.uid, planner.agentId, turn.id)).toEqual({ error: expect.stringContaining("No such draft") });
 
-    expect(await chat.turns.post(RADU.uid, turn.id, { text: "The West launch is in week 41." })).toBeNull();
+    expect(await chat.turns.post(RADU.uid, planner.agentId, turn.id, "The West launch is in week 41.")).toBeNull();
     expect(chat.posts).toEqual([expect.objectContaining({ text: "The West launch is in week 41.", postedBy: RADU.uid, sources: ["calendar"] })]);
     expect(chat.roster.held(RADU.uid)).toEqual([]);
     // Posted once.
-    expect(await chat.turns.post(RADU.uid, turn.id, {})).toEqual({ error: expect.stringContaining("No such draft") });
+    expect(await chat.turns.post(RADU.uid, planner.agentId, turn.id)).toEqual({ error: expect.stringContaining("No such draft") });
     expect(chat.posts).toHaveLength(1);
   });
 
@@ -687,9 +686,9 @@ describe("Member agents: private turns run apart", () => {
     await settle();
     chat.sessions.finish(first.id, "Private.", [result("calendar_events", [{ id: "e1", title: "x" }])]);
     await settle();
-    expect(await chat.turns.post(RADU.uid, first.id, "discard")).toBeNull();
+    expect(chat.turns.discard(RADU.uid, planner.agentId, first.id)).toBeNull();
     expect(chat.posts).toEqual([]);
-    expect(chat.roster.held()).toEqual([]);
+    expect(chat.roster.held(RADU.uid)).toEqual([]);
 
     const [second] = chat.turns.call([planner.agentId], chat.say(RADU, "@planner two"));
     await settle();
@@ -706,9 +705,9 @@ describe("Member agents: private turns run apart", () => {
     await settle();
     chat.sessions.finish(turn.id, "Private.", [result("calendar_events", [])]);
     await settle();
-    expect(chat.roster.held()).toHaveLength(1);
+    expect(chat.roster.held(RADU.uid)).toHaveLength(1);
     chat.roster.remove(planner.agentId);
-    expect(chat.roster.held()).toEqual([]);
+    expect(chat.roster.held(RADU.uid)).toEqual([]);
   });
 
   it("reads its own forked reply in a catch-up, and skips its own other replies", () => {

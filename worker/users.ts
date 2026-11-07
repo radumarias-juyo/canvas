@@ -10,6 +10,7 @@ import { titleFromMessage, UNNAMED_CHAT } from "./agent/title.ts";
 import { applyAuthChange, type McpAuthChange, type McpAuthRecord, type McpAuthStore } from "./mcp/oauth.ts";
 import { mcpServers } from "./mcp/servers.ts";
 import { AgentStore, type AgentSave } from "./agents/store.ts";
+import { addColumn } from "./members.ts";
 import { withoutSignInShares, type AgentChanges, type AgentChatUse, type AgentDefinition, type AgentInput, type AgentOrigin, type AgentResult } from "../shared/agents.ts";
 
 /** One user's OAuth state for one MCP server. `uid` must come from a verified identity. */
@@ -89,31 +90,23 @@ export class UserDirectory extends DurableObject<Env> {
     // write, and when they last saw the chat. activity_at > seen_at is unread. Then: when someone last tagged them in
     // it; mentioned_at > seen_at is a tag they have not seen.
     for (const table of ["chats", "shared_chats"]) {
-      this.#addColumn(table, "status", "TEXT");
-      this.#addColumn(table, "activity_at", "INTEGER NOT NULL DEFAULT 0");
-      this.#addColumn(table, "seen_at", "INTEGER NOT NULL DEFAULT 0");
-      this.#addColumn(table, "mentioned_at", "INTEGER NOT NULL DEFAULT 0");
+      addColumn(ctx.storage.sql, table, "status", "TEXT");
+      addColumn(ctx.storage.sql, table, "activity_at", "INTEGER NOT NULL DEFAULT 0");
+      addColumn(ctx.storage.sql, table, "seen_at", "INTEGER NOT NULL DEFAULT 0");
+      addColumn(ctx.storage.sql, table, "mentioned_at", "INTEGER NOT NULL DEFAULT 0");
     }
     // Whether this user's own chat has members: the chat tells (setChatShared) when that changes, and when it opens.
-    this.#addColumn("chats", "shared", "INTEGER NOT NULL DEFAULT 0");
+    addColumn(ctx.storage.sql, "chats", "shared", "INTEGER NOT NULL DEFAULT 0");
     // The files of a skill imported as a package (SkillPackageFiles as JSON).
-    this.#addColumn("skills", "files", "TEXT");
+    addColumn(ctx.storage.sql, "skills", "files", "TEXT");
     // The newest version of each artifact its owner opened. Artifacts from before count as seen.
-    if (this.#addColumn("artifacts", "seen", "INTEGER NOT NULL DEFAULT 0")) ctx.storage.sql.exec("UPDATE artifacts SET seen = latest");
+    if (addColumn(ctx.storage.sql, "artifacts", "seen", "INTEGER NOT NULL DEFAULT 0")) ctx.storage.sql.exec("UPDATE artifacts SET seen = latest");
     // A sidebar's socket stays open for hours: answer its keep-alive pings without waking this object.
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair(SOCKET_PING.request, SOCKET_PING.response));
     // Forget sign-ins to servers this deployment no longer has, tokens included.
     const configured = mcpServers(env).map((server) => server.name);
     const placeholders = configured.map(() => "?").join(", ");
     ctx.storage.sql.exec(`DELETE FROM mcp_auth${configured.length ? ` WHERE server NOT IN (${placeholders})` : ""}`, ...configured);
-  }
-
-  /** Add a column a table made before it lacks; true when it was added. `table`, `column` and `type` are written here, never input. */
-  #addColumn(table: string, column: string, type: string): boolean {
-    const columns = this.ctx.storage.sql.exec<{ name: string }>(`SELECT name FROM pragma_table_info('${table}')`).toArray();
-    if (columns.some((row) => row.name === column)) return false;
-    this.ctx.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
-    return true;
   }
 
   /** This user's OAuth state for one MCP server (worker/mcp/oauth.ts): registration, tokens, a sign-in in progress. */

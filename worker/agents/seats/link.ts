@@ -3,8 +3,8 @@
 // owner's sign-ins, files, skills and budget, which never leave the owner's object. Only labelled lines of the log go
 // in, and only a turn's reply (with what the app recorded of its calls) comes back.
 
-import type { ChatAgentReplyData, ChatTurnData } from "../../../shared/agents.ts";
-import type { TurnResult } from "../controller.ts";
+import type { ChatTurnData } from "../../../shared/agents.ts";
+import type { Outputs, TurnResult } from "../controller.ts";
 
 /** Which room a seat is for: the chat's owner and id, from which its object's name is built. */
 export interface RoomRef {
@@ -37,24 +37,17 @@ export interface SeatTurn extends ChatTurnData {
   byOwner: boolean;
 }
 
-/** How a seat's turn ended, with what the app recorded of it: the room builds the reply from it. */
-export interface SeatResult extends TurnResult {
-  published: NonNullable<ChatAgentReplyData["published"]>;
-  items: NonNullable<ChatAgentReplyData["items"]>;
-  /** The servers outside the agent's shared list it called (only in a fork of a turn its owner asked for). */
-  sources: string[];
-  /** It ran in a fork of the seat's session: only its reply reaches the shared one, from the room's log. */
-  forked?: boolean;
-  /** Its owner reviews a reply built on a private server before it is posted (reviewBeforePosting). */
-  review?: boolean;
-}
+/** How a seat's turn ended, with what the app recorded of it (sources only from a fork): the room builds the reply from it. */
+export type SeatResult = TurnResult & Outputs;
 
 /** What the room's turn controller calls on an agent's seat (one per roster entry with a `seat`). */
 export interface SeatLink {
-  /** Deliver lines of the log; the newest entry the seat has taken after it (its delivered seq). */
-  deliver(batch: SeatBatch): Promise<number>;
-  /** Give the agent a turn; returns once its input is in. Giving one twice places it once. The link adds its owner's name. */
-  give(turn: Omit<SeatTurn, "ownerName">): Promise<void>;
+  /**
+   * Give the agent a turn, after the lines of the log said since it last read (`batch`, none when nothing new); returns
+   * once its input is in, with the newest log entry the seat has taken (its delivered seq). Giving one twice places it
+   * once. The link adds its owner's name.
+   */
+  give(batch: SeatBatch | null, turn: Omit<SeatTurn, "ownerName">): Promise<number>;
   /** Stop a turn the seat runs. */
   abort(turn: number): Promise<void>;
   /** Have the seat send again the results of the turns it ended that the room has not taken (after a restart of either). */

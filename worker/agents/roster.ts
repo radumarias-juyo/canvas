@@ -2,11 +2,12 @@ import {
   MAX_CHAT_AGENTS,
   type AgentColor,
   type AgentTurnStatus,
+  type AgentDraftView,
   type AgentTurnView,
   type ChatAgentReplyData,
   type ChatAgentView,
 } from "../../shared/agents.ts";
-import type { Sql } from "../members.ts";
+import { addColumn, type Sql } from "../members.ts";
 
 /** One agent of a chat's roster: which definition it points at, and the pi session it runs in. */
 export interface RosterEntry {
@@ -67,14 +68,6 @@ export interface Outbox {
   toPi: boolean;
   /** It waits for its agent's owner to review it (reviewBeforePosting): only they see it until they post it. */
   held?: boolean;
-}
-
-/** A held reply, as its agent's owner sees it: the turn, the agent, and the reply. */
-export interface HeldReply {
-  turn: number;
-  agentId: string;
-  ownerUid: string;
-  reply: ChatAgentReplyData;
 }
 
 type RosterRow = {
@@ -188,14 +181,10 @@ export class ChatRoster {
       CREATE INDEX IF NOT EXISTS chat_agent_turns_by_root ON chat_agent_turns (root);
     `);
     // Columns added later: a roster or turn table made before them lacks them.
-    const added = (table: string, column: string, type: string) => {
-      if (!sql.exec(`SELECT 1 FROM pragma_table_info('${table}') WHERE name = ?`, column).toArray().length)
-        sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
-    };
-    added("chat_agents", "shared", "INTEGER NOT NULL DEFAULT 0");
-    added("chat_agents", "seat", "TEXT");
-    added("chat_agent_turns", "session", "TEXT");
-    added("chat_agent_turns", "held", "INTEGER NOT NULL DEFAULT 0");
+    addColumn(sql, "chat_agents", "shared", "INTEGER NOT NULL DEFAULT 0");
+    addColumn(sql, "chat_agents", "seat", "TEXT");
+    addColumn(sql, "chat_agent_turns", "session", "TEXT");
+    addColumn(sql, "chat_agent_turns", "held", "INTEGER NOT NULL DEFAULT 0");
   }
 
   /** The roster's clock: what its turns' times are taken from. */
@@ -288,7 +277,7 @@ export class ChatRoster {
     if (!before) return null;
     // A name taken here when it joined, kept as the one it got then ("planner-ana" for "planner"), as long as that is
     // still its name.
-    const alias = before.name.startsWith(`${view.name.toLowerCase()}-`);
+    const alias = before.seat !== undefined && before.name.startsWith(`${view.name.toLowerCase()}-`);
     const taken = view.name !== before.name && (alias || this.byName(view.name) !== null);
     const entry = { ...before, ...view, name: taken ? before.name : view.name.toLowerCase() };
     const changed = (["name", "avatar", "color", "job", "off"] as const).some((field) => entry[field] !== before[field]);
@@ -458,38 +447,29 @@ export class ChatRoster {
     return row?.reply ? { reply: JSON.parse(row.reply) as ChatAgentReplyData, toPi: row.to_pi === 1 } : null;
   }
 
-  /** The replies held for their owners' review, oldest first; only those of `ownerUid`'s agents with it. */
-  held(ownerUid?: string): HeldReply[] {
+  /** The replies of `ownerUid`'s agents held for their review, oldest first. */
+  held(ownerUid: string): AgentDraftView[] {
     const rows = this.#sql
       .exec(
-        `SELECT t.id, t.agent_id, t.reply, a.owner_uid FROM chat_agent_turns t JOIN chat_agents a ON a.agent_id = t.agent_id
-         WHERE t.reply IS NOT NULL AND t.delivered_at IS NULL AND t.held = 1 ${ownerUid === undefined ? "" : "AND a.owner_uid = ?"} ORDER BY t.id`,
-        ...(ownerUid === undefined ? [] : [ownerUid]),
+        `SELECT t.id, t.agent_id, t.reply FROM chat_agent_turns t JOIN chat_agents a ON a.agent_id = t.agent_id
+         WHERE ${HELD} AND a.owner_uid = ? ORDER BY t.id`,
+        ownerUid,
       )
-      .toArray() as { id: number; agent_id: string; reply: string; owner_uid: string }[];
-    return rows.map((row) => ({ turn: row.id, agentId: row.agent_id, ownerUid: row.owner_uid, reply: JSON.parse(row.reply) as ChatAgentReplyData }));
+      .toArray() as { id: number; agent_id: string; reply: string }[];
+    return rows.map((row) => ({ turn: row.id, agentId: row.agent_id, reply: JSON.parse(row.reply) as ChatAgentReplyData }));
   }
 
   /**
    * Let an ended turn's reply go to the chat as `reply` (a held one as its owner posts it, maybe edited), handing pi a
-   * turn when it names pi: it is then delivered. False when it has nothing to deliver (delivered or discarded already).
+   * turn when it names pi: it is then delivered. Nothing when it has nothing to deliver (delivered or discarded already).
    */
-  release(id: number, reply: ChatAgentReplyData, toPi: boolean): boolean {
-    return (
-      this.#sql.exec(
-        `UPDATE chat_agent_turns SET held = 0, reply = ?, to_pi = ? WHERE id = ? AND ${PENDING}`,
-        JSON.stringify(reply),
-        toPi ? 1 : 0,
-        id,
-      ).rowsWritten > 0
-    );
+  release(id: number, reply: ChatAgentReplyData, toPi: boolean): void {
+    this.#sql.exec(`UPDATE chat_agent_turns SET held = 0, reply = ?, to_pi = ? WHERE id = ? AND ${PENDING}`, JSON.stringify(reply), toPi ? 1 : 0, id);
   }
 
-  /** Drop a held reply, as its owner discards it: it never reaches the chat. False when it is not held. */
-  discard(id: number): boolean {
-    return (
-      this.#sql.exec(`UPDATE chat_agent_turns SET held = 0, reply = NULL, delivered_at = ? WHERE id = ? AND ${HELD}`, this.#now(), id).rowsWritten > 0
-    );
+  /** Drop a held reply, as its owner discards it: it never reaches the chat. */
+  discard(id: number): void {
+    this.#sql.exec(`UPDATE chat_agent_turns SET held = 0, reply = NULL, delivered_at = ? WHERE id = ? AND ${HELD}`, this.#now(), id);
   }
 
   /** The ended turns whose replies are not delivered yet, oldest first: what a restart delivers. */
@@ -578,9 +558,7 @@ export class ChatRoster {
     return running.flatMap((turn) => {
       const entry = entries.get(turn.agentId);
       if (!entry || entry.seat !== undefined) return [];
-      return [
-        { agentId: turn.agentId, session: turn.session ?? entry.session, turn: turn.id, ...(turn.session !== undefined && { only: entry.ownerUid }) },
-      ];
+      return [{ agentId: turn.agentId, session: sessionOf(entry, turn), turn: turn.id, ...(turn.session !== undefined && { only: entry.ownerUid }) }];
     });
   }
 
@@ -594,4 +572,9 @@ export class ChatRoster {
       KEPT_TURNS,
     );
   }
+}
+
+/** The session a turn runs in: its own (a fork), else its agent's. */
+export function sessionOf(entry: Pick<RosterEntry, "session">, turn: Pick<AgentTurn, "session">): string {
+  return turn.session ?? entry.session;
 }

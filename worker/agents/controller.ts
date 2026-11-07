@@ -1,16 +1,17 @@
 import type { EntryRecord } from "@earendil-works/pi-durable";
-import { MAX_HOPS, type AgentDefinition, type ChatAgentReplyData, type ChatTurnData } from "../../shared/agents.ts";
+import { MAX_HOPS, type AgentDefinition, type AgentDraftView, type ChatAgentReplyData, type ChatTurnData } from "../../shared/agents.ts";
 import { AGENT_NAME } from "../../shared/mentions.ts";
 import { errorMessage, serial } from "../../shared/util.ts";
-import type { AgentTurn, ChatRoster, RosterEntry, TurnRequest } from "./roster.ts";
+import { sessionOf, type AgentTurn, type ChatRoster, type RosterEntry, type TurnRequest } from "./roster.ts";
 import type { SeatBatch, SeatLink, SeatResult } from "./seats/link.ts";
 import { askOf, CatchUp, entryAskKey, handOffs, itemsIn, MAX_ASK_CHARS, publishedIn, turnAskKey, turnInput } from "./turns.ts";
 
 /**
  * What a turn left in its session for its reply to show: the pages it published, the records its results held, the
- * private servers it called (a fork's), and whether its owner reviews it before it is posted.
+ * private servers it called, whether it ran in a fork (only its reply reaches the shared session, from the log), and
+ * whether its owner reviews it before it is posted.
  */
-export type Outputs = Required<Pick<ChatAgentReplyData, "published" | "items" | "sources">> & { review?: boolean };
+export type Outputs = Required<Pick<ChatAgentReplyData, "published" | "items" | "sources">> & { forked?: boolean; review?: boolean };
 const NO_OUTPUTS: Outputs = { published: [], items: [], sources: [] };
 
 /** How one operation in an agent's session ended, as PiHarness.wait says. */
@@ -49,36 +50,32 @@ export interface TurnHost {
   changed(): void;
   /**
    * Whether a turn its owner asked for may reach a server outside the agent's shared list (forksFor): it then runs in a
-   * fork of the agent's session. Without it, no turn forks.
+   * fork of the agent's session.
    */
-  forks?(entry: RosterEntry, agent: AgentDefinition, turn: AgentTurn): Promise<boolean>;
+  forks(entry: RosterEntry, agent: AgentDefinition, turn: AgentTurn): Promise<boolean>;
   /** A new session that sees `session`'s history so far. */
-  fork?(session: string): Promise<string>;
+  fork(session: string): Promise<string>;
   /**
    * What a forked turn's reply shows of its sources (turnSources), from its session's entries: only the shared servers'
-   * records, the private servers it called, and whether its owner reviews it first. Without it: every record, no sources.
+   * records, the private servers it called, and whether its owner reviews it first.
    */
-  sources?(entry: RosterEntry, entries: readonly EntryRecord[]): Promise<Pick<Outputs, "items" | "sources" | "review">>;
+  sources(entry: RosterEntry, entries: readonly EntryRecord[]): Promise<Pick<Outputs, "items" | "sources" | "review">>;
   /** The seat of an agent that runs in its owner's own object (a member's: `entry.seat`). */
-  seat?(entry: RosterEntry): SeatLink;
-  /** Whether `uid` may give this agent another turn now (a per-person rate limit). Without it, always. */
-  mayCall?(entry: RosterEntry, uid: string): Promise<boolean>;
+  seat(entry: RosterEntry): SeatLink;
+  /** Whether `uid` may give this agent another turn now (a per-person rate limit). */
+  mayCall(entry: RosterEntry, uid: string): Promise<boolean>;
   /** A reply of an agent of `ownerUid`'s is held for them to review, or no longer is: tell them. */
-  drafted?(ownerUid: string): void;
+  drafted(ownerUid: string): void;
   /** Keep the object alive for work that outlives the call that started it. */
   waitUntil(promise: Promise<unknown>): void;
 }
 
 /**
  * Who gives agents turns, as `call` takes it: their request, less the agent; `hop` is 0 unless said. A person's message
- * gives a turn to each agent it calls, whoever's they are: whether its owner asked, and how its ask is labelled ("your
- * owner"), may then differ per agent.
+ * gives a turn to each agent it calls, whoever's they are: `byOwner` holds only for the agents of the person who asked
+ * (calledBy.uid), and the ask may be labelled per agent by it ("your owner").
  */
-export type Caller = Omit<TurnRequest, "agentId" | "hop" | "byOwner" | "ask"> & {
-  hop?: number;
-  byOwner: boolean | ((entry: RosterEntry) => boolean);
-  ask: string | ((byOwner: boolean) => string);
-};
+export type Caller = Omit<TurnRequest, "agentId" | "hop" | "ask"> & { hop?: number; ask: string | ((byOwner: boolean) => string) };
 
 /**
  * The chat's turn controller for the agents of its roster (not pi, whose turns are pi's own inbox). Each agent takes
@@ -106,7 +103,7 @@ export class AgentTurns {
     const turns = agentIds.flatMap((agentId) => {
       const entry = this.#host.roster.get(agentId);
       if (!entry) return [];
-      const byOwner = typeof caller.byOwner === "function" ? caller.byOwner(entry) : caller.byOwner;
+      const byOwner = caller.byOwner && (caller.calledBy.uid === undefined || caller.calledBy.uid === entry.ownerUid);
       const ask = typeof caller.ask === "function" ? caller.ask(byOwner) : caller.ask;
       const turn = this.#host.roster.enqueue({ ...caller, agentId, byOwner, ask, hop: caller.hop ?? 0, root });
       root ??= turn.id;
@@ -157,7 +154,7 @@ export class AgentTurns {
         return;
       }
       const asker = turn.calledBy.uid;
-      if (asker !== undefined && this.#host.mayCall && !(await this.#host.mayCall(entry, asker))) {
+      if (asker !== undefined && !(await this.#host.mayCall(entry, asker))) {
         await this.#ended(entry, turn, { status: "unanswered", reason: `@${entry.name} was asked too often just now; try again in a minute` });
         return;
       }
@@ -166,16 +163,16 @@ export class AgentTurns {
         // Its owner's own object runs it: the turn ends when the seat says so (seatEnded).
         await this.#giveSeat(entry, turn);
         if (!live())
-          await this.#host.seat!(entry)
+          await this.#host
+            .seat(entry)
             .abort(turn.id)
             .catch((error: unknown) => console.error("agent stop:", errorMessage(error)));
         return;
       }
-      const forks = turn.byOwner && this.#host.forks && this.#host.fork ? await this.#host.forks(entry, agent, turn) : false;
-      if (forks) {
+      if (turn.byOwner && (await this.#host.forks(entry, agent, turn))) {
         // A fork sees the agent's session as it is when made: the catch-up goes in first.
         await this.#catchUp(entry, turn.id);
-        const session = await this.#host.fork!(entry.session);
+        const session = await this.#host.fork(entry.session);
         if (!live()) return;
         roster.setSession(turn.id, session);
         turn = { ...turn, session };
@@ -201,15 +198,21 @@ export class AgentTurns {
   }
 
   /**
-   * Give a seat its turn: first what was said since it last read (its seat fills a gap itself), then the turn's input.
-   * The seat ends it by calling `seatEnded`.
+   * Give a seat its turn, in one call: what was said since it last read (its seat fills a gap itself), then the turn's
+   * input. The seat ends it by calling `seatEnded`.
    */
   async #giveSeat(entry: RosterEntry, turn: AgentTurn): Promise<void> {
-    const seat = this.#host.seat!(entry);
     const batch = await this.batchFor(entry, entry.mirrored, turn.id);
-    if (batch.through > entry.mirrored) this.#host.roster.setMirrored(entry.agentId, await seat.deliver(batch));
-    if (this.#host.roster.turn(turn.id)?.status !== "running") return;
-    await seat.give({ turn: turn.id, calledBy: turn.calledBy, hop: turn.hop, input: turnInput(turn), byOwner: turn.byOwner });
+    const delivered = await this.#host
+      .seat(entry)
+      .give(batch.through > entry.mirrored ? batch : null, {
+        turn: turn.id,
+        calledBy: turn.calledBy,
+        hop: turn.hop,
+        input: turnInput(turn),
+        byOwner: turn.byOwner,
+      });
+    this.#host.roster.setMirrored(entry.agentId, delivered);
     this.#host.roster.markSubmitted(turn.id);
   }
 
@@ -241,8 +244,7 @@ export class AgentTurns {
     const entry = roster.get(agentId);
     const turn = roster.turn(id);
     if (!entry || entry.seat === undefined || turn?.agentId !== agentId) return true;
-    const { published, items, sources, review, forked, ...ended } = result;
-    await this.#ended(entry, turn, ended, { published, items, sources, ...(review && { review }) }, forked === true);
+    await this.#ended(entry, turn, result, result);
     return true;
   }
 
@@ -273,16 +275,16 @@ export class AgentTurns {
    * A reply built on a private server, of an agent whose owner reviews those, is held for them (`held`): it hands off
    * and is delivered only once they post it (`post`).
    */
-  async #ended(entry: RosterEntry, turn: AgentTurn, result: TurnResult, outputs?: Outputs, seatForked = false): Promise<void> {
+  async #ended(entry: RosterEntry, turn: AgentTurn, result: TurnResult, outputs?: Outputs): Promise<void> {
     const roster = this.#host.roster;
     const now = roster.turn(turn.id);
     let delivering: Promise<void> | undefined;
     if (now?.status === "running" || now?.status === "queued") {
       const done = result.status === "done";
       const text = (result.text ?? "").trim();
-      const forked = seatForked || now.session !== undefined;
       // Only a turn whose input went in has outputs in its session.
-      const { published, items, sources, review } = outputs ?? (now.submitted ? await this.#outputs(entry, now) : NO_OUTPUTS);
+      const { published, items, sources, review, ...out } = outputs ?? (now.submitted ? await this.#outputs(entry, now) : NO_OUTPUTS);
+      const forked = out.forked === true || now.session !== undefined;
       const current = roster.get(entry.agentId) ?? entry;
       const reply: ChatAgentReplyData = {
         agentId: entry.agentId,
@@ -304,7 +306,7 @@ export class AgentTurns {
       };
       if (done && text && review && sources.length) {
         // Its owner sees it first: nothing of it reaches the chat, pi or other agents until they post it.
-        if (roster.end(turn.id, "done", { reply, toPi: false, held: true })) this.#host.drafted?.(current.ownerUid);
+        if (roster.end(turn.id, "done", { reply, toPi: false, held: true })) this.#host.drafted(current.ownerUid);
       } else if (roster.end(turn.id, done ? "done" : "failed", { reply, toPi: false })) {
         delivering = this.#release(turn.id, reply, done);
       }
@@ -333,20 +335,27 @@ export class AgentTurns {
     return this.#deliver(id);
   }
 
-  /**
-   * (the agent's owner) Post a reply held for review to the chat, as they may have edited it (`text`), or discard it.
-   * Refused for anyone else's agent, or a reply no longer held.
-   */
-  async post(uid: string, id: number, action: { text?: string } | "discard"): Promise<{ error: string } | null> {
+  /** A reply of `uid`'s agent `agentId` held for their review, as turn `id`; refused for anyone else's, or one no longer held. */
+  #held(uid: string, agentId: string, id: number): AgentDraftView | { error: string } {
+    const held = this.#host.roster.held(uid).find((reply) => reply.turn === id && reply.agentId === agentId);
+    return held ?? { error: "No such draft: it was posted or discarded already." };
+  }
+
+  /** (the agent's owner) Discard a reply held for their review: it never reaches the chat. */
+  discard(uid: string, agentId: string, id: number): { error: string } | null {
+    const held = this.#held(uid, agentId, id);
+    if ("error" in held) return held;
+    this.#host.roster.discard(id);
+    this.#host.drafted(uid);
+    return null;
+  }
+
+  /** (the agent's owner) Post a reply held for their review to the chat, as they may have edited it (`text`). */
+  async post(uid: string, agentId: string, id: number, edited?: string): Promise<{ error: string } | null> {
     const roster = this.#host.roster;
-    const held = roster.held(uid).find((reply) => reply.turn === id);
-    if (!held) return { error: "No such draft: it was posted or discarded already." };
-    if (action === "discard") {
-      roster.discard(id);
-      this.#host.drafted?.(uid);
-      return null;
-    }
-    const text = action.text === undefined ? held.reply.text : action.text.trim();
+    const held = this.#held(uid, agentId, id);
+    if ("error" in held) return held;
+    const text = edited === undefined ? held.reply.text : edited.trim();
     if (!text) return { error: "A reply needs some text; discard it instead." };
     const current = roster.get(held.agentId);
     const reply: ChatAgentReplyData = {
@@ -359,7 +368,7 @@ export class AgentTurns {
     // Its owner made it theirs: it hands off and is delivered as any other reply. Only once: with no await since it was
     // read, a second post finds it no longer held.
     const delivering = this.#release(id, reply, true);
-    this.#host.drafted?.(uid);
+    this.#host.drafted(uid);
     this.#host.changed();
     await delivering;
     return null;
@@ -373,7 +382,7 @@ export class AgentTurns {
     try {
       const entries = await this.#host.turnEntries(sessionOf(entry, turn), turn.id);
       const published = publishedIn(entries);
-      if (turn.session !== undefined && this.#host.sources) return { published, ...(await this.#host.sources(entry, entries)) };
+      if (turn.session !== undefined) return { published, forked: true, ...(await this.#host.sources(entry, entries)) };
       return { published, items: itemsIn(entries), sources: [] };
     } catch (error) {
       console.error("agent turn, outputs:", errorMessage(error));
@@ -427,7 +436,8 @@ export class AgentTurns {
     for (const agentId of seats) {
       const entry = roster.get(agentId)!;
       this.#host.waitUntil(
-        this.#host.seat!(entry)
+        this.#host
+          .seat(entry)
           .wake()
           .catch((error: unknown) => console.error("agent seat:", errorMessage(error))),
       );
@@ -453,7 +463,7 @@ export class AgentTurns {
     const aborts: Promise<void>[] = [];
     for (const turn of started) {
       const entry = roster.get(turn.agentId);
-      if (entry?.seat !== undefined) aborts.push(this.#host.seat!(entry).abort(turn.id));
+      if (entry?.seat !== undefined) aborts.push(this.#host.seat(entry).abort(turn.id));
       else if (entry) sessions.add(sessionOf(entry, turn));
     }
     aborts.push(...[...sessions].map((session) => this.#host.abort(session)));
@@ -480,11 +490,6 @@ export class AgentTurns {
       ...(chain.root !== undefined && { root: chain.root }),
     });
   }
-}
-
-/** The session a turn runs in: its own (a fork), else its agent's. */
-export function sessionOf(entry: Pick<RosterEntry, "session">, turn: Pick<AgentTurn, "session">): string {
-  return turn.session ?? entry.session;
 }
 
 /** A turn's operation id in its agent's session: submitting it twice places it once. */

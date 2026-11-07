@@ -7,7 +7,7 @@ import type { EntryRecord } from "@earendil-works/pi-durable";
 import type { AgentDefinition, ChatTurnData } from "../../../shared/agents.ts";
 import { errorMessage } from "../../../shared/util.ts";
 import type { Sql } from "../../members.ts";
-import { operationId, type TurnResult } from "../controller.ts";
+import { operationId, type Outputs, type TurnResult } from "../controller.ts";
 import { itemsIn, publishedIn } from "../turns.ts";
 import type { RoomLink, RoomRef, SeatBatch, SeatResult, SeatTurn } from "./link.ts";
 
@@ -21,7 +21,7 @@ export interface SeatHost {
   room(ref: RoomRef, agentId: string): RoomLink;
   /** A new session for a seat. */
   create(): Promise<string>;
-  /** A new session that sees `session`'s history so far; for a turn that may read a private server. */
+  /** A new session that sees `session`'s history so far (a new one when it has none); for a turn that may read a private server. */
   fork(session: string): Promise<string>;
   /** A passive write into a session: context, no run. `requestId` keeps a retry from placing it twice. */
   write(session: string, text: string, requestId: string): Promise<void>;
@@ -34,8 +34,11 @@ export interface SeatHost {
   abort(session: string): Promise<void>;
   /** The session's entries from turn `turn`'s input on, oldest first. */
   turnEntries(session: string, turn: number): Promise<readonly EntryRecord[]>;
-  /** What a fork's reply shows of its sources: the shared servers' records, and the private servers it called (turnSources). */
-  sources(agent: AgentDefinition, entries: readonly EntryRecord[]): Promise<{ items: SeatResult["items"]; sources: string[] }>;
+  /**
+   * What a fork's reply shows of its sources: the shared servers' records, the private servers it called (turnSources),
+   * and whether its owner reviews it first.
+   */
+  sources(agent: AgentDefinition, entries: readonly EntryRecord[]): Promise<Pick<Outputs, "items" | "sources" | "review">>;
   waitUntil(promise: Promise<unknown>): void;
 }
 
@@ -99,11 +102,11 @@ export class AgentSeats {
     return agent;
   }
 
-  /** A room's seat for an agent, made at its first delivery: a session of its own. */
-  async #ensure(ref: RoomRef, agentId: string): Promise<SeatRow> {
+  /** A room's seat for an agent, made at its first delivery: a session of its own. `checked` when the agent was just read. */
+  async #ensure(ref: RoomRef, agentId: string, checked = false): Promise<SeatRow> {
     const found = this.#seat(ref, agentId);
     if (found) return found;
-    await this.#agent(agentId);
+    if (!checked) await this.#agent(agentId);
     const session = await this.#host.create();
     // Made meanwhile by another delivery: that one is the seat, and this session stays unused.
     this.#sql.exec(
@@ -141,18 +144,20 @@ export class AgentSeats {
   /**
    * Give the agent its turn: in the seat's session, or for a turn its owner asked for that may reach a private server,
    * in a fork of it, so the private results stay out of the session other people's questions reach. The turn's tools
-   * follow who asked, as this object checks it again: only its owner, directly. Returns once its input is in; the
-   * reply goes to the room when it ends. A turn given again is placed once.
+   * follow who asked, as this object checks it again: only its owner, directly. The lines of the log said before it
+   * (`batch`) go in first. Returns once its input is in, with the newest log entry the seat has taken; the reply goes
+   * to the room when it ends. A turn given again is placed once.
    */
-  async give(ref: RoomRef, agentId: string, turn: SeatTurn): Promise<void> {
-    if (this.#turn(ref, turn.turn)) return;
-    const seat = await this.#ensure(ref, agentId);
+  async give(ref: RoomRef, agentId: string, turn: SeatTurn, batch: SeatBatch | null = null): Promise<number> {
+    if (this.#turn(ref, turn.turn)) return this.delivered(ref, agentId);
     const agent = await this.#agent(agentId);
+    const seat = await this.#ensure(ref, agentId, true);
+    const delivered = batch ? await this.deliver(ref, agentId, batch) : seat.delivered;
     const checked: SeatTurn = { ...turn, byOwner: turn.byOwner && turn.hop === 0 && turn.calledBy.uid === this.#host.uid && !turn.calledBy.agentId };
     const forked = checked.byOwner && (await this.#host.forks(agent, checked));
-    const session = forked ? await this.#host.fork(seat.session).catch(() => this.#host.create()) : seat.session;
+    const session = forked ? await this.#host.fork(seat.session) : seat.session;
     // Given meanwhile by a retry: that one runs.
-    if (this.#turn(ref, turn.turn)) return;
+    if (this.#turn(ref, turn.turn)) return delivered;
     this.#sql.exec(
       "INSERT INTO agent_seat_turns (room_owner, room_chat, agent_id, turn, session, forked, status) VALUES (?, ?, ?, ?, ?, ?, 'running')",
       ref.ownerUid,
@@ -168,9 +173,10 @@ export class AgentSeats {
     } catch (error) {
       this.#end(ref, turn.turn, { status: "unanswered", reason: errorMessage(error), published: [], items: [], sources: [] });
       this.#host.waitUntil(this.#report(ref, turn.turn));
-      return;
+      return delivered;
     }
     this.#host.waitUntil(this.#await(this.#turn(ref, turn.turn)!));
+    return delivered;
   }
 
   /** Wait for a turn's run to end, keep its result, and post it to the room. */
@@ -195,15 +201,14 @@ export class AgentSeats {
   }
 
   /** What a turn left in its session: the pages it published, and its records, only the shared servers' for a fork. */
-  async #outputs(row: SeatTurnRow): Promise<Pick<SeatResult, "published" | "items" | "sources" | "forked" | "review">> {
+  async #outputs(row: SeatTurnRow): Promise<Outputs> {
     try {
       const entries = await this.#host.turnEntries(row.session, row.turn);
       const published = publishedIn(entries);
       if (!row.forked) return { published, items: itemsIn(entries), sources: [] };
       const agent = await this.#host.definition(row.agent_id);
       if (!agent) return { published, items: [], sources: [], forked: true };
-      const { items, sources } = await this.#host.sources(agent, entries);
-      return { published, items, sources, forked: true, ...(agent.reviewBeforePosting && { review: true }) };
+      return { published, forked: true, ...(await this.#host.sources(agent, entries)) };
     } catch (error) {
       console.error("agent seat, outputs:", errorMessage(error));
       return { published: [], items: [], sources: [], ...(row.forked && { forked: true }) };
@@ -268,7 +273,7 @@ export class AgentSeats {
     );
   }
 
-  /** The newest log entry a room's seat took; -1 before any. For the tests and the room's view. */
+  /** The newest log entry a room's seat took; -1 before any. */
   delivered(ref: RoomRef, agentId: string): number {
     return this.#seat(ref, agentId)?.delivered ?? -1;
   }

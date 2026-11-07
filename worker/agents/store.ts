@@ -15,7 +15,7 @@ import {
 } from "../../shared/agents.ts";
 import type { ExportedAgent } from "../../shared/data-export.ts";
 import { isObject, randomHex } from "../../shared/util.ts";
-import type { Sql } from "../members.ts";
+import { addColumn, type Sql } from "../members.ts";
 
 type AgentRow = {
   id: string;
@@ -78,9 +78,7 @@ export class AgentStore {
       );
     `);
     // The chat's owner, for a chat of someone else's the user brought the agent into as a member; added later.
-    if (!sql.exec("SELECT 1 FROM pragma_table_info('agent_chats') WHERE name = 'owner_uid'").toArray().length) {
-      sql.exec("ALTER TABLE agent_chats ADD COLUMN owner_uid TEXT");
-    }
+    addColumn(sql, "agent_chats", "owner_uid", "TEXT");
   }
 
   list(): AgentDefinition[] {
