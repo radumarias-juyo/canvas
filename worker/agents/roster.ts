@@ -7,6 +7,7 @@ import {
   type ChatAgentReplyData,
   type ChatAgentView,
 } from "../../shared/agents.ts";
+import type { ArtifactMeta } from "../../shared/protocol.ts";
 import type { RunRef } from "../../shared/runs.ts";
 import { addColumns, type Sql } from "../members.ts";
 
@@ -136,6 +137,12 @@ type ForkRow = { session: string; posted: number; from_entry: number | null; rev
 export type ApartWindow = { turn: number; from: number; through?: number; posted: boolean };
 
 /** The sessions apart from the chat with a turn's reply not posted (ChatRoster.withheld). */
+/**
+ * Rows (of chat_agent_fork_pages, _files, _drafts) the current turn of a session made (bound twice): an earlier turn
+ * in a session later turns run in again (a run's reply session), whose reply is not posted, is apart from it too.
+ */
+const THIS_TURN = "(session IS ? AND turn IS (SELECT apart_turn FROM chat_agent_forks WHERE session = ?))";
+
 const WITHHELD = "SELECT session FROM chat_agent_forks WHERE posted = 0 UNION SELECT session FROM chat_agent_apart_windows WHERE posted = 0";
 
 /** The session of a draft a conversation the chat sees saved (ChatRoster.recordDraft): no session is named so. */
@@ -154,6 +161,9 @@ const forkOf = (row: ForkRow): Fork => ({
   reused: row.reused === 1,
 });
 
+/** What of a page is not its chat's yet: all of it, or these versions (ChatAgent.held). */
+export type HeldPage = { page: boolean; versions: number[] };
+
 /**
  * The newest of versions `floor` to `latest` not `withheld` (ChatRoster.withheldVersions, SessionRules.hiddenVersion):
  * `floor - 1` when there is none.
@@ -163,6 +173,13 @@ export function newestShown(latest: number, withheld: ReadonlySet<number> | ((ve
   let version = latest;
   while (version >= floor && hidden(version)) version--;
   return version;
+}
+
+/** `meta` as its chat has it (`held`, ChatAgent.held): newest and versions without the held ones; null when none is its yet. */
+export function shownOf(meta: ArtifactMeta, held: HeldPage): ArtifactMeta | null {
+  const hidden = new Set(held.versions);
+  const latest = held.page ? 0 : newestShown(meta.latest, hidden);
+  return latest ? { ...meta, latest, versions: meta.versions.filter((version) => !hidden.has(version.version)) } : null;
 }
 
 /** A version a turn apart published, the chat's now that its reply was posted (ChatRoster.release). */
@@ -651,12 +668,17 @@ export class ChatRoster {
     );
   }
 
-  /** The drafts sessions apart from the chat other than `except` saved, with their replies not posted, and `except` did not save too. */
+  /**
+   * The drafts turns apart from the chat other than the current turn of `except` saved, with their replies not posted,
+   * and that turn did not save too: an earlier turn of `except` itself whose reply is not posted is apart from it.
+   */
   withheldDrafts(except: string): Set<string> {
     const rows = this.#sql
       .exec(
-        `SELECT DISTINCT draft_id FROM chat_agent_fork_drafts WHERE posted = 0 AND session IS NOT ?
-         AND draft_id NOT IN (SELECT draft_id FROM chat_agent_fork_drafts WHERE session = ?)`,
+        `SELECT DISTINCT draft_id FROM chat_agent_fork_drafts WHERE posted = 0 AND NOT ${THIS_TURN}
+         AND draft_id NOT IN (SELECT draft_id FROM chat_agent_fork_drafts WHERE ${THIS_TURN})`,
+        except,
+        except,
         except,
         except,
       )
@@ -671,27 +693,33 @@ export class ChatRoster {
   }
 
   /**
-   * Whether a session apart from the chat (other than `except`) published `version` of a page (any version, when
-   * unset), with its reply not posted. Version 1: the page is one such a session made.
+   * Whether a turn apart from the chat (other than the current turn of `except`) published `version` of a page (any
+   * version, when unset), with its reply not posted. Version 1: the page is one such a turn made.
    */
   withheldVersion(artifactId: string, version?: number, except?: string): boolean {
     return (
       this.#sql
         .exec(
-          "SELECT 1 FROM chat_agent_fork_pages WHERE artifact_id = ? AND (? IS NULL OR version = ?) AND posted = 0 AND session IS NOT ? LIMIT 1",
+          `SELECT 1 FROM chat_agent_fork_pages WHERE artifact_id = ? AND (? IS NULL OR version = ?) AND posted = 0 AND NOT ${THIS_TURN} LIMIT 1`,
           artifactId,
           version ?? null,
           version ?? null,
+          except ?? null,
           except ?? null,
         )
         .toArray().length > 0
     );
   }
 
-  /** The versions of a page sessions apart from the chat other than `except` published, with their replies not posted. */
+  /** The versions of a page turns apart from the chat other than the current turn of `except` published, with their replies not posted. */
   withheldVersions(artifactId: string, except?: string): Set<number> {
     const rows = this.#sql
-      .exec("SELECT version FROM chat_agent_fork_pages WHERE artifact_id = ? AND posted = 0 AND session IS NOT ?", artifactId, except ?? null)
+      .exec(
+        `SELECT version FROM chat_agent_fork_pages WHERE artifact_id = ? AND posted = 0 AND NOT ${THIS_TURN}`,
+        artifactId,
+        except ?? null,
+        except ?? null,
+      )
       .toArray();
     return new Set(rows.map((row) => row.version as number));
   }
@@ -707,11 +735,12 @@ export class ChatRoster {
   }
 
   /**
-   * The pages `session` published while apart from the chat with its reply not posted (recordPage). Not those of an
-   * earlier turn in it whose reply was posted (a run's reply session): those are the chat's now.
+   * The pages the current turn of `session` published while apart from the chat with its reply not posted
+   * (recordPage). Not those of an earlier turn in it (a run's reply session): posted, they are the chat's; not, they
+   * are apart from this turn too.
    */
   pagesOf(session: string): Set<string> {
-    return this.#pageIds("session = ? AND posted = 0", session);
+    return this.#pageIds(`posted = 0 AND ${THIS_TURN}`, session, session);
   }
 
   #pageIds(where: string, ...bindings: string[]): Set<string> {

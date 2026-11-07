@@ -163,7 +163,17 @@ import {
 } from "../shared/agents.ts";
 import { AgentTurns, type Caller, type Outputs, type PiChain, type TurnHost, type TurnOutcome } from "./agents/controller.ts";
 import { isTurnEntry, TurnFilter } from "./agents/live.ts";
-import { ChatRoster, newestShown, sessionOf, type AgentTurn, type PostedPage, type RosterEntry, type RunningTurn } from "./agents/roster.ts";
+import {
+  ChatRoster,
+  newestShown,
+  sessionOf,
+  shownOf,
+  type AgentTurn,
+  type HeldPage,
+  type PostedPage,
+  type RosterEntry,
+  type RunningTurn,
+} from "./agents/roster.ts";
 import { reportOf, SignInNeeded, whenOf, type DeliveryRequest } from "./agents/runs/executor.ts";
 import { AgentRunner, type RunAlarm, type RunnerHost, type WatchAlarm } from "./agents/runs/runner.ts";
 import { AgentRuns, type RunRecord } from "./agents/runs/store.ts";
@@ -676,6 +686,7 @@ export class ChatAgent extends DurableObject<Env> {
       onSaving: (session, paths) => this.roster.recordFiles(session, paths),
       onDrafted: (session, id) => this.roster.recordDraft(session, id),
       broughtIn: (id) => this.#broughtIn().includes(id),
+      heldIn: (chatId, artifactId) => this.#heldIn(chatId, artifactId),
       proposeSkill: (skill) => this.#directory.saveSkill(skill, "agent", false),
       proposeAgent: (input) => this.#directory.saveAgent(input, "agent", false),
       checkPage: (input, signal) =>
@@ -4538,11 +4549,8 @@ export class ChatAgent extends DurableObject<Env> {
     if (already) return already;
     // Built on the newest version that is the chat's: not one a turn apart from it published with its reply not posted,
     // which the new version would carry to everyone.
-    const held =
-      meta.chatId === this.chatId ? await this.held(meta.id) : await exports.ChatAgent.getByName(chatAgentName(this.uid, meta.chatId)).held(meta.id);
-    const latest = held.page ? 0 : newestShown(meta.latest, new Set(held.versions));
-    if (!latest) return { kind: "page", to, status: "failed", detail: "page not updated: it is not the chat's yet" };
-    const base = { ...meta, latest };
+    const base = shownOf(meta, await this.#heldIn(meta.chatId, meta.id));
+    if (!base) return { kind: "page", to, status: "failed", detail: "page not updated: it is not the chat's yet" };
     if (step.edit === "rebuild") return this.#rebuildPage(request, base, scope, mark);
     return publishFindings(scope, base, request.text, `Findings, ${whenOf(request.agent)}`, mark);
   }
@@ -4763,6 +4771,11 @@ export class ChatAgent extends DurableObject<Env> {
     return { page: false, versions: [...this.roster.withheldVersions(artifactId)] };
   }
 
+  /** What of a page of the owner's chat `chatId` (this one or another) is not that chat's yet (held). */
+  #heldIn(chatId: string, artifactId: string): Promise<HeldPage> {
+    return chatId === this.chatId ? this.held(artifactId) : exports.ChatAgent.getByName(chatAgentName(this.uid, chatId)).held(artifactId);
+  }
+
   /** Versions never change once published, so their manifests cache for the object's lifetime. */
   async #manifest(artifactId: string, version: number): Promise<ArtifactManifest | undefined> {
     const key = `${artifactId}:${version}`;
@@ -4786,7 +4799,6 @@ interface ChatNow {
 }
 
 /** What of a page is not the chat's yet (ChatAgent.held): the page itself, or these versions. */
-type HeldPage = { page: boolean; versions: number[] };
 const NOTHING_HELD: HeldPage = { page: false, versions: [] };
 
 /** What #route found: a router's pick and the model choice it names, or why the chat keeps its model, and how long that took. */

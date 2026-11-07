@@ -1227,6 +1227,14 @@ describe("Member agents: what the review of private turns found", () => {
     chat.roster.recordPage("run-reply", "r2", 1);
     chat.roster.recordDraft("run-reply", "d2");
     expect(chat.roster.withheldDrafts("pi")).toEqual(new Set(["d1", "d2"]));
+    // The later turn in the same session is apart from the discarded one too: it neither sees nor builds on what it made.
+    expect([
+      chat.roster.withheldDrafts("run-reply"),
+      chat.roster.withheldVersions("r1", "run-reply"),
+      chat.roster.withheldVersion("r1", 2, "run-reply"),
+      chat.roster.withheldVersion("r2", 1, "run-reply"),
+      chat.roster.pagesOf("run-reply"),
+    ]).toEqual([new Set(["d1"]), new Set([2]), true, false, new Set(["r2"])]);
     chat.sessions.finish(second.id, "Week 41.", [...calendar, tool(PUBLISH_TOOL, { artifactId: "r2", version: 1, title: "Next" })]);
     await settle();
     expect(await chat.turns.post(RADU.uid, planner.agentId, second.id)).toBeNull();

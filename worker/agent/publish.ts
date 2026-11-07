@@ -8,6 +8,7 @@ import { timedOutReport, type CheckInput, type CheckReport } from "../artifacts/
 import { reviewLook, type Look, type Reviewed } from "../artifacts/look.ts";
 import { checkManifest, MAX_HTML_BYTES } from "../artifacts/manifest.ts";
 import { ReviewStopped, withReview, type PageReview, type PageReviewer } from "../artifacts/review.ts";
+import { newestShown } from "../agents/roster.ts";
 import type { McpHub } from "../mcp/hub.ts";
 import type { ArtifactStore } from "../storage/artifacts.ts";
 import { draftId, passed, type ChatDrafts, type Draft, type DraftCheck, type DraftSummary, type SkillSets } from "../storage/drafts.ts";
@@ -544,4 +545,20 @@ export async function publishDraft(scope: PublishScope, input: PublishInput, sig
   // Published already: a draft left behind is only clutter, never a reason to fail.
   await drafts.remove(draft.id).catch((error: unknown) => console.error("draft:", errorMessage(error)));
   return { meta, byTitle: target.byTitle, ...(unchecked && { unchecked }) };
+}
+
+/**
+ * The version of `meta` a read takes: `asked`, or the newest up to `newest` this conversation sees (one another
+ * conversation apart from the chat published is not the chat's yet). Throws for an asked version it does not see.
+ */
+export function versionToRead(meta: ArtifactMeta, asked: number | undefined, rules?: SessionRules, newest = meta.latest): number {
+  const hidden = (version: number) => !!rules?.hiddenVersion(meta.id, version);
+  if (asked !== undefined) {
+    // Not one of the versions `meta` lists either: a brought-in page's own chat may hold it (ownArtifact).
+    if (hidden(asked) || !meta.versions.some((version) => version.version === asked))
+      throw new Error(`Artifact ${meta.id} has no version ${asked} in this chat yet.`);
+    return asked;
+  }
+  // Version 1 when it sees none newer.
+  return newestShown(newest, hidden, 2);
 }

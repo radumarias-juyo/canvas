@@ -35,6 +35,7 @@ import {
   readPageSource,
   reviewedRefusal,
   rulesOf as sessionRules,
+  versionToRead,
   writeDraft,
   type PublishScope,
   type SessionRules,
@@ -43,7 +44,7 @@ import { checkFolders, FileRefError, MAX_SANDBOX_BYTES, outputPaths, resolveFile
 import { clip, MAX_TOOL_TEXT, text } from "./output.ts";
 import { pagePart } from "./page-part.ts";
 import type { AgentsScope } from "../agents/tools.ts";
-import { newestShown } from "../agents/roster.ts";
+import { shownOf, type HeldPage } from "../agents/roster.ts";
 
 /** What the tools need from the chat they run in. */
 export interface ChatScope extends PublishScope, AgentsScope {
@@ -53,6 +54,8 @@ export interface ChatScope extends PublishScope, AgentsScope {
   toolResults: () => Promise<ToolResults>;
   /** Whether the owner named this artifact from another of their chats with "@" here, so the agent may read it. */
   broughtIn(id: string): boolean;
+  /** What of a page of the owner's chat `chatId` is not that chat's yet (ChatAgent.held): a page brought in reads without it. */
+  heldIn(chatId: string, artifactId: string): Promise<HeldPage>;
   /** Save a skill for the user, turned off until they turn it on. */
   proposeSkill(skill: SkillInput): Promise<SkillResult>;
   /** The checks that found errors in a row; the chat resets it when someone writes. */
@@ -335,12 +338,17 @@ export function sandboxExtension(scope: ChatScope): Extension {
 /**
  * An artifact of this chat, or one of the owner's from another chat that the owner named here with "@": the agent may
  * read it, but publishes a new version only of this chat's (ArtifactStore.publishVersion). Anything else reads as missing.
+ * One brought in reads as its own chat has it: not what turns apart from that chat published with their replies not
+ * posted, which this chat's rules do not know.
  */
 async function ownArtifact(scope: ChatScope, id: string, rules?: SessionRules): Promise<ArtifactMeta> {
   const meta = rules?.hidden.has(id) ? null : await scope.artifacts.readMeta(id);
-  const readable = meta && (isOwnedBy(meta, scope.uid, scope.chatId) || (meta.ownerUid === scope.uid && scope.broughtIn(meta.id)));
-  if (!readable) throw new Error(`No artifact ${id} in this chat. One from another chat must be named with @ by the chat's owner first.`);
-  return meta;
+  const missing = () => new Error(`No artifact ${id} in this chat. One from another chat must be named with @ by the chat's owner first.`);
+  if (meta && isOwnedBy(meta, scope.uid, scope.chatId)) return meta;
+  if (!meta || meta.ownerUid !== scope.uid || !scope.broughtIn(meta.id)) throw missing();
+  const shown = shownOf(meta, await scope.heldIn(meta.chatId, meta.id));
+  if (!shown) throw missing();
+  return shown;
 }
 
 /** An artifact of this chat, the only kind a publish can add a version to (ArtifactStore.publishVersion). */
@@ -353,20 +361,6 @@ async function chatArtifact(scope: ChatScope, id: string, rules?: SessionRules):
 /** What the conversation a tool runs in may see and change (PublishScope.rulesFor); undefined: nothing is withheld. */
 async function rulesOf(scope: ChatScope, api: { conversationId: unknown }): Promise<SessionRules | undefined> {
   return sessionRules(scope, String(api.conversationId));
-}
-
-/**
- * The version of `meta` a read takes: `asked`, or the newest up to `newest` this conversation sees (one another
- * conversation apart from the chat published is not the chat's yet). Throws for an asked version it does not see.
- */
-function versionToRead(meta: ArtifactMeta, asked: number | undefined, rules?: SessionRules, newest = meta.latest): number {
-  const hidden = (version: number) => !!rules?.hiddenVersion(meta.id, version);
-  if (asked !== undefined) {
-    if (hidden(asked)) throw new Error(`Artifact ${meta.id} has no version ${asked} in this chat yet.`);
-    return asked;
-  }
-  // Version 1 when it sees none newer.
-  return newestShown(newest, hidden, 2);
 }
 
 /** Whether writing `path` would change a file the chat already has (SessionRules.chatFile): one that is there. */
