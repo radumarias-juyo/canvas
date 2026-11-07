@@ -12,6 +12,7 @@ import type { MemoryAgent } from "../../memory/chat.ts";
 import { operationId, outputsOf, unreadOutputs, type Outputs, type TurnResult } from "../controller.ts";
 import { askedApart } from "../turns.ts";
 import type { RoomLink, RoomRef, SeatBatch, SeatResult, SeatTurn } from "./link.ts";
+import { chatAgentName } from "../../chat-name.ts";
 
 /** What a seat needs of the object it is in: its owner's definitions, pi's sessions there, and its rooms. */
 export interface SeatHost {
@@ -109,15 +110,15 @@ export class AgentSeats {
   memoryAgent(session: string): MemoryAgent | undefined {
     const [turn] = this.#sql
       .exec(
-        "SELECT agent_id, room_chat, status, forked, kind, name FROM agent_seat_turns WHERE session = ? ORDER BY status = 'running' DESC, turn DESC LIMIT 1",
+        "SELECT agent_id, room_owner, room_chat, status, forked, kind, name FROM agent_seat_turns WHERE session = ? ORDER BY status = 'running' DESC, turn DESC LIMIT 1",
         session,
       )
-      .toArray() as Pick<SeatTurnRow, "agent_id" | "room_chat" | "status" | "forked" | "kind" | "name">[];
+      .toArray() as Pick<SeatTurnRow, "agent_id" | "room_owner" | "room_chat" | "status" | "forked" | "kind" | "name">[];
     const running = turn?.status === "running";
     const seat =
       turn ??
-      (this.#sql.exec("SELECT agent_id, room_chat FROM agent_seats WHERE session = ? LIMIT 1", session).toArray()[0] as
-        | Pick<SeatRow, "agent_id" | "room_chat">
+      (this.#sql.exec("SELECT agent_id, room_owner, room_chat FROM agent_seats WHERE session = ? LIMIT 1", session).toArray()[0] as
+        | Pick<SeatRow, "agent_id" | "room_owner" | "room_chat">
         | undefined);
     if (!seat) return undefined;
     return {
@@ -125,7 +126,9 @@ export class AgentSeats {
       ownerUid: this.#host.uid,
       name: turn?.name ?? "agent",
       byOwner: running && turn.forked === 1,
-      room: { chatId: seat.room_chat, kind: running && isChatKind(turn.kind) ? turn.kind : null },
+      // The room by its object's name (its owner and chat), never a bare chat id: one of this user's own chats could
+      // have the same id (an imported one keeps its id), and would lend the seat its notes.
+      room: { chatId: chatAgentName(seat.room_owner, seat.room_chat), kind: running && isChatKind(turn.kind) ? turn.kind : null },
     };
   }
 

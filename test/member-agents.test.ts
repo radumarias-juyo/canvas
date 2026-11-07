@@ -536,7 +536,7 @@ describe("Member agents: a seat in the member's own object", () => {
     await ana.seats.give(ROOM, "p", turn(2, ANA.uid, { kind: "page" }));
     // Said to be hers by the room, but a hand-off: not her turn.
     await ana.seats.give(ROOM, "p", turn(3, ANA.uid, { hop: 1 }));
-    const inRoom = (kind: string | null) => ({ chatId: ROOM.chatId, kind });
+    const inRoom = (kind: string | null) => ({ chatId: `${ROOM.ownerUid}:${ROOM.chatId}`, kind });
     expect(ana.sessions.configured.map((configured) => configured.memory)).toEqual([
       { agentId: "p", ownerUid: ANA.uid, name: "planner", byOwner: false, room: inRoom("group") },
       { agentId: "p", ownerUid: ANA.uid, name: "planner", byOwner: true, room: inRoom("page") },
