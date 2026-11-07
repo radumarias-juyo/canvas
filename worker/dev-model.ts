@@ -28,6 +28,7 @@ import { textOf } from "../shared/canonical.ts";
 import { modelKey } from "../shared/models.ts";
 import { excerpt } from "../shared/replies.ts";
 import { mcpToolName } from "./agent/mcp.ts";
+import type { Embedder } from "./agents/funnel.ts";
 
 export const SCRIPT_PROVIDER = "script";
 const SCRIPT_ID = "scripted";
@@ -37,6 +38,39 @@ export const SCRIPT_MODEL = modelKey(SCRIPT_PROVIDER, SCRIPT_ID);
 /** Whether this deployment runs on the scripted model: only a local one with DEV_TOOLS on. */
 export function scriptOn(env: { DEV_MODEL?: string; DEV_TOOLS?: string }): boolean {
   return env.DEV_MODEL === "script" && env.DEV_TOOLS === "true";
+}
+
+/** Places in the scripted interest model's vectors. */
+const WORD_DIMS = 256;
+
+/**
+ * On the scripted model, the interest stage of agents that speak up (worker/agents/funnel.ts) reads this in place of
+ * INTEREST_MODEL: a text's vector counts its words of four letters or more, each hashed to one of WORD_DIMS places, so
+ * two texts are as close as the words they share. The same every time, and nothing leaves the Worker.
+ */
+export const scriptEmbedder: Embedder = {
+  id: "script-words",
+  embed: async (texts) => texts.map(wordVector),
+};
+
+function wordVector(text: string): number[] {
+  const vector = new Array<number>(WORD_DIMS).fill(0);
+  for (const [word] of text.toLowerCase().matchAll(/\p{L}{4,}/gu)) {
+    // FNV-1a.
+    let hash = 0x811c9dc5;
+    for (let i = 0; i < word.length; i++) hash = Math.imul(hash ^ word.charCodeAt(i), 0x01000193);
+    vector[(hash >>> 0) % WORD_DIMS]++;
+  }
+  return vector;
+}
+
+/**
+ * How long a chat stays quiet before an agent may speak up in it, on the scripted model with DEV_PAUSE_MS set (the e2e
+ * suite's, so it waits seconds, not minutes); undefined anywhere else: PAUSE_MS.
+ */
+export function scriptPauseMs(env: { DEV_MODEL?: string; DEV_TOOLS?: string; DEV_PAUSE_MS?: string }): number | undefined {
+  const ms = Number(env.DEV_PAUSE_MS || NaN);
+  return scriptOn(env) && Number.isSafeInteger(ms) && ms >= 0 ? ms : undefined;
 }
 
 /** A script's step: a reply, or one tool call. A /tool line that cannot be read is a reply saying why. */

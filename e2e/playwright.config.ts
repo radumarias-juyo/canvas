@@ -49,6 +49,8 @@ export default defineConfig({
         PI_NO_DOCKER: "1",
         DEV_TOOLS: "true",
         DEV_MODEL: "script",
+        // Agents speak up after a pause of seconds, not minutes (worker/dev-model.ts: scriptPauseMs).
+        DEV_PAUSE_MS: "1500",
         PI_STATE_DIR: STATE,
         PI_MCP_SERVERS: JSON.stringify(servers),
         // A fixed key for the local state only: each run starts it afresh.
