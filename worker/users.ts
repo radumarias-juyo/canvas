@@ -80,8 +80,8 @@ export interface RunEnded {
   chatKind: ChatKind;
   /** The report it posted (in a chat or as a notification), if it did: what its followers may read. */
   post?: string;
-  /** When it was posted: an answer its owner wrote after it, before the run ended, answers it. */
-  postedAt?: number;
+  /** When its report was posted (RunDelivery.sentAt). */
+  sentAt?: number;
   /** Its post ends on a question to its owner. */
   asks?: boolean;
 }
@@ -446,8 +446,8 @@ export class UserDirectory extends DurableObject<Env> {
     this.addFeed({
       kind: "run",
       ref: `run:${agent.id}:${run.dueAt}`,
-      // When it asked, if it did: an answer its owner wrote since, while the run went on, answers it (FeedStore.add).
-      at: run.postedAt ?? Date.now(),
+      // When it asked, if it did: an answer written since, while the run went on, answers it (FeedStore.add).
+      at: run.sentAt ?? Date.now(),
       title: `@${agent.name} ${run.asks ? "asks you something" : RUN_FEED_TEXT[run.status]}`,
       ...(text && { text }),
       from,
@@ -551,10 +551,14 @@ export class UserDirectory extends DurableObject<Env> {
     const sql = own
       ? this.ctx.storage.sql.exec("UPDATE chats SET kind = ? WHERE id = ? AND kind IS NOT ?", kind, id, kind)
       : this.ctx.storage.sql.exec("UPDATE shared_chats SET kind = ? WHERE id = ? AND owner_uid = ? AND kind IS NOT ?", kind, id, ownerUid, kind);
-    if (sql.rowsWritten) this.#changed("chats");
-    // Off the record: what the feed kept of it leaves too, whether or not this row had heard it already (another write
-    // may have set the row without dropping them).
-    if (!mayLeave({ what: "feed" }, kind) && this.#feed.forgetChat(id)) this.#changed("feed");
+    if (!sql.rowsWritten) return;
+    this.#changed("chats");
+    this.#kindSet(id, kind);
+  }
+
+  /** Chat `id`'s row now says `kind`: off the record, what the feed kept of it leaves too (wherever a row's kind is set). */
+  #kindSet(id: string, kind: ChatKind | undefined): void {
+    if (kind && !mayLeave({ what: "feed" }, kind) && this.#feed.forgetChat(id)) this.#changed("feed");
   }
 
   /** The chat that discusses one of this user's artifacts (Discuss on its page), or null. */
@@ -740,6 +744,7 @@ export class UserDirectory extends DurableObject<Env> {
       chat.kind ?? null,
     );
     this.#changed("chats");
+    this.#kindSet(chat.id, chat.kind);
   }
 
   /**
@@ -752,8 +757,8 @@ export class UserDirectory extends DurableObject<Env> {
 
   /**
    * Bump a chat. With `tag`, the message tagged this user: the chat is marked so until they look, and the open apps hear
-   * it (MentionNotice), with the chat's title unless the chat is named after this very message (`named`). `wrote`: this
-   * user wrote it (also as the owner's second seat, which is someone else to the sidebar), answering what waited on them.
+   * it (MentionNotice), with the chat's title unless the chat is named after this very message (`named`). `answered`:
+   * this user wrote it (also as the owner's second seat), to these agents: what they asked this user there is answered.
    */
   #touch(id: string, ownerUid: string, title: string, byOther: boolean, tag: Tag | undefined, named: boolean, answered: readonly string[]): void {
     // This object's own clock for the row, as every other write to it uses: a tag's time comes from the chat, and could
@@ -815,8 +820,8 @@ export class UserDirectory extends DurableObject<Env> {
 
   /**
    * Bump a chat to the top. A chat still unnamed is named after the prompt, so the first prompt names it (`named`), until
-   * a model gives it a better title (nameChat). `byOther`: someone other than this user wrote it; `wrote`: this user
-   * did, as themselves or from their second seat (by default, when nobody else did). Returns its title.
+   * a model gives it a better title (nameChat). `byOther`: someone other than this user wrote it; `answered`: the agents
+   * this user's message (as themselves or from their second seat) reached. Returns its title.
    */
   touchChat(id: string, prompt: string, byOther: boolean, tag?: Tag, answered: readonly string[] = []): { title: string; named: boolean } {
     this.#notePreview(id, prompt);
@@ -1077,7 +1082,7 @@ export class UserDirectory extends DurableObject<Env> {
     // Turning it on confirms its guesses (AgentStore.setEnabled clears them).
     if (!("error" in result) && result.enabled) this.resolveFeed(assumptionRef(id));
     // Off, its runs wait on nothing more: no sign-in or answer is needed for a run that will not go on.
-    if (!("error" in result) && !result.enabled && this.#feed.resolveRuns(aboutOf("agent", id, this.ctx.id.name!))) this.#changed("feed");
+    if (!("error" in result) && !result.enabled && this.#feed.resolveAbout(aboutOf("agent", id, this.ctx.id.name!))) this.#changed("feed");
     return result;
   }
 

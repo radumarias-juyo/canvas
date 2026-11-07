@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type MouseEvent } from "react";
-import { feedPath, type FeedItem, type FeedKind, type FeedList, type FollowView } from "../../shared/feed.ts";
+import { feedPath, followKey, type FeedItem, type FeedKind, type FeedList, type FollowView } from "../../shared/feed.ts";
 import { errorMessage } from "../../shared/util.ts";
 import { api } from "../api.ts";
 import { UnreadDot } from "../chat/ChatList.tsx";
@@ -182,9 +182,6 @@ function FeedIcon({ item }: { item: FeedItem }) {
     </span>
   );
 }
-
-/** One follow among the user's: two people's agents can share an id, followed from different chats. */
-const followKey = (follow: FollowView) => `${follow.kind}:${follow.id}:${follow.chatId ?? ""}`;
 
 /** What the user follows: each page and agent, with a way to stop. */
 function Following() {

@@ -3233,7 +3233,7 @@ export class ChatAgent extends DurableObject<Env> {
       ...(run.summary && { summary: run.summary }),
       chatId: this.chatId,
       chatKind: this.kinds.kind(),
-      ...(posted?.text && { post: posted.text, ...(posted.sentAt && { postedAt: posted.sentAt }), ...(asksUser(posted.text) && { asks: true }) }),
+      ...(posted?.text && { post: posted.text, ...(posted.sentAt && { sentAt: posted.sentAt }), ...(asksUser(posted.text) && { asks: true }) }),
     });
     this.ctx.waitUntil(ended.catch((error: unknown) => console.error("feed:", errorMessage(error))));
   }

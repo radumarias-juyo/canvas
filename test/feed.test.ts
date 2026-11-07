@@ -129,8 +129,8 @@ describe("feed: keeping items", () => {
     expect(feed.list({ needsYou: true }).items.map((item) => item.at)).toEqual([T0 + 9]);
     expect(feed.counts()).toEqual({ unread: 1, needsYou: 1 });
     // Turned off, its agent's runs wait on nothing.
-    feed.add({ ...report(20), ref: "run:b1:20", needsYou: true }, null, aboutOf("agent", "b1", "ann"));
-    expect(feed.resolveRuns(aboutOf("agent", "b1", "ann"))).toBe(1);
+    feed.add({ ...report(20), needsYou: true }, null, aboutOf("agent", "b1", "ann"));
+    expect(feed.resolveAbout(aboutOf("agent", "b1", "ann"))).toBe(1);
   });
 
   it("lets a chat, or a page or agent, take its items along when it goes", () => {
