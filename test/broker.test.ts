@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import type { ProxyRequest, ProxyResponse } from "../shared/protocol.ts";
+import type { DeclaredTool, ProxyRequest, ProxyResponse } from "../shared/protocol.ts";
 import { ArtifactBroker } from "../src/artifact/broker.ts";
 
 /** A broker on a fake clock, with a fake port standing in for the iframe's end. */
-function setup(answer: (request: ProxyRequest, now: number) => ProxyResponse) {
+function setup(answer: (request: ProxyRequest, now: number) => ProxyResponse, tools: DeclaredTool[] = []) {
   let now = 1_000_000;
   const timers: { at: number; fn: () => void; id: number }[] = [];
   let nextTimer = 0;
@@ -19,7 +19,7 @@ function setup(answer: (request: ProxyRequest, now: number) => ProxyResponse) {
       requests.push(request);
       return answer(request, now);
     },
-    describe: async () => [],
+    describe: async () => tools,
     manifest: { mcp: { servers: [{ server: "S", tools: ["t"] }] } },
     now: () => now,
     random: () => 0,
@@ -119,6 +119,18 @@ describe("ArtifactBroker watches", () => {
     expect(t.requests).toHaveLength(2);
   });
 
+  it("waits for the tab to be visible before a background page's first fetch", async () => {
+    const t = setup((_, now) => fresh(now));
+    t.broker.setHidden(true);
+    t.send({ type: "watch", watchId: 1, server: "S", tool: "t", input: {}, refetchInterval: 30_000 });
+    await t.advance(60_000);
+    expect(t.requests).toHaveLength(0);
+    t.broker.setHidden(false);
+    await t.advance(0);
+    expect(t.requests).toHaveLength(1);
+    expect(t.events(1)).toHaveLength(1);
+  });
+
   it("tells a later watch of a denied call why, without asking again", async () => {
     const t = setup(() => ({ ok: false, error: { code: "not_granted", message: "author only" } }));
     t.send({ type: "watch", watchId: 1, server: "S", tool: "t", input: {}, refetchInterval: 30_000 });
@@ -168,6 +180,35 @@ describe("ArtifactBroker calls", () => {
     expect(t.requests[0]).toMatchObject({ mode: "call", staleMs: 0 });
   });
 
+  it("holds reads while the tab is hidden and sends identical ones as one when it returns", async () => {
+    const readOnly: DeclaredTool = { server: "S", name: "t", description: "", annotations: { readOnlyHint: true } };
+    const t = setup((_, now) => fresh(now), [readOnly]);
+    t.broker.setHidden(true);
+    t.send({ type: "request", id: 1, method: "call", params: { server: "S", tool: "t", input: { x: 1 } } });
+    t.send({ type: "request", id: 2, method: "call", params: { server: "S", tool: "t", input: { x: 1 } } });
+    t.send({ type: "request", id: 3, method: "call", params: { server: "S", tool: "t", input: { x: 1 }, cache: { staleTime: 60_000 } } });
+    await t.flush();
+    expect(t.requests).toHaveLength(0);
+    t.broker.setHidden(false);
+    await t.flush();
+    expect(t.requests).toHaveLength(2);
+    expect(t.requests).toEqual(
+      expect.arrayContaining([
+        { version: 1, mode: "call", server: "S", tool: "t", input: { x: 1 }, staleMs: 0 },
+        { version: 1, mode: "read", server: "S", tool: "t", input: { x: 1 }, staleMs: 60_000 },
+      ]),
+    );
+    expect(t.posted.filter((m) => m.type === "reply" && m.ok).map((m) => m.id).sort()).toEqual([1, 2, 3]);
+  });
+
+  it("sends a call to a tool that is not read-only at once, even while hidden", async () => {
+    const t = setup((_, now) => fresh(now), [{ server: "S", name: "t", description: "" }]);
+    t.broker.setHidden(true);
+    t.send({ type: "request", id: 1, method: "call", params: { server: "S", tool: "t", input: {} } });
+    await t.flush();
+    expect(t.requests).toHaveLength(1);
+  });
+
   it("describes a declared tool withheld from this viewer as not granted, and an undeclared one as not in the manifest", async () => {
     // describe() lists nothing: the Worker leaves out a server this viewer may not load.
     const t = setup((_, now) => fresh(now));
@@ -177,5 +218,68 @@ describe("ArtifactBroker calls", () => {
     const replies = t.posted.filter((m) => m.type === "reply");
     expect(replies.find((m) => m.id === 1).error.code).toBe("not_granted");
     expect(replies.find((m) => m.id === 2).error.code).toBe("not_in_manifest");
+  });
+});
+
+describe("ArtifactBroker saved values and model", () => {
+  it("passes storage and model calls to the Worker and answers with what came back", async () => {
+    const sent: unknown[] = [];
+    const posted: any[] = [];
+    const broker = new ArtifactBroker({
+      artifactId: "abc12345",
+      version: 1,
+      cacheNamespace: "ann",
+      transport: async () => ({ ok: false, error: { code: "upstream_error", message: "unused" } }),
+      describe: async () => [],
+      manifest: {},
+      pageStorage: async (request) => (sent.push(request), { ok: true, values: { layout: "[]" }, isAuthor: false }),
+      pageAi: async (request) => (sent.push(request), { ok: false, error: { code: "limit_reached", message: "used up" } }),
+    });
+    const port = { onmessage: null as ((e: { data: unknown }) => void) | null, postMessage: (m: unknown) => posted.push(m), close() {} };
+    broker.connect(port as unknown as MessagePort);
+    port.onmessage!({ data: { type: "request", id: 1, method: "storage", params: { op: "load" } } });
+    port.onmessage!({ data: { type: "request", id: 2, method: "ai", params: { messages: [{ role: "user", content: "hi" }] } } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sent).toEqual([{ op: "load" }, { messages: [{ role: "user", content: "hi" }] }]);
+    expect(posted).toEqual([
+      { type: "reply", id: 1, ok: true, value: { values: { layout: "[]" }, isAuthor: false } },
+      { type: "reply", id: 2, ok: false, error: { code: "limit_reached", message: "used up" } },
+    ]);
+  });
+
+  it("answers unavailable without a Worker to send them to", async () => {
+    const posted: any[] = [];
+    const broker = new ArtifactBroker({ artifactId: "abc12345", version: 1, cacheNamespace: "ann", transport: async () => fresh(0), describe: async () => [], manifest: {} });
+    const port = { onmessage: null as ((e: { data: unknown }) => void) | null, postMessage: (m: unknown) => posted.push(m), close() {} };
+    broker.connect(port as unknown as MessagePort);
+    port.onmessage!({ data: { type: "request", id: 1, method: "storage", params: { op: "load" } } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(posted[0]).toMatchObject({ id: 1, ok: false, error: { code: "unavailable" } });
+  });
+
+  it("still takes the page's last saved values for a moment after it closed, and nothing else", async () => {
+    const sent: unknown[] = [];
+    const timers: (() => void)[] = [];
+    let closed = false;
+    const broker = new ArtifactBroker({
+      artifactId: "abc12345",
+      version: 1,
+      cacheNamespace: "ann",
+      transport: async (request) => (sent.push(request), fresh(0)),
+      describe: async () => [],
+      manifest: {},
+      pageStorage: async (request) => (sent.push(request), { ok: true }),
+      setTimer: (fn) => timers.push(fn),
+    });
+    const port = { onmessage: null as ((e: { data: unknown }) => void) | null, postMessage() {}, close: () => (closed = true) };
+    broker.connect(port as unknown as MessagePort);
+    broker.close();
+    expect(closed).toBe(false);
+    port.onmessage!({ data: { type: "request", id: 1, method: "storage", params: { op: "write", changes: { a: "1" } } } });
+    port.onmessage!({ data: { type: "request", id: 2, method: "call", params: { server: "S", tool: "t", input: {} } } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sent).toEqual([{ op: "write", changes: { a: "1" } }]);
+    for (const fn of timers) fn();
+    expect(closed).toBe(true);
   });
 });

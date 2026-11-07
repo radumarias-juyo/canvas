@@ -11,7 +11,8 @@ export function canonicalJson(value: unknown): string {
 function sortKeys(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sortKeys);
   if (value !== null && typeof value === "object") {
-    const out: Record<string, unknown> = {};
+    // No prototype: a "__proto__" key from parsed JSON stays an ordinary key, and in the cache key.
+    const out: Record<string, unknown> = Object.create(null);
     for (const key of Object.keys(value).sort()) {
       out[key] = sortKeys((value as Record<string, unknown>)[key]);
     }
@@ -40,6 +41,11 @@ export function derivePayload(result: { content: { type: string; text?: string }
 /** The text of a result's first text block, if it has one. */
 export function firstText(content: readonly { type: string; text?: string }[]): string | undefined {
   return content.find((block) => block.type === "text")?.text;
+}
+
+/** The text of all of a message's text blocks, joined by `separator`. */
+export function textOf(content: readonly { type: string; text?: string }[], separator = "\n"): string {
+  return content.flatMap((block) => (block.type === "text" && block.text !== undefined ? [block.text] : [])).join(separator);
 }
 
 /** A result as served from a cache: stamped with when it was produced and whether a fresh one is on its way. */

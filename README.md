@@ -28,6 +28,7 @@ viewer page: ArtifactBroker (src/artifact/broker.ts)
   │  caches, groups identical watches, pauses while the tab is hidden, polls on the server's hint
   ▼  POST /api/artifacts/:id/mcp  {version, mode, server, tool, input, staleMs}
 Worker: finds the artifact's chat
+  ├─ a read the chat already allowed, with a young enough result? served here, the chat stays asleep
   ▼  RPC
 ChatAgent Durable Object (worker/chat-agent.ts)
   ├─ is (server, tool) in this version's manifest?      no → not_in_manifest
@@ -54,9 +55,18 @@ CoinGecko needs no sign-in. A server can also require each user's own; see [MCP 
 - The viewer asks again 0.25–1.25 s after that time, so it shows a new upstream result within about a second of the
   Durable Object fetching it. That is as fresh as WebSocket push would be, without the sockets.
 - `refetchInterval` has a 30 s floor, as at Claude.
-- Each server's results are cached per viewer by default (`cacheScope: "viewer"` in `worker/mcp/servers.ts`, the way
-  Claude keeps viewers apart). Switch a keyless server to `"shared"` to let every viewer reuse one upstream call per
-  interval.
+- Pages call as their author, so every viewer gets the same answer, and by default they share one cached result per
+  call (`cacheScope` in `worker/mcp/servers.ts`; `"viewer"` keeps each viewer's results apart).
+- The Worker keeps those shared results too (`worker/artifacts/page-calls.ts`), keyed by chat, server, tool and input,
+  so a read that is young enough for the page (its `staleMs`) is answered without waking the chat's
+  Durable Object, and identical reads that miss share one call to it. It serves a result only to a page version the
+  chat allowed that read in the last minute, never for `auth: "oauth"` servers (they load only for people in the
+  chat, which only the chat can check), and never for writes or uncached `callTool`s. Each Worker isolate keeps its
+  own copy (8 MB at most), so 1,000 people watching one dashboard cost about one chat call per interval per isolate,
+  not 1,000. (The Workers Cache API would share across a data center, but it is not available on workers.dev or
+  behind Cloudflare Access.)
+- While the viewer's tab is hidden, watches stop polling (a page opened in a background tab waits for its first
+  fetch too) and `callTool`s of read-only tools wait; identical waiting calls go out as one when the tab returns.
 - A chat keeps at most 16 MB of cached results. Expired entries go first, then the oldest; a single result larger than
   that is passed on but not cached.
 - Each viewer may make 120 calls a minute through the pages of one chat, counted by the Workers rate-limit binding `PAGE_CALLS`
@@ -121,8 +131,8 @@ Where things live and who can use them:
   are still the ones that chat used.
 - **Pages that call such a server load only for people in their author's chat** (the author, and anyone they invited
   into it; see [Shared chats](#shared-chats)). A page calls through its author's chat, so it would otherwise show the
-  author's data to anyone with the link. Other viewers, signed in or not, get `not_granted`, and the page's tool list
-  leaves that server's tools out for them. Claude's artifacts instead use each viewer's own connectors.
+  author's data to anyone with the link. Other viewers get `not_granted`, and the page's tool list leaves that server's
+  tools out for them. Claude's artifacts instead use each viewer's own connectors.
 - **Removing a server** from the list also removes everyone's stored sign-in for it, tokens included. This happens the
   next time each user's directory loads.
 - **Signing out:** a new sign-in replaces your tokens once it finishes; starting one (anyone can link to the sign-in route) changes nothing until then. To end the portal's own session, sign out on the portal's home
@@ -170,12 +180,115 @@ await mcp.invalidate("CoinGecko");                                    // refetch
 
 [`examples/crypto-dashboard.html`](examples/crypto-dashboard.html) is a complete page written against it.
 
+### Saved layouts and typed edits
+
+A page can also keep what each viewer changes, and ask a small model about what they type into it:
+
+```js
+const store = await pi.use("storage");      // this viewer's values over the author's; sync reads after this
+const layout = JSON.parse(store.getItem("layout") ?? "null") ?? DEFAULT;
+store.setItem("layout", JSON.stringify(next));   // saved in the background
+await store.reset();                         // back to the author's layout
+
+const ai = await pi.use("ai");
+const { json } = await ai.complete({ system: "Cards: … Reply with {order, hidden}.", messages: [{ role: "user", content: typed }], json: true });
+```
+
+- **Storage** is kept per viewer and page in the viewer's `UserDirectory` (`page_values`). The author's own values are
+  everyone's defaults: a viewer sees the author's layout until they change it, and a key they remove stays removed for
+  them. Nobody but the author changes the defaults, and everyone who opens the page reads them, so pages must not save
+  data from MCP calls there. The frame's opaque origin has no `localStorage`; the runtime puts the same store in its
+  place, so libraries that save their state there keep it. Limits: 500 keys and 500 000 characters per viewer and page.
+- **The model** (`PAGE_AI_MODEL`, by default gpt-oss-120b on Workers AI, then Gemini Flash-Lite) answers one request
+  at a time, with no tools. The person typing pays: each call counts against their own daily allowance
+  (`PAGE_AI_DAILY_USD`, kept in their `UserDirectory`), 20 calls a minute at most (`PAGE_AI`).
+
+| The author's layout, everyone's default | Another viewer's own order, over it |
+| --- | --- |
+| ![The author moved Active users first and hid Churn](docs/media/page-storage/author-layout.png) | ![Another viewer moved Costs first; the author's layout is unchanged](docs/media/page-storage/viewer-layout.png) |
+
+## Checking a page before it is published
+
+The agent checks every page in a headless browser (Cloudflare Browser Rendering, the `BROWSER` binding) before it
+becomes a version, so the versions a user sees are pages that rendered without errors, and fixes along the way use up
+none. The agent writes a page with `artifact_write`, which saves it as a draft (below) and returns its id; it then checks
+and publishes that draft by its id, so the page is written out once. `artifact_check` (`worker/artifacts/check.ts`)
+renders the draft as a viewer would: in a sandboxed frame under the
+page's CSP, with its live calls answered by the chat's MCP connections. It returns:
+
+- **errors:** uncaught exceptions and unhandled rejections (their lines mapped back to the page's own), `console.error`
+  calls, loads the CSP blocked or that failed, live calls the page got wrong (`not_in_manifest`, `bad_request`,
+  `tool_error`), a script error the page caught and only showed on screen ("L.map is not a function"), a page that shows
+  nothing, and failed tests;
+- **warnings:** `console.warn`, calls that failed for reasons outside the page (sign-in, an upstream outage, limits),
+  and text such as `NaN` or `undefined` on screen;
+- how each live call went, the page's visible text, and a **screenshot**, which the model looks at (and the chat's step
+  panel shows as a thumbnail);
+- the results of **tests** the agent passes: short scripts run in the page once its data arrived, such as "the price
+  table has rows".
+
+A check that found no errors also gets a **look at its screenshot** (`worker/artifacts/look.ts`): a vision classifier on
+Workers AI (TypeSafe's Jev by default, `CHECK_LOOK_MODEL`, run through the `AI` binding with no key) answers whether the
+page shows its content, or looks blank, shows an error, is stuck loading or is broken. It catches what only shows in the
+picture, such as text the same colour as its background or a chart that drew nothing. A sure "blank", or a sure "error"
+when no live call failed outside the page, is an error; anything else it sees is a warning. Since a model can be wrong,
+it stops a draft only once: checked again unchanged, after the agent looked at the screenshot, its finding is a warning.
+The look answers without writing text (input priced only) and its spend counts in the chat's cost panel; when it fails
+or takes over 6 s, the check goes on without it. An empty `CHECK_LOOK_MODEL` turns it off.
+
+A page's first check also gets a **code review** (`worker/artifacts/review.ts`), like the review pass run on the app's
+own code: a small, cheap model (`REVIEW_MODEL`, by default gpt-oss-120b on Workers AI, then Gemini Flash-Lite) reads the
+page's source, with line numbers, beside the browser check, so it adds no time unless it is the slower of the two. It
+looks for bugs, security holes (untrusted text from MCP calls, storage or `pi.use("ai")` put into `innerHTML` unescaped,
+MCP data saved to storage, where every viewer reads the author's values), work that never ends (polling without an end,
+`pi.use("ai")` on load or on a timer) and simpler code. What it says to fix is an error, so the agent fixes it with
+edits before publishing; a suggestion is a warning. The review is bounded to one round: a draft edited from a reviewed
+one is not reviewed again, and a draft it stopped passes when checked again unchanged, since the reviewer can be wrong.
+When it fails or takes over 45 s, the check goes on without it. The chat shows it as a step of its own under the check,
+and its spend in the cost panel ("Page code reviews"). An empty `REVIEW_MODEL` turns it off.
+
+A draft that passes is published by its `draft_id`. A publish without an `artifact_id` goes to the artifact the draft was
+written for, else to the chat's artifact whose title matches (`new_artifact: true` makes a separate one), so a fix the
+model publishes without the id never turns into a second artifact stuck at version 1. `artifact_publish` takes only a
+draft that passed its check.
+
+Until a page passes, it is a **draft**, not a version: every page the agent writes is saved as one of its chat's drafts
+(`worker/storage/drafts.ts`), so no attempt is lost and the Git repo only ever gets pages that passed. Drafts live in
+the chat owner's R2 folder (`users/<uid>/drafts/<chatId>/`), encrypted with the owner's key like their files but apart
+from them, keyed by a hash of the page and what it declares, so the same page is one draft. A chat keeps its newest 20;
+publishing a page drops its draft, and deleting the chat deletes them all. To fix a page, or to change a published one,
+the agent sends `artifact_write` a `draft_id` (or the `artifact_id`, for its latest version or `version`) and `edits` (text replaced
+exactly once each), so a fix costs the model only what changes, not the whole page again. Right after a check found
+errors, `artifact_write` refuses the first whole new page, telling the model to fix the draft by edits. The agent lists drafts and
+gets one back with `artifact_drafts` (an earlier attempt, or the page it was working on after the chat restarted).
+
+A check has hard limits, so it never holds a run: the browser gets 30 s to start, the whole check 60 s (loading and
+settling at most 15 s, the agent's tests 20 s together), and a page that holds the browser past that, such as one stuck
+in a loop, gets an error for it while its browser is dropped. Stopping the chat ends a running check. After 5 checks in
+a row with errors the agent stops fixing and tells the user what still fails; their next message lets it go on.
+
+During a check only read-only tools run, from results up to two minutes old; a write tool answers `not_granted`. The
+browser may reach only the page's script hosts and Google Fonts. When no browser can check a page (none bound, or one
+that fails to start), the page is not published: it stays a draft, and the agent says so. Only local development
+(`AUTH_MODE=demo`) publishes it unchecked. `pnpm dev` runs a local Chrome, which miniflare downloads.
+
 ## Your files
 
 Upload from the sidebar (several files, or a whole folder) or drop files and folders anywhere on the app. Uploads land
 in `uploads/`, a folder keeping its layout (`reports/q3/sales.csv` is `uploads/reports/q3/sales.csv`); files and folders
 whose names start with a dot (`.git`, `.DS_Store`) are left out of a folder. A file may be up to 10 MB; the app splits a
 big pick into requests of at most 50 files and 40 MB (`shared/uploads.ts`, `worker/files-routes.ts`).
+
+Your files sit in a panel at the bottom of the sidebar that opens and closes (artifacts and the skills link sit just above it, and only chats scroll above them; a long artifact list scrolls on its own). An image's name
+opens it in a new tab, and every file and folder has a download button. A folder
+downloads as a zip named after it with the folder itself at its root (`q3.zip` holds `q3/sales.csv`, `q3/2024/…`),
+streamed by the Worker and stored uncompressed (`worker/zip.ts`), up to 1 GB and 2,000 files. Files are served with
+`nosniff`, a sandboxing CSP and `Cross-Origin-Resource-Policy: same-origin`; only raster images and SVG open in the
+browser (an SVG's scripts stay off under the sandbox), anything else only downloads.
+
+The panel's search filters the tree by path. **Select** picks files and folders to download together: one zip named
+after the folder holding them all, with that folder at its root (`files.zip` with the top folders when they share
+none), posted as a form into a hidden frame (`POST /api/files/zip/`), which shows the Worker's reason when it refuses.
 
 Before each message, the agent's prompt gets a list of your files, newest first (at most 150, then a count per folder),
 so "the sales file from q3" maps to its path without a tool call. `files_read`, `run_python` and `run_bash` also take a
@@ -204,7 +317,8 @@ opens quickly.
 ## The sandbox
 
 `run_python` and `run_bash` run in one Linux container per chat (`worker/sandbox.ts`, the Sandbox SDK's container
-in a Durable Object). It runs Debian with Python 3.13, pandas, numpy and the usual command-line tools, and has no
+in a Durable Object). It runs Debian with Python 3.13, pandas, numpy, the libraries skills' scripts commonly import (pypdf, pdfplumber,
+reportlab, openpyxl, python-docx, python-pptx, pillow, matplotlib, pyyaml, jinja2, beautifulsoup4, lxml) and the usual command-line tools, and has no
 internet. Each run is limited to 60 seconds. Files move like this:
 
 - **In:** the agent names files from the user's files: paths, a file's name or the end of its path when only one file
@@ -213,7 +327,9 @@ internet. Each run is limited to 60 seconds. Files move like this:
   but without the leading `uploads/` (`uploads/q3/sales.csv` is `./files/q3/sales.csv`). Two files that would land on
   one path (`uploads/a.csv` and `a.csv`) refuse the run. One run takes at most 200 files and 25 MB (they reach the container in one RPC call, capped at 32 MiB).
 - **Out:** after the run, whatever the script wrote to `./out/` (top level only) is read back from the container and
-  saved through the same `UserFiles` as `out/<name>`, encrypted with the user's key.
+  saved through the same `UserFiles` as `out/<chatId>/<name>`, encrypted with the user's key. Each chat saves to its
+  own folder, so two chats of one user running at once never overwrite each other's outputs; the agent is told to keep
+  the files it writes with `files_write` there too.
 - **Between runs:** `./files` and `./out` start empty each run. Anything else in the working directory stays until
   the container stops, 10 minutes after the last run.
 
@@ -233,6 +349,24 @@ a request fits one, the agent calls `activate_skill` and gets the rest. Skills u
 - **Your own skills** are kept per user in `UserDirectory` and apply in all your chats. Write them, import a `SKILL.md`,
   download one, turn them on and off or delete them under **Skills** in the sidebar (`/skills`, API under
   `/api/skills`, in `worker/skills-routes.ts`). A change applies from the next message in any chat.
+- **Skill packages**: **Import package** takes a zip (`.zip` or `.skill`) of a skill's folder, its `SKILL.md` and
+  the files beside it (`POST /api/skills/import`, `application/zip`; at most 10 MB, 300 files, 2 MB each). Nothing in
+  it runs on import. The files are kept encrypted in your R2 folder (`users/<uid>/skills/<name>/<set>/`,
+  `worker/storage/skill-files.ts`), a new set per import, binary ones (images, fonts…) marked as such. The agent reads
+  them with `read_skill_resource`, and a page uses one by reference: `<script src="skill:<name>/<path>"></script>`,
+  `<link rel="stylesheet" href="skill:…">`, or as another attribute's whole value (`<img src="skill:…">`, an icon's
+  `href`…). The draft keeps the
+  reference and pins the set; the check and the publish put the file in its place (`shared/skill-files.ts`): a
+  script's or stylesheet's text, any other file as a `data:` URL, and the fonts and images a skill stylesheet names by
+  relative `url()` as `data:` URLs too. So a version holds everything it runs and never changes when the skill does,
+  and what was checked is what is published. Reading a published page back (`artifact_read`, edits, diffs) shows the
+  references again. A skill's scripts run in the sandbox: `run_python` and `run_bash` take `skills: ["<name>"]`,
+  which copies the skill's folder (its `SKILL.md` and files) to `./skills/<name>/`; `/mnt/skills/{public,user}/`,
+  `/mnt/user-data/outputs` and `/mnt/user-data/uploads` point at `./skills/`, `./out/` and `./files/`, so scripts
+  written for those paths run as they are. A Claude Code skill's
+  `allowed-tools` are read as written ("Bash(git:*)" is `Bash`), and the agent is told which tool here does each one's
+  work (`Bash` → `run_bash`, `Read` → `files_read`, `Write`/`Edit` → `files_write`, `Glob`/`Grep` → `files_list`). A skill written for another host (copy `dist/`, supporting files,
+  `/mnt/skills/…`, an outputs folder) works unchanged: the system prompt tells the agent what each means here.
 - **The agent can propose a skill** with `skill_propose` when you ask it to ("save this as a skill"). A proposal is
   saved **off** and can replace only another proposal that is still off. Text from a tool result or a file therefore
   never becomes standing instructions in every chat until you have read it and turned it on.
@@ -240,12 +374,104 @@ a request fits one, the agent calls `activate_skill` and gets the rest. Skills u
   `/api/skills/:name`), and the list labels each skill's source. A new skill cannot take a built-in's name, but a
   built-in added later can take one of yours: then the agent uses yours while it is on, and the list says so.
 - The tool list is guidance shown on activation, not a sandbox: every tool of the chat stays callable.
+- **Only the skills a chat needs are listed.** Before each message that starts a run, a System One classifier on
+  Workers AI (`SKILLS_MODEL`, TypeSafe's Jev by default, through the AI binding) answers, for each enabled skill the
+  chat does not list yet, whether the message needs it (one yes-or-no question per skill, from the message, the names
+  of its attachments and the end of the conversation). Only those join the chat's list
+  (`worker/agent/skill-pick.ts`). The list only grows: it is part of the system prompt and the tools, and the
+  provider's prompt cache keeps the conversation only while they stay the same, so a chat the agent answered before
+  the skills were picked keeps every skill it was shown. When the classifier fails or runs out
+  of time, every skill it was asked about is listed, as before; an empty `SKILLS_MODEL` lists every enabled skill. Its
+  calls count in the chat's AI cost ("Skill picks").
+
+## Keeping model calls small
+
+Every model call sends the whole conversation again, so most of what a chat costs is its context, read from the
+provider's prompt cache or written to it again:
+
+- **Context budget.** A conversation is summarized once it passes `CONTEXT_BUDGET` (160K tokens, `shared/models.ts`),
+  whatever the model's window; the summary starts in the background 32K before that. With 1M-token windows, long
+  page builds otherwise reached 400-740K tokens a call. The context meter fills up to that point.
+- **Warm cache.** Claude keeps a prompt cache for 5 minutes after its last use; a later call writes the whole
+  conversation again. `worker/cache-warmer.ts` sends a chat's last large Claude request again with `max_tokens: 0`
+  every 4.5 minutes, until 15 minutes after its last call, which keeps the cache at the price of a cache read.
+- **Smaller tool results.** MCP results go to the model as compact JSON, check screenshots at 1,280 px at most,
+  `run_python`/`run_bash` output by its last 10,000 characters, and `artifact_read`/`artifact_drafts` can return
+  part of a page (`part`: a line range or a piece of text).
+
+## System prompts
+
+You can add your own instructions to the agent's built-in system prompt, which they never replace:
+
+- **Your own system prompt** (account menu, **System prompt**) applies in all your chats, the ones you share
+  included. It is kept in your `UserDirectory` (`GET`/`PUT /api/me/system-prompt`), read again before every message.
+- **A chat's system prompt** (the pen icon in the chat's header) adds to yours for that chat, and wins where the two
+  disagree. Only the owner changes it; the people the chat is shared with can read it there
+  (`GET`/`PUT /api/chats/:id/system-prompt`). It applies from the agent's next model request, a run going included.
+- Both go after the built-in sections (`worker/agent/prompt.ts`, section `user_system_prompt`), up to 8,000 characters
+  each, and the built-in rules for pages win over them: the page check and sandbox enforce those anyway.
+- The agent's system prompt stays on the server: the chat's socket sends its `pi.system` entries without their
+  sections and tools, so a member's browser never gets the owner's prompts, file list or MCP tools. That is hygiene,
+  not a boundary: the agent acts as the owner and may tell anyone in the chat what it was told.
+
+## Export and import
+
+Everything you have can leave as one zip and come back, on the same deployment or another (account menu, **Export
+data** and **Import data**). The browser builds the zip a piece at a time and reads one back the same way
+(`src/data/`, routes in `worker/data-routes.ts`, format in `shared/data-export.ts`), so no request carries more than one
+piece and the zip is not bound by what one Worker request may hold.
+
+- **In it:** your own chats (each chat object's conversation, reactions and settings, `worker/chat-dump.ts`, and the
+  pages its agent saved and did not publish), your artifacts with every version, your files, your skills with the files
+  of those imported as packages, your system prompt, model pick and built-in skills turned off, and what pages saved for
+  you (`pi.use("storage")`).
+- **Not in it:** your sign-ins to MCP servers (tokens, which belong to the deployment), what pages' model calls cost you,
+  the chats others shared with you (listed by name only: they are their owners'), and the people in your shared chats
+  and their invites: their ids mean nothing on another deployment, so an imported chat has only you in it. Their
+  messages stay in its conversation, under their names. Work still running in a chat (a run, a queued message) is left
+  out too, so nothing runs on import as you without being asked.
+- **Ids:** your user id differs between deployments, so an import puts yours in place of the export's wherever a chat
+  stores it. Chats keep their ids. An artifact keeps its id unless someone else's artifact has it on this deployment;
+  then it gets one derived from your id and its old one, the same on every try, and chats that name it are changed to
+  match.
+- **Never over what is here:** a chat, artifact version, file or skill you have already is skipped, and settings are set
+  only where you have none. An import that stopped part way is run again with the same zip and goes on: a chat becomes
+  yours only once all of it is in.
+- **Limits:** a plain zip (up to 4 GB and 65,535 files); one file of at most 95 MB per import request (Cloudflare takes
+  100 MB in one).
 
 ## Shared chats
 
 A chat's owner can invite other people to build artifacts with them in the same chat. Pi Durable is multiplayer for
 people: many people share one conversation with one agent, and their messages queue in its inbox while it works.
 
+- **The agent answers when called:** the agent is named `pi`. In a chat with members, only a message with `@pi` in it
+  (typed, or picked first in the "@" list), or a reply to one of pi's answers, is a prompt; any other message is people
+  talking among themselves. Such an aside is two passive pi writes: the `chat.message` entry everyone sees, with
+  `aside: true` and no model message, lands at once even mid-run; a `chat.aside` entry carries it to the model as a
+  user message, which pi places at once when idle, or at its next step while it works. So the model reads the talk as
+  context when it is next called, and a run starts only for `@pi`. A message that called pi shows 👀 once its run
+  picked it up, and pi's answers carry its name. A chat nobody shares works as before: every message is a prompt.
+- **Spotting messages meant for pi:** an aside may still be for pi ("pi, can you…"). Once it is placed, a System One
+  classifier on Workers AI (`CALL_HINT_MODEL`, TypeSafe's Jev by default, through the AI binding with no provider key)
+  reads it with the end of the conversation and says how likely it is meant for pi (`worker/agent/call-hint.ts`). At
+  0.7 or more, only its author's windows are told (`callHint`), and show "Meant for pi? Ask pi" under it: Ask pi
+  replies to the message with `@pi`, which calls pi like any reply. The message itself stays an aside, nothing runs on
+  its own, and a failed or slow call (past 4 s) shows nothing. Each call is in the chat's AI cost ("Spotting asks for
+  pi"). The hint lives only in the open windows, and goes once pi has run since (it read the message then).
+- **Tagging people:** "@" also offers the others in the chat; a pick puts `@name` in the text and sends the person's
+  uid with the message, which the chat keeps only for someone in it. The tagged person sees the tag in their colour
+  and the message marked; their sidebar shows "@" on the chat until they open it, and every app window they have open
+  shows a notice that opens the chat (none in the chat they are looking at). While the app is in the background, the
+  browser shows a notification too, once they allowed it with the bell in a shared chat's header (the notification's
+  tag keeps it to one across windows). A tag is no call of pi. The notice goes over the sidebar's socket
+  (`MentionNotice`, sent with the chat's bump: a `Tag` on `UserDirectory.touchChat`/`touchSharedChat`); with the app closed nothing is pushed, there is no service worker.
+- **Filtering chats:** once a chat is shared, the sidebar's chat list can show all chats, private ones (the user's own,
+  nobody else in them), or shared ones: both, those the user shared, or those shared with them. The chat open now
+  always shows. The owner's directory learns which of their chats have members from the chat (`setChatShared`), on
+  joins and leaves (a chat shared before that tells it once, when anyone in it next opens it).
+- **Replies and copying:** any message can be answered (the reply quotes it, and the model reads `[Replying to name:
+  "…"]`) or copied, as rich text and as plain text (Markdown for pi's answers).
 - **Invite:** **Share** in the chat header makes a single-use link, `/join/<token>`, valid for 7 days. The token names
   the chat and carries a random secret; the chat keeps only the secret's SHA-256 hash, so the link is shown once.
   Whoever opens it, signed in, clicks **Join** and finds the chat in their sidebar; someone already in the chat (the
@@ -264,15 +490,25 @@ people: many people share one conversation with one agent, and their messages qu
   owner trying their own, or a member in another window or on another device) shows as "joined again from another
   window or device"; a reload shows nothing. It is a passive pi write: placed at once, even mid-run, and the
   model never reads it.
-- **Who is here now:** the header lists the others in the chat, with a dot by whoever has it open right now and
-  "(2 windows)" when someone has it open more than once; "Open in 2 of your windows" counts your own. Each open
-  window is one chat socket, so the chat object counts them and tells every socket when one opens or closes.
+- **Who is here now:** the header lists everyone in the chat, the owner and the members alike, each with their colour
+  and a green dot while they have it open ("×2" when in two windows). Each open window is one chat socket, so the chat
+  object counts them and tells every socket when one opens or closes. Each person's messages have their colour, the
+  same in every window (by their place in the chat), and pi's have the accent colour.
+- **What members see of the owner's:** the "@" list offers a member only the chat's files (attached in it, saved by
+  its agent, or in its `out/<chatId>/` folder) and artifacts, and their own files; one of their own they name is
+  copied into the owner's `uploads/` and attached to the message, as the agent works with the owner's files. The
+  sidebar adds the chat's files and artifacts beside the member's own while the chat is open; the chat's files are
+  served through `GET /api/chats/:id/files/<path>`, which the chat object checks. A member's message attaches only what
+  they uploaded through the chat (which the chat object notes) or the chat's files; what a member uploads or brings
+  goes beside an owner's file of the same name, never over it. The agent itself still reaches all
+  of the owner's files, as the Share panel says.
 - **Queued messages:** a message sent while the agent works waits in pi's inbox (`pi.inbox`). pi's event stream
   reports each change to the inbox by ids only, so the chat adds the waiting messages, read from the inbox, to that
   batch. Everyone sees them at once, faded and marked "Queued" (with "2 of 3" when more than one waits), below what
   the agent is doing. Each leaves the queue for the transcript
   when its turn comes. A failed run goes on to the messages behind it (`afterFailedRun: "continue"`), so one person's
-  failed request does not hold the others'. **Stop** withdraws the queued messages too, as pi's abort does.
+  failed request does not hold the others'. **Stop** withdraws the queued messages too, as pi's abort does, and the
+  others see who stopped pi.
 - **Access:** the Worker finds the chat through the user's index (their own chats and the ones shared with them), and
   the chat object checks membership again on every socket and prompt, and on page calls to servers that sign in each
   user. Removing someone tells their sockets so and closes them at once (close code 4403), and the app stops reconnecting;
@@ -286,8 +522,22 @@ people: many people share one conversation with one agent, and their messages qu
 Each chat picks its model and effort above the message box. The picker (`src/chat/ModelPicker.tsx`, choices from
 `GET /api/models`, built in `worker/models.ts`) lists:
 
-- **Anthropic and OpenAI:** every chat model in pi-ai's AI Gateway catalog for the two, newest first. Calls go through
-  the `pi-artifacts` AI Gateway, which holds the keys (Provider Keys, BYOK) or bills them (unified billing).
+- **Every provider the `pi-artifacts` AI Gateway holds a key for** (Provider Keys, BYOK), among Anthropic, OpenAI,
+  Google AI Studio, xAI, Mistral, DeepSeek, Groq, Cerebras, Cohere, OpenRouter and Hugging Face, with the models
+  each one's own list offers that can chat and call tools. `worker/gateway-models.ts` asks each provider's list through
+  the gateway (the gateway adds its key, so the Worker holds none and needs no Cloudflare token): a list that comes
+  back means a key; a refusal (401/403) means none. The answer is kept in R2 (`models/discovered.json`) for every
+  isolate and chat, asked again in the background once it is an hour old, and by hand from the picker's refresh button
+  (at most once a minute); a list that cannot be read keeps its last models. A model AI Gateway's own catalog has
+  (most Claude and GPT models) runs through it as before; any other runs on the provider's own path through the
+  gateway, as `<provider>/<id>` (`groq/llama-3.3-70b-versatile`), with pi-ai's metadata where pi-ai knows the model
+  and the list's (or safe defaults) where not. Google and Mistral models go through their OpenAI-compatible APIs.
+  Gemini refuses a request whose earlier tool calls come back without the thought signatures it gave them, and pi-ai's
+  wire for that API drops them, so `worker/gemini.ts` reads them off Gemini's answers, keeps each on its
+  tool call in the transcript and puts them back on later requests (with Google's placeholder on a tool call another
+  model made); it also shows Gemini's own error text instead of a bare "HTTP 400".
+  Until their lists are read, and when they cannot be, Anthropic and OpenAI show pi-ai's AI Gateway catalog (they may
+  be on unified billing, with no key of the gateway's own).
 - **Workers AI:** a few open models that run on Cloudflare and suit building pages (tool calling, a context of 128k
   tokens or more): Kimi K2.7 Code, GLM 5.3, DeepSeek V4, Qwen 3.8, GPT OSS 120B, Gemma 4. They need no provider
   key and use the account's free daily Workers AI allowance first, then Workers AI pricing.
@@ -296,15 +546,69 @@ Each chat picks its model and effort above the message box. The picker (`src/cha
   runtime's `GET /models` again at most every 15 seconds, so a model you load shows up when you reload the page, with no
   restart (`worker/local-models.ts`).
 
-The AI Gateway list is pi-ai's catalog, shipped with the package, not asked of the gateway: AI Gateway documents no API
-that lists the models it can reach, so the Anthropic and OpenAI choices change when pi-ai is updated.
-
 The effort picker shows only the levels the model takes, and nothing for a model that does not reason. The choice is
 the chat's own (pi's agent state, so a change reaches every open view of the chat) and applies from the next model
 request. Everyone in a [shared chat](#shared-chats) can change it. The latest pick is also the default for new chats
 of whoever made it (kept in their `UserDirectory`): a chat takes it when it is first opened and keeps its model from
 then on, even before its first message, until someone changes it. Before a user has picked anything, chats start on
-`MODEL` at `THINKING_LEVEL` from `cloudflare.config.ts` (Claude Opus 5.5 at high effort).
+Auto (when the deployment has a `ROUTER_MODEL`), which runs on `MODEL` at `THINKING_LEVEL` from `cloudflare.config.ts`
+(Claude Sonnet 5.5 at high effort) until it picks, and keeps that when no router answers.
+
+A provider lists its models whether or not its account can pay for a call (a key with no credits left still lists
+them), so Auto picks only models that answer: each time the providers are asked for their lists, every model in
+`AUTO_MODELS` gets a tiny call (a few tokens), and a model whose call, or any real call, fails for a reason that will
+not pass on its own (no key or credits, a quota, no access, no such model; not a rate limit or a busy server) is marked
+for every chat until the next try (`worker/model-health.ts`). Auto leaves marked models out; the picker says "not
+answering", with why in its tooltip. The tries run in the background, after the lists are kept. A stream that ends
+with an error event names the provider's own code and message, nested or not (a patch to pi-ai in `patches/`, until
+pi-ai reads OpenAI's nested errors itself).
+
+With many providers the list is long, so the picker is a searchable menu: a search box over every model (by name, id
+or provider), then the user's favorites (the star on each row) and recent picks, then each provider's models in a
+section that opens and closes (the current model's open at first). Each row shows the context window, the price per
+million input / output tokens (or "price unknown") and whether the model sees images. Arrow keys move, Enter picks,
+Escape closes. Favorites, recent picks and open sections are kept in the browser.
+
+### What a chat costs
+
+The chat shows what its model calls cost and how long they took: each prompt's under the agent's last reply to it
+(with the tokens in and out), and the chat's total in the header, which opens each model's share and where the time
+went. A prompt's time runs from when its messages were placed to its last reply or tool result; pi times every model
+reply and tool call, and the tooltip splits the time between them (tools can run side by side). The chat's time adds
+up its finished prompts. pi-ai prices every model reply when it
+comes in, from the tokens the provider reports and its model's prices per million tokens (input, output, cache reads
+and writes, and the higher rates of a long prompt where a model has them), and stores the price with the reply; pi
+keeps a ledger of the conversation's spend by model, which the total comes from, so it also counts the calls that
+summarize a long conversation. The prices come from the vendors' own price pages (Anthropic, OpenAI and Workers AI,
+read as Markdown) and, for the other providers, from models.dev's catalog (the source of pi-ai's own model data),
+kept in `worker/prices.json` and applied to every model in place of pi-ai's. A build first asks Cloudflare which
+providers the gateway holds keys for (`cf ai-gateway gateways providers list`, signed in as for the deploy) and prices
+those providers' models; signed out, it keeps the providers the file already prices. It reads the sources again once
+the file is a week old or when those providers change (`scripts/prices.ts`, a Vite plugin), and fails if a source
+cannot be fetched or read, or the file is not a valid price list, rather than ship prices that may be wrong; commit
+the file it writes. `pnpm prices` reads them now. A live list's own price (OpenRouter's, Hugging Face's) goes first;
+a model no source prices keeps pi-ai's, and one pi-ai does not know either counts as free (so a provider keyed after the last build has its models priced from the next build), which the picker and the
+cost panel say ("price unknown"). They are list prices: Workers AI's free daily allowance, and any discount the
+account has, are not taken off. Everyone in a shared chat sees them.
+
+## Dictation
+
+The microphone under the message box tries three ways, best first (`src/chat/dictation-engine.ts`):
+
+1. **On this device**: the browser's own speech recognition with `processLocally` (Chrome 139+), once
+   `SpeechRecognition.available()` says the language pack is installed. It works offline, and the audio never leaves
+   the device. A pack that can be downloaded starts downloading on the first press, for the next time.
+2. **The browser's service**: the same API without `processLocally`. In Chrome it sends the audio to Google's service,
+   so Chromium browsers without Google's key (Brave, Arc) and blocked networks fail it with a `network` error.
+3. **The Worker**: when that API is missing (Firefox) or fails that way while online, the composer records the clip
+   (up to 2 minutes), turns it into 16 kHz mono WAV and posts it to `POST /api/dictation`, which runs
+   `DICTATION_MODEL` (Whisper large v3 turbo on Workers AI, through the `AI` binding) and returns the text when the
+   recording stops. Each person may send 12 clips a minute (`DICTATION`) and have `DICTATION_DAILY_MINUTES` (60) of
+   audio written out a day, counted in their `UserDirectory`. An empty `DICTATION_MODEL` turns it off.
+
+| Recording for the Worker | Writing it out | Done |
+| --- | --- | --- |
+| ![Recording](docs/media/dictation/recording-dark.png) | ![Writing out what you said](docs/media/dictation/transcribing-light.png) | ![The text in the message box](docs/media/dictation/done-dark.png) |
 
 ## Layout
 
@@ -313,7 +617,7 @@ then on, even before its first message, until someone changes it. Before a user 
 | `worker/index.ts`, `worker/files-routes.ts` | Routes: identity, chats, artifact pages (`/u/:id/v:n`), the rate-limited MCP proxy, files and uploads |
 | `worker/chat-agent.ts` | `ChatAgent` DO: `PiHarness`, the chat socket (a capability on the Agents lifecycle API), `artifactCall`, members |
 | `worker/chat-routes.ts`, `worker/members.ts` | Shared chats: the chat socket, people, invite links and their routes |
-| `worker/models.ts` | The models a chat can pick, and the check on a pick |
+| `worker/models.ts`, `worker/gateway-models.ts`, `worker/prices.json`, `scripts/prices.ts` | The models a chat can pick (asked of AI Gateway's providers, kept in R2 by `worker/storage/model-cache.ts`), the check on a pick, and their prices, read at build time |
 | `worker/mcp/`, `worker/mcp-routes.ts` | `McpHub` (connections, cache, coalescing, hint), the MCP SDK connector, the server list, per-user OAuth sign-in and its routes |
 | `worker/agent/` | Pi tools (MCP, files, artifacts, `run_python`, `run_bash`, `skill_propose`), the system prompt, built-in skills |
 | `worker/skills/`, `worker/skills-routes.ts` | Built-in skills, the SKILL.md format, and the `/api/skills` routes |
@@ -324,6 +628,7 @@ then on, even before its first message, until someone changes it. Before a user 
 | `runtime/` | The page runtime and its contract |
 | `src/` | React app: chats, the streamed transcript, the preview panel, `ArtifactBroker`; resizable columns (`layout.tsx`); uploads and the file tree (`files/`) |
 | `shared/` | Types and helpers used by all of the above |
+| `docs/media/` | Screenshots and other media for the docs and pull requests, one folder per feature, stored with Git LFS (`.gitattributes`): run `git lfs install` once before cloning to get the files rather than their pointers |
 
 ## Run it
 
@@ -366,21 +671,26 @@ The project uses Cloudflare's [`cf` CLI](https://developers.cloudflare.com/cf/);
    The Artifacts namespace `pi-artifacts` needs no setup: it is created with the first repo. Artifacts needs the
    Workers Paid plan.
 3. Create an AI Gateway named `pi-artifacts` and store an Anthropic key and an OpenAI key in it (Provider Keys,
-   BYOK), or use unified billing. Without an OpenAI key, OpenAI models answer with the gateway's error and everything
-   else works. `MODEL` in `cloudflare.config.ts`, what new chats start on, is a pi-ai gateway specifier
-   (`anthropic/claude-opus-5.5`); a Workers AI id such as `@cf/zai-org/glm-5.3-flash` needs no key. See [Models](#models).
+   BYOK), or use unified billing. Keys for other providers (Google AI Studio, xAI, Mistral, DeepSeek, Groq, Cerebras,
+   Cohere, OpenRouter, Hugging Face) add their models to the picker within the hour, or at once with its refresh
+   button; no redeploy is needed. `MODEL` in `cloudflare.config.ts`, what new chats run on until Auto or their user picks, is a pi-ai
+   gateway specifier (`anthropic/claude-sonnet-5.5`); a Workers AI id such as `@cf/zai-org/glm-5.3-flash` needs no key. See [Models](#models).
 4. Put the app behind Cloudflare Access: create a self-hosted Access application for the Worker's hostname with a
    policy listing who may sign in, then set `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` (the application's audience tag) in
-   `cloudflare.config.ts`. To let people view shared artifacts without signing in, add a second self-hosted
-   application on the same hostname for the paths `a/*`, `u/*`, `assets/*` and `api/artifacts/*`, with one policy
-   whose action is **Bypass** and which includes **Everyone**. Access then lets those requests through, and the
-   Worker answers them for anyone: see [Viewing without signing in](#viewing-without-signing-in).
+   `cloudflare.config.ts`. That hostname is `domains` there, a custom domain on a zone in your account, with
+   workers.dev and Preview URLs off so the Worker is reachable only through Access; change it to yours, or drop it and
+   set `workersDev: true` to serve on workers.dev.
 5. Generate the file-encryption master key (`openssl rand -base64 32`, at least 32 bytes) and keep a copy somewhere
    safe: losing it makes every user's files unreadable, and changing it later needs a migration (see
    [How file encryption works](#how-file-encryption-works)). Pass it as a secret:
    `cf deploy --secrets-file secrets.json` with `{"FILES_MASTER_KEY": "…"}`, then delete `secrets.json`. Later deploys
    keep the secret, so they need no `--secrets-file` unless it changes.
 6. `pnpm run deploy` (`cf deploy`). This builds the sandbox image with Docker and needs the Workers Paid plan.
+
+A website that links to the app gets a "Back to <hostname>" link at the top of the sidebar, taken from the browser's
+referrer and kept for the tab. The Access sign-in on a first visit replaces the referrer, so a site that wants the
+link on that visit too adds `?from=<its page>` (an https address) to its link; the app takes it off the address. When a
+referrer is there, `from` counts only on the referrer's own site, so a link posted elsewhere cannot point Back at a third site.
 
 ## Who can read what
 
@@ -392,29 +702,14 @@ The project uses Cloudflare's [`cf` CLI](https://developers.cloudflare.com/cf/);
   every key under that user's folder and rejects paths like `..` or absolute paths.
 - **Per-user encryption:** user files are stored with R2 customer-supplied keys (SSE-C), one key per user. See
   [How file encryption works](#how-file-encryption-works).
-- **Artifacts** are shared by link with anyone, signed in or not, and are not encrypted per user. Only their owner's
-  chat can publish new versions, and only their owner can clone their repo. See
-  [Viewing without signing in](#viewing-without-signing-in) and [Versions in Git](#versions-in-git).
+- **Artifacts** are shared by link with anyone Access lets in, and are not encrypted per user. Only their owner's chat
+  can publish new versions, and only their owner can clone their repo. See
+  [Versions in Git](#versions-in-git).
+- **What a page saves** belongs to the viewer who saved it; only the page's author's values are read by others, as
+  defaults, and only by those who may load everything the page calls (a page calling a server that signs in each
+  user shares them only with the people in its chat), since a page may have saved what it loaded. A page's model calls run as the viewer and count against their allowance, never the author's.
 - **Shared chats** open only to their owner and the people the owner invited, and everyone in one works through the
   owner's agent and connections. See [Shared chats](#shared-chats).
-
-### Viewing without signing in
-
-Anyone with an artifact's link (`/a/<id>`) can view it and its live data without signing in. Chatting, editing,
-publishing and everything else still need a sign-in.
-
-- **What is public** (`artifactPage` and `publicArtifactRoute` in `worker/index.ts`), and nothing else: the page's HTML (`/u/<id>/v<n>`), its
-  metadata, the tools it declared and its live calls. The metadata leaves out the chat the artifact lives in and who
-  owns it; the app's own sign-in check (`identify`) still runs, so a signed-in owner sees the owner's controls.
-- **Live calls for viewers who are not signed in** are read-only, from servers that do not sign in each user, as for
-  any viewer outside the author's chat. They share one cache, and are rate-limited per IP address, as are their
-  metadata and tool-list requests.
-- **Ids are the secret.** An artifact id is 64 random bits, so links cannot be guessed, but anyone a link reaches can
-  view the page. Pages are served with `X-Robots-Tag: noindex, nofollow`, and the `/a/<id>` view adds a robots
-  `noindex` meta tag.
-- **Two gates.** Deployed, Cloudflare Access must let these paths through (a Bypass application; see
-  [Deploy](#deploy), step 4); the Worker decides on its own what each of them answers. Without the Bypass
-  application, Access keeps asking everyone to sign in, as before.
 
 ### Versions in Git
 
@@ -463,6 +758,8 @@ userKey = HKDF-SHA-256(ikm = FILES_MASTER_KEY,                                  
                        salt = "pi-artifacts/user-files/v1", info = uid) → 256 bits
 UserFiles(uid, userKey): keys under users/<uid>/files/, every put/get passes {ssecKey: userKey}
                                                                                   worker/storage/user-files.ts
+ChatDrafts(uid, chatId, userKey): keys under users/<uid>/drafts/<chatId>/, the same {ssecKey: userKey}
+                                                                                  worker/storage/drafts.ts
 ```
 
 - **No key is stored.** The derivation is deterministic, so a user's key is recomputed whenever their files are
@@ -495,8 +792,7 @@ before reading R2. Changing the runtime or the CSP changes the fingerprint, so a
 
 ## Limits and what's next
 
-- **Access policy is per email.** Adding people means adding them to the Access policy. Viewing artifacts needs no
-  sign-in (see [Viewing without signing in](#viewing-without-signing-in)), and there is no per-artifact switch to keep one private yet. Per-viewer consent for live
+- **Access policy is per email.** Adding people means adding them to the Access policy. Per-viewer consent for live
   data (as in Claude's artifacts) is not built yet.
 - **Verified deployed with Claude Sonnet 5.5:** the agent built a live BTC/ETH/SOL dashboard from one prompt and, when
   told what was wrong, fixed it as version 2 of the same artifact.
@@ -508,13 +804,15 @@ before reading R2. Changing the runtime or the CSP changes the fingerprint, so a
   - R2 refuses to read that file without its key ("stored using a form of Server Side Encryption");
   - a publish created the artifact's repo, and its `git` button produced a working clone command.
 
+  The page check before publishing has been verified only locally, against a real Chrome (`test/check.test.ts`), not
+  yet with Browser Rendering in a deployed Worker.
+
   The per-user sign-in to an MCP portal has been verified only locally, against a stand-in portal: the deployed
   portal so far refuses the code exchange with Cloudflare error 1014 (see
   [MCP servers, and servers that need your own sign-in](#mcp-servers-and-servers-that-need-your-own-sign-in)).
 - **Pi Durable is experimental.** It has no tool approvals, conversations can't be deleted yet, and a reconnecting
   client resumes from a fresh snapshot rather than a cursor.
 - **Next:**
-  - a screenshot self-check in the sandbox before publishing
   - live data from sign-in servers for every viewer, each with their own sign-in
   - in shared chats, members bringing their own files and sign-ins to the agent
   - WebSocket push for sources that stream

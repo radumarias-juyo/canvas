@@ -1,7 +1,8 @@
-import { ANONYMOUS_VIEWER, type CallToolResult, type McpError, type ToolInfo } from "../../shared/protocol.ts";
-import { callIdentity, derivePayload, firstText, withCache } from "../../shared/canonical.ts";
+import type { CallToolResult, McpError, ToolInfo } from "../../shared/protocol.ts";
+import { callIdentity, derivePayload, firstText } from "../../shared/canonical.ts";
 import { errorMessage } from "../../shared/util.ts";
-import type { McpServerConfig } from "./servers.ts";
+import { ResultCache, type CachedResult } from "./result-cache.ts";
+import { sharesResults, type McpServerConfig } from "./servers.ts";
 
 /** A tool result as an MCP server returns it. */
 export interface RawToolResult {
@@ -36,13 +37,6 @@ export interface ReadResult {
   nextRefreshAt: number;
 }
 
-interface CacheEntry {
-  result: CallToolResult;
-  storedAt: number;
-  /** About how much memory the result holds: its JSON length. */
-  bytes: number;
-}
-
 /** What one chat object may hold in cached results. Durable Objects have 128 MB; results vary from bytes to megabytes. */
 const MAX_CACHE_BYTES = 16 * 1024 * 1024;
 const CACHE_LIFETIME_MS = 10 * 60_000;
@@ -63,14 +57,14 @@ export class McpHub {
   readonly #servers = new Map<string, McpServerConfig>();
   readonly #connections = new Map<string, Promise<McpConnection>>();
   readonly #tools = new Map<string, { list: Promise<ToolInfo[]>; listedAt: number }>();
-  readonly #cache = new Map<string, CacheEntry>();
-  #cacheBytes = 0;
-  readonly #inflight = new Map<string, Promise<CacheEntry>>();
+  readonly #cache: ResultCache;
+  readonly #inflight = new Map<string, Promise<CachedResult>>();
 
   constructor(servers: McpServerConfig[], connector: Connector, now: () => number = Date.now) {
     for (const server of servers) this.#servers.set(server.name, server);
     this.#connector = connector;
     this.#now = now;
+    this.#cache = new ResultCache(MAX_CACHE_BYTES, CACHE_LIFETIME_MS, now);
   }
 
   servers(): McpServerConfig[] {
@@ -127,29 +121,19 @@ export class McpHub {
   /**
    * A read-only call through the cache. Serves an entry younger than
    * `staleMs`, otherwise executes; identical calls in flight share one
-   * execution. `viewer` keys the cache unless the server's scope is shared; viewers who are not signed in (null) share
-   * one entry (ANONYMOUS_VIEWER).
+   * execution. `viewer` keys the cache when the server keeps viewers apart (see sharesResults).
    */
-  async read(server: string, tool: string, input: unknown, options: { staleMs: number; viewer: string | null }): Promise<ReadResult> {
-    const config = this.#config(server);
-    const scope = config.cacheScope === "shared" ? "*" : (options.viewer ?? ANONYMOUS_VIEWER);
+  async read(server: string, tool: string, input: unknown, options: { staleMs: number; viewer: string }): Promise<ReadResult> {
+    const scope = sharesResults(this.#config(server)) ? "*" : options.viewer;
     const key = `${scope}\u0000${callIdentity(server, tool, input)}`;
-    const now = this.#now();
-
-    const hit = this.#cache.get(key);
-    if (hit && now - hit.storedAt < options.staleMs) {
-      return {
-        result: withCache(hit.result, hit.storedAt, false),
-        storedAt: hit.storedAt,
-        nextRefreshAt: hit.storedAt + options.staleMs,
-      };
-    }
+    const hit = this.#cache.fresh(key, options.staleMs);
+    if (hit) return hit;
 
     let flight = this.#inflight.get(key);
     if (!flight) {
       flight = this.call(server, tool, input).then((result) => {
-        const entry = { result, storedAt: this.#now(), bytes: JSON.stringify(result).length };
-        this.#store(key, entry);
+        const entry = { result, storedAt: this.#now() };
+        this.#cache.set(key, entry);
         return entry;
       });
       this.#inflight.set(key, flight);
@@ -170,31 +154,6 @@ export class McpHub {
     const config = this.server(server);
     if (!config) throw new McpFailure({ code: "server_not_connected", server, message: `No MCP server named "${server}" is connected to this chat.` });
     return config;
-  }
-
-  /**
-   * Keep a result within the byte budget. Entries are re-inserted on every
-   * store, so the map runs oldest first: expired entries go from the front,
-   * then the oldest until the new one fits. A result bigger than the whole
-   * budget is not cached.
-   */
-  #store(key: string, entry: CacheEntry): void {
-    this.#evict(key);
-    if (entry.bytes > MAX_CACHE_BYTES) return;
-    const now = this.#now();
-    for (const [k, e] of this.#cache) {
-      if (now - e.storedAt <= CACHE_LIFETIME_MS && this.#cacheBytes + entry.bytes <= MAX_CACHE_BYTES) break;
-      this.#evict(k);
-    }
-    this.#cache.set(key, entry);
-    this.#cacheBytes += entry.bytes;
-  }
-
-  #evict(key: string): void {
-    const entry = this.#cache.get(key);
-    if (!entry) return;
-    this.#cache.delete(key);
-    this.#cacheBytes -= entry.bytes;
   }
 
   /**

@@ -1,6 +1,19 @@
 import { callIdentity, stripCache, withCache } from "../../shared/canonical.ts";
 import { errorMessage, memoAsync } from "../../shared/util.ts";
-import { MIN_REFETCH_MS, type ArtifactManifest, type CallToolResult, type McpError, type DeclaredTool, type ProxyRequest, type ProxyResponse } from "../../shared/protocol.ts";
+import {
+  isReadOnly,
+  MIN_REFETCH_MS,
+  type ArtifactManifest,
+  type CallToolResult,
+  type DeclaredTool,
+  type McpError,
+  type PageAiRequest,
+  type PageAiResponse,
+  type PageStorageRequest,
+  type PageStorageResponse,
+  type ProxyRequest,
+  type ProxyResponse,
+} from "../../shared/protocol.ts";
 
 /** Sends one proxied call to the Worker. Swappable in tests. */
 export type Transport = (request: ProxyRequest) => Promise<ProxyResponse>;
@@ -9,9 +22,12 @@ export interface BrokerOptions {
   artifactId: string;
   version: number;
   transport: Transport;
+  /** The page's saved values (pi.use("storage")) and its model calls (pi.use("ai")), sent to the Worker as they are. */
+  pageStorage?: (request: PageStorageRequest) => Promise<PageStorageResponse>;
+  pageAi?: (request: PageAiRequest) => Promise<PageAiResponse>;
   /** The version's tools this viewer may call; a declared server the viewer may not load is left out. */
   describe: () => Promise<DeclaredTool[]>;
-  /** What the version declared: tells a tool withheld from this viewer (not_granted) from one never declared. */
+  /** What the version declared: tells a tool withheld from this viewer or not listed (not_granted) from one never declared. */
   manifest: ArtifactManifest;
   /** Browser cache namespace; include the viewer so accounts on one browser never share results. */
   cacheNamespace: string;
@@ -45,6 +61,8 @@ interface Group {
 }
 
 const CACHE_LIFETIME_MS = 10 * 60_000;
+/** How long a closed broker still takes the page's last saved values (see close). */
+const CLOSING_GRACE_MS = 2_000;
 /** The storages swept of expired results already (see #sweepStorage). */
 const sweptStorages = new WeakSet<object>();
 /** Errors no refetch can fix: stop polling and drop the data. */
@@ -65,9 +83,12 @@ export class ArtifactBroker {
   readonly #watchGroup = new Map<number, Group>();
   #port: MessagePort | undefined;
   #hidden = false;
+  /** Read-only calls the page made while the viewer's tab was hidden, by call: `send` lets each out once it is visible. */
+  readonly #waiting = new Map<string, { call: Omit<ProxyRequest, "version">; send: () => void; response: Promise<ProxyResponse> }>();
   #closed = false;
   /** A version's tool list never changes, so one describe call serves the page's whole life. */
   readonly #tools: () => Promise<DeclaredTool[]>;
+  readonly #readOnlyTools: () => Promise<DeclaredTool[]>;
 
   constructor(options: BrokerOptions) {
     this.#o = {
@@ -76,9 +97,13 @@ export class ArtifactBroker {
       setTimer: (fn, ms) => setTimeout(fn, ms),
       clearTimer: (timer) => clearTimeout(timer as number),
       storage: null,
+      pageStorage: unavailable,
+      pageAi: unavailable,
       ...options,
     };
     this.#tools = memoAsync(() => this.#o.describe());
+    // Asked once per page at most, even when the list fails: only a hidden tab asks, and it should not keep waking the chat.
+    this.#readOnlyTools = memoAsync(() => this.#tools().then((tools) => tools.filter(isReadOnly), () => []));
     this.#sweepStorage();
   }
 
@@ -88,7 +113,7 @@ export class ArtifactBroker {
     port.onmessage = (event: MessageEvent) => this.#onMessage(event.data);
   }
 
-  /** Pause polling while the viewer cannot see the page; catch up when it comes back. */
+  /** Pause polling and reads while the viewer cannot see the page; catch up when it comes back. */
   setHidden(hidden: boolean): void {
     if (this.#hidden === hidden) return;
     this.#hidden = hidden;
@@ -96,6 +121,10 @@ export class ArtifactBroker {
       if (hidden) this.#clearTimer(group);
       else this.#schedule(group);
     }
+    if (hidden) return;
+    const waiting = [...this.#waiting.values()];
+    this.#waiting.clear();
+    for (const { send } of waiting) send();
   }
 
   close(): void {
@@ -103,11 +132,16 @@ export class ArtifactBroker {
     for (const group of this.#groups.values()) this.#clearTimer(group);
     this.#groups.clear();
     this.#watchGroup.clear();
-    this.#port?.close();
+    this.#waiting.clear();
+    // A page that is going away saves its last changes as it goes (pagehide), and those reach this port only after
+    // the frame was taken down: they still get a moment to arrive.
+    const port = this.#port;
+    this.#o.setTimer(() => port?.close(), CLOSING_GRACE_MS);
   }
 
   #onMessage(message: any): void {
-    if (!message || this.#closed) return;
+    if (!message) return;
+    if (this.#closed && !(message.type === "request" && message.method === "storage" && message.params?.op === "write")) return;
     if (message.type === "request") void this.#onRequest(message.id, message.method, message.params ?? {});
     else if (message.type === "watch") this.#watch(message);
     else if (message.type === "unwatch") this.#unwatch(message.watchId);
@@ -120,7 +154,7 @@ export class ArtifactBroker {
         const cache = params.cache;
         const read = typeof cache === "object" && cache !== null;
         const staleMs = read ? (cache.refresh ? 0 : Math.max(0, Number(cache.staleTime) || 0)) : 0;
-        const response = await this.#send({ mode: read ? "read" : "call", server: params.server, tool: params.tool, input: params.input, staleMs });
+        const response = await this.#sendWhenVisible({ mode: read ? "read" : "call", server: params.server, tool: params.tool, input: params.input, staleMs });
         if (!response.ok) return reply(false, response.error);
         if (read) this.#feed(callIdentity(params.server, params.tool, params.input), response);
         reply(true, response.result);
@@ -137,6 +171,12 @@ export class ArtifactBroker {
             : reply(false, { code: "not_in_manifest", server: params.server, message: `${params.server}/${params.tool} is not declared by this page.` });
         }
         reply(true, { name: tool.name, description: tool.description, inputSchema: tool.inputSchema, annotations: tool.annotations });
+      } else if (method === "storage" || method === "ai") {
+        // The Worker checks what the page sends; these go on as they are, answered with what came back.
+        const response = await (method === "storage" ? this.#o.pageStorage(params) : this.#o.pageAi(params));
+        if (!response.ok) return reply(false, response.error);
+        const { ok: _ok, ...value } = response;
+        reply(true, value);
       } else {
         reply(false, { code: "bad_request", message: `Unknown method ${method}` });
       }
@@ -160,7 +200,12 @@ export class ArtifactBroker {
     const stale = !group.last || this.#o.now() - group.last.storedAt >= this.#staleMs(group);
     if (group.last) this.#deliverTo(message.watchId, { type: "data", result: withCache(group.last.result, group.last.storedAt, stale) });
     if (group.denied) return this.#deliverTo(message.watchId, { type: "error", error: group.denied });
-    if (stale && !group.inflight) return void this.#fetch(group);
+    if (stale && !group.inflight) {
+      if (!this.#hidden) return void this.#fetch(group);
+      // In a hidden tab (a page opened in the background), the first fetch waits until the viewer looks: setHidden(false) schedules it.
+      group.nextAt = this.#o.now();
+      return;
+    }
     // This subscriber may poll sooner than the group does, or be the first of it to poll at all.
     const polling = this.#interval(group);
     if (polling !== undefined && group.last) group.nextAt = Math.min(group.nextAt ?? Infinity, group.last.storedAt + polling);
@@ -280,6 +325,32 @@ export class ArtifactBroker {
     }
   }
 
+  /**
+   * Send a page's call, unless the viewer's tab is hidden and the tool only reads: then it waits until the tab is
+   * visible, and identical waiting calls share one request. Calls to other tools go out at once.
+   */
+  async #sendWhenVisible(call: Omit<ProxyRequest, "version">): Promise<ProxyResponse> {
+    if (!this.#hidden) return this.#send(call);
+    const holds = call.mode === "read" || (await this.#readOnly(call.server, call.tool));
+    // The tab may have come back while the tool list loaded.
+    if (!holds || !this.#hidden) return this.#send(call);
+    const key = `${call.mode}\u0000${callIdentity(call.server, call.tool, call.input)}`;
+    const waiting = this.#waiting.get(key);
+    if (waiting) {
+      waiting.call.staleMs = Math.min(waiting.call.staleMs ?? 0, call.staleMs ?? 0);
+      return waiting.response;
+    }
+    let send!: () => void;
+    const response = new Promise<void>((resolve) => (send = resolve)).then(() => this.#send(call));
+    this.#waiting.set(key, { call, send, response });
+    return response;
+  }
+
+  /** Whether the version's tool is read-only, from its tool list; a tool the list does not have counts as a write. */
+  async #readOnly(server: string, tool: string): Promise<boolean> {
+    return (await this.#readOnlyTools()).some((t) => t.server === server && t.name === tool);
+  }
+
   async #send(call: Omit<ProxyRequest, "version">): Promise<ProxyResponse> {
     try {
       return await this.#o.transport({ ...call, version: this.#o.version });
@@ -348,6 +419,11 @@ export class ArtifactBroker {
       this.#o.storage?.removeItem(this.#storagePrefix() + key);
     } catch {}
   }
+}
+
+/** What a viewer without saved values or a model answers. */
+async function unavailable(): Promise<{ ok: false; error: { code: "unavailable"; message: string } }> {
+  return { ok: false, error: { code: "unavailable", message: "Not available in this view." } };
 }
 
 /** The smallest of the numbers given, or undefined when none is. */

@@ -1,8 +1,30 @@
-import { clampThinkingLevel, getSupportedThinkingLevels, type Api, type Model, type ModelThinkingLevel } from "@earendil-works/pi-ai";
+import { clampThinkingLevel, getSupportedThinkingLevels, type Api, type Model, type Models, type ModelThinkingLevel, type Provider, type ThinkingLevelMap } from "@earendil-works/pi-ai";
 import { ANTHROPIC_MODELS } from "@earendil-works/pi-ai/providers/anthropic.models";
+import { createModels } from "@earendil-works/pi-ai/models";
 import { createAI } from "agents/models/pi-ai";
-import { EFFORT_LABELS, LOCAL_PREFIX, LOCAL_PROVIDER_ID, VENDORS, type ModelChoice, type ModelInfo, type Vendor } from "../shared/models.ts";
-import { localModels } from "./local-models.ts";
+import {
+  AUTO_MODEL,
+  EFFORT_LABELS,
+  LOCAL_PROVIDER,
+  modelKey,
+  PROVIDERS,
+  providerLabel,
+  type ModelCatalog,
+  type ModelChoice,
+  type AutoCandidate,
+  type ModelInfo,
+  type ModelSetting,
+  type ProviderId,
+} from "../shared/models.ts";
+import { errorMessage } from "../shared/util.ts";
+import type { CacheWarmer } from "./cache-warmer.ts";
+import { discoverModels, GATEWAY_PROVIDERS, ROUTED_APIS, SNAPSHOT, type Discovery, type GatewayFetcher, type GatewayOptions, type GatewayProviderId, type ListedModel } from "./gateway-models.ts";
+import { GeminiCompat } from "./gemini.ts";
+import { lastLocalModels, localModels, localProvider } from "./local-models.ts";
+import { failureOf, tryModels, type ModelFailures } from "./model-health.ts";
+import prices from "./prices.json";
+import { tapStream } from "./streams.ts";
+import type { ModelCache } from "./storage/model-cache.ts";
 
 /**
  * The Workers AI models the picker offers, best first. Workers AI runs on Cloudflare, within the account's free daily
@@ -21,38 +43,81 @@ const WORKERS_AI_MODELS = [
   "@cf/google/gemma-4-26b-a4b-it",
 ];
 
-const VENDOR_ORDER = Object.keys(VENDORS) as Vendor[];
+const PROVIDER_ORDER = Object.keys(PROVIDERS) as ProviderId[];
 
-/** A listed model, and the pi-ai metadata its efforts come from. */
+type ModelCost = Model<Api>["cost"];
+
+/**
+ * The vendors' own prices, by model id, read from their price pages into worker/prices.json by scripts/prices.ts: a
+ * build refreshes the file once it is a week old, and fails if it cannot read the pages. They replace pi-ai's prices,
+ * which are as old as the pi-ai release the app ships with; a model the pages do not list keeps pi-ai's. pi-ai prices
+ * every model reply from its model's `cost` when the reply comes in, and stores that price with the reply, so a change
+ * prices replies from then on and leaves earlier ones as they were charged.
+ */
+export const PRICES: ReadonlyMap<string, ModelCost> = new Map(Object.entries((prices as { models: Record<string, ModelCost> }).models));
+
+/** Each model's copy at its current price, made once: pi looks a model up several times per model call. */
+const priced = new WeakMap<object, object>();
+
+/** `model` at its current price: the vendor's, else pi-ai's. */
+function withCurrentPrice<T extends { id: string; cost: ModelCost }>(model: T): T {
+  const cost = PRICES.get(model.id);
+  if (!cost) return model;
+  let copy = priced.get(model) as T | undefined;
+  if (!copy) priced.set(model, (copy = { ...model, cost }));
+  return copy;
+}
+
+/**
+ * `provider` with its models at their current prices. The agent finds the models it runs on through its provider, and
+ * the picker lists the same ones, so every price the app reads goes through here.
+ */
+export function withCurrentPrices(provider: Provider): Provider {
+  return {
+    ...provider,
+    getModels: () => provider.getModels().map(withCurrentPrice),
+    getAllModels: () => (provider.getAllModels?.() ?? provider.getModels()).map(withCurrentPrice),
+  };
+}
+
+/**
+ * `models`, with each reply of a model that reasons marked with the effort it was asked at: pi-ai's `thinkingLevel` on
+ * the message, which only pi's own agent loop sets, and pi-durable does not (until it does, this stands in). The chat's
+ * cost panel shows it next to the model. A request that asks for no reasoning is "off". The partials it streams are
+ * marked too: pi-durable keeps the last one as the reply when a run is cut off. Replies fetched later (`fetchDeferred`,
+ * which this app does not use) are not marked.
+ */
+export function withEffortRecorded(models: Models): Models {
+  const streamSimple = models.streamSimple.bind(models);
+  // completeSimple (the calls that summarize a long conversation) goes through streamSimple too.
+  models.streamSimple = (model, context, options) => {
+    const stream = streamSimple(model, context, options);
+    const effort = model.reasoning ? (options?.reasoning ?? "off") : undefined;
+    if (!effort) return stream;
+    return tapStream(
+      stream,
+      (event) => {
+        if ("partial" in event) event.partial.thinkingLevel ??= effort;
+      },
+      (message) => {
+        message.thinkingLevel ??= effort;
+      },
+    );
+  };
+  return models;
+}
+
+/** A listed model: what the picker shows, the model a chat runs, and the pi-ai metadata its efforts come from. */
 interface ModelEntry {
   info: ModelInfo;
+  model: Model<Api>;
   metadata: Model<Api>;
 }
 
-/**
- * What the picker offers: the models of a runtime on this machine, and the cloud's (Anthropic, OpenAI and Workers AI,
- * through AI Gateway) unless the AI binding is out of reach.
- */
-export interface ModelSources {
-  local: readonly Model<Api>[];
-  cloud: boolean;
-}
-
-const CLOUD_ONLY: ModelSources = { local: [], cloud: true };
-
-/** The sources the Worker's settings name: `LOCAL_MODELS_URL` (asked for its models) and `CLOUD_MODELS`. */
-export async function modelSources(env: { LOCAL_MODELS_URL: string; CLOUD_MODELS: string }): Promise<ModelSources> {
-  return { local: env.LOCAL_MODELS_URL ? await localModels(env.LOCAL_MODELS_URL) : [], cloud: env.CLOUD_MODELS !== "false" };
-}
-
-/**
- * A local runtime's models are `local`. Otherwise `@cf/…` ids are Workers AI's and AI Gateway catalog ids are
- * `<vendor>/<id>`. Undefined for a vendor the picker leaves out.
- */
-function vendorOf(model: Model<Api>): Vendor | undefined {
-  if (model.provider === LOCAL_PROVIDER_ID) return "local";
-  const vendor = model.id.startsWith("@cf/") ? "workers-ai" : model.id.slice(0, model.id.indexOf("/"));
-  return Object.hasOwn(VENDORS, vendor) ? (vendor as Vendor) : undefined;
+/** `@cf/…` ids are Workers AI's; AI Gateway catalog ids are `<vendor>/<id>`. Undefined for a vendor the catalog leaves out. */
+function providerOf(id: string): "anthropic" | "openai" | "workers-ai" | undefined {
+  const vendor = id.startsWith("@cf/") ? "workers-ai" : id.slice(0, id.indexOf("/"));
+  return vendor === "anthropic" || vendor === "openai" || vendor === "workers-ai" ? vendor : undefined;
 }
 
 /**
@@ -60,40 +125,37 @@ function vendorOf(model: Model<Api>): Vendor | undefined {
  * Anthropic catalog (which knows, say, that Claude Sonnet 5.5 takes neither "off" nor "minimal"), so Claude models use
  * the Anthropic entry, found by Anthropic's spelling of the id (claude-opus-5-5 for anthropic/claude-opus-5.5).
  */
-function metadataOf(model: Model<Api>, vendor: Vendor): Model<Api> {
-  if (vendor !== "anthropic") return model;
+function metadataOf(model: Model<Api>, provider: ProviderId): Model<Api> {
+  if (provider !== "anthropic") return model;
   const id = model.id.slice("anthropic/".length).replaceAll(".", "-");
   return Object.hasOwn(ANTHROPIC_MODELS, id) ? (ANTHROPIC_MODELS[id as keyof typeof ANTHROPIC_MODELS] as Model<Api>) : model;
 }
 
+/** The picker's view of a model. */
+function infoOf(model: Model<Api>, metadata: Model<Api>, provider: ProviderId, id: string, isPriced: boolean): ModelInfo {
+  return {
+    id,
+    name: model.name,
+    provider,
+    efforts: model.reasoning ? getSupportedThinkingLevels(metadata) : [],
+    images: model.input.includes("image"),
+    contextWindow: model.contextWindow,
+    ...(isPriced && { price: { input: model.cost.input, output: model.cost.output } }),
+  };
+}
+
 /**
- * The models a chat can pick among `models` (pi-ai providers'): a local runtime's, in the runtime's order, then every
- * Anthropic and OpenAI chat model, newest first (by version, then by price, so a family's largest model leads), then
- * the Workers AI models above, in their order. A local model's id is `local/` and the runtime's id.
+ * The models a chat can pick among `models` (a pi-ai Cloudflare provider's) without asking AI Gateway: every Anthropic
+ * and OpenAI model in its gateway catalog, newest first (by version, then by price, so a family's largest model leads),
+ * then the Workers AI models above, in their order.
  */
 export function chatModels(models: readonly Model<Api>[]): ModelEntry[] {
-  return models
-    .flatMap((model) => {
-      const vendor = vendorOf(model);
-      return vendor && (vendor !== "workers-ai" || WORKERS_AI_MODELS.includes(model.id)) ? [{ model, vendor }] : [];
-    })
-    .sort((a, b) => {
-      const byVendor = VENDOR_ORDER.indexOf(a.vendor) - VENDOR_ORDER.indexOf(b.vendor);
-      // Local ids carry no version to go by (qwen3-32b is not version 3.32): they keep the order the runtime lists them in.
-      if (byVendor || a.vendor === "local") return byVendor;
-      return (
-        WORKERS_AI_MODELS.indexOf(a.model.id) - WORKERS_AI_MODELS.indexOf(b.model.id) ||
-        version(b.model.id) - version(a.model.id) ||
-        b.model.cost.output - a.model.cost.output ||
-        a.model.name.localeCompare(b.model.name)
-      );
-    })
-    .map(({ model, vendor }) => {
-      const metadata = metadataOf(model, vendor);
-      const efforts = model.reasoning ? getSupportedThinkingLevels(metadata) : [];
-      const id = vendor === "local" ? LOCAL_PREFIX + model.id : model.id;
-      return { info: { id, name: model.name, vendor, efforts, images: model.input.includes("image") }, metadata };
-    });
+  return models.flatMap((model) => {
+    const provider = providerOf(model.id);
+    if (!provider || (provider === "workers-ai" && !WORKERS_AI_MODELS.includes(model.id))) return [];
+    const metadata = metadataOf(model, provider);
+    return [{ info: infoOf(model, metadata, provider, model.id, true), model, metadata }];
+  });
 }
 
 /**
@@ -106,65 +168,488 @@ function version(id: string): number {
   return match ? Number(match[1]) + Number(match[2] ?? 0) / 100 : 0;
 }
 
-let cloudCatalog: Map<string, ModelEntry> | undefined;
+/** Providers whose lists are long and mix many vendors' models: listed by name, which starts with the vendor's. */
+const BY_NAME = new Set<ProviderId>(["openrouter", "huggingface"]);
 
-/** The cloud's models ship with pi-ai, so their list is built once per isolate. Listing them never touches the AI binding. */
-function cloudEntries(): Map<string, ModelEntry> {
-  return (cloudCatalog ??= byId(chatModels(createAI({ binding: {} as never }).provider.getModels())));
+/**
+ * The picker's order: by provider; a local runtime's in the runtime's order; Workers AI's in their chosen order; a long
+ * mixed list by name; otherwise newest first (by version, then by price, so a family's largest model leads), then by name.
+ */
+function byPickerOrder(a: ModelEntry, b: ModelEntry): number {
+  const [x, y] = [a.info, b.info];
+  const byProvider = PROVIDER_ORDER.indexOf(x.provider) - PROVIDER_ORDER.indexOf(y.provider);
+  // A local runtime's ids carry no version to go by (qwen3-32b is not version 3.32): the sort is stable, so they keep
+  // the order the runtime lists them in.
+  if (byProvider || x.provider === LOCAL_PROVIDER) return byProvider;
+  return (
+    WORKERS_AI_MODELS.indexOf(x.id) - WORKERS_AI_MODELS.indexOf(y.id) ||
+    (BY_NAME.has(x.provider) ? x.name.localeCompare(y.name) : 0) ||
+    version(y.id) - version(x.id) ||
+    (y.price?.output ?? 0) - (x.price?.output ?? 0) ||
+    x.name.localeCompare(y.name)
+  );
 }
 
-function byId(entries: ModelEntry[]): Map<string, ModelEntry> {
-  return new Map(entries.map((entry) => [entry.info.id, entry]));
-}
+/** The efforts a model routed through an OpenAI-compatible API takes when pi-ai does not say: the three every such API takes. */
+const BASIC_EFFORTS: ThinkingLevelMap = { off: null, minimal: null, xhigh: null, max: null };
+const NO_COST: ModelCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+/** What a model pi-ai does not know gets when its provider's list does not say (agents/models/pi-ai's own defaults). */
+export const DEFAULT_CONTEXT_WINDOW = 128_000;
+const DEFAULT_MAX_TOKENS = 8_192;
 
-/** The models `sources` offer, local ones first. */
-function entries({ local, cloud }: ModelSources): Map<string, ModelEntry> {
-  const remote = cloud ? cloudEntries() : new Map<string, ModelEntry>();
-  return local.length ? new Map([...byId(chatModels(local)), ...remote]) : remote;
-}
-
-/** The models a chat can pick, as the picker lists them. */
-export function modelCatalog(sources = CLOUD_ONLY): ModelInfo[] {
-  return [...entries(sources).values()].map((entry) => entry.info);
+/**
+ * The AI Gateway catalog's id for a vendor's own: Anthropic's dated snapshot is its model, and its dashes between
+ * version numbers become dots (claude-haiku-4-5-20251001 → anthropic/claude-haiku-4.5).
+ */
+function catalogId(provider: GatewayProviderId, id: string): string {
+  return `${provider}/${provider === "anthropic" ? id.replace(SNAPSHOT, "").replace(/(\d)-(\d)(?!\d)/g, "$1.$2") : id}`;
 }
 
 /**
- * A choice from the browser, checked: a listed model, at an effort it takes. An effort it does not take moves to the
- * nearest one it does (pi-ai's rule); no effort asks for medium. Null for a model the picker does not list.
+ * A model a provider listed, as pi-ai runs it through AI Gateway: under the provider's AI Gateway name, with the
+ * vendor's own id (what the request carries). pi-ai's own metadata where it knows the model, else what the list says,
+ * else safe defaults. Its price: the list's, else the build's, else pi-ai's; with none of those it costs nothing and
+ * the picker says its price is not known.
  */
-export function checkModelChoice(input: { model?: unknown; thinkingLevel?: unknown }, sources = CLOUD_ONLY): ModelChoice | null {
-  const entry = entries(sources).get(input.model as string);
-  return entry ? choiceOf(entry, input.thinkingLevel) : null;
+function listedModel(provider: GatewayProviderId, listed: ListedModel): { model: Model<Api>; isPriced: boolean } {
+  const spec = GATEWAY_PROVIDERS[provider];
+  const known = Object.hasOwn(spec.known, listed.id) ? spec.known[listed.id] : undefined;
+  // pi-ai's own wire for the model, when AI Gateway routes it for pi; else the provider's.
+  const own = known && ROUTED_APIS.has(known.api);
+  const { api, baseUrl } = own ? known : spec.wire;
+  const reasoning = known?.reasoning ?? listed.reasoning ?? false;
+  // A live list's price (OpenRouter's, Hugging Face's) is the newest; the build's (worker/prices.json) is at most a week old.
+  const cost = listed.cost ?? PRICES.get(catalogId(provider, listed.id)) ?? known?.cost;
+  const thinkingLevelMap = (own && known.thinkingLevelMap) || (reasoning && api === "openai-completions" ? BASIC_EFFORTS : undefined);
+  const model: Model<Api> = {
+    id: listed.id,
+    name: known?.name ?? listed.name ?? listed.id,
+    api,
+    provider,
+    baseUrl,
+    reasoning,
+    input: known?.input ?? (listed.images ? ["text", "image"] : ["text"]),
+    cost: cost ?? NO_COST,
+    contextWindow: known?.contextWindow ?? listed.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+    maxTokens: known?.maxTokens ?? listed.maxTokens ?? DEFAULT_MAX_TOKENS,
+    ...(thinkingLevelMap && { thinkingLevelMap }),
+    ...(own && known.compat && { compat: known.compat }),
+  };
+  return { model, isPriced: cost !== undefined };
 }
 
-/** `entry` at `thinkingLevel`, moved to an effort it takes. */
-function choiceOf(entry: ModelEntry, thinkingLevel: unknown): ModelChoice {
-  const wanted = thinkingLevelOf(thinkingLevel) ?? "medium";
-  return { model: entry.info.id, thinkingLevel: entry.info.efforts.length ? clampThinkingLevel(entry.metadata, wanted) : "off" };
+/** A provider's own model's entry: run on its provider's path through AI Gateway, under `<provider>/<id>`. */
+function ownEntry(provider: GatewayProviderId, listed: ListedModel): ModelEntry {
+  const { model, isPriced } = listedModel(provider, listed);
+  return { info: infoOf(model, model, provider, modelKey(provider, model.id), isPriced), model, metadata: model };
+}
+
+/** A local runtime's model's entry (worker/local-models.ts): `local/` and the runtime's id, free. */
+function localEntry(model: Model<Api>): ModelEntry {
+  return { info: infoOf(model, model, LOCAL_PROVIDER, modelKey(LOCAL_PROVIDER, model.id), true), model, metadata: model };
+}
+
+/** What a catalog adds beside AI Gateway's providers: a local runtime's models, and whether the cloud's are listed at all. */
+interface LocalModels {
+  local?: readonly Model<Api>[];
+  cloud?: boolean;
+}
+
+/**
+ * The models a chat can pick: a local runtime's when one is set (local development only), then the deployment's
+ * providers' (as last discovered) and Workers AI's, unless the cloud's are left out (`cloud: false`).
+ */
+export class Catalog {
+  readonly checkedAt: number | undefined;
+  readonly #discovery: Discovery | null;
+  readonly #entries = new Map<string, ModelEntry>();
+  /** Each provider's own models (those not in AI Gateway's catalog), for the chat's pi providers. */
+  readonly #listed = new Map<GatewayProviderId, Model<Api>[]>();
+  /** The last catalog `withLocal` made from this one, made again only when the runtime's list changes. */
+  #withLocal: { local: readonly Model<Api>[]; cloud: boolean; catalog: Catalog } | undefined;
+
+  constructor(base: readonly ModelEntry[], discovery: Discovery | null, { local = [], cloud = true }: LocalModels = {}) {
+    this.checkedAt = discovery?.checkedAt;
+    this.#discovery = discovery;
+    const byCatalogId = new Map(base.map((entry) => [entry.info.id, entry]));
+    const entries = new Map<string, ModelEntry>();
+    for (const provider of PROVIDER_ORDER) {
+      if (provider === LOCAL_PROVIDER) {
+        for (const model of local) entries.set(modelKey(LOCAL_PROVIDER, model.id), localEntry(model));
+        continue;
+      }
+      if (!cloud) continue;
+      const listed = provider === "workers-ai" ? undefined : discovery?.providers[provider]?.models;
+      // A provider with no models listed (Workers AI, and before or without a list) shows what AI Gateway's catalog
+      // has of it: Anthropic and OpenAI can be reached without a key of the deployment's own (unified billing).
+      if (!listed?.length) {
+        for (const entry of base) if (entry.info.provider === provider) entries.set(entry.info.id, entry);
+        continue;
+      }
+      for (const model of listed) {
+        const entry = byCatalogId.get(catalogId(provider as GatewayProviderId, model.id)) ?? ownEntry(provider as GatewayProviderId, model);
+        if (!entries.has(entry.info.id)) entries.set(entry.info.id, entry);
+      }
+    }
+    const failing = discovery?.failing ?? {};
+    for (const entry of [...entries.values()].sort(byPickerOrder)) {
+      const failure = Object.hasOwn(failing, entry.info.id) ? failing[entry.info.id] : undefined;
+      this.#entries.set(entry.info.id, failure ? { ...entry, info: { ...entry.info, failing: failure.error } } : entry);
+      const { provider } = entry.model;
+      if (!Object.hasOwn(GATEWAY_PROVIDERS, provider)) continue;
+      const own = this.#listed.get(provider as GatewayProviderId);
+      if (own) own.push(entry.model);
+      else this.#listed.set(provider as GatewayProviderId, [entry.model]);
+    }
+  }
+
+  /** The picker's list. */
+  get models(): ModelInfo[] {
+    return [...this.#entries.values()].map((entry) => entry.info);
+  }
+
+  toJSON(): ModelCatalog {
+    return { models: this.models, checkedAt: this.checkedAt };
+  }
+
+  /** The listed model the picker calls `id`, as pi names it: provider and id. */
+  model(id: string): Model<Api> | undefined {
+    return this.#entries.get(id)?.model;
+  }
+
+  /**
+   * This catalog with a local runtime's models (`local`) first, and without the cloud's when `cloud` is false. Itself
+   * when neither changes anything.
+   */
+  withLocal(local: readonly Model<Api>[], cloud: boolean): Catalog {
+    if (!local.length && cloud) return this;
+    const made = this.#withLocal;
+    if (made?.local === local && made.cloud === cloud) return made.catalog;
+    const catalog = new Catalog(baseEntries(), this.#discovery, { local, cloud });
+    this.#withLocal = { local, cloud, catalog };
+    return catalog;
+  }
+
+  /** A provider's own models: those it listed that AI Gateway's catalog does not have. */
+  listed(provider: GatewayProviderId): Model<Api>[] {
+    return this.#listed.get(provider) ?? [];
+  }
+
+  /**
+   * A choice from the browser, checked: a listed model, at an effort it takes. An effort it does not take moves to the
+   * nearest one it does (pi-ai's rule); no effort asks for medium. Null for a model the picker does not list.
+   */
+  check(input: { model?: unknown; thinkingLevel?: unknown }): ModelChoice | null {
+    const entry = typeof input.model === "string" ? this.#entries.get(input.model) : undefined;
+    if (!entry) return null;
+    const wanted = thinkingLevelOf(input.thinkingLevel) ?? "medium";
+    return { model: entry.info.id, thinkingLevel: entry.info.efforts.length ? clampThinkingLevel(entry.metadata, wanted) : "off" };
+  }
+}
+
+let base: ModelEntry[] | undefined;
+
+/** AI Gateway's catalog and the Workers AI models, which ship with pi-ai: built once per isolate, without the AI binding. */
+function baseEntries(): ModelEntry[] {
+  return (base ??= chatModels(withCurrentPrices(createAI({ binding: {} as never }).provider).getModels()));
+}
+
+let fallback: Catalog | undefined;
+
+/** The catalog before any provider was asked: AI Gateway's Anthropic and OpenAI models, and Workers AI's. */
+export function baseCatalog(): Catalog {
+  return (fallback ??= new Catalog(baseEntries(), null));
+}
+
+/** The catalog from a discovery. */
+export function catalogFrom(discovery: Discovery | null): Catalog {
+  return discovery ? new Catalog(baseEntries(), discovery) : baseCatalog();
 }
 
 /** `level` when it is one of pi's thinking levels. */
-function thinkingLevelOf(level: unknown): ModelThinkingLevel | undefined {
+export function thinkingLevelOf(level: unknown): ModelThinkingLevel | undefined {
   return typeof level === "string" && Object.hasOwn(EFFORT_LABELS, level) ? (level as ModelThinkingLevel) : undefined;
 }
 
-/**
- * The deployment's default (`MODEL` at `THINKING_LEVEL`), checked like a pick when the picker lists the model, so a
- * level the model rejects (Claude 5.5 takes no "off") moves to one it takes. A model the picker does not list is used
- * as configured, at medium when `THINKING_LEVEL` is not one of pi's levels.
- */
-export function defaultModelChoice(model: string, thinkingLevel: string): ModelChoice {
-  return checkModelChoice({ model, thinkingLevel }) ?? { model, thinkingLevel: thinkingLevelOf(thinkingLevel) ?? "medium" };
+/** A setting from the browser or a user's saved default, checked: Auto, or a model as `Catalog.check` checks it. */
+export function checkSetting(catalog: Catalog, input: { model?: unknown; thinkingLevel?: unknown }): ModelSetting | null {
+  return input.model === AUTO_MODEL ? { model: AUTO_MODEL } : catalog.check(input);
 }
 
 /**
- * Without the cloud's models (a local run with PI_OFFLINE=1), the deployment's default `model` is out of reach: a new
- * chat then starts on the first model listed. Null while the default is reachable, or when nothing is listed.
+ * What a new chat starts on: its user's last pick (`saved`), else Auto when the deployment names a router
+ * (`ROUTER_MODEL`, a comma-separated list, read as routersFrom reads it), else null, the deployment's default.
  */
-export function offlineModelChoice(model: string, sources: ModelSources): ModelChoice | null {
-  if (sources.cloud) return null;
-  const listed = entries(sources);
-  if (listed.has(model)) return null;
-  const first = listed.values().next();
-  return first.done ? null : choiceOf(first.value, undefined);
+export function startingSetting(saved: ModelSetting | null, routers: string): ModelSetting | null {
+  return saved ?? (routers.split(",").some((id) => id.trim()) ? { model: AUTO_MODEL } : null);
+}
+
+/**
+ * The deployment's default (`MODEL` at `THINKING_LEVEL`), checked like a pick when AI Gateway's catalog or Workers AI
+ * has the model, so a level the model rejects (Claude 5.5 takes no "off") moves to one it takes. Any other model is
+ * used as configured, at medium when `THINKING_LEVEL` is not one of pi's levels.
+ */
+export function defaultModelChoice(model: string, thinkingLevel: string): ModelChoice {
+  return baseCatalog().check({ model, thinkingLevel }) ?? { model, thinkingLevel: thinkingLevelOf(thinkingLevel) ?? "medium" };
+}
+
+/**
+ * Where a local runtime is (local development only): `LOCAL_MODELS_URL`, e.g. http://localhost:1234/v1, and whether
+ * the cloud's models are listed beside its models (`CLOUD_MODELS`, "false" with PI_OFFLINE=1: no AI binding).
+ */
+export interface LocalEnv {
+  LOCAL_MODELS_URL?: string;
+  CLOUD_MODELS?: string;
+}
+
+/** No local models: one list, so `Catalog.withLocal` sees the same list and keeps the catalog it made. */
+const NO_LOCAL: readonly Model<Api>[] = [];
+
+/** `catalog` with the local runtime's models in front, as it lists them now, and without the cloud's when CLOUD_MODELS is "false". */
+export async function withLocalModels(catalog: Catalog, env: LocalEnv): Promise<Catalog> {
+  const local = env.LOCAL_MODELS_URL ? await localModels(env.LOCAL_MODELS_URL) : NO_LOCAL;
+  return catalog.withLocal(local.length ? local : NO_LOCAL, env.CLOUD_MODELS !== "false");
+}
+
+/** The same without asking the runtime: its models as it last listed any. */
+export function withLastLocalModels(catalog: Catalog, env: LocalEnv): Catalog {
+  const local = env.LOCAL_MODELS_URL ? lastLocalModels(env.LOCAL_MODELS_URL) : NO_LOCAL;
+  return catalog.withLocal(local.length ? local : NO_LOCAL, env.CLOUD_MODELS !== "false");
+}
+
+/** The local runtime's pi provider, for a chat's model registry: none unless LOCAL_MODELS_URL names one. */
+export function localProviders(env: LocalEnv): Provider[] {
+  return env.LOCAL_MODELS_URL ? [localProvider(env.LOCAL_MODELS_URL)] : [];
+}
+
+/**
+ * Without the cloud's models (a local run with PI_OFFLINE=1), neither Auto nor the deployment's default can run: a new
+ * chat then starts on the first model `catalog` lists. Null when it lists none.
+ */
+export function firstModelChoice(catalog: Catalog): ModelChoice | null {
+  const [first] = catalog.models;
+  return first ? catalog.check({ model: first.id }) : null;
+}
+
+/**
+ * The pi providers of the providers' own models, for a chat's model registry: one per AI Gateway provider, named as
+ * AI Gateway names it, each with the models the current catalog lists for it. They stream as `cloudflare` (agents'
+ * Cloudflare provider) does, which routes each model to AI Gateway by its vendor URL.
+ */
+export function listedProviders(cloudflare: Provider, catalog: () => Catalog): Provider[] {
+  return (Object.keys(GATEWAY_PROVIDERS) as GatewayProviderId[]).map((id) => ({
+    ...cloudflare,
+    id,
+    name: providerLabel(id),
+    getModels: () => catalog().listed(id),
+    getAllModels: () => catalog().listed(id),
+  }));
+}
+
+/** How long a discovery stands before the providers are asked again (in the background: the old one serves meanwhile). */
+const FRESH_MS = 60 * 60_000;
+/** How soon someone may ask the providers again by hand. */
+const MIN_REFRESH_MS = 60_000;
+/** How long an isolate keeps the catalog before reading the shared copy again, which another isolate may have renewed. */
+const REREAD_MS = 5 * 60_000;
+
+/** The AI binding, and the gateway and key alias the chats use. */
+export interface CatalogSource extends GatewayOptions {
+  cache: ModelCache;
+  /** Keeps a background refresh alive after the response (the Worker's waitUntil). */
+  waitUntil?: (promise: Promise<unknown>) => void;
+  /** Tries the models that must answer (Auto's) after each discovery: those that cannot be called, with why. */
+  tryModels?: (catalog: Catalog) => Promise<ModelFailures>;
+}
+
+/** What a Worker or chat object reaches AI Gateway with: the AI binding, the gateway's id, and the key alias. */
+interface GatewayEnv {
+  AI: NonNullable<Parameters<typeof createAI>[0]["binding"]>;
+  AI_GATEWAY_ID: string;
+  AI_BYOK_ALIAS?: string;
+}
+
+/** agents/models/pi-ai over the deployment's AI Gateway, with Gemini's answers read by `gemini`. */
+export function gatewayAI(env: GatewayEnv, gemini: GeminiCompat, warmer?: CacheWarmer) {
+  const binding = gemini.binding(env.AI);
+  return createAI({ binding: warmer ? warmer.binding(binding) : binding, gateway: env.AI_GATEWAY_ID, byokAlias: env.AI_BYOK_ALIAS || undefined });
+}
+
+/** Where a Worker or chat object finds the catalog, from its environment. */
+export function catalogSource(env: GatewayEnv & { AUTO_MODELS?: unknown }, cache: ModelCache, waitUntil?: (promise: Promise<unknown>) => void): CatalogSource {
+  const auto = (env.AUTO_MODELS as AutoCandidate[] | undefined)?.map(({ id }) => id) ?? [];
+  return {
+    cache,
+    ai: env.AI as unknown as GatewayFetcher,
+    gateway: env.AI_GATEWAY_ID,
+    byokAlias: env.AI_BYOK_ALIAS || undefined,
+    waitUntil,
+    ...(auto.length && {
+      tryModels: (catalog: Catalog) => {
+        const gemini = new GeminiCompat();
+        const targets = auto.flatMap((id) => catalog.model(id) ?? []);
+        return tryModels(piModels(gatewayAI(env, gemini).provider, gemini, () => catalog), targets);
+      },
+    }),
+  };
+}
+
+/** The isolate's catalog, and when it was read. */
+let held: { catalog: Catalog; discovery: Discovery | null; readAt: number } | undefined;
+
+/** The catalog this isolate holds, without waiting: the base one until a discovery was read. */
+export function currentCatalog(): Catalog {
+  return held?.catalog ?? baseCatalog();
+}
+
+/** A discovery's marks, to compare: a mark made or cleared since it was held makes it another one (not by time: isolates' clocks differ). */
+function marksOf(discovery: Discovery | null | undefined): string {
+  return Object.keys(discovery?.failing ?? {})
+    .sort()
+    .join("\n");
+}
+
+/** Hold a discovery, building its catalog only when it is not the one already held. */
+function hold(discovery: Discovery | null): Catalog {
+  const readAt = Date.now();
+  if (held && held.discovery?.checkedAt === discovery?.checkedAt && marksOf(held.discovery) === marksOf(discovery)) {
+    held.readAt = readAt;
+    return held.catalog;
+  }
+  const catalog = catalogFrom(discovery);
+  held = { catalog, discovery, readAt };
+  return catalog;
+}
+
+/** The read and the ask in flight, which concurrent callers share. */
+let reading: Promise<Discovery | null> | undefined;
+let discovering: Promise<Catalog> | undefined;
+
+/** The shared copy, read once however many ask at the same time. */
+function readCached(cache: ModelCache): Promise<Discovery | null> {
+  return (reading ??= cache
+    .read()
+    .catch((error: unknown) => {
+      console.error("models: could not read the last discovery:", errorMessage(error));
+      return null;
+    })
+    .finally(() => {
+      reading = undefined;
+    }));
+}
+
+/**
+ * Ask the providers, keep the answer for every isolate, and hold it here. `previous` (the last discovery read, else
+ * the one held) gives a provider whose list cannot be read now the models it had.
+ */
+function rediscover(source: CatalogSource, previous: Discovery | null | undefined): Promise<Catalog> {
+  return (discovering ??= (async () => {
+    const before = previous ?? held?.discovery;
+    // The marks stand until the models are tried again, after the lists are kept: no one waits on the tries. With no
+    // models to try, they end here, as markFailing says.
+    const listed = await discoverModels({ ai: source.ai, gateway: source.gateway, byokAlias: source.byokAlias, previous: before });
+    const discovery = { ...listed, failing: source.tryModels ? before?.failing : undefined };
+    await source.cache.write(discovery).catch((error: unknown) => console.error("models: could not keep the discovery:", errorMessage(error)));
+    const catalog = hold(discovery);
+    if (!source.tryModels) return catalog;
+    const trying = retry(source, discovery, catalog);
+    // In the background where the Worker can keep it alive; else (tests) waited on.
+    if (!source.waitUntil) return await trying;
+    source.waitUntil(trying);
+    return catalog;
+  })().finally(() => {
+    discovering = undefined;
+  }));
+}
+
+/**
+ * Try the models that must answer, on `catalog` (that of `discovery`), and keep what they say for every isolate: afresh,
+ * so a model that answers again loses its mark. The catalog with the new marks; never throws: a try that fails keeps the
+ * marks as they were.
+ */
+async function retry(source: CatalogSource, discovery: Discovery, catalog: Catalog): Promise<Catalog> {
+  try {
+    const failing = await source.tryModels!(catalog);
+    for (const [id, failure] of Object.entries(failing)) console.error(`models: ${id} cannot be called:`, failure.error);
+    const tried = { ...discovery, failing };
+    await source.cache.write(tried);
+    return hold(tried);
+  } catch (error) {
+    console.error("models: could not try the Auto models:", errorMessage(error));
+    return catalog;
+  }
+}
+
+/** The models a comma-separated list of the picker's ids names (PAGE_AI_MODEL, REVIEW_MODEL), in order: those `catalog` has. */
+export function modelsNamed(list: string, catalog: Catalog): Model<Api>[] {
+  return list
+    .split(",")
+    .map((id) => id.trim())
+    .filter(Boolean)
+    .flatMap((id) => catalog.model(id) ?? []);
+}
+
+/**
+ * The models a chat can pick: the providers' lists as last asked (kept in R2 for every isolate), and Workers AI's. The
+ * first call with no discovery anywhere asks the providers and waits; later, a discovery older than FRESH_MS is renewed
+ * in the background while the old one serves. `refresh` asks again now, unless the last ask was under a minute ago.
+ */
+export async function loadCatalog(source: CatalogSource, { refresh = false } = {}): Promise<Catalog> {
+  if (held && !refresh && Date.now() - held.readAt < REREAD_MS) return held.catalog;
+  const discovery = await readCached(source.cache);
+  const age = discovery ? Date.now() - discovery.checkedAt : Infinity;
+  if (!discovery || (refresh && age >= MIN_REFRESH_MS)) {
+    try {
+      return await rediscover(source, discovery);
+    } catch (error) {
+      console.error("models: could not ask the providers:", errorMessage(error));
+      return hold(discovery);
+    }
+  }
+  const catalog = hold(discovery);
+  if (age >= FRESH_MS) {
+    const renew = rediscover(source, discovery).catch((error: unknown) => console.error("models: could not ask the providers:", errorMessage(error)));
+    source.waitUntil?.(renew);
+  }
+  return catalog;
+}
+
+/**
+ * Mark a model that failed a call for a reason that will not pass on its own (worker/model-health.ts cannotCall), for
+ * every isolate, until the providers are next asked: Auto leaves it out meanwhile. Not marked when there is no
+ * discovery to keep the mark in (nothing was asked yet). Never throws: a mark that cannot be kept is logged.
+ */
+export async function markFailing(source: CatalogSource, id: string, error: string): Promise<void> {
+  try {
+    console.error(`models: ${id} cannot be called:`, error);
+    // Marked already, here: every call to a model with no credits fails, and one mark is enough.
+    if (held?.discovery?.failing?.[id]) return;
+    const discovery = (await readCached(source.cache)) ?? held?.discovery;
+    if (!discovery) return;
+    // Marked already, by another isolate: held here too, so this one's Auto leaves it out now.
+    if (discovery.failing?.[id]) return void hold(discovery);
+    const marked: Discovery = { ...discovery, failing: { ...discovery.failing, [id]: failureOf(error) } };
+    await source.cache.write(marked);
+    hold(marked);
+  } catch (caught) {
+    console.error("models: could not mark a failing model:", errorMessage(caught));
+  }
+}
+
+/** Forget what this isolate holds (tests). */
+export function forgetCatalog(): void {
+  held = undefined;
+}
+
+/**
+ * pi-ai's models, through the chat's AI Gateway, at the vendors' current prices, each reply marked with its effort and
+ * Gemini's tool calls signed: AI Gateway's catalog and Workers AI's through `provider`, the models the providers list
+ * (as this isolate's catalog has them now) through one pi provider each, and a local runtime's through `local`.
+ */
+export function piModels(provider: Provider, gemini: GeminiCompat, catalog: () => Catalog = currentCatalog, local: readonly Provider[] = []) {
+  const models = createModels();
+  models.setProvider(withCurrentPrices(provider));
+  for (const listed of listedProviders(provider, catalog)) models.setProvider(listed);
+  for (const runtime of local) models.setProvider(runtime);
+  return gemini.models(withEffortRecorded(models));
 }

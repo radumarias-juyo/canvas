@@ -29,14 +29,24 @@
     if (window.parent !== window) window.parent.postMessage({ type: "pi:hello" }, "*");
   });
 
-  let mcp;
-  function use(name) {
-    if (name !== "mcp") return Promise.resolve(null);
-    if (!mcp) mcp = session.then((s) => (s ? createMcp(s.port, s.manifest) : null));
-    return mcp;
+  // One link per page: the port, with the calls waiting on it and the watches it feeds.
+  let link;
+  function connected() {
+    if (!link) link = session.then((s) => (s ? createLink(s.port, s.manifest) : null));
+    return link;
   }
 
-  function mcpError(error) {
+  const namespaces = new Map();
+  const makers = { mcp: createMcp, storage: createStorage, ai: createAi };
+  function use(name) {
+    // Own names only: "constructor" or "toString" are not capabilities.
+    if (typeof name !== "string" || !Object.prototype.hasOwnProperty.call(makers, name)) return Promise.resolve(null);
+    const make = makers[name];
+    if (!namespaces.has(name)) namespaces.set(name, connected().then((l) => (l ? make(l) : null)));
+    return namespaces.get(name);
+  }
+
+  function piError(error) {
     const e = new Error(error.message || error.code);
     for (const key of ["code", "server", "retryable", "retryAfterMs", "result"]) {
       if (error[key] !== undefined) e[key] = error[key];
@@ -45,7 +55,7 @@
   }
 
   function badRequest(message) {
-    return mcpError({ code: "bad_request", message });
+    return piError({ code: "bad_request", message });
   }
 
   function checkJson(input) {
@@ -57,12 +67,10 @@
     }
   }
 
-  function createMcp(port, manifest) {
+  function createLink(port, manifest) {
     let seq = 0;
     const pending = new Map();
     const watchers = new Map();
-    const servers = (manifest.mcp && manifest.mcp.servers) || [];
-
     port.onmessage = (event) => {
       const message = event.data;
       if (!message) return;
@@ -71,45 +79,59 @@
         if (!call) return;
         pending.delete(message.id);
         if (message.ok) call.resolve(message.value);
-        else call.reject(mcpError(message.error));
+        else call.reject(piError(message.error));
       } else if (message.type === "watch") {
         const handler = watchers.get(message.watchId);
         if (!handler) return;
         const ev = message.event;
         try {
-          handler(ev.type === "error" ? { type: "error", error: mcpError(ev.error) } : ev);
+          handler(ev.type === "error" ? { type: "error", error: piError(ev.error) } : ev);
         } catch (err) {
           console.error(err);
         }
       }
     };
+    return {
+      port,
+      manifest,
+      watchers,
+      nextId: () => ++seq,
+      request(method, params) {
+        const id = ++seq;
+        return new Promise((resolve, reject) => {
+          pending.set(id, { resolve, reject });
+          port.postMessage({ type: "request", id, method, params });
+        });
+      },
+    };
+  }
 
-    function request(method, params) {
-      const id = ++seq;
-      return new Promise((resolve, reject) => {
-        pending.set(id, { resolve, reject });
-        port.postMessage({ type: "request", id, method, params });
-      });
-    }
+  /** A call that rejects with `cancelled` once `signal` fires; the reply, if any, is then dropped. */
+  function abortable(call, signal) {
+    if (!signal) return call;
+    if (signal.aborted) return Promise.reject(piError({ code: "cancelled", message: "aborted" }));
+    return new Promise((resolve, reject) => {
+      const abort = () => reject(piError({ code: "cancelled", message: "aborted" }));
+      signal.addEventListener("abort", abort, { once: true });
+      call.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+    });
+  }
+
+  function createMcp(link) {
+    const { port, watchers, request } = link;
+    const servers = (link.manifest.mcp && link.manifest.mcp.servers) || [];
 
     function callTool(server, tool, input, options) {
       options = options || {};
       if (typeof server !== "string" || typeof tool !== "string") return Promise.reject(badRequest("server and tool must be strings"));
       if (!checkJson(input)) return Promise.reject(badRequest("input must be plain JSON"));
-      const call = request("call", { server, tool, input: input === undefined ? {} : input, cache: options.cache });
-      const signal = options.signal;
-      if (!signal) return call;
-      if (signal.aborted) return Promise.reject(mcpError({ code: "cancelled", message: "aborted" }));
-      return new Promise((resolve, reject) => {
-        signal.addEventListener("abort", () => reject(mcpError({ code: "cancelled", message: "aborted" })), { once: true });
-        call.then(resolve, reject);
-      });
+      return abortable(request("call", { server, tool, input: input === undefined ? {} : input, cache: options.cache }), options.signal);
     }
 
     function watchTool(server, tool, input, handler, options) {
       if (typeof handler !== "function") throw new TypeError("watchTool needs a handler function");
       options = options || {};
-      const watchId = ++seq;
+      const watchId = link.nextId();
       watchers.set(watchId, handler);
       if (typeof server !== "string" || typeof tool !== "string" || !checkJson(input)) {
         queueMicrotask(() => {
@@ -161,7 +183,7 @@
 
     function server(name) {
       const h = handle(name);
-      return h ? Promise.resolve(h) : Promise.reject(mcpError({ code: "server_not_connected", server: name, message: `${name} is not declared by this page` }));
+      return h ? Promise.resolve(h) : Promise.reject(piError({ code: "server_not_connected", server: name, message: `${name} is not declared by this page` }));
     }
 
     const namespace = { callTool, watchTool, invalidate, listTools, describeTool, server };
@@ -170,6 +192,162 @@
       if (!(s.server in namespace)) namespace[s.server] = handle(s.server);
     }
     return Object.freeze(namespace);
+  }
+
+  // What a page saves (pi.use("storage")): the viewer's own values for this page over the author's, loaded once and
+  // read synchronously; changes go back in the background, a short while after the last one. The localStorage
+  // stand-in below is the same store. The Worker puts its limits in when it serves the page (worker/artifacts/serve.ts).
+  const LIMITS = __PAGE_STORAGE_LIMITS__;
+  const WRITE_DELAY_MS = 500;
+  const saved = { values: new Map(), changes: new Map(), isAuthor: false, link: null, timer: 0, loadFailed: false };
+
+  function quotaError(message) {
+    return new DOMException(message, "QuotaExceededError");
+  }
+
+  function change(key, value) {
+    saved.changes.set(key, value);
+    if (!saved.link) return;
+    clearTimeout(saved.timer);
+    saved.timer = setTimeout(flush, WRITE_DELAY_MS);
+  }
+
+  /** Send the changes made so far. Resolves once they are saved; rejects with why they were not. */
+  function flush() {
+    clearTimeout(saved.timer);
+    if (saved.loadFailed && saved.changes.size) {
+      return Promise.reject(piError({ code: "unavailable", message: "Saved values could not be loaded, so nothing is saved." }));
+    }
+    if (!saved.link || saved.changes.size === 0) return Promise.resolve();
+    const changes = Object.fromEntries(saved.changes);
+    saved.changes.clear();
+    const write = saved.link.request("storage", { op: "write", changes }).then(() => undefined);
+    write.catch((error) => console.error("pi storage: not saved:", error.message));
+    return write;
+  }
+
+  const store = Object.freeze({
+    get length() {
+      return saved.values.size;
+    },
+    get isAuthor() {
+      return saved.isAuthor;
+    },
+    key(index) {
+      const key = [...saved.values.keys()][index];
+      return key === undefined ? null : key;
+    },
+    keys() {
+      return [...saved.values.keys()];
+    },
+    getItem(key) {
+      const value = saved.values.get(String(key));
+      return value === undefined ? null : value;
+    },
+    setItem(key, value) {
+      key = String(key);
+      value = String(value);
+      if (key.length > LIMITS.keyChars) throw quotaError(`A key is at most ${LIMITS.keyChars} characters.`);
+      if (value.length > LIMITS.valueChars) throw quotaError(`A value is at most ${LIMITS.valueChars} characters.`);
+      if (saved.values.get(key) === value) return;
+      saved.values.set(key, value);
+      change(key, value);
+    },
+    removeItem(key) {
+      key = String(key);
+      if (saved.values.delete(key)) change(key, null);
+    },
+    clear() {
+      for (const key of [...saved.values.keys()]) store.removeItem(key);
+    },
+    flush,
+    /** Drop this viewer's own values: back to the author's (for the author: no defaults for anyone). */
+    reset() {
+      clearTimeout(saved.timer);
+      saved.changes.clear();
+      if (!saved.link) {
+        saved.values = new Map();
+        return Promise.resolve();
+      }
+      return saved.link.request("storage", { op: "reset" }).then((loaded) => {
+        saved.values = new Map(Object.entries(loaded.values || {}));
+      });
+    },
+  });
+
+  function createStorage(link) {
+    return link.request("storage", { op: "load" }).then(
+      (loaded) => {
+        const values = new Map(Object.entries(loaded.values || {}));
+        // What the page set before they loaded counts only for keys with nothing saved: code that writes its defaults
+        // at startup (as code written for localStorage does) must not overwrite what the viewer saved.
+        for (const [key, value] of [...saved.changes]) {
+          if (values.has(key) || value === null) saved.changes.delete(key);
+          else values.set(key, value);
+        }
+        saved.values = values;
+        saved.isAuthor = loaded.isAuthor === true;
+        saved.link = link;
+        if (saved.changes.size) saved.timer = setTimeout(flush, WRITE_DELAY_MS);
+        addEventListener("pagehide", () => void flush());
+        addEventListener("visibilitychange", () => document.visibilityState === "hidden" && void flush());
+        return store;
+      },
+      (error) => {
+        // The page still runs on what it sets now; nothing is saved, so a later load cannot be overwritten with it.
+        console.warn("pi storage: saved values could not be loaded:", error.message);
+        saved.loadFailed = true;
+        return store;
+      },
+    );
+  }
+
+  // An opaque origin has no localStorage (reading it throws): in its place, the page's saved values, so code written
+  // for localStorage keeps its state. The first read starts loading them; await pi.use("storage") before relying on it.
+  // sessionStorage lives only as long as the page.
+  function memoryStorage() {
+    const values = new Map();
+    return Object.freeze({
+      get length() {
+        return values.size;
+      },
+      key: (index) => [...values.keys()][index] ?? null,
+      getItem: (key) => (values.has(String(key)) ? values.get(String(key)) : null),
+      setItem: (key, value) => void values.set(String(key), String(value)),
+      removeItem: (key) => void values.delete(String(key)),
+      clear: () => values.clear(),
+    });
+  }
+  function standIn(name, value, onRead) {
+    try {
+      if (window[name]) return;
+    } catch {}
+    try {
+      Object.defineProperty(window, name, {
+        configurable: true,
+        enumerable: true,
+        get() {
+          if (onRead) onRead();
+          return value;
+        },
+      });
+    } catch {}
+  }
+  standIn("localStorage", store, () => void use("storage"));
+  standIn("sessionStorage", memoryStorage());
+
+  // pi.use("ai"): one answer from a small model, paid for by the viewer, for what they typed into the page.
+  function createAi(link) {
+    return Object.freeze({
+      complete(request, options) {
+        options = options || {};
+        const body = typeof request === "string" ? { messages: [{ role: "user", content: request }] } : request;
+        if (!body || !Array.isArray(body.messages) || !checkJson(body)) {
+          return Promise.reject(badRequest("complete takes a prompt or { system?, messages, maxTokens?, json? }"));
+        }
+        return abortable(link.request("ai", body), options.signal);
+      },
+    });
   }
 
   Object.defineProperty(window, "pi", { value: Object.freeze({ use }), enumerable: true });

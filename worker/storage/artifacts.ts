@@ -1,6 +1,7 @@
-import { isOwnedBy, type ArtifactManifest, type ArtifactMeta, type CloneAccess } from "../../shared/protocol.ts";
+import { isOwnedBy, type ArtifactManifest, type ArtifactMeta, type ArtifactVersion, type CloneAccess } from "../../shared/protocol.ts";
 import { randomHex } from "../../shared/util.ts";
 import { commitAndPush, tokenSecret, type GitHttp } from "./git.ts";
+import { deletePrefix } from "./r2.ts";
 
 const BRANCH = "main";
 const PAGE_FILE = "index.html";
@@ -14,8 +15,9 @@ const repoName = (id: string) => `artifact-${id}`;
 const tagFor = (version: number) => `v${version}`;
 // The R2 read cache keeps the layout artifacts had before repos, so artifacts
 // published then still serve from it.
-const metaKey = (id: string) => `artifacts/${id}/meta.json`;
-const htmlKey = (id: string, version: number) => `artifacts/${id}/v${version}/index.html`;
+const cachePrefix = (id: string) => `artifacts/${id}/`;
+const metaKey = (id: string) => `${cachePrefix(id)}meta.json`;
+const htmlKey = (id: string, version: number) => `${cachePrefix(id)}v${version}/index.html`;
 
 /** A new artifact or chat id: 16 lowercase hex characters. */
 export function newId(): string {
@@ -71,6 +73,21 @@ export class ArtifactStore {
   }
 
   /**
+   * Delete an artifact, every version, for good: its repo, then its cached copies, so that a failure part way leaves
+   * it still readable and the next try finishes the job. Only the chat that owns it may: false for anyone else's. An
+   * artifact already gone is deleted.
+   */
+  async delete(id: string, ownerUid: string, chatId: string): Promise<boolean> {
+    // Not readMeta: it would cache a copy of what is about to go.
+    const cached = await this.#cache.get(metaKey(id));
+    const meta = cached ? ((await cached.json()) as ArtifactMeta) : await this.#readRepoMeta(id);
+    if (meta && !isOwnedBy(meta, ownerUid, chatId)) return false;
+    await this.#repos.delete(repoName(id));
+    await deletePrefix(this.#cache, cachePrefix(id));
+    return true;
+  }
+
+  /**
    * Commit a new version and push it. Only the chat that created an artifact
    * publishes to it, and a chat's Durable Object handles one call at a time,
    * so two publishes to one repo cannot race.
@@ -99,18 +116,46 @@ export class ArtifactStore {
       createdToken = (await this.#repos.create(repoName(meta.id), { description: input.title, setDefaultBranch: BRANCH })).token;
     }
 
-    const version = meta.latest + 1;
-    const message = input.message?.trim().split("\n")[0].slice(0, 200) || undefined;
-    meta = {
-      ...meta,
-      title: input.title,
-      updatedAt: now,
-      latest: version,
-      versions: [...meta.versions, { version, publishedAt: now, manifest: input.manifest, ...(message ? { message } : {}) }],
+    return this.#addVersion(meta, input.title, { version: meta.latest + 1, publishedAt: now, manifest: input.manifest, message: input.message }, input.html, createdToken);
+  }
+
+  /** Commit `version` after the ones `meta` has, push it, and cache it. Its message is cut to its first line. */
+  async #addVersion(before: ArtifactMeta, title: string, version: ArtifactVersion, html: string, createdToken?: string): Promise<ArtifactMeta> {
+    const message = version.message?.trim().split("\n")[0].slice(0, 200) || undefined;
+    const meta: ArtifactMeta = {
+      ...before,
+      title,
+      updatedAt: version.publishedAt,
+      latest: version.version,
+      versions: [...before.versions, { version: version.version, publishedAt: version.publishedAt, manifest: version.manifest, ...(message && { message }) }],
     };
-    await this.#commit(meta, input.html, now, createdToken);
-    await Promise.all([this.#cacheHtml(meta.id, version, input.html), this.#cacheMeta(meta)]);
+    await this.#commit(meta, html, version.publishedAt, createdToken);
+    await Promise.all([this.#cacheHtml(meta.id, version.version, html), this.#cacheMeta(meta)]);
     return meta;
+  }
+
+  /**
+   * Add one version an import brings, as it was published (its time, manifest and message), to artifact `id` of the
+   * user's chat `chatId`: versions come in order, the first making the repo. A version that is here already is skipped,
+   * so an import that stopped part way goes on. Throws an ArtifactImportError for an id that is another chat's here, or a
+   * version out of order.
+   */
+  async importVersion(input: { id: string; ownerUid: string; chatId: string; title: string; createdAt: number; version: ArtifactVersion; html: string }): Promise<ArtifactMeta> {
+    const { id, ownerUid, chatId, version } = input;
+    // One published before repos has only its read cache: it is replayed into a repo first, as a publish does.
+    const existing = (await this.#readRepoMeta(id)) ?? (await this.#importFromCache(id, ownerUid, chatId));
+    if (existing && !isOwnedBy(existing, ownerUid, chatId)) throw new ArtifactImportError(`Artifact ${id} belongs to another chat here.`);
+    if (existing && existing.latest >= version.version) return existing;
+    const next = (existing?.latest ?? 0) + 1;
+    if (next !== version.version) throw new ArtifactImportError(`Artifact ${id} needs version ${next} before ${version.version}.`);
+    let createdToken: string | undefined;
+    if (!existing) {
+      // A repo without artifact.json holds nothing yet (an import that stopped before its first push): start it again.
+      await this.#repos.delete(repoName(id)).catch(() => false);
+      createdToken = (await this.#repos.create(repoName(id), { description: input.title, setDefaultBranch: BRANCH })).token;
+    }
+    const before = existing ?? { id, title: input.title, ownerUid, chatId, createdAt: input.createdAt, updatedAt: input.createdAt, latest: 0, versions: [] };
+    return this.#addVersion(before, input.title, version, input.html, createdToken);
   }
 
   /**
@@ -204,3 +249,6 @@ export class ArtifactStore {
     await this.#cache.put(htmlKey(id, version), html, { httpMetadata: { contentType: "text/html; charset=utf-8" } }).catch(() => {});
   }
 }
+
+/** A version an import brings that cannot go where it says. */
+export class ArtifactImportError extends Error {}

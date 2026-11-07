@@ -34,6 +34,10 @@ describe("canonicalJson", () => {
   it("ignores property order at every depth", () => {
     expect(canonicalJson({ b: 1, a: { d: [1, { y: 2, x: 1 }], c: null } })).toBe(canonicalJson({ a: { c: null, d: [1, { x: 1, y: 2 }] }, b: 1 }));
   });
+
+  it("keeps a __proto__ key from parsed JSON", () => {
+    expect(canonicalJson(JSON.parse('{"f":{"__proto__":{"x":1}}}'))).toBe('{"f":{"__proto__":{"x":1}}}');
+  });
 });
 
 describe("McpHub.read", () => {
@@ -98,20 +102,19 @@ describe("McpHub.read", () => {
     expect(server.calls).toHaveLength(2);
   });
 
-  it("keeps viewers who are not signed in apart from every signed-in viewer, and shares one entry among them", async () => {
-    const server = fakeServer(() => text({}));
-    const hub = new McpHub([viewerScoped], server.connector);
-    await hub.read("Prices", "price", {}, { staleMs: 30_000, viewer: null });
-    await hub.read("Prices", "price", {}, { staleMs: 30_000, viewer: null });
-    await hub.read("Prices", "price", {}, { staleMs: 30_000, viewer: "ann" });
-    expect(server.calls).toHaveLength(2);
-  });
-
   it("shares one result across viewers on a shared-scoped server", async () => {
     const server = fakeServer(() => text({}));
     const hub = new McpHub([sharedScoped], server.connector);
     await hub.read("Public", "price", {}, { staleMs: 30_000, viewer: "ann" });
     await hub.read("Public", "price", {}, { staleMs: 30_000, viewer: "bob" });
+    expect(server.calls).toHaveLength(1);
+  });
+
+  it("shares one result across viewers by default", async () => {
+    const server = fakeServer(() => text({}));
+    const hub = new McpHub([{ name: "Open", url: "https://example.invalid/mcp" }], server.connector);
+    await hub.read("Open", "price", {}, { staleMs: 30_000, viewer: "ann" });
+    await hub.read("Open", "price", {}, { staleMs: 30_000, viewer: "bob" });
     expect(server.calls).toHaveLength(1);
   });
 

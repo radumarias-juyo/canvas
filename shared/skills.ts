@@ -1,7 +1,10 @@
 // Skills: named ways of working the agent picks for itself. Each one says
 // when to use it, how to work (instructions and guardrails) and which tools
 // it works with. Only names and descriptions are in the system prompt; the
-// agent activates a skill to read the rest.
+// agent activates a skill to read the rest. A skill imported as a package also
+// has files (shared/skill-files.ts).
+
+import type { SkillFileInfo } from "./skill-files.ts";
 
 /** Lowercase words joined by hyphens, as in the Agent Skills format. */
 export const SKILL_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -43,6 +46,10 @@ export interface SkillInfo extends SkillInput {
   updatedAt: number;
   /** A built-in skill that one of the user's own, turned on, has the same name as: the agent gets the user's. */
   replaced?: true;
+  /** The files that came with a skill imported as a package, by path; none for others. */
+  files?: SkillFileInfo[];
+  /** Where those files are kept (SkillFiles): the set the last import wrote. */
+  fileSet?: string;
 }
 
 /** Whether the agent gets this skill: it is on, and no skill of the user's own with its name replaces it. */
@@ -64,17 +71,21 @@ export type SkillResult = SkillInfo | { error: string };
 
 /** A tool list as people write it: names separated by spaces or commas. */
 export function splitTools(list: string): string[] {
-  return list.split(/[\s,]+/).filter(Boolean);
+  // A Claude Code tool may name what it allows in parentheses, spaces and all: "Bash(git add:*)" is one entry.
+  return list.match(/[^\s,(]+(?:\([^)]*\))?/g) ?? [];
 }
 
-/** A skill's fields trimmed, with the tool list deduplicated. Throws with what to fix. */
+/**
+ * A skill's fields trimmed, with the tool list deduplicated: a Claude Code entry is its tool, without what it allows
+ * ("Bash(git:*)" is Bash), whether from a SKILL.md or typed in the app. Throws with what to fix.
+ */
 export function checkSkill(input: unknown): SkillInput {
   const value = (input ?? {}) as Partial<Record<keyof SkillInput, unknown>>;
   const name = typeof value.name === "string" ? value.name.trim() : "";
   const description = typeof value.description === "string" ? value.description.trim().replace(/\s+/g, " ") : "";
   const instructions = typeof value.instructions === "string" ? value.instructions.trim() : "";
   const listed = Array.isArray(value.tools) ? value.tools : value.tools === undefined ? [] : null;
-  const tools = listed && [...new Set(listed.map((tool) => (typeof tool === "string" ? tool.trim() : "")))];
+  const tools = listed && [...new Set(listed.map((tool) => (typeof tool === "string" ? tool.trim().replace(/\(.*\)$/s, "") : "")))];
   const problems: string[] = [];
   if (!SKILL_NAME_PATTERN.test(name) || name.length > MAX_SKILL_NAME) {
     problems.push(`The name must be up to ${MAX_SKILL_NAME} lowercase letters, digits and single hyphens, e.g. "weekly-report".`);

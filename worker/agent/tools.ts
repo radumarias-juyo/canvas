@@ -1,38 +1,52 @@
 import { Type } from "@earendil-works/pi-ai";
 import { exports } from "cloudflare:workers";
-import { defineExtension, defineTool, section, type Extension } from "@earendil-works/pi-durable";
+import { defineExtension, defineTool, section, type Extension, type ToolExecutionResult } from "@earendil-works/pi-durable";
 import { createTwoFilesPatch } from "diff";
-import { isOwnedBy, manifestOf, PUBLISH_TOOL, type ArtifactManifest, type ArtifactMeta, type ArtifactSummary, type PublishedDetails } from "../../shared/protocol.ts";
+import {
+  CHECK_TOOL,
+  DRAFTS_TOOL,
+  isOwnedBy,
+  manifestOf,
+  PUBLISH_TOOL,
+  WRITE_TOOL,
+  type ArtifactMeta,
+  type CheckedDetails,
+  type CheckedResultDetails,
+  countFindings,
+  type PublishedDetails,
+  type ReviewedDetails,
+  type SavedFilesDetails,
+} from "../../shared/protocol.ts";
+import { AGENT_REACTIONS, type Reaction } from "../../shared/reactions.ts";
 import { MAX_SKILL_DESCRIPTION, type SkillInput, type SkillResult } from "../../shared/skills.ts";
-import { formatBytes, listSome } from "../../shared/util.ts";
-import { checkManifest, MAX_HTML_BYTES } from "../artifacts/manifest.ts";
-import type { McpHub } from "../mcp/hub.ts";
-import type { SandboxFile, SandboxRun } from "../sandbox.ts";
-import { normalisePath, PathError, type ArtifactStore, type FileEntry, type UserFiles } from "../storage/index.ts";
-import { FileRefError, MAX_SANDBOX_BYTES, resolveFile, resolveRef, sandboxLayout } from "./file-refs.ts";
+import { formatBytes, listSome, plural } from "../../shared/util.ts";
+import { describeReport, type CheckReport } from "../artifacts/check.ts";
+import type { PageReview } from "../artifacts/review.ts";
+import { chatOutFolder, FILES_WRITE_TOOL, RUN_BASH_TOOL, RUN_PYTHON_TOOL, savedReport, wroteReport } from "../chat-traces.ts";
+import { MAX_RUN_STDERR, MAX_RUN_STDOUT, type SandboxFile, type SandboxRun } from "../sandbox.ts";
+import { literalPath, MAX_DRAFTS, type FileEntry, type UserFiles } from "../storage/index.ts";
+import { checkDraft, draftLine, draftNamed, FailedChecks, publishDraft, readPageSource, writeDraft, type PublishScope } from "./publish.ts";
+import { FileRefError, MAX_SANDBOX_BYTES, outputPaths, resolveFile, resolveRef, sandboxLayout } from "./file-refs.ts";
 import { clip, MAX_TOOL_TEXT, text } from "./output.ts";
+import { pagePart } from "./page-part.ts";
 
 /** What the tools need from the chat they run in. */
-export interface ChatScope {
-  uid: string;
-  chatId: string;
-  hub: McpHub;
-  artifacts: ArtifactStore;
+export interface ChatScope extends PublishScope {
   /** This chat's user's files: scoped to the uid and encrypted with that user's key. */
   files: () => Promise<UserFiles>;
-  onPublished(artifact: Omit<ArtifactSummary, "chatId">): Promise<void>;
+  /** Whether the owner named this artifact from another of their chats with "@" here, so the agent may read it. */
+  broughtIn(id: string): boolean;
   /** Save a skill for the user, turned off until they turn it on. */
   proposeSkill(skill: SkillInput): Promise<SkillResult>;
-}
-
-/** `path` as a stored path, or undefined when it cannot be one ("data/", a name with characters paths do not allow). */
-function literalPath(path: string): string | undefined {
-  try {
-    return normalisePath(path);
-  } catch (error) {
-    if (error instanceof PathError) return undefined;
-    throw error;
-  }
+  /** The checks that found errors in a row; the chat resets it when someone writes. */
+  failedChecks: FailedChecks;
+  /** React with `emoji` to the newest message a person sent; who it was from, or null when there is none. */
+  react(emoji: Reaction): Promise<string | null>;
+  /**
+   * The folders of those of the owner's skills named that are on, for the sandbox: each skill's SKILL.md and files,
+   * named <skill>/<path>. Throws naming a skill that is not one, and, before reading, when they hold over `maxBytes`.
+   */
+  skillFolders(names: readonly string[], maxBytes: number): Promise<SandboxFile[]>;
 }
 
 /**
@@ -89,7 +103,7 @@ export function filesExtension(scope: ChatScope): Extension {
           let path = literal;
           let object = path === undefined ? null : await files.get(path, range);
           if (!object) {
-            const found = await findFiles(files, [args.path], (entries, ref) => [resolveFile(entries, ref)]);
+            const found = await findFiles(files, [args.path], (entries, ref) => [resolveFile(entries, ref, chatOutFolder(scope.chatId))]);
             path = found.paths[0];
             // The listing did not match it either and fell back to the path just read: it is not there.
             object = path === literal ? null : await files.get(path, range);
@@ -100,12 +114,14 @@ export function filesExtension(scope: ChatScope): Extension {
         },
       }),
       defineTool({
-        name: "files_write",
-        description: "Write a UTF-8 text file into the user's files, replacing any file at that path.",
+        name: FILES_WRITE_TOOL,
+        description:
+          "Write a UTF-8 text file into the user's files, replacing any file at that path. " +
+          "Keep files you make for this chat, such as notes or an intermediate CSV, in this chat's folder under out/ (named with the user's files): the user's other chats save to their own.",
         parameters: Type.Object({ path: Type.String(), content: Type.String() }),
         execute: async (args) => {
           const path = await (await scope.files()).put(args.path, args.content, "text/plain; charset=utf-8");
-          return { output: text(`Wrote ${path} (${args.content.length} characters).`) };
+          return { output: text(wroteReport(path, args.content.length)), details: { saved: [path] } satisfies SavedFilesDetails };
         },
       }),
     ],
@@ -119,19 +135,20 @@ export function filesIndexExtension(index: string): Extension {
 
 const SANDBOX_FILES =
   "Files you name are copied from the user's files into ./files/, in their folders but without the leading uploads/ " +
-  "(uploads/q3/sales.csv is ./files/q3/sales.csv, out/report.csv is ./files/out/report.csv). " +
-  "Anything written to ./out/ (top level, not subfolders) is saved back to the user's files under out/. " +
-  "Each run starts with fresh ./files and ./out; other files under the working directory stay while the sandbox is up (10 minutes after the last run). " +
-  "Returns exit code, stdout and stderr.";
+  "(uploads/q3/sales.csv is ./files/q3/sales.csv, out/<chat>/report.csv is ./files/out/<chat>/report.csv). " +
+  "Anything written to ./out/ (top level, not subfolders) is saved back to this chat's folder under out/ in the user's files (named with them). " +
+  "Skills you name are copied into ./skills/<name>/, so their scripts run as the skill says. " +
+  "Each run starts with fresh ./files, ./skills and ./out; other files under the working directory stay while the sandbox is up (10 minutes after the last run). " +
+  `Returns exit code, the last ${MAX_RUN_STDOUT.toLocaleString("en")} characters of stdout and the last ${MAX_RUN_STDERR.toLocaleString("en")} of stderr: print a summary, and write anything longer to ./out.`;
 
 /** The files `refs` name, read, keyed by where they go under ./files/ (see sandboxLayout). */
-async function sandboxInputs(files: UserFiles, refs: readonly string[]): Promise<SandboxFile[]> {
+async function sandboxInputs(files: UserFiles, refs: readonly string[], ownFolder: string, maxBytes = MAX_SANDBOX_BYTES): Promise<SandboxFile[]> {
   if (refs.length === 0) return [];
-  const { entries, paths, missing } = await findFiles(files, refs, resolveRef);
+  const { entries, paths, missing } = await findFiles(files, refs, (entries, ref) => resolveRef(entries, ref, ownFolder));
   const layout = sandboxLayout(paths);
   const sizes = new Map(entries.map((e) => [e.path, e.size]));
   const listedBytes = paths.reduce((sum, path) => sum + (sizes.get(path) ?? 0), 0);
-  if (listedBytes > MAX_SANDBOX_BYTES) throw new Error(tooMuch(listedBytes));
+  if (listedBytes > maxBytes) throw new Error(tooMuch(listedBytes, maxBytes));
   // Paths past the end of the listing had no size above: they count as they come, before their body is read.
   let unlisted = 0;
   // Once one file fails the run is refused: the others still opening are not read.
@@ -145,7 +162,7 @@ async function sandboxInputs(files: UserFiles, refs: readonly string[]): Promise
       }
       let error: Error | undefined;
       if (failed) error = new Error("Another file failed.");
-      else if (!sizes.has(path) && listedBytes + (unlisted += object.size) > MAX_SANDBOX_BYTES) error = new Error(tooMuch(listedBytes + unlisted));
+      else if (!sizes.has(path) && listedBytes + (unlisted += object.size) > maxBytes) error = new Error(tooMuch(listedBytes + unlisted, maxBytes));
       if (error) {
         failed = true;
         // Thrown before the cancel settles, so the first failure is the one Promise.all reports.
@@ -158,48 +175,52 @@ async function sandboxInputs(files: UserFiles, refs: readonly string[]): Promise
   );
 }
 
-function tooMuch(bytes: number): string {
-  return `Those files hold ${formatBytes(bytes)}; one run takes at most ${formatBytes(MAX_SANDBOX_BYTES)}. Pass fewer.`;
+function tooMuch(bytes: number, maxBytes: number): string {
+  return `Those files hold ${formatBytes(bytes)}; one run takes at most ${formatBytes(maxBytes)}${maxBytes < MAX_SANDBOX_BYTES ? " besides the skills" : ""}. Pass fewer.`;
+}
+
+/** The name of a chat's sandbox object. */
+export function sandboxName(uid: string, chatId: string): string {
+  return `${uid}-${chatId}`;
 }
 
 /**
  * Copy the named user files in, run in this chat's sandbox, save ./out back to
- * the user's files. The files go through the user's UserFiles, so they are
+ * this chat's folder in the user's files (chatOutFolder). The files go through the user's UserFiles, so they are
  * decrypted on the way in and encrypted with the user's key on the way out.
  */
-async function runInSandbox(scope: ChatScope, refs: string[] | undefined, run: (sandbox: ReturnType<typeof exports.Sandbox.getByName>, inputs: SandboxFile[]) => Promise<SandboxRun>) {
+async function runInSandbox(
+  scope: ChatScope,
+  args: { files?: string[]; skills?: string[] },
+  run: (sandbox: ReturnType<typeof exports.Sandbox.getByName>, inputs: SandboxFile[], skills: SandboxFile[]) => Promise<SandboxRun>,
+) {
   const files = await scope.files();
-  const inputs = await sandboxInputs(files, refs ?? []);
-  const result = await run(exports.Sandbox.getByName(`${scope.uid}-${scope.chatId}`), inputs);
-  const toSave = new Map<string, ArrayBuffer>();
-  const skipped = [];
-  for (const output of result.outputs) {
-    // A name the user's files do not allow must not throw away the run's output and the files already saved.
-    try {
-      // Names that differ only in what normalising trims ("a.csv" and "a.csv ") would overwrite each other.
-      const path = normalisePath(`out/${output.name}`);
-      if (toSave.has(path)) skipped.push(`${output.name} (same file as ${path})`);
-      else toSave.set(path, output.bytes);
-    } catch (error) {
-      if (!(error instanceof PathError)) throw error;
-      skipped.push(`${output.name} (${error.message})`);
-    }
-  }
+  const folder = chatOutFolder(scope.chatId);
+  // The skills first: their sizes are known before they are read, and the files get what they leave of the limit.
+  const skills = args.skills?.length ? await scope.skillFolders(args.skills, MAX_SANDBOX_BYTES) : [];
+  const inputs = await sandboxInputs(files, args.files ?? [], folder, MAX_SANDBOX_BYTES - skills.reduce((sum, file) => sum + file.bytes.byteLength, 0));
+  const result = await run(exports.Sandbox.getByName(sandboxName(scope.uid, scope.chatId)), inputs, skills);
+  const { toSave, skipped } = outputPaths(folder, result.outputs);
   const saved = await Promise.all([...toSave].map(([path, bytes]) => files.put(path, bytes)));
   const report = [
     inputs.length && `copied in: ${listSome(inputs.map((input) => `./files/${input.name}`), 20)}`,
+    skills.length && `skills copied in: ${[...new Set(args.skills)].map((name) => `./skills/${name}/`).join(", ")}`,
     `exit code ${result.exitCode}`,
     `stdout:\n${result.stdout}`,
     result.stderr && `stderr:\n${result.stderr}`,
-    saved.length && `saved: ${saved.join(", ")}`,
-    skipped.length && `not saved: ${skipped.join("; ")}`,
+    ...savedReport(saved, skipped),
   ];
-  return { output: text(clip(report.filter(Boolean).join("\n\n"))), isError: result.exitCode !== 0 };
+  return { output: text(clip(report.filter(Boolean).join("\n\n"))), details: { saved } satisfies SavedFilesDetails, isError: result.exitCode !== 0 };
 }
 
 const inputFiles = Type.Optional(
   Type.Array(Type.String(), {
     description: "The user's files to copy in: paths, a file's name or the end of its path when only one file matches, or a folder for every file in it.",
+  }),
+);
+const inputSkills = Type.Optional(
+  Type.Array(Type.String(), {
+    description: "Skills (by name) whose folders to copy in, to ./skills/<name>/ with their SKILL.md and files: what a skill's own scripts need.",
   }),
 );
 
@@ -208,55 +229,96 @@ export function sandboxExtension(scope: ChatScope): Extension {
     name: "sandbox",
     tools: [
       defineTool({
-        name: "run_python",
-        description: `Run a Python 3.13 script (pandas and numpy installed) in this chat's isolated Linux sandbox: no internet, 60 s limit. ${SANDBOX_FILES}`,
-        parameters: Type.Object({ code: Type.String(), files: inputFiles }),
-        execute: async (args) => runInSandbox(scope, args.files, (sandbox, inputs) => sandbox.runPython(args.code, inputs)),
+        name: RUN_PYTHON_TOOL,
+        description: `Run a Python 3.13 script in this chat's isolated Linux sandbox (installed: pandas, numpy, pypdf, pdfplumber, reportlab, openpyxl, python-docx, python-pptx, pillow, matplotlib, pyyaml, jinja2, beautifulsoup4, lxml): no internet, 60 s limit. ${SANDBOX_FILES}`,
+        parameters: Type.Object({ code: Type.String(), files: inputFiles, skills: inputSkills }),
+        execute: async (args) => runInSandbox(scope, args, (sandbox, inputs, skills) => sandbox.runPython(args.code, inputs, skills)),
       }),
       defineTool({
-        name: "run_bash",
+        name: RUN_BASH_TOOL,
         description:
           "Run a bash script in the same sandbox as run_python (Debian with coreutils, grep, sed, awk, tar, gzip, python3): no internet, so no package installs or downloads; 60 s limit. " +
           `Runs as written; start with set -e to stop at the first failing command. ${SANDBOX_FILES}`,
-        parameters: Type.Object({ script: Type.String(), files: inputFiles }),
-        execute: async (args) => runInSandbox(scope, args.files, (sandbox, inputs) => sandbox.runBash(args.script, inputs)),
+        parameters: Type.Object({ script: Type.String(), files: inputFiles, skills: inputSkills }),
+        execute: async (args) => runInSandbox(scope, args, (sandbox, inputs, skills) => sandbox.runBash(args.script, inputs, skills)),
       }),
     ],
   });
 }
 
-export interface PublishInput {
-  title: string;
-  html: string;
-  artifactId?: string;
-  mcp?: NonNullable<ArtifactManifest["mcp"]>["servers"];
-  message?: string;
-}
-
-/** Check the declaration, store a new version and index it for the user. Throws with what to fix. */
-export async function publishArtifact(scope: ChatScope, input: PublishInput): Promise<ArtifactMeta> {
-  if (new TextEncoder().encode(input.html).byteLength > MAX_HTML_BYTES) throw new Error("The page is over 2 MB; summarise the data instead of inlining it.");
-  const manifest: ArtifactManifest = input.mcp?.length ? { mcp: { servers: input.mcp } } : {};
-  const problems = await checkManifest(scope.hub, manifest);
-  if (problems.length) throw new Error(`Not published. Fix the mcp declaration:\n${problems.join("\n")}`);
-  const meta = await scope.artifacts.publishVersion({
-    id: input.artifactId,
-    ownerUid: scope.uid,
-    chatId: scope.chatId,
-    title: input.title,
-    html: input.html,
-    manifest,
-    message: input.message,
-  });
-  await scope.onPublished({ id: meta.id, title: meta.title, latest: meta.latest, updatedAt: meta.updatedAt });
-  return meta;
-}
-
-/** An artifact this chat published. Anything else reads as missing. */
+/**
+ * An artifact of this chat, or one of the owner's from another chat that the owner named here with "@": the agent may
+ * read it, but publishes a new version only of this chat's (ArtifactStore.publishVersion). Anything else reads as missing.
+ */
 async function ownArtifact(scope: ChatScope, id: string): Promise<ArtifactMeta> {
   const meta = await scope.artifacts.readMeta(id);
-  if (!meta || !isOwnedBy(meta, scope.uid, scope.chatId)) throw new Error(`No artifact ${id} in this chat.`);
+  const readable = meta && (isOwnedBy(meta, scope.uid, scope.chatId) || (meta.ownerUid === scope.uid && scope.broughtIn(meta.id)));
+  if (!readable) throw new Error(`No artifact ${id} in this chat. One from another chat must be named with @ by the chat's owner first.`);
   return meta;
+}
+
+/** An artifact of this chat, the only kind a publish can add a version to (ArtifactStore.publishVersion). */
+async function chatArtifact(scope: ChatScope, id: string): Promise<ArtifactMeta> {
+  const meta = await scope.artifacts.readMeta(id);
+  if (!meta || !isOwnedBy(meta, scope.uid, scope.chatId)) throw new Error(`No artifact ${id} in this chat to publish a new version of. Write the page without artifact_id to make a new artifact.`);
+  return meta;
+}
+
+const mcpParameter = (more = "") =>
+  Type.Optional(
+    Type.Array(Type.Object({ server: Type.String(), tools: Type.Array(Type.String()) }), {
+      description: `e.g. [{"server": "CoinGecko", "tools": ["execute"]}]${more}`,
+    }),
+  );
+
+const pagePartParameter = Type.Optional(
+  Type.String({
+    description:
+      'Only part of the page: "120-180" for those lines, or a piece of its text for the lines around each place it occurs. ' +
+      "What you read stays in this chat's context, which every later step sends again, so to change one part, read that part.",
+  }),
+);
+
+/** What a check's result gives the model: a line on what came of it, the report, then the screenshot. */
+function checkOutput(headline: string, report: CheckReport) {
+  const content: ({ type: "text"; text: string } | { type: "image"; data: string; mimeType: string })[] = text(clip(`${headline}\n\n${describeReport(report)}`));
+  if (report.screenshot) content.push({ type: "image", data: report.screenshot, mimeType: "image/jpeg" });
+  return content;
+}
+
+/**
+ * What the agent is told of a check's code review, after the headline: that a small model can be wrong, so it fixes
+ * the findings that are real, and how it goes on when one to fix is not.
+ */
+function reviewNote(review: PageReview, id: string): string {
+  if (review.failed) return " The page's code review did not finish; it goes on without one.";
+  const { fixes, suggestions } = countFindings(review.findings);
+  if (!fixes && !suggestions) return " A code review of the page found nothing to change.";
+  const parts = [
+    fixes &&
+      `A code review by a small model (it can be wrong) found ${plural(fixes, "thing")} to fix, among the errors: fix the real ones. It runs once: ` +
+        `if all left are wrong and nothing else failed, check draft "${id}" again unchanged.`,
+    suggestions && `Its ${plural(suggestions, "suggestion")}, among the warnings, are optional.`,
+  ];
+  return ` ${parts.filter(Boolean).join(" ")}`;
+}
+
+function reviewedDetails(review: PageReview): ReviewedDetails {
+  return {
+    findings: review.findings,
+    ...(review.by && { by: review.by }),
+    cost: review.usage.cost.total,
+    ms: review.ms,
+    ...(review.failed && { failed: review.failed }),
+  };
+}
+
+function checkedDetails(report: CheckReport): CheckedDetails {
+  return { thumb: report.thumb, errors: report.errors.length, warnings: report.warnings.length };
+}
+
+function passedLine(report: CheckReport): string {
+  return `The check passed${report.warnings.length ? ` with ${plural(report.warnings.length, "warning")}` : ""}.`;
 }
 
 export function artifactExtension(scope: ChatScope): Extension {
@@ -264,48 +326,173 @@ export function artifactExtension(scope: ChatScope): Extension {
     name: "artifacts",
     tools: [
       defineTool({
+        name: WRITE_TOOL,
+        description:
+          "Save a page you wrote as a draft of this chat, to check and publish by the draft_id this returns: send a new page as html once, then change " +
+          "it by draft_id and `edits` for just what changes, rather than sending the whole page again. To change a page published in this chat, pass its " +
+          "artifact_id and `edits` to its latest version, or to `version` (artifact_read shows it). Nothing is checked or published here. " +
+          "Declare in `mcp` every server and tool the page calls; the page can call nothing else.",
+        parameters: Type.Object({
+          html: Type.Optional(Type.String({ description: "A new page: a full HTML document, or a body fragment. Leave out with draft_id." })),
+          draft_id: Type.Optional(Type.String({ description: "The draft to change with `edits` (from a write, a check or artifact_drafts). Leave out with html." })),
+          edits: Type.Optional(
+            Type.Array(
+              Type.Object({
+                old: Type.String({ description: "Text that occurs exactly once in the page, with enough around it to be unique." }),
+                new: Type.String({ description: "What replaces it; empty deletes it." }),
+              }),
+              { description: "Changes to the draft, or to the artifact's page, applied in order. Not with html.", maxItems: 20 },
+            ),
+          ),
+          mcp: mcpParameter(". With edits, leave out to keep what the draft or version declares."),
+          artifact_id: Type.Optional(
+            Type.String({ description: "The artifact of this chat this page is a new version of: publishing the draft goes there, unless the publish names another or new_artifact." }),
+          ),
+          version: Type.Optional(Type.Number({ description: "With artifact_id alone: the version whose page `edits` change (the latest by default); no edits to restore it as it was." })),
+        }),
+        execute: async (args) => {
+          scope.failedChecks.allow("Not saved");
+          const broken = args.html === undefined ? undefined : scope.failedChecks.refuseRewrite();
+          if (broken) {
+            // A model that cannot find its error tends to write the page out again, at the cost of the whole page each time.
+            throw new Error(
+              `Not saved: the check just found errors in draft "${broken}". Fix that draft with draft_id "${broken}" and edits for just what changes, ` +
+                `rather than writing the whole page again (${DRAFTS_TOOL} with its draft_id shows the page). Only a page that is not that one goes as html.`,
+            );
+          }
+          // Opening the drafts (memoised) while the artifact is read, rather than after.
+          const [artifact] = await Promise.all([args.artifact_id === undefined ? undefined : chatArtifact(scope, args.artifact_id), scope.drafts()]);
+          const draft = await writeDraft(scope, { html: args.html, draftId: args.draft_id, edits: args.edits, mcp: args.mcp, artifact, version: args.version });
+          const next =
+            draft.errors === null
+              ? `Check it with ${CHECK_TOOL} and draft_id "${draft.id}".`
+              : `This page was checked before: ${draftLine(draft)}. ${draft.errors ? `Fix it with draft_id "${draft.id}" and edits.` : `Publish it with ${PUBLISH_TOOL} and draft_id "${draft.id}".`}`;
+          return { output: text(`Saved as draft "${draft.id}" (${formatBytes(draft.bytes)}). Nothing was checked or published. ${next}`) };
+        },
+      }),
+      defineTool({
+        name: CHECK_TOOL,
+        description:
+          `Render a draft (saved with ${WRITE_TOOL}) in a headless browser before publishing it, with its live MCP calls answered as the viewer's would be (read-only tools only; ` +
+          "a write tool gets a not_granted error instead of running). Returns errors (uncaught exceptions, console errors, blocked or failed loads, " +
+          "calls the page got wrong, failed tests, a screenshot a vision model is sure looks blank or shows an error), warnings, how the live calls went, " +
+          "the visible text and a screenshot. On a page's first check, a small model also reviews its code (bugs, security, performance, simpler code): " +
+          "what to fix is among the errors, suggestions among the warnings; a draft edited from a reviewed one is not reviewed again. Nothing is published, " +
+          `so fixing and checking again uses up no versions. Fix what it finds with ${WRITE_TOOL}, draft_id and edits, then check the new draft. ` +
+          "Pass `tests`: a few short checks of what the page must show once its data arrived.",
+        parameters: Type.Object({
+          draft_id: Type.String({ description: `The draft to check, from ${WRITE_TOOL}.` }),
+          tests: Type.Optional(
+            Type.Array(
+              Type.Object({
+                name: Type.String({ description: 'What it checks, e.g. "price table has rows".' }),
+                run: Type.String({
+                  description:
+                    "The body of an async function run in the page after it settled: throw (or return false) to fail, return a string to report a value. " +
+                    'e.g. "const rows = document.querySelectorAll(\'#prices tbody tr\').length; if (rows < 1) throw new Error(\'no rows\'); return rows + \' rows\';"',
+                }),
+              }),
+              { maxItems: 10 },
+            ),
+          ),
+          viewport: Type.Optional(Type.Union([Type.Literal("desktop"), Type.Literal("mobile")], { description: "desktop (1280 wide, the default) or mobile (390 wide)." })),
+        }),
+        execute: async (args, _api, context) => {
+          scope.failedChecks.allow();
+          const { draft, report, unchecked, usage, lookStopped, review } = await checkDraft(
+            scope,
+            args.draft_id,
+            { tests: args.tests, viewport: args.viewport },
+            context.abortSignal,
+          );
+          const { id } = draft;
+          const failed = report ? report.errors.length > 0 : undefined;
+          // A check that could not run counts too, unless such a page is published anyway (local development): a browser
+          // that never starts must not be retried forever.
+          const stop = scope.failedChecks.record(failed ?? !scope.publishUnchecked, failed ? id : undefined);
+          if (!report) {
+            const next = scope.publishUnchecked
+              ? `Publish it with ${PUBLISH_TOOL} and draft_id "${id}"; it is published unchecked.`
+              : "A page is published only once a check passes: check it again in a while.";
+            return { output: text(`The page could not be checked: ${unchecked}. Nothing was published. ${next}${stop}`) };
+          }
+          // A look at the screenshot can be wrong: a page it stopped may also be checked again unchanged (look.ts).
+          const fix = lookStopped
+            ? `Look at the screenshot: fix the page with ${WRITE_TOOL}, draft_id "${id}" and edits, then check the new draft; or, if it does show what ` +
+              `it should, check draft "${id}" again unchanged.`
+            : `Fix them with ${WRITE_TOOL}, draft_id "${id}" and edits for just what changes, then check the new draft.`;
+          const headline = failed
+            ? `The check found ${plural(report.errors.length, "error")} in draft "${id}". ${fix} Nothing was published.${stop}`
+            : `${passedLine(report)} To publish this page, call ${PUBLISH_TOOL} with draft_id "${id}".`;
+          const details: CheckedResultDetails = { check: checkedDetails(report), ...(review && { review: reviewedDetails(review) }) };
+          return { output: checkOutput(`${headline}${review ? reviewNote(review, id) : ""}`, report), details, isError: failed, usage };
+        },
+      }),
+      defineTool({
         name: PUBLISH_TOOL,
         description:
-          "Publish an HTML page as an artifact the user sees in the preview panel. Pass artifact_id to publish a new version of an artifact " +
-          "you published in this chat; omit it to create a new one. Declare in `mcp` every server and tool the page calls; the page can call nothing else.",
+          `Publish a draft that passed ${CHECK_TOOL} as an artifact the user sees in the preview panel. Pass artifact_id to publish a new version of an artifact ` +
+          "you published in this chat. Without it, the draft goes to the artifact it was written for; else a page titled like one of this chat's artifacts becomes its next version; " +
+          "anything else, or new_artifact: true, creates a new artifact (also to build on an artifact from another chat, which stays as it is). " +
+          "A fix or a change is a new version, never a new artifact.",
         parameters: Type.Object({
           title: Type.String({ description: "Two to five words." }),
-          html: Type.String({ description: "The page: a full HTML document, or a body fragment." }),
+          draft_id: Type.String({ description: `The draft to publish, as ${CHECK_TOOL} passed it.` }),
           artifact_id: Type.Optional(Type.String()),
+          new_artifact: Type.Optional(Type.Boolean({ description: "A separate artifact, even if this chat has one with this title." })),
           message: Type.Optional(
             Type.String({ description: "One line on what this version changes, e.g. \"Add a 7-day sparkline\". It becomes the version's commit message." }),
           ),
-          mcp: Type.Optional(
-            Type.Array(Type.Object({ server: Type.String(), tools: Type.Array(Type.String()) }), {
-              description: 'e.g. [{"server": "CoinGecko", "tools": ["execute"]}]',
-            }),
-          ),
         }),
+        execute: async (args, _api, context): Promise<ToolExecutionResult<PublishedDetails>> => {
+          const target = { title: args.title, artifactId: args.artifact_id, newArtifact: args.new_artifact, message: args.message };
+          const { meta, byTitle, unchecked } = await publishDraft(scope, { ...target, draftId: args.draft_id }, context.abortSignal);
+          const done =
+            `Published artifact ${meta.id} version ${meta.latest} ("${meta.title}"). The user now sees it in the preview panel.` +
+            (byTitle
+              ? ` It went to this chat's artifact with that title, as its next version: pass artifact_id ${meta.id} for it next time, or new_artifact: true for a separate one.`
+              : "") +
+            (unchecked ? " It was not checked in a browser." : "");
+          return { output: text(done), details: { artifactId: meta.id, version: meta.latest, title: meta.title } };
+        },
+      }),
+      defineTool({
+        name: DRAFTS_TOOL,
+        description:
+          `List this chat's drafts, newest first: pages you wrote that are not published yet, with how their checks went (the newest ${MAX_DRAFTS} are kept; ` +
+          "a published page's draft goes). Pass draft_id to get one back, its html and mcp, to carry on from it: after a fix went wrong, " +
+          "when the user asks for an earlier attempt, or when you no longer have the page you were working on.",
+        parameters: Type.Object({ draft_id: Type.Optional(Type.String()), part: pagePartParameter }),
+        replay: "safe",
         execute: async (args) => {
-          const meta = await publishArtifact(scope, { title: args.title, html: args.html, artifactId: args.artifact_id, mcp: args.mcp, message: args.message });
-          return {
-            output: text(`Published artifact ${meta.id} version ${meta.latest} ("${meta.title}"). The user now sees it in the preview panel.`),
-            details: { artifactId: meta.id, version: meta.latest, title: meta.title } satisfies PublishedDetails,
-          };
+          const drafts = await scope.drafts();
+          if (args.draft_id === undefined) {
+            const list = await drafts.list();
+            const lines = list.length ? `${plural(list.length, "draft")}, newest first:\n${list.map(draftLine).join("\n")}` : "This chat has no drafts.";
+            return { output: text(lines) };
+          }
+          const draft = await draftNamed(drafts, args.draft_id);
+          const declared = JSON.stringify(draft.manifest.mcp?.servers ?? []);
+          return { output: text(`Draft ${draftLine(draft)}, mcp ${declared}:\n\n${pagePart(draft.html, args.part)}`) };
         },
       }),
       defineTool({
         name: "artifact_read",
-        description: "Read the HTML of an artifact published in this chat, to revise it.",
-        parameters: Type.Object({ artifact_id: Type.String(), version: Type.Optional(Type.Number()) }),
+        description: "Read the HTML of an artifact published in this chat, to revise it, or of one the user named with @ from another of their chats, to build on it.",
+        parameters: Type.Object({ artifact_id: Type.String(), version: Type.Optional(Type.Number()), part: pagePartParameter }),
         replay: "safe",
         execute: async (args) => {
           const meta = await ownArtifact(scope, args.artifact_id);
           const version = args.version ?? meta.latest;
-          const html = await scope.artifacts.readHtml(meta.id, version);
+          const html = await readPageSource(scope, meta.id, version);
           if (html === null) throw new Error(`Artifact ${meta.id} has no version ${version}.`);
           const declared = JSON.stringify(manifestOf(meta, version) ?? {});
-          return { output: text(`Version ${version} of ${meta.latest}, manifest ${declared}:\n\n${html}`) };
+          return { output: text(`Version ${version} of ${meta.latest}, manifest ${declared}:\n\n${pagePart(html, args.part)}`) };
         },
       }),
       defineTool({
         name: "artifact_history",
-        description: "List the versions of an artifact published in this chat: when each was published and what it changed.",
+        description: "List the versions of an artifact published in this chat (or named with @ from another): when each was published and what it changed.",
         parameters: Type.Object({ artifact_id: Type.String() }),
         replay: "safe",
         execute: async (args) => {
@@ -323,7 +510,7 @@ export function artifactExtension(scope: ChatScope): Extension {
           const meta = await ownArtifact(scope, args.artifact_id);
           const to = args.to ?? meta.latest;
           const from = args.from ?? to - 1;
-          const [before, after] = await Promise.all([scope.artifacts.readHtml(meta.id, from), scope.artifacts.readHtml(meta.id, to)]);
+          const [before, after] = await Promise.all([readPageSource(scope, meta.id, from), readPageSource(scope, meta.id, to)]);
           if (before === null || after === null) throw new Error(`Artifact ${meta.id} has versions 1 to ${meta.latest}.`);
           const patch = createTwoFilesPatch(`v${from}/index.html`, `v${to}/index.html`, before, after, undefined, undefined, { context: 3 });
           return { output: text(clip(patch)) };
@@ -353,6 +540,28 @@ export function skillsExtension(scope: ChatScope): Extension {
           const saved = await scope.proposeSkill({ name: args.name, description: args.description, instructions: args.instructions, tools: args.tools ?? [] });
           if ("error" in saved) throw new Error(`Not saved: ${saved.error}`);
           return { output: text(`Saved the skill "${saved.name}", turned off. Tell the user to review it and turn it on under Skills in the sidebar.`) };
+        },
+      }),
+    ],
+  });
+}
+
+/** A reaction to the message the agent is answering, as people react to each other's: an emoji under it. */
+export function reactionsExtension(scope: ChatScope): Extension {
+  return defineExtension({
+    name: "reactions",
+    tools: [
+      defineTool({
+        name: "react",
+        description:
+          "React with an emoji to the newest message a person sent, the way people do in a chat: 🚀 when asked to deploy or ship, 👍 or ✅ when " +
+          "something is done, 🎉 for good news, ❤️ or 🙏 for thanks, 😂 for a joke. Use it only when an emoji says something, at most once a message, " +
+          "and never instead of answering. Everyone in the chat sees it at once.",
+        parameters: Type.Object({ emoji: Type.Union(AGENT_REACTIONS.map((emoji) => Type.Literal(emoji))) }),
+        execute: async ({ emoji }) => {
+          const to = await scope.react(emoji);
+          if (to === null) throw new Error("There is no message from a person to react to.");
+          return { output: text(`Reacted with ${emoji} to ${to}'s message.`) };
         },
       }),
     ],

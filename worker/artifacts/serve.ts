@@ -1,7 +1,11 @@
-import RUNTIME from "../../runtime/pi-runtime.js?raw";
+import RUNTIME_SOURCE from "../../runtime/pi-runtime.js?raw";
+import { ARTIFACT_SANDBOX, PAGE_STORAGE_LIMITS } from "../../shared/protocol.ts";
+
+/** The page runtime as pages get it: with the storage limits the Worker holds them to. */
+const RUNTIME = RUNTIME_SOURCE.replace("__PAGE_STORAGE_LIMITS__", JSON.stringify(PAGE_STORAGE_LIMITS));
 
 /** The only hosts a page may load scripts from, as on claude.ai. */
-const SCRIPT_HOSTS = [
+export const SCRIPT_HOSTS = [
   "https://cdnjs.cloudflare.com",
   "https://cdn.jsdelivr.net/npm/",
   "https://unpkg.com",
@@ -9,18 +13,8 @@ const SCRIPT_HOSTS = [
   "https://code.jquery.com",
 ];
 
-/**
- * The page has no network of its own: `connect-src 'none'`. Every connector
- * call goes through the runtime's message port to the viewer page, which
- * sends it to the Worker.
- *
- * `sandbox` gives the page an opaque origin however it is loaded: framed by
- * the viewer, opened directly from a link, or as a popup that escaped the
- * frame's sandbox. Without it, a page loaded top-level would run on the app's
- * origin and could script the app as the viewer.
- */
-export const ARTIFACT_CSP = [
-  "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox",
+/** The policy without its sandbox directive, which a <meta> policy cannot carry: the check (check.ts) sandboxes its frame instead. */
+export const PAGE_POLICY = [
   "default-src 'none'",
   `script-src 'unsafe-inline' ${SCRIPT_HOSTS.join(" ")}`,
   "style-src 'unsafe-inline' https://fonts.googleapis.com",
@@ -34,12 +28,25 @@ export const ARTIFACT_CSP = [
 ].join("; ");
 
 /**
+ * The page has no network of its own: `connect-src 'none'`. Every connector
+ * call goes through the runtime's message port to the viewer page, which
+ * sends it to the Worker.
+ *
+ * `sandbox` gives the page an opaque origin however it is loaded: framed by
+ * the viewer, opened directly from a link, or as a popup that escaped the
+ * frame's sandbox. Without it, a page loaded top-level would run on the app's
+ * origin and could script the app as the viewer.
+ */
+export const ARTIFACT_CSP = `sandbox ${ARTIFACT_SANDBOX}; ${PAGE_POLICY}`;
+
+/**
  * Wrap the HTML the agent published in a document that loads the runtime
  * first. A page that is already a full document gets the runtime as the first
- * thing in its head.
+ * thing in its head. `prelude` goes before the runtime (the check's policy and
+ * error capture).
  */
-export function renderArtifact(html: string): string {
-  const runtime = `<script>${RUNTIME}</script>`;
+export function renderArtifact(html: string, prelude = ""): string {
+  const runtime = `${prelude}<script>${RUNTIME}</script>`;
   if (/<head[\s>]/i.test(html)) return html.replace(/<head(\s[^>]*)?>/i, (head) => `${head}${runtime}`);
   if (/<html[\s>]/i.test(html)) return html.replace(/<html(\s[^>]*)?>/i, (tag) => `${tag}<head>${runtime}</head>`);
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${runtime}</head><body>${html}</body></html>`;
@@ -64,13 +71,12 @@ export function artifactETag(id: string, version: number): string {
   return `"${id}-v${version}-${BUILD}"`;
 }
 
-const PAGE_HEADERS = {
+/** What a served page carries: its policy, and nothing that would let a browser read it as another type or leak where it is. */
+export const PAGE_HEADERS = {
   "content-security-policy": ARTIFACT_CSP,
   "x-content-type-options": "nosniff",
   "referrer-policy": "no-referrer",
   "cache-control": "private, no-cache",
-  // Anyone with a link may view a page, but a link someone shared is not an invitation to index it.
-  "x-robots-tag": "noindex, nofollow",
 };
 
 /** 304 when the browser already holds this exact page. */
@@ -82,4 +88,14 @@ export function notModified(request: Request, etag: string): Response | undefine
 
 export function artifactResponse(html: string, etag: string): Response {
   return new Response(renderArtifact(html), { headers: { ...PAGE_HEADERS, "content-type": "text/html; charset=utf-8", etag } });
+}
+
+/** A version's source never changes either, and has no runtime in it: a deploy leaves it as it is. */
+export function sourceETag(id: string, version: number): string {
+  return `"${id}-v${version}-source"`;
+}
+
+/** The page as the agent wrote it, without the runtime, as plain text: a browser shows it and runs none of it. */
+export function sourceResponse(html: string, etag: string): Response {
+  return new Response(html, { headers: { ...PAGE_HEADERS, "content-type": "text/plain; charset=utf-8", etag } });
 }

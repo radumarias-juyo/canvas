@@ -1,4 +1,15 @@
-import { useCallback, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type KeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent,
+  type ReactNode,
+} from "react";
+import { Icon } from "./Icon.tsx";
 
 /**
  * A layout setting kept in this browser. Storage can be missing or throw (private windows), or hold
@@ -27,6 +38,119 @@ export function useStoredState<T>(key: string, fallback: T, valid?: (value: unkn
     [key],
   );
   return [value, store];
+}
+
+/**
+ * Closes a popup on a click outside the element the returned ref is put on (an iframe's included), or on Escape;
+ * listens only while `open`.
+ */
+export function useDismiss<T extends HTMLElement>(open: boolean, setOpen: (open: boolean) => void) {
+  const box = useRef<T>(null);
+  useEffect(() => {
+    if (!open) return;
+    // By the path the click took, not where its target is now: a click that swaps a popup's content (a menu item that
+    // opens a list in its place) has a target no longer in the document by the time it gets here.
+    const onClick = (event: MouseEvent) => (box.current && event.composedPath().includes(box.current)) || setOpen(false);
+    const onKey = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      // Focus inside the popup would fall to the page as it closes: hand it back to the button that opened it.
+      if (box.current?.contains(document.activeElement)) box.current.querySelector<HTMLElement>('[aria-expanded="true"]')?.focus();
+      setOpen(false);
+    };
+    // A click into an iframe (the artifact preview) reaches no document listener here, but blurs the window.
+    const onBlur = () => setOpen(false);
+    document.addEventListener("click", onClick);
+    document.addEventListener("keydown", onKey);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      document.removeEventListener("click", onClick);
+      document.removeEventListener("keydown", onKey);
+      window.removeEventListener("blur", onBlur);
+    };
+  }, [open, setOpen]);
+  return box;
+}
+
+/** Each media query's list, made once and shared by every component that follows it. */
+const mediaLists = new Map<string, MediaQueryList>();
+const mediaList = (query: string): MediaQueryList => {
+  let list = mediaLists.get(query);
+  if (!list) mediaLists.set(query, (list = matchMedia(query)));
+  return list;
+};
+
+/** Whether the window matches a media `query`, following it as it changes. */
+export function useMediaQuery(query: string): boolean {
+  const subscribe = useCallback(
+    (onChange: () => void) => {
+      const list = mediaList(query);
+      list.addEventListener("change", onChange);
+      return () => list.removeEventListener("change", onChange);
+    },
+    [query],
+  );
+  return useSyncExternalStore(
+    subscribe,
+    () => mediaList(query).matches,
+    () => false,
+  );
+}
+
+/** A click that should open a link the browser's way (a new tab or window), not in the app. */
+export const opensElsewhere = (event: ReactMouseEvent) => event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey;
+
+/** The check for a stored open/closed (or on/off) setting. */
+export const isBoolean = (value: unknown): value is boolean => typeof value === "boolean";
+
+/**
+ * The heading of a sidebar section that opens and closes: its name and count, then whatever else it shows (an
+ * indicator while closed), then a chevron pointing the way the section opens, flipped while it is open.
+ */
+export function SectionHead({
+  name,
+  count,
+  open,
+  onToggle,
+  upward = false,
+  children,
+}: {
+  name: string;
+  count: number;
+  open: boolean;
+  onToggle: (open: boolean) => void;
+  /** The section opens above its heading (a panel at the bottom of the sidebar). */
+  upward?: boolean;
+  children?: ReactNode;
+}) {
+  // In a heading, so moving through the page by headings still finds the section.
+  return (
+    <h3 className="section-title">
+      <button
+        type="button"
+        className="section-head"
+        aria-expanded={open}
+        onClick={() => onToggle(!open)}
+        title={`${open ? "Hide" : "Show"} your ${name.toLowerCase()}`}
+      >
+        {name} <small>{count.toLocaleString("en")}</small>
+        {children}
+        <Icon size={14} box={16} stroke={1.8}>
+          <path d={upward ? "M4 10l4-4 4 4" : "M4 6l4 4 4-4"} />
+        </Icon>
+      </button>
+    </h3>
+  );
+}
+
+/** Opens the app's menu (the sidebar) where it is hidden: on a phone or in a narrow window. */
+export function MenuButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button type="button" className="icon-button menu-button" onClick={onClick} title="Menu" aria-label="Open the menu">
+      <Icon>
+        <path d="M4 7h16M4 12h16M4 17h16" />
+      </Icon>
+    </button>
+  );
 }
 
 interface HandleProps {

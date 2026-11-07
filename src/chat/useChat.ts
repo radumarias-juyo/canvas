@@ -1,10 +1,24 @@
 import type { AssistantMessage, ModelThinkingLevel } from "@earendil-works/pi-ai";
-import type { AgentEvent, AgentState, EntryRecord, JsonObject } from "@earendil-works/pi-durable";
+import type { AgentEvent, AgentState, EntryRecord, JsonObject, UsageState } from "@earendil-works/pi-durable";
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import type { AttachmentInput } from "../../shared/attachments.ts";
-import { pickerModelId } from "../../shared/models.ts";
-import { SOCKET_NOT_A_MEMBER, type ChatClientMessage, type ChatPeopleView, type ChatServerMessage, type Presence, type QueuedMessage } from "../../shared/protocol.ts";
-import { api } from "../api.ts";
+import type { MentionInput } from "../../shared/mentions.ts";
+import { modelKey } from "../../shared/models.ts";
+import {
+  CHAT_MESSAGE_KIND,
+  incomingKey,
+  SOCKET_NOT_A_MEMBER,
+  SOCKET_PING,
+  type ChatClientMessage,
+  type ChatMessageData,
+  type ChatPeopleView,
+  type ChatServerMessage,
+  type IncomingMessage,
+  type Presence,
+  type QueuedMessage,
+} from "../../shared/protocol.ts";
+import type { EntryReactions, Reaction, Reactions } from "../../shared/reactions.ts";
+import { api, keepAlive } from "../api.ts";
 
 /** A call of the current round: waiting its turn, running, or ended without a result (it faulted, or was orphaned). */
 export interface RunningTool {
@@ -12,6 +26,8 @@ export interface RunningTool {
   toolName: string;
   output: string;
   status: "pending" | "running" | "stopped";
+  /** When it started running, by this browser's clock: for the time on its step while it runs. */
+  startedAt?: number;
 }
 
 export interface ChatState {
@@ -25,24 +41,41 @@ export interface ChatState {
   error?: string;
   /** Messages sent while the agent was busy, oldest first: they wait their turn in pi's inbox. */
   queued: QueuedMessage[];
+  /**
+   * Messages the chat is getting ready to put in, oldest first (see IncomingMessage). `arriving`: when one went in, by
+   * this browser's clock; it is kept until it shows in `entries` or `queued` (the chat says so on its own, and either
+   * can come first), or for ARRIVING_MS, should it never show (a Stop that withdrew it before the queue listed it).
+   */
+  incoming: (IncomingMessage & { arriving?: number })[];
   /** The model and effort the chat runs on, from pi's agent state. */
   model?: string;
   thinkingLevel?: ModelThinkingLevel;
+  /** pi's ledger of what the chat's model calls used and cost, by model. */
+  usage?: UsageState;
 }
 
-const initial: ChatState = { entries: [], tools: [], busy: false, queued: [] };
+/** How long an incoming message that went in is kept, at most, waiting to show in the transcript or the queue. */
+export const ARRIVING_MS = 10_000;
+
+const initial: ChatState = { entries: [], tools: [], busy: false, queued: [], incoming: [] };
 
 type Action =
   /**
-   * `at`: when the batch arrived. `runElapsedMs`: how long the snapshot's run had gone, from the server. `queued`: the
-   * messages waiting after the batch, when it changed them; in the same action, so one moves from queued to placed at once.
+   * `at`: when the batch arrived. `runElapsedMs`: how long the snapshot's run had gone, from the server; `toolsElapsedMs`,
+   * its running calls, by call id. `queued`: the messages waiting after the batch, when it changed them; in the same
+   * action, so one moves from queued to placed at once.
    */
-  | { type: "events"; events: AgentEvent[]; at: number; runElapsedMs?: number; queued?: QueuedMessage[] }
+  | (Omit<Extract<ChatServerMessage, { type: "events" }>, "events"> & { events: AgentEvent[]; at: number })
+  | (Extract<ChatServerMessage, { type: "incoming" }> & { at: number })
+  /** ARRIVING_MS passed since an incoming message went in. */
+  | { type: "expire"; at: number }
   | { type: "error"; message?: string }
   | { type: "reset" };
 
 function withAgent(state: ChatState, agent: AgentState | undefined): ChatState {
-  return { ...state, model: agent?.model && pickerModelId(agent.model), thinkingLevel: agent?.thinkingLevel };
+  // The picker's id: a provider's own model is named with its provider.
+  const model = agent?.model && modelKey(agent.model.provider, agent.model.modelId);
+  return { ...state, model, thinkingLevel: agent?.thinkingLevel };
 }
 
 function addEntry(entries: EntryRecord[], entry: EntryRecord): EntryRecord[] {
@@ -53,6 +86,20 @@ function addEntry(entries: EntryRecord[], entry: EntryRecord): EntryRecord[] {
 export function reduce(state: ChatState, action: Action): ChatState {
   if (action.type === "reset") return initial;
   if (action.type === "error") return { ...state, error: action.message };
+  if (action.type === "incoming") {
+    const coming = new Set(action.incoming.map(incomingKey));
+    const arriving = state.incoming.flatMap((message) => {
+      const key = incomingKey(message);
+      if (coming.has(key)) return [];
+      if (message.arriving !== undefined) return [message];
+      return key === action.placed ? [{ ...message, arriving: action.at }] : [];
+    });
+    return withoutShown({ ...state, incoming: [...action.incoming, ...arriving] });
+  }
+  if (action.type === "expire") {
+    const incoming = state.incoming.filter((message) => message.arriving === undefined || action.at - message.arriving < ARRIVING_MS);
+    return incoming.length === state.incoming.length ? state : { ...state, incoming };
+  }
   let next = state;
   for (const event of action.events) {
     switch (event.type) {
@@ -60,7 +107,9 @@ export function reduce(state: ChatState, action: Action): ChatState {
         const busy = event.run !== undefined;
         // A duration from the server, applied to this clock: the two clocks need not agree. Without one (the server
         // could not tell), a snapshot after an overflow keeps the start already known.
-        const started = action.runElapsedMs === undefined ? next.runStartedAt : action.at - Math.max(0, action.runElapsedMs);
+        const started = startFrom(action.at, action.runElapsedMs, next.runStartedAt);
+        const known = next.tools;
+        const runningSince = (id: string) => known.find((t) => t.toolCallId === id && t.status === "running")?.startedAt;
         next = withAgent(
           {
             entries: [...event.entries],
@@ -69,10 +118,20 @@ export function reduce(state: ChatState, action: Action): ChatState {
             // A slot done without a result entry faulted or was orphaned: it stays in the round as stopped.
             tools: event.tools
               .filter((t) => t.status !== "done" || t.entry === undefined)
-              .map((t) => ({ toolCallId: t.callId, toolName: t.name, output: t.output ?? "", status: t.status === "done" ? "stopped" : t.status })),
+              .map((t) => ({
+                toolCallId: t.callId,
+                toolName: t.name,
+                output: t.output ?? "",
+                status: t.status === "done" ? "stopped" : t.status,
+                // A call still running from before the socket (re)connected counts on from where it was, else from now.
+                startedAt:
+                  t.status === "running" ? (startFrom(action.at, action.toolsElapsedMs?.[t.callId], runningSince(t.callId)) ?? action.at) : undefined,
+              })),
             busy,
             runStartedAt: busy ? (started ?? action.at) : undefined,
             queued: next.queued,
+            incoming: next.incoming,
+            usage: event.usage,
           },
           event.agent,
         );
@@ -80,6 +139,9 @@ export function reduce(state: ChatState, action: Action): ChatState {
       }
       case "agent_changed":
         next = withAgent(next, event.agent);
+        break;
+      case "usage_changed":
+        next = { ...next, usage: event.usage };
         break;
       case "run_start":
         next = { ...next, busy: true, runStartedAt: action.at, error: undefined };
@@ -122,7 +184,7 @@ export function reduce(state: ChatState, action: Action): ChatState {
         break;
       case "tool_execution_start": {
         if (event.parentToolCallId) break;
-        const tool: RunningTool = { toolCallId: event.toolCallId, toolName: event.toolName, output: "", status: "running" };
+        const tool: RunningTool = { toolCallId: event.toolCallId, toolName: event.toolName, output: "", status: "running", startedAt: action.at };
         next = { ...next, tools: [...next.tools.filter((t) => t.toolCallId !== event.toolCallId), tool] };
         break;
       }
@@ -157,7 +219,27 @@ export function reduce(state: ChatState, action: Action): ChatState {
         break;
     }
   }
-  return action.queued ? { ...next, queued: action.queued } : next;
+  return withoutShown(action.queued ? { ...next, queued: action.queued } : next);
+}
+
+/** `state` without the incoming messages that are in its transcript or queue by now. */
+function withoutShown(state: ChatState): ChatState {
+  if (!state.incoming.length) return state;
+  const shown = (message: IncomingMessage) => {
+    const key = incomingKey(message);
+    const placed = (entry: EntryRecord) => entry.kind === CHAT_MESSAGE_KIND && incomingKey(entry.data as unknown as ChatMessageData) === key;
+    return state.queued.some((queued) => incomingKey(queued) === key) || state.entries.some(placed);
+  };
+  const incoming = state.incoming.filter((message) => !shown(message));
+  return incoming.length === state.incoming.length ? state : { ...state, incoming };
+}
+
+/**
+ * When something a snapshot reports started: by the server's duration, applied to this clock (the two clocks need not
+ * agree), else the start already `known`.
+ */
+function startFrom(at: number, elapsedMs: number | undefined, known: number | undefined): number | undefined {
+  return elapsedMs === undefined ? known : at - Math.max(0, elapsedMs);
 }
 
 /** `value` with `delta` appended to the string at `path`, copying only what is on the way there. */
@@ -176,6 +258,9 @@ export function unansweredCalls(entries: readonly EntryRecord[]): Set<string> {
     const message = entries[i].model?.[0];
     if (message?.role === "toolResult") answered.add(message.toolCallId);
     else if (message?.role === "assistant") {
+      // Only a message that stopped to use tools has its calls run; one cut off (stopped, a broken stream, out of
+      // tokens) never does, so none of its calls is waited on.
+      if (message.stopReason !== "toolUse") return new Set();
       return new Set(message.content.flatMap((block) => (block?.type === "toolCall" && !answered.has(block.id) ? [block.id] : [])));
     } else if (message) break;
   }
@@ -198,6 +283,9 @@ export function waitingOnModel(state: ChatState): boolean {
   return last?.type !== "text" || !last.text;
 }
 
+/** Why the chat's socket stopped for good. */
+const STOPPED = { removed: "You are not in this chat.", deleted: "This chat was deleted." };
+
 /**
  * The chat's WebSocket: reconnects with backoff, and every (re)connect starts from a fresh snapshot.
  * It stops for good when the user is no longer in the chat (removed, or the chat is gone).
@@ -207,41 +295,63 @@ export function useChat(chatId: string) {
   const [connected, setConnected] = useState(false);
   const [people, setPeople] = useState<ChatPeopleView | null>(null);
   const [online, setOnline] = useState<Presence[]>([]);
-  const [gone, setGone] = useState(false);
+  const [reactions, setReactions] = useState<Reactions>({});
+  const [auto, setAuto] = useState(false);
+  // The viewer's messages that did not call the agent but look meant for it: under each the app offers to call it.
+  const [hints, setHints] = useState<ReadonlySet<number>>(NO_HINTS);
   const socket = useRef<WebSocket | null>(null);
+  // One that went in and never showed is let go after ARRIVING_MS (see ChatState.incoming).
+  const arrived = state.incoming.reduce((first, message) => Math.min(first, message.arriving ?? Infinity), Infinity);
+  useEffect(() => {
+    if (arrived === Infinity) return;
+    const timer = setTimeout(() => dispatch({ type: "expire", at: Date.now() }), Math.max(0, arrived + ARRIVING_MS - Date.now()));
+    return () => clearTimeout(timer);
+  }, [arrived]);
 
   useEffect(() => {
     dispatch({ type: "reset" });
     setPeople(null);
+    setReactions({});
     setOnline([]);
-    setGone(false);
+    setAuto(false);
+    setHints(NO_HINTS);
     let closed = false;
     let attempt = 0;
     let timer: ReturnType<typeof setTimeout> | undefined;
 
     // Not in the chat: stop for good.
-    const stop = () => {
+    const stop = (why = STOPPED.removed) => {
       closed = true;
-      setGone(true);
-      dispatch({ type: "error", message: "You are not in this chat." });
+      dispatch({ type: "error", message: why });
     };
 
     const open = () => {
       const ws = new WebSocket(api.chatSocketUrl(chatId));
       socket.current = ws;
       ws.onopen = () => {
-        attempt = 0;
         setConnected(true);
+        // A reconnect would also send the whole conversation again.
+        keepAlive(ws);
       };
       ws.onmessage = (event) => {
+        if (event.data === SOCKET_PING.response) return;
         const message = JSON.parse(event.data) as ChatServerMessage;
-        if (message.type === "events") dispatch({ type: "events", events: message.events as AgentEvent[], at: Date.now(), runElapsedMs: message.runElapsedMs, queued: message.queued });
-        else if (message.type === "people") setPeople(message.people);
+        // Backoff resets only once the conversation came: a chat that closes every socket before its snapshot (an attach
+        // that stalls) is retried ever more slowly, not every few seconds.
+        if (message.type === "events") {
+          attempt = 0;
+          dispatch({ ...message, events: message.events as AgentEvent[], at: Date.now() });
+        } else if (message.type === "people") setPeople(message.people);
+        else if (message.type === "reactions") setReactions((known) => keepSame(known, message.reactions));
+        else if (message.type === "reacted") setReactions((known) => withEntry(known, message.entry, message.reactions));
         else if (message.type === "presence") setOnline(message.online);
-        else if (message.type === "removed") {
-          stop();
+        else if (message.type === "auto") setAuto(message.on);
+        else if (message.type === "callHint") setHints((known) => new Set(known).add(message.entry));
+        else if (message.type === "removed" || message.type === "deleted") {
+          stop(STOPPED[message.type]);
           ws.close();
-        } else dispatch({ type: "error", message: message.message });
+        } else if (message.type === "incoming") dispatch({ ...message, at: Date.now() });
+        else dispatch({ type: "error", message: message.message });
       };
       ws.onclose = (event) => {
         setConnected(false);
@@ -267,8 +377,30 @@ export function useChat(chatId: string) {
     socket.current.send(JSON.stringify(message));
     return true;
   }, []);
+  const prompt = useCallback(
+    (text: string, attachments?: AttachmentInput[], mentions?: MentionInput[], replyTo?: number) =>
+      send({
+        type: "prompt",
+        text,
+        ...(attachments?.length && { attachments }),
+        ...(mentions?.length && { mentions }),
+        ...(replyTo !== undefined && { replyTo }),
+      }),
+    [send],
+  );
   // Stable, so the memoized model picker skips the re-render on every streamed token.
   const setModel = useCallback((model: string, thinkingLevel?: ModelThinkingLevel) => send({ type: "model", model, thinkingLevel }), [send]);
+  const react = useCallback((entry: number, emoji: Reaction, on: boolean) => send({ type: "react", entry, emoji, on }), [send]);
+  const dropHint = useCallback(
+    (entry: number) =>
+      setHints((known) => {
+        if (!known.has(entry)) return known;
+        const next = new Set(known);
+        next.delete(entry);
+        return next;
+      }),
+    [],
+  );
 
   return {
     state,
@@ -276,10 +408,38 @@ export function useChat(chatId: string) {
     people,
     /** Who has the chat open right now, and in how many windows. */
     online,
-    /** True once the chat refused this user's socket: they are not (or no longer) in it. */
-    gone,
-    prompt: (text: string, attachments?: AttachmentInput[]) => send({ type: "prompt", text, ...(attachments?.length && { attachments }) }),
+    prompt,
     abort: () => send({ type: "abort" }),
     setModel,
+    /** Whether the chat is on Auto: a router picks the model and effort for each message. */
+    auto,
+    /** Everyone's reactions, by transcript entry; each entry's object stays the same until its reactions change. */
+    reactions,
+    react,
+    /** The viewer's messages that look meant for the agent though they did not call it, by transcript entry. */
+    hints,
+    /** Stop offering to call the agent on a message: it was called, or the viewer said no. */
+    dropHint,
   };
+}
+
+const NO_HINTS: ReadonlySet<number> = new Set();
+
+/**
+ * `next`, keeping `known`'s object for each entry whose reactions are the same: a socket is sent all of them again on
+ * every wake of the chat, and only a changed entry should draw its message again.
+ */
+function keepSame(known: Reactions, next: Reactions): Reactions {
+  const kept: Reactions = {};
+  for (const [entry, reactions] of Object.entries(next) as unknown as [number, EntryReactions][]) {
+    const before = known[entry];
+    kept[entry] = before && JSON.stringify(before) === JSON.stringify(reactions) ? before : reactions;
+  }
+  return kept;
+}
+
+/** `known` with one entry's reactions replaced (dropped once it has none); every other entry keeps its object. */
+function withEntry(known: Reactions, entry: number, reactions: EntryReactions): Reactions {
+  const { [entry]: _before, ...rest } = known;
+  return Object.keys(reactions).length ? { ...rest, [entry]: reactions } : rest;
 }

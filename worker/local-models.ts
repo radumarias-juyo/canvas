@@ -1,14 +1,15 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { createProvider, type Provider } from "@earendil-works/pi-ai/models";
-import { LOCAL_PROVIDER_ID } from "../shared/models.ts";
+import { LOCAL_PROVIDER } from "../shared/models.ts";
 import { errorMessage } from "../shared/util.ts";
 
 /*
  * Models from an OpenAI-compatible runtime on this machine (LM Studio, Ollama, llama.cpp's server, vLLM), for local
  * development: `LOCAL_MODELS_URL=http://localhost:1234/v1 pnpm dev`. The runtime says which models it has
- * (`GET /models`); the agent talks to them with chat completions. They run under the provider `LOCAL_PROVIDER_ID`
- * and the picker names them `LOCAL_PREFIX` and the runtime's id (`shared/models.ts`).
+ * (`GET /models`); the agent talks to them with chat completions. They run under the provider `LOCAL_PROVIDER`, and
+ * the picker names them `local/` and the runtime's id (`modelKey`, `shared/models.ts`); `worker/models.ts` lists them
+ * first in the catalog.
  */
 
 type LocalModel = Model<"openai-completions">;
@@ -29,6 +30,8 @@ interface ListedModel {
 }
 
 let listed: { url: string; at: number; models: Promise<LocalModel[]> } | undefined;
+/** The last list that named any model: what chats run on while the runtime answers with none (busy, or restarting). */
+let lastListed: { url: string; models: LocalModel[] } | undefined;
 
 /**
  * The chat models the runtime at `url` serves, asked again after a few seconds. Empty, and logged, when it does not
@@ -36,8 +39,19 @@ let listed: { url: string; at: number; models: Promise<LocalModel[]> } | undefin
  */
 export function localModels(url: string): Promise<LocalModel[]> {
   const now = Date.now();
-  if (listed?.url !== url || now - listed.at > LIST_TTL_MS) listed = { url, at: now, models: fetchLocalModels(url) };
+  if (listed?.url !== url || now - listed.at > LIST_TTL_MS) {
+    const models = fetchLocalModels(url).then((found) => {
+      if (found.length) lastListed = { url, models: found };
+      return found;
+    });
+    listed = { url, at: now, models };
+  }
   return listed.models;
+}
+
+/** The runtime's models as last listed with any in it, without asking: empty before any was. */
+export function lastLocalModels(url: string): readonly LocalModel[] {
+  return lastListed?.url === url ? lastListed.models : [];
 }
 
 async function fetchLocalModels(url: string): Promise<LocalModel[]> {
@@ -62,7 +76,7 @@ export function localModel(url: string, id: string, listing: ListedModel = {}): 
     id,
     name: id,
     api: "openai-completions",
-    provider: LOCAL_PROVIDER_ID,
+    provider: LOCAL_PROVIDER,
     baseUrl: url,
     reasoning: false,
     input: ["text"],
@@ -73,14 +87,20 @@ export function localModel(url: string, id: string, listing: ListedModel = {}): 
   };
 }
 
-/** The pi-ai provider for `models`. Local runtimes need no key, but the OpenAI client insists on one, so it gets a stand-in. */
-export function localProvider(url: string, models: readonly Model<Api>[]): Provider {
-  return createProvider({
-    id: LOCAL_PROVIDER_ID,
+/**
+ * The pi-ai provider for the runtime at `url`. pi finds a chat's model in its provider's list on every model call, so the
+ * list is the runtime's latest (`models`, by default the last one that named any): one that fails to answer once does
+ * not take a chat's model away mid-run. Local runtimes need no key, but the OpenAI client insists on one, so it gets a
+ * stand-in.
+ */
+export function localProvider(url: string, models: () => readonly Model<Api>[] = () => lastLocalModels(url)): Provider {
+  const provider = createProvider({
+    id: LOCAL_PROVIDER,
     name: "Local runtime",
     baseUrl: url,
-    auth: { apiKey: { name: "Local runtime (no key)", resolve: async () => ({ auth: { apiKey: LOCAL_PROVIDER_ID } }) } },
-    models,
+    auth: { apiKey: { name: "Local runtime (no key)", resolve: async () => ({ auth: { apiKey: LOCAL_PROVIDER } }) } },
+    models: [],
     api: openAICompletionsApi(),
   });
+  return { ...provider, getModels: () => [...models()], getAllModels: () => [...models()] };
 }

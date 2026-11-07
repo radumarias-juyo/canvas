@@ -1,6 +1,23 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { inputSections, liveStatus, stepHint, stepLabel, stepResults, StepsProvider, stepsLive, ToolStep } from "../src/chat/Steps.tsx";
+import {
+  inputSections,
+  liveStatus,
+  runSummary,
+  shortOutput,
+  stepHint,
+  stepLabel,
+  stepResults,
+  StepRun,
+  StepsProvider,
+  stepsLive,
+  thoughtLine,
+  ThoughtStep,
+  tookFor,
+  tookTogether,
+  ToolStep,
+} from "../src/chat/Steps.tsx";
+import { stepRuns, streamingSteps, type StepItem } from "../src/chat/stepRuns.ts";
 import type { RunningTool } from "../src/chat/useChat.ts";
 
 const call = (id: string, name: string, args: Record<string, unknown>) => ({ type: "toolCall", id, name, arguments: args });
@@ -8,6 +25,9 @@ const entries = [
   { id: "1", kind: "pi.assistant", model: [{ role: "assistant", content: [call("ok", "run_python", { code: "print(1)" }), call("bad", "run_bash", { script: "false" }), call("open", "files_list", {})] }] },
   { id: "2", kind: "pi.tool-result", model: [{ role: "toolResult", toolCallId: "ok", toolName: "run_python", content: [{ type: "text", text: "exit code 0" }], isError: false, durationMs: 1_250 }] },
   { id: "3", kind: "pi.tool-result", model: [{ role: "toolResult", toolCallId: "bad", toolName: "run_bash", content: [{ type: "text", text: "exit code 1" }], isError: true }] },
+  { id: "4", kind: "pi.assistant", model: [{ role: "assistant", content: [call("short", "files_list", {}), call("long", "files_list", {})] }] },
+  { id: "5", kind: "pi.tool-result", model: [{ role: "toolResult", toolCallId: "short", toolName: "files_list", content: [{ type: "text", text: "2 files" }], isError: false, durationMs: 40 }] },
+  { id: "6", kind: "pi.tool-result", model: [{ role: "toolResult", toolCallId: "long", toolName: "files_list", content: [{ type: "text", text: "a.csv\nb.csv" }], isError: false, durationMs: 40 }] },
 ] as never;
 const slot = (status: RunningTool["status"]): RunningTool => ({ toolCallId: "open", toolName: "files_list", output: "", status });
 
@@ -26,8 +46,8 @@ describe("step status", () => {
 
   it("knows which results have their call in the chat", () => {
     const { calls, results } = stepResults(entries);
-    expect([...calls]).toEqual(["ok", "bad", "open"]);
-    expect([...results.keys()]).toEqual(["ok", "bad"]);
+    expect([...calls]).toEqual(["ok", "bad", "open", "short", "long"]);
+    expect([...results.keys()]).toEqual(["ok", "bad", "short", "long"]);
   });
 });
 
@@ -40,11 +60,17 @@ describe("step header", () => {
   });
 
   it("hints with the first telling line of the first text argument, else the arguments", () => {
-    expect(stepHint({ code: "\n# Load the sales\nimport pandas" })).toBe("# Load the sales");
-    expect(stepHint({ script: "#!/bin/bash\nset -euo pipefail\nwc -l files/sales.csv" })).toBe("wc -l files/sales.csv");
-    expect(stepHint({ script: "set -e" })).toBe("set -e");
-    expect(stepHint({ ids: ["bitcoin"], days: 7 })).toBe('{"ids":["bitcoin"],"days":7}');
-    expect(stepHint(undefined)).toBe("");
+    expect(stepHint("run_python", { code: "\n# Load the sales\nimport pandas" })).toBe("# Load the sales");
+    expect(stepHint("run_python", { script: "#!/bin/bash\nset -euo pipefail\nwc -l files/sales.csv" })).toBe("wc -l files/sales.csv");
+    expect(stepHint("run_python", { script: "set -e" })).toBe("set -e");
+    expect(stepHint("run_python", { ids: ["bitcoin"], days: 7 })).toBe('{"ids":["bitcoin"],"days":7}');
+    expect(stepHint("run_python", undefined)).toBe("");
+    // A page check's hint is how it checks; a write's, what it writes.
+    expect(stepHint("artifact_check", { html: "<!doctype html>", tests: [{}, {}], viewport: "mobile" })).toBe("Mobile · 2 tests");
+    expect(stepHint("artifact_check", { draft_id: "0123456789abcdef" })).toBe("Desktop");
+    expect(stepHint("artifact_write", { html: "<!doctype html>" })).toBe("New page · 15 B");
+    expect(stepHint("artifact_write", { draft_id: "0123456789abcdef", edits: [{}, {}] })).toBe("2 edits to draft");
+    expect(stepHint("artifact_write", { artifact_id: "a1", edits: [{}] })).toBe("1 edit to published page");
   });
 });
 
@@ -54,16 +80,16 @@ describe("step input", () => {
       { label: "Python", text: "import pandas\nprint(1)" },
       { label: "Arguments", text: '{\n  "files": [\n    "sales.csv"\n  ]\n}' },
     ]);
-    expect(inputSections("coingecko__get_price", { ids: "bitcoin" })).toEqual([{ label: "Input", text: '{\n  "ids": "bitcoin"\n}' }]);
+    expect(inputSections("coingecko__get_price", { ids: "bitcoin" })).toEqual([{ label: "Request", text: '{\n  "ids": "bitcoin"\n}' }]);
     expect(inputSections("mcp_discover", {})).toEqual([]);
   });
 });
 
 describe("step panel", () => {
-  const render = (id: string, tools: RunningTool[] = [], busy = false) =>
+  const render = (id: string, tools: RunningTool[] = [], busy = false, name = "run_python", args: Record<string, unknown> = { code: "print(1)" }) =>
     renderToStaticMarkup(
       <StepsProvider entries={entries} tools={tools} busy={busy}>
-        <ToolStep call={call(id, "run_python", { code: "print(1)" }) as never} />
+        <ToolStep call={call(id, name, args) as never} />
       </StepsProvider>,
     );
 
@@ -71,7 +97,8 @@ describe("step panel", () => {
     const html = render("ok");
     expect(html).toMatch(/^<details class="step done">/);
     expect(html).not.toContain("step-body");
-    expect(html).toContain('<span class="step-label">Python</span><span class="step-hint">print(1)</span><span class="step-status">Done · 1.3 s</span>');
+    expect(html).toContain('<summary class="step-line"><span class="step-icon">✓</span><span class="step-label">Python</span><span class="step-hint">print(1)</span><svg class="step-chevron"');
+    expect(html).toContain('<span class="step-status">Done · 1.3s</span></summary>');
   });
 
   it("spins the thinking indicator's spark while the step runs", () => {
@@ -81,8 +108,276 @@ describe("step panel", () => {
     expect(html).toContain('<span class="step-status">Running…</span>');
   });
 
+  it("counts how long a running step has run, from its first whole second", () => {
+    const since = (ms: number) => render("open", [{ ...slot("running"), startedAt: Date.now() - ms }], true);
+    expect(since(47_400)).toContain('<span class="step-status">Running…</span><span class="step-time">47s</span>');
+    expect(since(125_000)).toContain('<span class="step-time">2m 5s</span>');
+    // A quick call never flashes "0s".
+    expect(since(300)).not.toContain("step-time");
+  });
+
+  it("says how long a finished step took the way its count read, finer under ten seconds", () => {
+    expect([40, 1_250, 9_960, 47_400, 125_000].map(tookFor)).toEqual(["40ms", "1.3s", "10s", "47s", "2m 5s"]);
+  });
+
   it("marks a failed step, and one that stopped", () => {
-    expect(render("bad")).toMatch(/^<details class="step error"><summary><span class="step-icon">✕<\/span>/);
-    expect(render("open")).toMatch(/^<details class="step"><summary><span class="step-icon">■<\/span>/);
+    expect(render("bad")).toMatch(/^<details class="step error"><summary class="step-line"><span class="step-icon">✕<\/span>/);
+    expect(render("open")).toMatch(/^<details class="step"><summary class="step-line"><span class="step-icon">■<\/span>/);
+  });
+
+  it("says a call without arguments and with a one-line output on its line, with nothing to open", () => {
+    const html = render("short", [], false, "files_list", {});
+    expect(html).toMatch(/^<div class="step done static"><div class="step-line">/);
+    expect(html).toContain('<span class="step-hint">2 files</span><span class="step-status">Done · 40ms</span>');
+    expect(html).not.toContain("step-chevron");
+    expect(render("long", [], false, "files_list", {})).toMatch(/^<details class="step done">/);
+    // Stopped before any output: the status says it all.
+    expect(render("open", [], false, "files_list", {})).toMatch(/^<div class="step static">/);
+  });
+});
+
+describe("thought step", () => {
+  const render = (text: string) => renderToStaticMarkup(<ThoughtStep openKey="t" text={text} />);
+
+  it("shows a short thought whole, on a line with nothing to open", () => {
+    expect(thoughtLine("  The base query\nworks.  ")).toEqual({ line: "The base query works.", whole: true });
+    const html = render("The base query works.");
+    expect(html).toMatch(/^<div class="step static">/);
+    expect(html).toContain('<span class="step-hint prose">The base query works.</span>');
+    expect(html).not.toContain("step-chevron");
+  });
+
+  it("opens a longer thought, its line the first sentence", () => {
+    const long = `Base works, about 4k rows. ${"Then more detail. ".repeat(20)}`;
+    expect(thoughtLine(long)).toEqual({ line: "Base works, about 4k rows.", whole: false });
+    // An ellipsis is no sentence end, and neither is a stop after a word or two.
+    expect(thoughtLine(`SELECT ... FROM base. Ok. ${long}`).line).toBe("SELECT ... FROM base.");
+    expect(thoughtLine(`Ok. Then the base works. ${long}`).line).toBe("Ok. Then the base works.");
+    // No sentence end within the short length: the head, cut by the line.
+    expect(thoughtLine("x".repeat(300)).line).toBe("x".repeat(200));
+    const html = render(long);
+    expect(html).toMatch(/^<details class="step">/);
+    expect(html).toContain('<span class="step-hint prose">Base works, about 4k rows.</span><svg class="step-chevron"');
+  });
+
+  it("takes an output as short only when it is one line", () => {
+    expect(shortOutput(" 2 files \n")).toBe("2 files");
+    expect(shortOutput(" ")).toBe("");
+    expect(shortOutput("a\nb")).toBeUndefined();
+    expect(shortOutput("x".repeat(201))).toBeUndefined();
+  });
+});
+
+describe("runs of steps", () => {
+  const assistant = (id: number, content: unknown[], timestamp = id) => ({ id, kind: "pi.assistant", model: [{ role: "assistant", timestamp, content }] });
+  const result = (id: number, callId: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    kind: "pi.tool-result",
+    model: [{ role: "toolResult", toolCallId: callId, toolName: "run_bash", content: [], isError: false, ...extra }],
+  });
+  const thought = (thinking: string) => ({ type: "thinking", thinking });
+  const text = (value: string) => ({ type: "text", text: value });
+  const keys = (items: readonly StepItem[] | null | undefined) => items?.map((item) => item.key);
+
+  it("joins the steps of a reply's messages until something shows between them", () => {
+    const chat = [
+      { id: 1, kind: "pi.user", model: [{ role: "user", content: "hi" }] },
+      assistant(2, [thought("Look first."), call("a", "sales__run_query", {})]),
+      result(3, "a"),
+      // Not shown: an aside does not end the run.
+      { id: 4, kind: "chat.aside", data: {} },
+      assistant(5, [call("b", "run_bash", { script: "ls" })]),
+      result(6, "b"),
+      assistant(7, [text("Found it."), call("c", "run_bash", {})]),
+      result(8, "c"),
+      assistant(9, [call("d", "run_bash", {})]),
+    ] as never;
+    const runs = stepRuns(chat, new Set());
+    expect(keys(runs.byEntry.get(2)?.get(0))).toEqual(["2:0", "a", "b"]);
+    expect(runs.byEntry.get(2)?.get(1)).toBeNull();
+    expect(runs.byEntry.get(5)?.get(0)).toBeNull();
+    // Text ends a run; the next starts at its next step, and is still open.
+    expect(runs.byEntry.get(7)?.has(0)).toBe(false);
+    expect(keys(runs.byEntry.get(7)?.get(1))).toEqual(["c", "d"]);
+    expect(runs.open).toMatchObject({ entry: 7, index: 1 });
+    // The same places again are the same objects: a message whose steps did not change is not drawn again.
+    const again = stepRuns(chat, new Set(), runs);
+    expect(again.byEntry.get(2)).toBe(runs.byEntry.get(2));
+    // A line the chat draws over a message (a day, "New") ends the run before it.
+    expect(keys(stepRuns(chat, new Set([5])).byEntry.get(5)?.get(0))).toEqual(["b"]);
+  });
+
+  it("ends a run at a published artifact's card, a message, and a stopped message", () => {
+    const chat = [
+      assistant(1, [call("p", "artifact_publish", {})]),
+      result(2, "p", { toolName: "artifact_publish", details: { artifactId: "a1", version: 1 } }),
+      assistant(3, [call("q", "run_bash", {})], 3),
+      { id: 4, kind: "chat.message", data: { uid: "u", text: "and?" } },
+      {
+        ...assistant(5, [call("r", "run_bash", {})]),
+        model: [{ role: "assistant", timestamp: 5, content: [call("r", "run_bash", {})], stopReason: "aborted" }],
+      },
+      assistant(6, [call("s", "run_bash", {})]),
+    ] as never;
+    const runs = stepRuns(chat, new Set());
+    expect([1, 3, 5, 6].map((id) => keys(runs.byEntry.get(id)?.get(0)))).toEqual([["p"], ["q"], ["r"], ["s"]]);
+  });
+
+  it("joins a streaming reply's first steps to the run before it", () => {
+    const chat = [assistant(1, [call("a", "run_bash", {})]), result(2, "a")] as never;
+    const runs = stepRuns(chat, new Set());
+    const content = [call("b", "run_bash", {}), text("Done."), call("c", "run_bash", {})];
+    const streaming = { role: "assistant", timestamp: 3, content } as never;
+    const { steps, grown } = streamingSteps(runs, streaming);
+    expect(grown?.entry).toBe(1);
+    expect(keys(grown?.steps.get(0))).toEqual(["a", "b"]);
+    expect(grown?.steps.get(0)?.[1]).toMatchObject({ streaming: true });
+    expect(steps.get(0)).toBeNull();
+    expect(keys(steps.get(2))).toEqual(["c"]);
+    // The next chunk with the same first steps keeps the grown places: the earlier message is not drawn again.
+    expect(streamingSteps(runs, { role: "assistant", timestamp: 3, content: [...content] } as never, { steps, grown }).grown).toBe(grown);
+    // Text first: nothing joins.
+    expect(streamingSteps(runs, { role: "assistant", timestamp: 3, content: [text("So"), call("b", "run_bash", {})] } as never).grown).toBeUndefined();
+  });
+
+  it("says what a run did in a line, by kind in the order they came", () => {
+    const tool = (name: string, args: Record<string, unknown> = {}) =>
+      ({ kind: "tool", key: name, call: call(name, name, args), streaming: false }) as StepItem;
+    const thoughtItem = { kind: "thought", key: "t", text: "Hmm." } as StepItem;
+    expect(
+      runSummary([
+        thoughtItem,
+        tool("sales__run_query"),
+        tool("run_bash"),
+        tool("sales__list_regions"),
+        tool("run_bash"),
+        tool("run_bash"),
+        tool("sales__describe"),
+        tool("other__x"),
+      ]),
+    ).toBe("Queried sales 3 times, ran 3 commands, queried other");
+    expect(runSummary([tool("files_write"), tool("run_bash")])).toBe("Wrote a file, ran a command");
+    expect(runSummary([tool("artifact_write", { html: "<p>" }), tool("artifact_check"), tool("artifact_write", { edits: [] }), tool("artifact_check")])).toBe(
+      "Wrote a page, checked the page twice, edited the page",
+    );
+    expect(runSummary([tool("brand_new"), tool("brand_new")])).toBe("Used brand_new twice");
+    expect(runSummary([thoughtItem, thoughtItem])).toBe("2 thoughts");
+  });
+});
+
+describe("step run", () => {
+  const items = (...ids: string[]) => ids.map((id) => ({ kind: "tool", key: id, call: call(id, "run_bash", { script: id }), streaming: false }) as StepItem);
+  const render = (run: StepItem[], tools: RunningTool[] = [], busy = false) =>
+    renderToStaticMarkup(
+      <StepsProvider entries={entries} tools={tools} busy={busy}>
+        <StepRun items={run} />
+      </StepsProvider>,
+    );
+
+  it("is the step alone when it has one", () => {
+    expect(render(items("ok"))).toMatch(
+      /^<details class="step done"><summary class="step-line"><span class="step-icon">✓<\/span><span class="step-label">Bash<\/span>/,
+    );
+  });
+
+  it("shows a summary line, how long it took and what failed, closed on its steps", () => {
+    const html = render(items("ok", "short", "bad"));
+    expect(html).toMatch(
+      /^<details class="step step-run done"><summary class="step-line"><span class="step-icon">✓<\/span><span class="step-label">Ran 3 commands<\/span><svg class="step-chevron"/,
+    );
+    expect(html).toContain('<span class="step-status">Done · 1.3s</span><span class="step-time step-failed">· 1 failed</span>');
+    expect(html).not.toContain("step-body");
+  });
+
+  it("fails when none of its calls succeeded, also with one stopped before it", () => {
+    // "open" has no result and no run goes on: stopped. "bad" failed after it.
+    expect(render(items("open", "bad"))).toMatch(/^<details class="step step-run error">.*<span class="step-status">Failed<\/span>/);
+  });
+
+  it("counts calls that ran at once once in their time together", () => {
+    const result = (timestamp: number | undefined, durationMs: number) => ({ timestamp, durationMs }) as never;
+    // Two at once (0–1 s and 0.5–1.5 s), then one later (3–4 s), and one without a time.
+    expect(tookTogether([result(1_000, 1_000), result(1_500, 1_000), result(4_000, 1_000), result(undefined, 200)])).toBe(2_700);
+  });
+
+  it("spins while a step in it runs, saying in red what failed so far", () => {
+    const html = render(items("ok", "open"), [{ ...slot("running"), startedAt: Date.now() - 5_000 }], true);
+    expect(html).toMatch(/^<details class="step step-run active">/);
+    expect(html).toContain('<span class="step-status">Running…</span><span class="step-time">5s</span>');
+    expect(html).not.toContain("step-failed");
+    const failing = render(items("bad", "open"), [{ ...slot("running"), startedAt: Date.now() - 5_000 }], true);
+    expect(failing).toContain('<span class="step-time">5s</span><span class="step-time step-failed">· 1 failed</span>');
+  });
+
+  it("says what failed when it stopped", () => {
+    // "open" has no result and no run goes on: stopped, after "bad" failed and "ok" succeeded.
+    const html = render(items("ok", "bad", "open"));
+    expect(html).toContain('<span class="step-status">Stopped</span><span class="step-time step-failed">· 1 failed</span>');
+  });
+});
+
+describe("code review step", () => {
+  const review = {
+    findings: [
+      { severity: "fix", kind: "security", line: 12, problem: "MCP text goes into innerHTML.", fix: "Use textContent." },
+      { severity: "suggest", kind: "simplify", problem: "Two render functions do the same." },
+    ],
+    by: "@cf/openai/gpt-oss-120b",
+    cost: 0.0021,
+    ms: 8_200,
+  };
+  const checked = (details: unknown) =>
+    [
+      { id: "1", kind: "pi.assistant", model: [{ role: "assistant", content: [call("c", "artifact_check", { draft_id: "0123456789abcdef" })] }] },
+      {
+        id: "2",
+        kind: "pi.tool-result",
+        model: [
+          {
+            role: "toolResult",
+            toolCallId: "c",
+            toolName: "artifact_check",
+            content: [{ type: "text", text: "The check found 1 error" }],
+            isError: true,
+            durationMs: 9_000,
+            details,
+          },
+        ],
+      },
+    ] as never;
+  const render = (details: unknown) =>
+    renderToStaticMarkup(
+      <StepsProvider entries={checked(details)} tools={[]} busy={false}>
+        <ToolStep call={call("c", "artifact_check", { draft_id: "0123456789abcdef" }) as never} />
+      </StepsProvider>,
+    );
+  const check = { thumb: "", errors: 1, warnings: 1 };
+
+  it("shows under its check as a step of its own: what it found and what it cost", () => {
+    const html = render({ check, review });
+    expect(html).toContain('<span class="step-label">Check page</span>');
+    expect(html).toContain(
+      '<details class="step error"><summary class="step-line"><span class="step-icon">!</span><span class="step-label">Review code</span><span class="step-hint">1 to fix, 1 suggestion · $0.0021</span>',
+    );
+    expect(html).toContain('<span class="step-status">Found issues · 8.2s</span>');
+  });
+
+  it("is a line alone when it found nothing, or did not finish; a check without one has no such step", () => {
+    expect(render({ check, review: { ...review, findings: [] } })).toContain(
+      '<div class="step done static"><div class="step-line"><span class="step-icon">✓</span><span class="step-label">Review code</span><span class="step-hint">Nothing to change · $0.0021</span>',
+    );
+    expect(render({ check, review: { findings: [], cost: 0, ms: 45_000, failed: "no answer in 45 s" } })).toContain(
+      '<span class="step-label">Review code</span><span class="step-hint">no answer in 45 s</span><span class="step-status">Did not finish · 45s</span>',
+    );
+    expect(render({ check })).not.toContain("Review code");
+  });
+
+  it("counts in its run's summary after the check", () => {
+    const item = { kind: "tool", key: "c", call: call("c", "artifact_check", {}), streaming: false } as StepItem;
+    const results = stepResults(checked({ check, review })).results;
+    expect(runSummary([item], results)).toBe("Checked the page, reviewed the code");
+    expect(runSummary([item])).toBe("Checked the page");
+    const failed = stepResults(checked({ check, review: { findings: [], cost: 0, ms: 45_000, failed: "no answer in 45 s" } })).results;
+    expect(runSummary([item], failed)).toBe("Checked the page");
   });
 });

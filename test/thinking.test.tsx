@@ -1,9 +1,10 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { THINKING_WORDS, Thinking, formatElapsed, nextWord } from "../src/chat/Thinking.tsx";
-import { reduce, waitingOnModel, type ChatState } from "../src/chat/useChat.ts";
+import { formatElapsed } from "../src/chat/elapsed.ts";
+import { THINKING_WORDS, Thinking, nextWord } from "../src/chat/Thinking.tsx";
+import { reduce, unansweredCalls, waitingOnModel, type ChatState } from "../src/chat/useChat.ts";
 
-const idle: ChatState = { entries: [], tools: [], busy: false, queued: [] };
+const idle: ChatState = { entries: [], tools: [], busy: false, queued: [], incoming: [] };
 const busy: ChatState = { ...idle, busy: true };
 const partial = (content: unknown[]) => ({ ...busy, partial: { role: "assistant", content } }) as unknown as ChatState;
 
@@ -29,7 +30,7 @@ describe("waiting on the model", () => {
 
   it("hides while a tool call is written or waits to start: its panel shows a spinner", () => {
     expect(waitingOnModel(partial([{ type: "text", text: "Building it." }, { type: "toolCall", id: "c", name: "artifact_publish", arguments: {} }]))).toBe(false);
-    const call = { id: "a", kind: "pi.assistant", model: [{ role: "assistant", content: [{ type: "toolCall", id: "c", name: "run_python", arguments: {} }] }] };
+    const call = { id: "a", kind: "pi.assistant", model: [{ role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", id: "c", name: "run_python", arguments: {} }] }] };
     const result = { id: "r", kind: "pi.tool-result", model: [{ role: "toolResult", toolCallId: "c", toolName: "run_python", content: [], isError: false }] };
     expect(waitingOnModel({ ...busy, entries: [call] } as unknown as ChatState)).toBe(false);
     // Ended without a result: the model is up again.
@@ -37,6 +38,15 @@ describe("waiting on the model", () => {
     expect(waitingOnModel({ ...busy, entries: [call], tools: stopped } as unknown as ChatState)).toBe(true);
     // Answered: the model is up again.
     expect(waitingOnModel({ ...busy, entries: [call, result] } as unknown as ChatState)).toBe(true);
+  });
+
+  it("waits on no call of a message that was cut off: those calls never run", () => {
+    const cut = { id: "a", kind: "pi.assistant", model: [{ role: "assistant", stopReason: "aborted", content: [{ type: "toolCall", id: "c", name: "artifact_check", arguments: {} }] }] };
+    expect(unansweredCalls([cut] as unknown as ChatState["entries"])).toEqual(new Set());
+    // Out of tokens while writing the page: the call never runs either.
+    const long = { ...cut, model: [{ ...cut.model[0], stopReason: "length" }] };
+    expect(unansweredCalls([long] as unknown as ChatState["entries"])).toEqual(new Set());
+    expect(waitingOnModel({ ...busy, entries: [cut] } as unknown as ChatState)).toBe(true);
   });
 });
 
@@ -90,5 +100,22 @@ describe("elapsed time", () => {
     const running = reduce(idle, { type: "events", at: 5_000, events: [{ type: "run_start", inputs: [] }] as never });
     const again = reduce(running, { type: "events", at: 20_000, events: [{ type: "snapshot", entries: [], tools: [], run: { inputs: [] } }] as never });
     expect(again.runStartedAt).toBe(5_000);
+  });
+
+  it("times each running call: from its start, else the server's duration, else the start it knows, else the snapshot", () => {
+    const call = { toolName: "run_python" };
+    const started = reduce(busy, { type: "events", at: 5_000, events: [{ type: "tool_execution_start", toolCallId: "a", ...call, args: {} }] as never });
+    expect(started.tools[0].startedAt).toBe(5_000);
+    const slots = [
+      { callId: "a", name: "run_python", status: "running" },
+      { callId: "b", name: "run_python", status: "running" },
+      { callId: "c", name: "run_python", status: "running" },
+      { callId: "d", name: "run_python", status: "pending" },
+    ];
+    const snapshot = { type: "snapshot", entries: [], tools: slots, run: { inputs: [] } };
+    const again = reduce(started, { type: "events", at: 20_000, toolsElapsedMs: { b: 3_000, c: -1 }, events: [snapshot] as never });
+    expect(again.tools.map((t) => t.startedAt)).toEqual([5_000, 17_000, 20_000, undefined]);
+    const fresh = reduce(idle, { type: "events", at: 20_000, events: [snapshot] as never });
+    expect(fresh.tools[0].startedAt).toBe(20_000);
   });
 });

@@ -1,32 +1,45 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type DragEvent, type FormEvent } from "react";
-import type { ChatSummary, PublishedDetails } from "../shared/protocol.ts";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type FormEvent } from "react";
+import { ID_PATTERN, secondSeatUid, type ChatContents } from "../shared/protocol.ts";
+import { chatFileRoute, MAX_LISTED } from "../shared/uploads.ts";
 import { isActive, type SkillInfo } from "../shared/skills.ts";
 import { errorMessage } from "../shared/util.ts";
-import { api, type ArtifactSummary, type FileInfo, type Me } from "./api.ts";
+import { AccountMenu } from "./AccountMenu.tsx";
+import { BackToSite } from "./BackToSite.tsx";
+import { api, inSecondSeat, type ArtifactSummary, type FileInfo, type Me } from "./api.ts";
 import { ArtifactPanel } from "./artifact/ArtifactPanel.tsx";
+import { ChatFilterBar, ChatList, isShared, UnreadDot, useChatFilter, useChatList } from "./chat/ChatList.tsx";
 import { ChatView } from "./chat/ChatView.tsx";
+import { MentionToasts, useMentionNotices } from "./chat/notify.tsx";
+import { DeleteChat } from "./chat/DeleteChat.tsx";
 import { ErrorBoundary } from "./ErrorBoundary.tsx";
+import { ChatFiles } from "./files/ChatFiles.tsx";
+import { FilePreview } from "./files/FilePreview.tsx";
 import { FilesNav, useUploads } from "./files/FilesNav.tsx";
 import { carriesFiles, fromDrop } from "./files/pick.ts";
-import { ResizeHandle, useStoredState } from "./layout.tsx";
+import { isPicked, type Picks } from "./files/picks.ts";
+import { isBoolean, MenuButton, ResizeHandle, SectionHead, useMediaQuery, useStoredState } from "./layout.tsx";
+import { useLatest, useSidebarSocket } from "./sidebar.ts";
 import { SkillsView } from "./skills/SkillsView.tsx";
 
-function usePath(): [string, (path: string) => void] {
-  const [path, setPath] = useState(location.pathname);
+/** The app's location, path and query, and a way to go elsewhere in it without loading the page again. */
+function usePath(): [URL, (path: string) => void] {
+  const [href, setHref] = useState(location.href);
   useEffect(() => {
-    const onPop = () => setPath(location.pathname);
+    const onPop = () => setHref(location.href);
     addEventListener("popstate", onPop);
     return () => removeEventListener("popstate", onPop);
   }, []);
   const navigate = useCallback((next: string) => {
-    if (next !== location.pathname) history.pushState(null, "", next);
-    setPath(next);
+    const url = new URL(next, location.href);
+    if (url.href !== location.href) history.pushState(null, "", url);
+    setHref(url.href);
   }, []);
-  return [path, navigate];
+  return [useMemo(() => new URL(href), [href]), navigate];
 }
 
 export function App() {
-  const [path, navigate] = usePath();
+  const [url, navigate] = usePath();
+  const path = url.pathname;
   // Who is signed in, and how this deployment signs people in. Undefined until the Worker answers.
   const [session, setSession] = useState<{ me: Me | null; auth: Me["auth"] }>();
 
@@ -36,30 +49,33 @@ export function App() {
 
   if (!session) return null;
   const { me } = session;
-
-  const shared = path.match(/^\/a\/([a-z0-9]+)$/);
-  if (shared) {
-    // A shared artifact: anyone with its link can view it, signed in or not. Chatting about it needs a sign-in.
-    return (
-      <ErrorBoundary what="this artifact">
-        <ArtifactPanel artifactId={shared[1]} uid={me?.uid ?? null} fullPage />
-      </ErrorBoundary>
-    );
-  }
-
   // Deployed, Cloudflare Access signs people in before the app loads; a 401 here means the session lapsed.
   if (me === null && session.auth === "access") return <AccessExpired />;
   if (me === null) return <SignIn onSignedIn={(uid) => setSession({ me: { uid, auth: "demo" }, auth: "demo" })} />;
+
+  const shared = path.match(/^\/a\/([a-z0-9]+)$/);
+  if (shared) {
+    // A shared artifact: anyone the app lets in can view it by its link.
+    return (
+      <ErrorBoundary what="this artifact">
+        <ArtifactPanel artifactId={shared[1]} uid={me.uid} fullPage />
+      </ErrorBoundary>
+    );
+  }
 
   const join = path.match(/^\/join\/([a-z0-9.-]+)$/);
   if (join) return <Join token={join[1]} navigate={navigate} />;
 
   const chatId = path.match(/^\/c\/([a-z0-9]+)$/)?.[1];
+  // An artifact's page links back to the chat that builds it, with the artifact open beside it.
+  const opening = url.searchParams.get("artifact");
   return (
     <Workspace
       uid={me.uid}
       label={me.email ?? me.uid}
       chatId={chatId}
+      secondSeat={chatId !== undefined && inSecondSeat(url.search)}
+      opening={chatId && opening && ID_PATTERN.test(opening) ? opening : undefined}
       showSkills={path === "/skills"}
       navigate={navigate}
       onSignOut={async () => {
@@ -72,6 +88,18 @@ export function App() {
         navigate("/");
       }}
     />
+  );
+}
+
+/** An artifact in the sidebar: it opens on its own page. */
+function ArtifactLink({ artifact: a }: { artifact: ArtifactSummary }) {
+  return (
+    <a href={`/a/${a.id}`} target="_blank" rel="noreferrer" className={a.unread ? "nav-item unread" : "nav-item"}>
+      <span className="nav-title">
+        {a.title} <small>v{a.latest}</small>
+      </span>
+      {a.unread && <UnreadDot label="New version you have not opened" />}
+    </a>
   );
 }
 
@@ -154,11 +182,24 @@ interface WorkspaceProps {
   /** What the sidebar shows for the signed-in user: their email, or the demo name. */
   label: string;
   chatId: string | undefined;
+  /** The chat is open as the owner's second seat in it (secondSeat): a member, as the people they share it with are. */
+  secondSeat: boolean;
+  /** The artifact to show beside the chat when it opens, rather than the newest one it published. */
+  opening: string | undefined;
   /** The skills page in place of a chat. */
   showSkills: boolean;
   navigate: (path: string) => void;
   onSignOut: () => void;
 }
+
+/** The artifact beside the chat, and the newest version the chat knows of, once it does. */
+interface ArtifactPreview {
+  artifactId: string;
+  version?: number;
+}
+
+/** What shows beside the chat: an artifact, or a file: the user's own, or with `base` one of a chat shared with them. */
+type Preview = ArtifactPreview | { file: string; base?: string };
 
 const SIDEBAR_DEFAULT = 240;
 const SIDEBAR_MIN = 180;
@@ -166,58 +207,113 @@ const SIDEBAR_MAX = 480;
 const RAIL_WIDTH = 52;
 const CHAT_MIN = 320;
 const PREVIEW_MIN = 360;
+/** Phones and narrow windows: one column, the sidebar a menu that slides in over it (styles.css, the same width). */
+const NARROW = "(max-width: 900px)";
 
-function Workspace({ uid, label, chatId, showSkills, navigate, onSignOut }: WorkspaceProps) {
-  const [chats, setChats] = useState<ChatSummary[]>([]);
-  const [artifacts, setArtifacts] = useState<ArtifactSummary[]>([]);
-  const [files, setFiles] = useState<FileInfo[]>([]);
-  const [skills, setSkills] = useState<SkillInfo[] | null>(null);
+function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, navigate, onSignOut }: WorkspaceProps) {
+  const { chats, load: loadChats, newSince } = useChatList(chatId);
+  const [artifacts, loadArtifacts] = useLatest<ArtifactSummary[]>(api.artifacts, []);
+  const [files, loadFiles] = useLatest<FileInfo[]>(api.files, []);
   const [skillsError, setSkillsError] = useState<string | null>(null);
-  const [preview, setPreview] = useState<PublishedDetails | null>(null);
-  const [collapsed, setCollapsed] = useStoredState("layout.sidebarCollapsed", false);
+  const [skills, loadSkills] = useLatest<SkillInfo[] | null>(api.skills, null, (e) => setSkillsError(e?.message ?? null));
+  const [preview, setPreview] = useState<Preview | null>(null);
+  // In a chat someone shared with this user, what it holds of theirs: its files and artifacts, which the sidebar lists
+  // beside the user's own (the owner's other files and artifacts stay theirs).
+  // The owner's second seat sees the chat as they do.
+  const guestChat = chatId && (secondSeat || chats.some((chat) => chat.id === chatId && chat.sharedBy)) ? chatId : undefined;
+  const [contents, loadContents, setContents] = useLatest<ChatContents | null>(() => (guestChat ? api.chatContents(guestChat) : Promise.resolve(null)), null);
+  // Sidebar sections start closed, so the chat list gets the room.
+  const [chatFilesOpen, setChatFilesOpen] = useStoredState("layout.chatFilesOpen", false, isBoolean);
+  // The chat whose deletion is being confirmed.
+  const [deleting, setDeleting] = useState<string | null>(null);
+  const [collapsed, setCollapsed] = useStoredState("layout.sidebarCollapsed", false, isBoolean);
+  // Narrow, the sidebar is a menu, open or closed, and never the rail.
+  const narrow = useMediaQuery(NARROW);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const rail = collapsed && !narrow;
+  const chatFilter = useChatFilter(chats, chatId);
+  const [artifactsOpen, setArtifactsOpen] = useStoredState("layout.artifactsOpen", false, isBoolean);
   const [sidebarWidth, setSidebarWidth] = useStoredState("layout.sidebarWidth", SIDEBAR_DEFAULT);
   // The chat column's width beside an open preview; null splits the space 40/60.
   const [chatWidth, setChatWidth] = useStoredState<number | null>("layout.chatWidth", null);
   const chatRef = useRef<HTMLElement>(null);
 
-  const loadSkills = useCallback(() => {
-    api.skills().then(
-      (list) => {
-        setSkills(list);
-        setSkillsError(null);
-      },
-      (e: Error) => setSkillsError(e.message),
-    );
-  }, []);
-  const loadChats = useCallback(() => void api.chats().then(setChats, () => {}), []);
-  const loadArtifacts = useCallback(() => void api.artifacts().then(setArtifacts, () => {}), []);
-  const loadFiles = useCallback(() => void api.files().then(setFiles, () => {}), []);
-  // After a run: it may have named the chat, published, saved files (run_python) or proposed a skill.
-  const refresh = useCallback(() => {
-    loadChats();
+  useEffect(() => {
     loadArtifacts();
     loadFiles();
     loadSkills();
-  }, [loadChats, loadArtifacts, loadFiles, loadSkills]);
-  useEffect(refresh, [refresh]);
-  useEffect(() => setPreview(null), [chatId]);
+  }, [loadArtifacts, loadFiles, loadSkills]);
+  useEffect(() => {
+    setContents(() => null);
+    loadContents();
+  }, [guestChat, loadContents, setContents]);
+  // A finished run may have saved files (run_python) or published: read them again.
+  const onActivity = useCallback(() => {
+    loadFiles();
+    loadContents();
+  }, [loadFiles, loadContents]);
+  // Chats, artifacts and skills live in the user's directory, which says when they change. Files are not in it: a run
+  // may have saved some (run_python), so they are read again after each one.
+  // Someone tagging the user shows in the app, and in the browser while it is in the background.
+  const notices = useMentionNotices(chatId, navigate);
+  useSidebarSocket({ chats: loadChats, artifacts: loadArtifacts, skills: loadSkills }, notices.onMention);
+  // Another chat shows its own artifacts: the one asked for at once, else the newest it published once it loads.
+  // Going to the same chat without one asked for (its sidebar link, Back) keeps what it shows: the chat does not load
+  // again, so it would not offer its newest artifact.
+  const previewChat = useRef(chatId);
+  useEffect(() => {
+    if (opening) setPreview({ artifactId: opening });
+    else if (previewChat.current !== chatId) setPreview(null);
+    previewChat.current = chatId;
+  }, [chatId, opening]);
+  // A new publish always shows; the chat's newest artifact on load only when none was asked for, and not on a narrow
+  // screen, where the preview would cover the chat just opened.
+  const onArtifact = useCallback(
+    (artifact: ArtifactPreview, loading?: boolean) => {
+      if (!loading || (!opening && !narrow)) setPreview(artifact);
+    },
+    [opening, narrow],
+  );
+
+  // The menu closes once the user picked something in it: a chat, the skills, a file or an artifact to preview; and when
+  // the window widens past NARROW, so it does not open again by itself when it narrows.
+  useEffect(() => setMenuOpen(false), [chatId, showSkills, preview, narrow]);
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onKey = (event: KeyboardEvent) => event.key === "Escape" && setMenuOpen(false);
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [menuOpen]);
+  const openMenu = useCallback(() => setMenuOpen(true), []);
+
+  const openFile = useCallback((file: string) => setPreview({ file }), []);
+  const chatFileBase = guestChat && chatFileRoute(guestChat);
+  const openChatFile = useCallback((file: string) => chatFileBase && setPreview({ file, base: chatFileBase }), [chatFileBase]);
+  const previewing = preview && "file" in preview ? preview : null;
+  const closePreview = useCallback(() => setPreview(null), []);
+  // A file deleted from the sidebar leaves the preview at once, however many files the listing holds. A delete that
+  // failed (`gone` null) may still have taken some: the files, and the chat's (the owner's second seat), are read again.
+  const onFilesDeleted = useCallback(
+    (gone: Picks | null) => {
+      if (gone) setPreview((shown) => (shown && "file" in shown && !shown.base && isPicked(gone, shown.file) ? null : shown));
+      onActivity();
+    },
+    [onActivity],
+  );
+  // One deleted with a chat leaves it once a whole listing lacks it. Only when the files are read again: a file just
+  // opened is in the listing it was opened from.
+  useEffect(() => {
+    if (files.length >= MAX_LISTED) return;
+    setPreview((shown) => (shown && "file" in shown && !shown.base && !files.some((file) => file.path === shown.file) ? null : shown));
+  }, [files]);
 
   // Skills the agent proposed in a chat wait, off, for the user to review.
   const proposed = (skills ?? []).filter((s) => s.origin === "agent" && !s.enabled).length;
 
   const newChat = async () => {
     const chat = await api.createChat();
-    loadChats();
     navigate(`/c/${chat.id}`);
   };
-
-  const onArtifact = useCallback(
-    (artifact: PublishedDetails) => {
-      setPreview(artifact);
-      loadArtifacts();
-    },
-    [loadArtifacts],
-  );
 
   const { status: uploadStatus, upload } = useUploads(loadFiles);
   // Files dragged over the app: entries counted, since entering a child element leaves its parent first. Only whether
@@ -256,19 +352,22 @@ function Workspace({ uid, label, chatId, showSkills, navigate, onSignOut }: Work
     },
   };
 
+  // The owner's artifacts are theirs: only this chat's show, and only while it is open.
+  const chatArtifacts = contents?.artifacts ?? [];
   return (
     <div
       className={["workspace", preview && "with-preview", dragging && "dragging"].filter(Boolean).join(" ")}
       {...dropHandlers}
       style={
         {
-          "--sidebar-w": `${collapsed ? RAIL_WIDTH : sidebarWidth}px`,
+          "--sidebar-w": `${rail ? RAIL_WIDTH : sidebarWidth}px`,
           "--chat-w": chatWidth === null ? "40%" : `${chatWidth}px`,
         } as CSSProperties
       }
     >
-      {collapsed ? (
+      {rail ? (
         <aside className="sidebar rail">
+          <BackToSite compact />
           <button type="button" onClick={() => setCollapsed(false)} title="Show the sidebar" aria-label="Show the sidebar">
             »
           </button>
@@ -277,63 +376,81 @@ function Workspace({ uid, label, chatId, showSkills, navigate, onSignOut }: Work
           </button>
         </aside>
       ) : (
-        <aside className="sidebar">
+        <aside className={narrow ? (menuOpen ? "sidebar drawer open" : "sidebar drawer") : "sidebar"}>
+          <BackToSite />
           <div className="sidebar-top">
             <button type="button" className="primary" onClick={newChat}>
               + New chat
             </button>
-            <button type="button" onClick={() => setCollapsed(true)} title="Hide the sidebar" aria-label="Hide the sidebar">
-              «
-            </button>
+            {narrow ? (
+              <button type="button" onClick={() => setMenuOpen(false)} title="Close the menu" aria-label="Close the menu">
+                ×
+              </button>
+            ) : (
+              <button type="button" onClick={() => setCollapsed(true)} title="Hide the sidebar" aria-label="Hide the sidebar">
+                «
+              </button>
+            )}
           </div>
-          <h3>Chats</h3>
-          <nav>
-            {chats.map((chat) => (
+          {/* Chats scroll here; artifacts, skills and the files panel stay below them. */}
+          <div className="sidebar-scroll">
+            <h3>Chats</h3>
+            {chatFilter.bar && <ChatFilterBar {...chatFilter} />}
+            <ChatList chats={chatFilter.shown} openId={chatId} navigate={navigate} onDelete={setDeleting} empty={chatFilter.empty} />
+          </div>
+          <section className="sidebar-pinned">
+            <SectionHead name="Artifacts" count={artifacts.length + chatArtifacts.length} open={artifactsOpen} onToggle={setArtifactsOpen}>
+              {/* Closed, the section still shows that an artifact has a version the user has not opened. */}
+              {!artifactsOpen && artifacts.some((a) => a.unread) && <UnreadDot label="New versions you have not opened" />}
+            </SectionHead>
+            {/* A long list scrolls on its own, so skills and the files panel stay in view. */}
+            {artifactsOpen && (
+              <nav className="artifact-list">
+                {chatArtifacts.length > 0 && <h4 className="nav-group">In this chat</h4>}
+                {chatArtifacts.map((a) => (
+                  <ArtifactLink key={a.id} artifact={a} />
+                ))}
+                {chatArtifacts.length > 0 && artifacts.length > 0 && <h4 className="nav-group">Yours</h4>}
+                {artifacts.map((a) => (
+                  <ArtifactLink key={a.id} artifact={a} />
+                ))}
+              </nav>
+            )}
+            {contents && chatFileBase && (
+              <>
+                <SectionHead name="Files in this chat" count={contents.files.length} open={chatFilesOpen} onToggle={setChatFilesOpen} />
+                {chatFilesOpen && (
+                  <ChatFiles files={contents.files} base={chatFileBase} openFile={previewing?.base ? previewing.file : null} onOpenFile={openChatFile} />
+                )}
+              </>
+            )}
+            <h3>Skills</h3>
+            <nav>
               <a
-                key={chat.id}
-                href={`/c/${chat.id}`}
-                className={chat.id === chatId ? "active" : ""}
-                title={chat.sharedBy && `Shared by ${chat.sharedBy}`}
+                href="/skills"
+                className={["nav-item", showSkills && "active", proposed > 0 && "unread"].filter(Boolean).join(" ")}
                 onClick={(e) => {
                   e.preventDefault();
-                  navigate(`/c/${chat.id}`);
+                  navigate("/skills");
                 }}
               >
-                {chat.title}
-                {chat.sharedBy && <small> · {chat.sharedBy}</small>}
+                <span className="nav-title">
+                  {(skills ?? []).filter(isActive).length} on, {skills?.length ?? 0} in all
+                  {proposed > 0 && <small> · {proposed} to review</small>}
+                </span>
+                {proposed > 0 && <UnreadDot label="Proposed skills to review" />}
               </a>
-            ))}
-          </nav>
-          <h3>Artifacts</h3>
-          <nav>
-            {artifacts.map((a) => (
-              <a key={a.id} href={`/a/${a.id}`} target="_blank" rel="noreferrer">
-                {a.title} <small>v{a.latest}</small>
-              </a>
-            ))}
-          </nav>
-          <h3>Skills</h3>
-          <nav>
-            <a
-              href="/skills"
-              className={showSkills ? "active" : ""}
-              onClick={(e) => {
-                e.preventDefault();
-                navigate("/skills");
-              }}
-            >
-              {(skills ?? []).filter(isActive).length} on, {skills?.length ?? 0} in all
-              {proposed > 0 && <small> · {proposed} to review</small>}
-            </a>
-          </nav>
-          <h3>Files</h3>
-          <FilesNav files={files} status={uploadStatus} upload={upload} />
-          <footer>
-            <span title={label}>{label}</span>
-            <button type="button" onClick={onSignOut}>
-              Sign out
-            </button>
-          </footer>
+            </nav>
+          </section>
+          <FilesNav
+            files={files}
+            status={uploadStatus}
+            upload={upload}
+            openFile={previewing && !previewing.base ? previewing.file : null}
+            onOpenFile={openFile}
+            onDeleted={onFilesDeleted}
+          />
+          <AccountMenu label={label} onSignOut={onSignOut} />
         </aside>
       )}
       <ResizeHandle
@@ -343,25 +460,44 @@ function Workspace({ uid, label, chatId, showSkills, navigate, onSignOut }: Work
         max={() => SIDEBAR_MAX}
         onResize={setSidebarWidth}
         onReset={() => setSidebarWidth(SIDEBAR_DEFAULT)}
-        disabled={collapsed}
+        disabled={rail}
       />
+      {narrow && menuOpen && <div className="drawer-backdrop" onClick={() => setMenuOpen(false)} aria-hidden="true" />}
       <main className="main" ref={chatRef}>
+        {/* A chat has its own header, with the menu button in it. */}
+        {narrow && (showSkills || !chatId) && (
+          <header className="chat-header">
+            <MenuButton onClick={openMenu} />
+            <h1 className="chat-title">{showSkills ? "Skills" : "Chats"}</h1>
+          </header>
+        )}
         {showSkills ? (
           <ErrorBoundary what="skills">
             <SkillsView skills={skills} loadError={skillsError} reload={loadSkills} />
           </ErrorBoundary>
         ) : chatId ? (
-          <ErrorBoundary key={chatId} what="this chat">
+          // A new chat view, with a new socket, also between the owner and their second seat in the same chat.
+          <ErrorBoundary
+            key={`${chatId}${secondSeat ? ".2" : ""}`}
+            what="this chat"
+            // The chat's own header, with the menu button, is gone with it: without this a phone could not leave it.
+            head={
+              narrow && (
+                <header className="chat-header">
+                  <MenuButton onClick={openMenu} />
+                </header>
+              )
+            }
+          >
             <ChatView
               chatId={chatId}
-              uid={uid}
+              title={chats.find((chat) => chat.id === chatId)?.title}
+              onMenu={narrow ? openMenu : undefined}
+              uid={secondSeat ? secondSeatUid(uid) : uid}
+              newSince={newSince}
               onArtifact={onArtifact}
-              onActivity={refresh}
-              onGone={loadChats}
-              onLeft={() => {
-                loadChats();
-                navigate("/");
-              }}
+              onActivity={onActivity}
+              onLeft={() => navigate("/")}
             />
           </ErrorBoundary>
         ) : (
@@ -377,9 +513,22 @@ function Workspace({ uid, label, chatId, showSkills, navigate, onSignOut }: Work
           label="Chat width"
           width={chatWidth ?? chatRef.current?.offsetWidth ?? CHAT_MIN}
           min={CHAT_MIN}
-          max={() => (chatRef.current?.parentElement?.offsetWidth ?? innerWidth) - (collapsed ? RAIL_WIDTH : sidebarWidth) - PREVIEW_MIN}
+          max={() => (chatRef.current?.parentElement?.offsetWidth ?? innerWidth) - (rail ? RAIL_WIDTH : sidebarWidth) - PREVIEW_MIN}
           onResize={setChatWidth}
           onReset={() => setChatWidth(null)}
+        />
+      )}
+      {deleting && (
+        <DeleteChat
+          chatId={deleting}
+          onClose={() => setDeleting(null)}
+          onDeleted={() => {
+            setDeleting(null);
+            // Leaving the chat closes its preview; another chat's deletion leaves this one's open.
+            if (deleting === chatId) navigate("/");
+            // Its files may be gone too; the chat and artifact lists follow on their own.
+            loadFiles();
+          }}
         />
       )}
       {dragging && (
@@ -387,11 +536,23 @@ function Workspace({ uid, label, chatId, showSkills, navigate, onSignOut }: Work
           Drop files or folders to upload them, or on the message box to send them with your message
         </div>
       )}
-      {preview && (
-        <ErrorBoundary key={preview.artifactId} what="the preview">
-          <ArtifactPanel artifactId={preview.artifactId} latestKnown={preview.version} uid={uid} onClose={() => setPreview(null)} />
-        </ErrorBoundary>
-      )}
+      {preview &&
+        ("file" in preview ? (
+          <ErrorBoundary key={`file:${preview.base ?? ""}:${preview.file}`} what="the preview">
+            <FilePreview
+              path={preview.file}
+              files={preview.base ? (contents?.files ?? []) : files}
+              onOpen={preview.base ? openChatFile : openFile}
+              onClose={closePreview}
+              base={preview.base}
+            />
+          </ErrorBoundary>
+        ) : (
+          <ErrorBoundary key={preview.artifactId} what="the preview">
+            <ArtifactPanel artifactId={preview.artifactId} latestKnown={preview.version} uid={uid} onClose={closePreview} />
+          </ErrorBoundary>
+        ))}
+      <MentionToasts {...notices} asking={chats.some(isShared)} />
     </div>
   );
 }

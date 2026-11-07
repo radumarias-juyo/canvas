@@ -1,9 +1,24 @@
 import type { ToolCall, ToolResultMessage } from "@earendil-works/pi-ai";
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { createContext, use, useMemo, useState, type ReactNode } from "react";
-import { MCP_DISCOVER_TOOL, MCP_TOOL_SEPARATOR, PUBLISH_TOOL } from "../../shared/protocol.ts";
-import { clip } from "../../shared/util.ts";
+import {
+  CHECK_TOOL,
+  DRAFTS_TOOL,
+  MCP_DISCOVER_TOOL,
+  mcpParts,
+  PUBLISH_TOOL,
+  WRITE_TOOL,
+  type CheckedDetails,
+  type CheckedResultDetails,
+  countFindings,
+  type ReviewedDetails,
+  type ReviewFindingKind,
+} from "../../shared/protocol.ts";
+import { clip, formatBytes, plural } from "../../shared/util.ts";
 import { Linkified } from "./Linkified.tsx";
+import { formatElapsed, useElapsed } from "./elapsed.ts";
+import { formatCost } from "./spend.ts";
+import type { StepItem } from "./stepRuns.ts";
 import { unansweredCalls, type RunningTool } from "./useChat.ts";
 
 /** The finished calls, by call id, and every call some assistant entry made: a result without one shows on its own. */
@@ -88,6 +103,9 @@ const LABELS: Record<string, string> = {
   run_python: "Python",
   run_bash: "Bash",
   [PUBLISH_TOOL]: "Publish artifact",
+  [WRITE_TOOL]: "Write page",
+  [CHECK_TOOL]: "Check page",
+  [DRAFTS_TOOL]: "Drafts",
   artifact_read: "Read artifact",
   artifact_history: "Artifact history",
   artifact_diff: "Compare versions",
@@ -102,23 +120,111 @@ const LABELS: Record<string, string> = {
 const INPUT_LABELS: Record<string, Record<string, string>> = {
   run_python: { code: "Python" },
   run_bash: { script: "Bash" },
+  [WRITE_TOOL]: { html: "HTML" },
+  // Older chats sent the page to these.
   [PUBLISH_TOOL]: { html: "HTML" },
+  [CHECK_TOOL]: { html: "HTML" },
 };
 
 export function stepLabel(name: string): string {
   if (LABELS[name]) return LABELS[name];
-  let split = name.indexOf(MCP_TOOL_SEPARATOR);
-  if (split <= 0) return name;
-  // A server slug can end in "_" ("Reports (beta)" is "reports_beta_"): the separator is the last two of the run.
-  while (name[split + MCP_TOOL_SEPARATOR.length] === "_") split++;
-  return `${name.slice(0, split)} › ${name.slice(split + MCP_TOOL_SEPARATOR.length)}`;
+  const mcp = mcpParts(name);
+  return mcp ? `${mcp[0]} › ${mcp[1]}` : name;
+}
+
+/** Whether a page write writes a whole new page, not edits to one. */
+function writesNewPage(args: Record<string, unknown> | undefined): args is { html: string } {
+  return typeof args?.html === "string";
+}
+
+const times = (n: number) => (n === 1 ? "" : n === 2 ? " twice" : ` ${n} times`);
+/** "ran a command", "ran 3 commands". */
+const some = (verb: string, one: string, noun: string) => (n: number) => (n === 1 ? `${verb} ${one}` : `${verb} ${plural(n, noun)}`);
+/** "checked the page", "checked the page twice". */
+const again = (did: string) => (n: number) => did + times(n);
+
+/** What a kind of step did, for so many of them, in a run's summary; beside LABELS, which names one step. */
+const SAID: Record<string, (n: number) => string> = {
+  run_bash: some("ran", "a command", "command"),
+  run_python: again("ran Python"),
+  "write:new": some("wrote", "a page", "page"),
+  "write:edit": again("edited the page"),
+  [CHECK_TOOL]: again("checked the page"),
+  review: again("reviewed the code"),
+  [PUBLISH_TOOL]: again("published"),
+  [DRAFTS_TOOL]: again("listed drafts"),
+  artifact_read: some("read", "an artifact", "artifact"),
+  artifact_history: again("looked at version history"),
+  artifact_diff: again("compared versions"),
+  files_list: again("listed files"),
+  files_read: some("read", "a file", "file"),
+  files_write: some("wrote", "a file", "file"),
+  skill_propose: some("proposed", "a skill", "skill"),
+  [MCP_DISCOVER_TOOL]: again("looked up MCP servers"),
+  tool_search: again("searched for tools"),
+  react: again("reacted"),
+};
+
+/** A step's kind for a run's summary: a page write by whether it writes a new page, an MCP call by its server. */
+function kindOf(call: Pick<ToolCall, "name" | "arguments">): string {
+  if (call.name === WRITE_TOOL) return writesNewPage(call.arguments) ? "write:new" : "write:edit";
+  const mcp = mcpParts(call.name);
+  return mcp ? `mcp:${mcp[0]}` : call.name;
+}
+
+function said(kind: string, n: number): string {
+  if (SAID[kind]) return SAID[kind](n);
+  if (kind.startsWith("mcp:")) return `queried ${kind.slice(4)}${times(n)}`;
+  return `used ${kind}${times(n)}`;
+}
+
+/** The code review a page check's result carries (a step of its own, ReviewStep), if any. */
+function reviewOf(result: ToolResultMessage | undefined): ReviewedDetails | undefined {
+  return (result?.details as Partial<CheckedResultDetails> | undefined)?.review;
+}
+
+/** Whether a page check's result carries a code review that finished: one that did not is said on its own step only. */
+function reviewDone(result: ToolResultMessage | undefined): boolean {
+  const review = reviewOf(result);
+  return review !== undefined && !review.failed;
+}
+
+/**
+ * A run's summary in a line: what its calls did, by kind in the order they first came ("Queried sales 5 times, ran 3
+ * commands"), a check's code review (from `results`) after the check. Thoughts count only in a run of nothing else.
+ */
+export function runSummary(items: readonly StepItem[], results?: ReadonlyMap<string, ToolResultMessage>): string {
+  const kinds = new Map<string, number>();
+  const count = (kind: string) => kinds.set(kind, (kinds.get(kind) ?? 0) + 1);
+  for (const item of items) {
+    if (item.kind !== "tool") continue;
+    count(kindOf(item.call));
+    if (reviewDone(results?.get(item.call.id))) count("review");
+  }
+  const line = kinds.size ? [...kinds].map(([kind, n]) => said(kind, n)).join(", ") : plural(items.length, "thought");
+  return line.charAt(0).toUpperCase() + line.slice(1);
 }
 
 /** Lines that say nothing about what a script does: blank, a shebang, shell options. */
 const BOILERPLATE = /^\s*($|#!|set -)/;
 
+/** Tools whose first text argument says little about the call, by a hint of their own. */
+const HINTS: Record<string, (args: Record<string, unknown> | undefined) => string> = {
+  // A new page, whose first line is its doctype, or edits to one.
+  [WRITE_TOOL]: (args) => {
+    const edits = Array.isArray(args?.edits) ? args.edits.length : 0;
+    if (writesNewPage(args)) return `New page · ${formatBytes(args.html.length)}`;
+    return edits ? `${plural(edits, "edit")} to ${args?.draft_id ? "draft" : "published page"}` : "";
+  },
+  [CHECK_TOOL]: (args) => {
+    const tests = Array.isArray(args?.tests) ? args.tests.length : 0;
+    return [args?.viewport === "mobile" ? "Mobile" : "Desktop", tests && plural(tests, "test")].filter(Boolean).join(" · ");
+  },
+};
+
 /** One line on what the call does: the first telling line of its first text argument, or its arguments in short. */
-export function stepHint(args: Record<string, unknown> | undefined): string {
+export function stepHint(name: string, args: Record<string, unknown> | undefined): string {
+  if (HINTS[name]) return HINTS[name](args);
   const values = Object.values(args ?? {});
   const first = values.find((value): value is string => typeof value === "string" && value.trim() !== "");
   if (first !== undefined) {
@@ -142,7 +248,7 @@ export function inputSections(name: string, args: Record<string, unknown> | unde
     if (typeof value === "string" && (value.includes("\n") || value.length > 120)) sections.push({ label: INPUT_LABELS[name]?.[key] ?? key, text: value });
     else rest[key] = value;
   }
-  if (Object.keys(rest).length) sections.push({ label: sections.length ? "Arguments" : "Input", text: JSON.stringify(rest, null, 2) });
+  if (Object.keys(rest).length) sections.push({ label: sections.length ? "Arguments" : "Request", text: JSON.stringify(rest, null, 2) });
   return sections;
 }
 
@@ -153,50 +259,123 @@ function resultText(result: ToolResultMessage): string {
   return result.content.map((block) => (block.type === "text" ? block.text : "[image]")).join("\n");
 }
 
-function seconds(ms: number): string {
-  return ms < 1_000 ? `${Math.round(ms)} ms` : `${(ms / 1_000).toFixed(ms < 10_000 ? 1 : 0)} s`;
+/** How long a finished step took: like the count it showed while running ("47s", "2m 5s"), finer under 10 s ("1.2s", "40ms"). */
+export function tookFor(ms: number): string {
+  // From where a tenth would round up to 10.0.
+  if (ms >= 9_950) return formatElapsed(Math.max(ms, 10_000));
+  return ms < 1_000 ? `${Math.round(ms)}ms` : `${(ms / 1_000).toFixed(1)}s`;
 }
 
-/** Panels the reader opened, by key: one stays open when its streaming message becomes an entry and remounts. */
-const opened = new Set<string>();
+/**
+ * Panels the reader opened (true) or closed (false), by key: one stays as it was when its streaming message becomes an
+ * entry and remounts. A closed one is kept too, so a run the reader closed does not open again for its first step.
+ */
+const opened = new Map<string, boolean>();
+
+/** Whether a panel starts open: as the reader left it, else as the step it grew from (`openedAs`), which it then keeps. */
+function startsOpen(openKey: string, openedAs: string | undefined): boolean {
+  const known = opened.get(openKey);
+  if (known !== undefined) return known;
+  const grown = openedAs !== undefined && opened.get(openedAs) === true;
+  if (grown) opened.set(openKey, true);
+  return grown;
+}
 
 /**
- * One step of the agent, collapsed to a line: an icon, what it is, a hint and where it is. Opened, it shows what the
- * step was given and what came back. The body is only rendered while open, so a long history of steps stays cheap.
+ * One step of the agent as a plain line: an icon, what it is, a hint and where it is. With more to show than the line
+ * holds, an arrow opens it on what the step was given and what came back; the body is only rendered while open, so a
+ * long history of steps stays cheap. Without (`children` left out), the line is all there is, and its hint wraps.
  */
-function Panel({ openKey, tone, icon, label, hint, status, children }: {
+function Panel({ openKey, openedAs, kind, tone, icon, label, hint, prose, status, time, children }: {
   openKey: string;
+  /** Another key it starts open for: the step a run grew from. */
+  openedAs?: string;
+  /** A class of its own, beside `step`. */
+  kind?: string;
   tone?: "active" | "done" | "error";
   icon: ReactNode;
   label: string;
   hint: string;
+  /** The hint is words (a thought), not code. */
+  prose?: boolean;
   status?: string;
-  children: () => ReactNode;
+  /** After the status, out of its shimmer, whose sweep would jump as the count changes width. */
+  time?: ReactNode;
+  children?: () => ReactNode;
 }) {
-  const [open, setOpen] = useState(() => opened.has(openKey));
-  return (
-    <details
-      className={tone ? `step ${tone}` : "step"}
-      open={open}
-      onToggle={(event) => {
-        const now = event.currentTarget.open;
-        if (now) opened.add(openKey);
-        else opened.delete(openKey);
-        setOpen(now);
-      }}
-    >
-      <summary>
-        <span className="step-icon">{icon}</span>
-        <span className="step-label">{label}</span>
-        {hint && <span className="step-hint">{hint}</span>}
-        {status && <span className="step-status">{status}</span>}
+  const [open, setOpen] = useState(() => startsOpen(openKey, openedAs));
+  const className = ["step", kind, tone, !children && "static"].filter(Boolean).join(" ");
+  const line = (
+    <>
+      <span className="step-icon">{icon}</span>
+      <span className="step-label">{label}</span>
+      {hint && (
+        <span className={prose ? "step-hint prose" : "step-hint"}>
+          {/* Whole on a line with nothing to open, where its links are the only way to follow them. */}
+          {children ? hint : <Linkified text={hint} />}
+        </span>
+      )}
+      {children && (
         <svg className="step-chevron" viewBox="0 0 16 16" aria-hidden="true">
           <path d="M6 4l4 4-4 4" />
         </svg>
-      </summary>
+      )}
+      {status && <span className="step-status">{status}</span>}
+      {time}
+    </>
+  );
+  if (!children) {
+    return (
+      <div className={className}>
+        <div className="step-line">{line}</div>
+      </div>
+    );
+  }
+  return (
+    <details
+      className={className}
+      open={open}
+      onToggle={(event) => {
+        const now = event.currentTarget.open;
+        opened.set(openKey, now);
+        setOpen(now);
+      }}
+    >
+      <summary className="step-line">{line}</summary>
       {open && <div className="step-body">{children()}</div>}
     </details>
   );
+}
+
+/** Up to this many characters, a thought or a one-line output shows whole on its line, with nothing to open. */
+const SHORT_DETAIL = 200;
+
+/** The first sentence, when it ends within the short length: a few words at least, and not at an ellipsis. */
+const FIRST_SENTENCE = new RegExp(`^.{12,${SHORT_DETAIL - 2}}?[^.][.!?:](?=\\s|$)`);
+
+/** `text` trimmed, when it is short enough to show whole. Measured raw first: this runs on every streamed chunk. */
+function short(text: string): string | undefined {
+  if (text.length > 2 * SHORT_DETAIL) return undefined;
+  const trimmed = text.trim();
+  return trimmed.length <= SHORT_DETAIL ? trimmed : undefined;
+}
+
+/**
+ * A thought on one line: the whole of it when it is short (`whole`; words, so its line breaks may go), else its first
+ * sentence, which the line cuts to fit, and the rest behind the arrow.
+ */
+export function thoughtLine(text: string): { line: string; whole: boolean } {
+  const whole = short(text);
+  if (whole !== undefined) return { line: whole.replace(/\s+/g, " "), whole: true };
+  // Only the head: the line shows a sentence at most.
+  const flat = text.slice(0, 3 * SHORT_DETAIL).trim().replace(/\s+/g, " ");
+  return { line: FIRST_SENTENCE.exec(flat)?.[0] ?? flat.slice(0, SHORT_DETAIL), whole: false };
+}
+
+/** An output said on the step's line itself: short, and one line (its line breaks may matter). Empty when there is none. */
+export function shortOutput(output: string): string | undefined {
+  const line = short(output);
+  return line !== undefined && !line.includes("\n") ? line : undefined;
 }
 
 function Section({ label, text, error }: { label: string; text: string; error?: boolean }) {
@@ -218,21 +397,40 @@ export function ToolStep({ call, streaming = false }: { call: StepCall; streamin
   const result = use(ResultsContext).results.get(call.id);
   // Read only while the call is unfinished: a finished step does not follow the live output of others.
   const live = result ? undefined : use(LiveContext);
-  const status: StepStatus = result ? (result.isError ? "error" : "done") : liveStatus(live!, call.id, streaming);
+  const { status, startedAt } = callStatus(result, live, call.id, streaming);
   const { text, icon, tone } = STATUS[status];
-  const time = result?.durationMs !== undefined ? ` · ${seconds(result.durationMs)}` : "";
-  return (
-    <Panel openKey={call.id} tone={tone} icon={icon ?? <Spark />} label={stepLabel(call.name)} hint={stepHint(call.arguments)} status={text + time}>
+  const took = result?.durationMs !== undefined ? ` · ${tookFor(result.durationMs)}` : "";
+  const props = {
+    openKey: call.id,
+    tone,
+    icon: icon ?? <Spark />,
+    label: stepLabel(call.name),
+    status: text + took,
+    time: startedAt !== undefined && <RunningFor since={startedAt} />,
+  };
+  const check = (result?.details as Partial<CheckedResultDetails> | undefined)?.check;
+  const review = reviewOf(result);
+  // Only when it is needed: a result can be long, and finished steps re-render as the chat grows.
+  const output = () => (result ? resultText(result) : live!.tools.get(call.id)?.output) ?? "";
+  // A call without arguments whose output is a short line (or which has none) is said on its line alone. Not while the
+  // model writes it: its arguments are empty until the first one lands, and the line would turn into a panel then.
+  if (status !== "writing" && !check && !call.argumentsError && Object.keys(call.arguments ?? {}).length === 0) {
+    const line = shortOutput(output());
+    if (line !== undefined) return <Panel {...props} hint={line} />;
+  }
+  const panel = (
+    <Panel {...props} hint={stepHint(call.name, call.arguments)}>
       {() => {
-        const output = result ? resultText(result) : live!.tools.get(call.id)?.output;
+        const shown = output();
         return (
           <>
+            {check && <CheckShot check={check} />}
             {inputSections(call.name, call.arguments).map((section, i) => (
               <Section key={i} {...section} />
             ))}
             {call.argumentsError && <Section label="Invalid arguments" text={call.argumentsError} error />}
-            {output ? (
-              <Section label={status === "error" ? "Error" : "Output"} text={output} error={status === "error"} />
+            {shown ? (
+              <Section label={status === "error" ? "Error" : "Response"} text={shown} error={status === "error"} />
             ) : (
               status === "stopped" && <p className="step-note">Stopped before it finished.</p>
             )}
@@ -241,6 +439,176 @@ export function ToolStep({ call, streaming = false }: { call: StepCall; streamin
       }}
     </Panel>
   );
+  return (
+    <>
+      {panel}
+      {review && <ReviewStep openKey={`review:${call.id}`} review={review} />}
+    </>
+  );
+}
+
+const KIND_LABELS: Record<ReviewFindingKind, string> = { bug: "Bug", security: "Security", performance: "Performance", simplify: "Simpler code" };
+
+/**
+ * The code review that ran beside a page check (worker/artifacts/review.ts), as a step of its own under it: how many
+ * things to fix and suggestions it found, and what it cost, opening on each finding.
+ */
+export function ReviewStep({ openKey, review }: { openKey: string; review: ReviewedDetails }) {
+  const took = ` · ${tookFor(review.ms)}`;
+  if (review.failed) return <Panel openKey={openKey} icon={STATUS.stopped.icon} label="Review code" hint={review.failed} status={`Did not finish${took}`} />;
+  const { fixes, suggestions } = countFindings(review.findings);
+  const found = [fixes && `${fixes} to fix`, suggestions && plural(suggestions, "suggestion")].filter(Boolean).join(", ");
+  const hint = `${found || "Nothing to change"} · ${formatCost(review.cost)}`;
+  const props = fixes
+    ? { tone: "error" as const, icon: "!", status: `Found issues${took}` }
+    : { tone: "done" as const, icon: STATUS.done.icon, status: STATUS.done.text + took };
+  return (
+    <Panel openKey={openKey} label="Review code" hint={hint} {...props}>
+      {review.findings.length
+        ? () => (
+            <>
+              <ul className="review-findings">
+                {review.findings.map((finding, i) => (
+                  <li key={i} className={finding.severity}>
+                    <div className="review-kind">
+                      {finding.severity === "fix" ? "Fix" : "Suggestion"} · {KIND_LABELS[finding.kind] ?? finding.kind}
+                      {finding.line ? ` · line ${finding.line}` : ""}
+                    </div>
+                    <p>{finding.problem}</p>
+                    {finding.fix && <p className="review-fix">{finding.fix}</p>}
+                  </li>
+                ))}
+              </ul>
+              {review.by && <p className="step-note">Reviewed by {review.by}</p>}
+            </>
+          )
+        : undefined}
+    </Panel>
+  );
+}
+
+/** Where a call is (its result's outcome, else what the live round says), and since when it runs. `live` is needed only without a result. */
+function callStatus(result: ToolResultMessage | undefined, live: StepsLive | undefined, callId: string, streaming: boolean): { status: StepStatus; startedAt?: number } {
+  if (result) return { status: result.isError ? "error" : "done" };
+  const status = liveStatus(live!, callId, streaming);
+  return { status, startedAt: status === "running" ? live!.tools.get(callId)?.startedAt : undefined };
+}
+
+/** A run's calls in short: the first still under way, where the last is, how many failed and succeeded, and their time together. */
+interface RunTally {
+  active?: { status: StepStatus; startedAt?: number };
+  last?: StepStatus;
+  failed: number;
+  succeeded: number;
+  took: number;
+}
+
+/**
+ * How a run's line looks from its tally: like its active call, else done, failed, or stopped. Unless all failed, how many
+ * did shows in red after the status, so a closed run says it, running or ended.
+ */
+function runLook({ active, last, failed, succeeded, took }: RunTally): Pick<Parameters<typeof Panel>[0], "tone" | "icon" | "status" | "time"> {
+  const failures = failed > 0 && <span className="step-time step-failed">· {failed} failed</span>;
+  if (active) {
+    const time = (
+      <>
+        {active.startedAt !== undefined && <RunningFor since={active.startedAt} />}
+        {failures}
+      </>
+    );
+    return { tone: "active", icon: <Spark />, status: STATUS[active.status].text, time };
+  }
+  // Thoughts alone.
+  if (!last) return { icon: "✻" };
+  if (last === "stopped") return { icon: STATUS.stopped.icon, status: STATUS.stopped.text, time: failures };
+  // None of them did what it was called for (each failed, or stopped before it finished).
+  if (succeeded === 0) return { tone: "error", icon: STATUS.error.icon, status: STATUS.error.text };
+  return { tone: "done", icon: STATUS.done.icon, status: STATUS.done.text + (took ? ` · ${tookFor(took)}` : ""), time: failures };
+}
+
+/**
+ * How long calls took together: the spans they ran in (each ending at its result's time), merged, so calls of one round
+ * that ran at once count once. A result without a time adds its duration.
+ */
+export function tookTogether(results: readonly ToolResultMessage[]): number {
+  let took = 0;
+  const spans: [start: number, end: number][] = [];
+  for (const { durationMs = 0, timestamp } of results) {
+    if (typeof timestamp === "number") spans.push([timestamp - durationMs, timestamp]);
+    else took += durationMs;
+  }
+  spans.sort((a, b) => a[0] - b[0]);
+  let end = -Infinity;
+  for (const [from, to] of spans) {
+    if (to <= end) continue;
+    took += to - Math.max(from, end);
+    end = to;
+  }
+  return took;
+}
+
+/** A step on its own: a call, or a thought. */
+function OneStep({ item }: { item: StepItem }) {
+  return item.kind === "tool" ? <ToolStep call={item.call} streaming={item.streaming} /> : <ThoughtStep openKey={item.key} text={item.text} />;
+}
+
+/**
+ * A run of steps (stepRuns.ts) as one line on what they did ("Queried sales 5 times, ran 3 commands") and where they
+ * are, opening on the list of them, each of which opens on what it was given and what came back. A run of one is that
+ * step alone. Opened, it stays open as it grows, and when a step the reader opened grows into a run.
+ */
+export function StepRun({ items }: { items: readonly StepItem[] }) {
+  const { results } = use(ResultsContext);
+  // Which of the run's checks had a code review: the results change with every entry, this only when one of the run's
+  // lands. With the items, which stay the same until the run grows, the line is worked out once for a finished run, and
+  // not for a step alone.
+  const reviewed = items.map((item) => (item.kind === "tool" && reviewDone(results.get(item.call.id)) ? 1 : 0)).join("");
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const label = useMemo(() => (items.length === 1 ? "" : runSummary(items, results)), [items, reviewed]);
+  if (items.length === 1) return <OneStep item={items[0]} />;
+  const calls = items.flatMap((item) => (item.kind === "tool" ? [item] : []));
+  // Read only while a call is unfinished, as ToolStep does.
+  const live = calls.every((item) => results.has(item.call.id)) ? undefined : use(LiveContext);
+  const tally: RunTally = { failed: 0, succeeded: 0, took: 0 };
+  const finished: ToolResultMessage[] = [];
+  for (const { call, streaming } of calls) {
+    const result = results.get(call.id);
+    const now = callStatus(result, live, call.id, streaming);
+    tally.last = now.status;
+    if (result) {
+      finished.push(result);
+      if (result.isError) tally.failed++;
+      else tally.succeeded++;
+    } else if (now.status !== "stopped") tally.active ??= now;
+  }
+  tally.took = tookTogether(finished);
+  return (
+    <Panel openKey={`run:${items[0].key}`} openedAs={items[0].key} kind="step-run" label={label} hint="" {...runLook(tally)}>
+      {() => (
+        <div className="step-run-list">
+          {items.map((item) => (
+            <OneStep key={item.key} item={item} />
+          ))}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+/** How long a running step has run, from its first whole second on: a quick call never flashes "0s". */
+function RunningFor({ since }: { since: number }) {
+  const elapsed = useElapsed(since);
+  return elapsed >= 1_000 && <span className="step-time">{formatElapsed(elapsed)}</span>;
+}
+
+/** What a page check saw: its screenshot, and how many errors and warnings it found. */
+function CheckShot({ check }: { check: CheckedDetails }) {
+  return (
+    <figure className={check.errors ? "step-shot error" : "step-shot"}>
+      {check.thumb.startsWith("data:image/jpeg;base64,") && <img src={check.thumb} alt="The page as the check rendered it" />}
+      <figcaption>{check.errors || check.warnings ? `${plural(check.errors, "error")}, ${plural(check.warnings, "warning")}` : "No errors or warnings"}</figcaption>
+    </figure>
+  );
 }
 
 /** A result whose call no assistant entry holds: shown on its own, with what came back. Nothing when its call shows it. */
@@ -248,11 +616,15 @@ export function OrphanResult({ message }: { message: ToolResultMessage }) {
   return use(ResultsContext).calls.has(message.toolCallId) ? null : <ToolStep call={{ id: message.toolCallId, name: message.toolName }} />;
 }
 
-/** What the model thought before answering, when the provider sends it. `openKey` stays the same once the message lands. */
+/**
+ * What the model thought before answering, when the provider sends it: a short thought whole on its line, a longer one
+ * by its first sentence, opening on all of it. `openKey` stays the same once the message lands.
+ */
 export function ThoughtStep({ openKey, text }: { openKey: string; text: string }) {
+  const { line, whole } = thoughtLine(text);
   return (
-    <Panel openKey={openKey} icon="✻" label="Thought process" hint={stepHint({ text })}>
-      {() => <div className="step-thought">{text.trim()}</div>}
+    <Panel openKey={openKey} icon="✻" label="Thought" hint={line} prose>
+      {whole ? undefined : () => <div className="step-thought">{text.trim()}</div>}
     </Panel>
   );
 }
