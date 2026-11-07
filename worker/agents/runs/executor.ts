@@ -714,7 +714,8 @@ export class RunExecutor {
           if (state.configured !== (model ?? "")) {
             await this.#host.configure(state.session, state.agent, step.model, state.run.dueAt);
             state.configured = model ?? "";
-            if (this.#host.notesRead) this.#usedNotes(state, await this.#host.notesRead(state.session));
+            // Only a record: a failed read leaves the count as it is.
+            if (this.#host.notesRead) this.#usedNotes(state, await this.#host.notesRead(state.session).catch(() => []));
           }
           const result = await this.#host.work(state.session, workPrompt(step, state.when, state.element), `${opId(state)}:work:${key}`);
           state.cost += result.cost;
