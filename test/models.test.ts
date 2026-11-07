@@ -3,7 +3,19 @@ import { fauxAssistantMessage, fauxProvider, type AssistantMessage } from "@eare
 import { createModels } from "@earendil-works/pi-ai/models";
 import { createAI } from "agents/models/pi-ai";
 import { discoverModels, type Discovery } from "../worker/gateway-models.ts";
-import { baseCatalog, catalogFrom, defaultModelChoice, forgetCatalog, listedProviders, loadCatalog, PRICES, startingSetting, withEffortRecorded } from "../worker/models.ts";
+import {
+  baseCatalog,
+  catalogFrom,
+  DEFAULT_BACKGROUND_MODEL,
+  defaultModelChoice,
+  forgetCatalog,
+  internalModel,
+  listedProviders,
+  loadCatalog,
+  PRICES,
+  startingSetting,
+  withEffortRecorded,
+} from "../worker/models.ts";
 import { ModelCache } from "../worker/storage/model-cache.ts";
 import { AUTO_MODEL, COMPACTION, compactionOverrides, compactionPoint, CONTEXT_BUDGET, modelKeyOfLedger } from "../shared/models.ts";
 import { FakeBucket } from "./fakes.ts";
@@ -46,6 +58,36 @@ describe("model catalog", () => {
     expect(byId("anthropic/claude-opus-5.5").contextWindow).toBeGreaterThan(100_000);
     const price = PRICES.get("anthropic/claude-opus-5.5")!;
     expect(byId("anthropic/claude-opus-5.5").price).toEqual({ input: price.input, output: price.output });
+  });
+});
+
+describe("Workers AI reasoning models", () => {
+  const workersAi = models.filter((model) => model.provider === "workers-ai").map((model) => model.id);
+
+  it("offers those with tool calling and room for the system prompt, and leaves out the rest", () => {
+    for (const id of ["@cf/openai/gpt-oss-20b", "@cf/openai/gpt-oss-120b", "@cf/zai-org/glm-4.7-flash", "@cf/nvidia/nemotron-3-120b-a12b", "@cf/moonshotai/kimi-k2.6"])
+      expect(workersAi).toContain(id);
+    // Too small a context (32k, 24k), replaced by a newer one, or no tool calling.
+    for (const id of ["@cf/qwen/qwen3-30b-a3b-fp8", "@cf/qwen/qwq-32b", "@cf/zai-org/glm-5.2", "@cf/deepseek-ai/deepseek-v4-flash-0731"]) expect(workersAi).not.toContain(id);
+    for (const id of workersAi) expect(byId(id).contextWindow).toBeGreaterThanOrEqual(128_000);
+  });
+
+  it("offers the efforts pi-ai's Workers AI catalog sends: gpt-oss's three, Kimi K2.6's none or high, Nemotron's low or high", () => {
+    expect(byId("@cf/openai/gpt-oss-20b").efforts).toEqual(["low", "medium", "high"]);
+    expect(byId("@cf/openai/gpt-oss-120b").efforts).toEqual(["low", "medium", "high"]);
+    expect(byId("@cf/moonshotai/kimi-k2.6").efforts).toEqual(["off", "high"]);
+    expect(byId("@cf/nvidia/nemotron-3-120b-a12b").efforts).toEqual(["low", "high"]);
+    expect(byId("@cf/zai-org/glm-4.7-flash").efforts.length).toBeGreaterThan(0);
+    expect(check({ model: "@cf/openai/gpt-oss-20b", thinkingLevel: "max" })?.thinkingLevel).toBe("high");
+    expect(check({ model: "@cf/openai/gpt-oss-20b" })?.thinkingLevel).toBe("medium");
+    expect(check({ model: "@cf/moonshotai/kimi-k2.6", thinkingLevel: "medium" })?.thinkingLevel).toBe("high");
+  });
+
+  it("runs background jobs on the deployment's model, else a small Workers AI one with tool calling", () => {
+    expect(internalModel("  anthropic/claude-haiku-5.5 ")).toBe("anthropic/claude-haiku-5.5");
+    expect(internalModel("")).toBe(DEFAULT_BACKGROUND_MODEL);
+    expect(internalModel(undefined)).toBe("@cf/openai/gpt-oss-20b");
+    expect(byId(DEFAULT_BACKGROUND_MODEL).efforts).toEqual(["low", "medium", "high"]);
   });
 });
 

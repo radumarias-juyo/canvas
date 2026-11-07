@@ -83,8 +83,11 @@ export const MAX_STEP_INPUT = 4_000;
 /** What starts a run of an agent on its own: a local time each day (or on some days), or a watch on an interval. */
 export type AgentTrigger =
   | { kind: "schedule"; at: string; tz: string; days?: Weekday[] }
-  | { kind: "watch"; step: LookStep; everyMinutes: number; when: string };
-/** The shortest and longest interval of a watch. */
+  | { kind: "watch"; step: LookStep; everyMinutes: number; when: string; urgent?: true };
+/**
+ * The shortest and longest interval of a watch. A watch not marked `urgent` checks less often as its owner's day of
+ * model calls nears the cap for runs (worker/agents/runs/pacing.ts); an urgent one keeps its interval.
+ */
 export const MIN_WATCH_MINUTES = 15;
 export const MAX_WATCH_MINUTES = 7 * 24 * 60;
 
@@ -131,11 +134,22 @@ export interface AgentInput {
    */
   speaksUp?: boolean;
   /**
+   * What is worth a post from a run, in its owner's words ("a drop of more than 5%", "only a deal that closed"): a run
+   * with nothing that meets it posts nothing and keeps a quiet line in its record. Any report when absent.
+   */
+  worthPosting?: string;
+  /** At most this many posts a day from its runs on their own (schedule and watch); the rest are quiet lines. */
+  postsPerDay?: number;
+  /**
    * How often it may speak up, and be picked by a chat's router, as its owner limits it: the stricter of these and the
    * chat's own holds (shared/speak-up.ts).
    */
   speakUpLimits?: SpeakUpLimits;
 }
+
+/** The longest "worth a post" bar, and the most posts a day an agent may be limited to. */
+export const MAX_WORTH_POSTING = 500;
+export const MAX_POSTS_PER_DAY = 48;
 
 /** Who made an agent: its owner, or the model in a chat (saved off until the owner turns it on, as skills are). */
 export type AgentOrigin = "user" | "agent";
@@ -258,11 +272,13 @@ function checkTrigger(value: unknown): AgentTrigger | undefined {
     if (typeof every !== "number" || !Number.isInteger(every) || every < MIN_WATCH_MINUTES || every > MAX_WATCH_MINUTES) {
       fail(`A watch checks every ${MIN_WATCH_MINUTES} to ${MAX_WATCH_MINUTES} minutes.`);
     }
+    if (value.urgent !== undefined && value.urgent !== null && typeof value.urgent !== "boolean") fail("A watch's urgent is true or false.");
     return {
       kind: "watch",
       step: checkLook(value.step, "A watch's step"),
       everyMinutes: every,
       when: condition(value.when, field("A watch", "a", "condition")),
+      ...(value.urgent === true && { urgent: true as const }),
     };
   }
   fail('An agent\'s trigger is a "schedule" or a "watch".');
@@ -433,6 +449,11 @@ export function checkAgent(input: unknown): AgentInput {
   if (review !== undefined && typeof review !== "boolean") fail("An agent's review before posting is true or false.");
   const speaksUp = input.speaksUp ?? undefined;
   if (speaksUp !== undefined && typeof speaksUp !== "boolean") fail("An agent's speaksUp is true or false.");
+  const bar = field("An agent", "a", "bar for what is worth a post");
+  const worthPosting = str(input.worthPosting, bar, MAX_WORTH_POSTING, { required: false, seen: true });
+  const postsPerDay = input.postsPerDay ?? undefined;
+  const perDay = typeof postsPerDay === "number" && Number.isInteger(postsPerDay) && postsPerDay >= 1 && postsPerDay <= MAX_POSTS_PER_DAY;
+  if (postsPerDay !== undefined && !perDay) fail(`An agent posts at most 1 to ${MAX_POSTS_PER_DAY} times a day.`);
   let speakUpLimits: SpeakUpLimits | undefined;
   try {
     speakUpLimits = checkSpeakUpLimits(input.speakUpLimits);
@@ -459,6 +480,8 @@ export function checkAgent(input: unknown): AgentInput {
     ...(assumed?.length && { assumed }),
     ...(review && { reviewBeforePosting: true }),
     ...(speaksUp && { speaksUp: true }),
+    ...(worthPosting && { worthPosting }),
+    ...(postsPerDay !== undefined && { postsPerDay: postsPerDay as number }),
     ...(speakUpLimits && { speakUpLimits }),
   };
 }
@@ -562,6 +585,8 @@ export const COPIED_FIELDS = [
   "scope",
   "workflow",
   "speaksUp",
+  "worthPosting",
+  "postsPerDay",
   "speakUpLimits",
 ] as const satisfies readonly (keyof AgentInput)[];
 export type CopiedField = (typeof COPIED_FIELDS)[number];

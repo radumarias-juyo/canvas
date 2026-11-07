@@ -136,6 +136,7 @@
     "src/agents/runs.ts",
     "src/agents/workflow.ts",
     "src/agents/limits/rules.ts",
+    "src/agents/draft-edit.ts",
     "src/chat/ActionCard.tsx",
     "src/chat/AgentWindow.tsx",
     "src/chat/AgentDraft.tsx",
