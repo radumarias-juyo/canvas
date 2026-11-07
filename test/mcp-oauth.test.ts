@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { checkSignIn } from "../worker/mcp/background.ts";
 import { connectStreamableHttp } from "../worker/mcp/connect.ts";
 import { McpFailure } from "../worker/mcp/hub.ts";
 import { applyAuthChange, finishSignIn, McpOAuthClient, serverOfState, startSignIn, type McpAuthChange, type McpAuthRecord, type McpAuthStore } from "../worker/mcp/oauth.ts";
@@ -267,6 +268,51 @@ describe("per-user MCP sign-in", () => {
     await chatB.tokens();
     await chatB.invalidateCredentials("tokens");
     expect(ada.record.tokens).toBeUndefined();
+  });
+});
+
+describe("checking a sign-in before a scheduled run", () => {
+  it("is ok when signed in, and the refresh renews the tokens", async () => {
+    const ada = new MemoryStore();
+    await signIn(ada, "ada@example.com");
+    const before = ada.record.tokens!;
+    expect(await checkSignIn(config, ada)).toBe("ok");
+    expect(ada.record.tokens!.refresh_token).not.toBe(before.refresh_token);
+    // The renewed tokens work, and the old refresh token is spent.
+    expect(await whoami(ada)).toBe("ada@example.com");
+    expect(portal.refresh.has(before.refresh_token!)).toBe(false);
+  });
+
+  it("needs a sign-in when the refresh is refused, and opens none", async () => {
+    const ada = new MemoryStore();
+    await signIn(ada, "ada@example.com");
+    portal.refreshAllowed = false;
+    expect(await checkSignIn(config, ada)).toBe("needs_sign_in");
+    expect(ada.record.tokens).toBeUndefined();
+    expect(ada.record.state).toBeUndefined();
+    expect(ada.record.verifier).toBeUndefined();
+  });
+
+  it("needs a sign-in when there was none, without registering a client", async () => {
+    const ada = new MemoryStore();
+    expect(await checkSignIn(config, ada)).toBe("needs_sign_in");
+    expect(portal.clients.size).toBe(0);
+  });
+
+  it("checks a sign-in without a refresh token by connecting", async () => {
+    const ada = new MemoryStore();
+    await signIn(ada, "ada@example.com");
+    delete ada.record.tokens!.refresh_token;
+    expect(await checkSignIn(config, ada)).toBe("ok");
+    portal.access.get(ada.record.tokens!.access_token)!.expires = 0;
+    expect(await checkSignIn(config, ada)).toBe("needs_sign_in");
+  });
+
+  it("is unavailable, not a sign-in, when the server does not answer", async () => {
+    const ada = new MemoryStore();
+    await signIn(ada, "ada@example.com");
+    expect(await checkSignIn({ ...config, url: "http://127.0.0.1:1/mcp" }, ada)).toBe("unavailable");
+    expect(ada.record.tokens).toBeDefined();
   });
 });
 

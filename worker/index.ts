@@ -12,6 +12,7 @@ import { filesRoute } from "./files-routes.ts";
 import { json, readJson } from "./http.ts";
 import { chatRoute } from "./chat-routes.ts";
 import { mcpRoute } from "./mcp-routes.ts";
+import { pushRoute } from "./push-routes.ts";
 import { catalogSource, loadCatalog } from "./models.ts";
 import { skillsRoute } from "./skills-routes.ts";
 import { agentsRoute } from "./agents-routes.ts";
@@ -152,6 +153,8 @@ async function route(request: Request, env: Env): Promise<Response> {
 
   const mcp = await mcpRoute(request, env, uid);
   if (mcp) return mcp;
+  const push = await pushRoute(request, env, uid);
+  if (push) return push;
 
   const directory = exports.UserDirectory.getByName(uid);
   // The sidebar's socket: it hears which of the chat, artifact and skill lists changed (worker/users.ts).
@@ -201,6 +204,17 @@ async function route(request: Request, env: Env): Promise<Response> {
     } catch (error) {
       return json({ error: errorMessage(error) }, 400);
     }
+  }
+
+  // Try the notices of sign-ins for scheduled runs without a run. Needs DEV_TOOLS=true. Body: { what?, chatId?, runs? }:
+  // `runs` names a chat whose runs use this server (setRunServers); otherwise a run is said to need a new sign-in.
+  const devSignIn = path.match(/^\/api\/dev\/sign-ins\/([^/]+)$/);
+  if (devSignIn && method === "POST" && env.DEV_TOOLS === "true") {
+    const body = ((await readJson<{ what?: string; chatId?: string; runs?: string }>(request)) ?? {}) as { what?: string; chatId?: string; runs?: string };
+    const server = decodeURIComponent(devSignIn[1]!);
+    if (body.runs) await directory.setRunServers(body.runs, [server]);
+    else await directory.notifySignInNeeded(server, { what: body.what, chatId: body.chatId });
+    return json(await directory.mcpSignIns());
   }
 
   const files = await filesRoute(request, () => storage.userFiles(uid));

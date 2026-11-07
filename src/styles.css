@@ -1105,3 +1105,20 @@ a.mention-chip:hover { text-decoration: underline; }
 .chip:hover { color: var(--text); background: var(--surface-2); }
 .chip:is(.active, [aria-pressed="true"]) { border-color: transparent; background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 .sidebar .chat-filter .nav-unread { position: absolute; top: -2px; right: -2px; width: 7px; height: 7px; margin: 0; }
+
+/* Sign-ins to servers that sign in each user (src/SignIns.tsx): the sidebar's notices and the account menu's list. */
+.sign-in-notices { display: flex; flex-direction: column; gap: 6px; }
+.sign-in-notice { display: flex; align-items: flex-start; gap: 8px; padding: 10px 6px 10px 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--accent-soft); }
+.sign-in-notice.needed { box-shadow: inset 3px 0 0 var(--accent); }
+.sign-in-notice > svg { flex: none; margin-top: 2px; color: var(--accent); }
+.sign-in-notice-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
+.sign-in-notice-body strong { font-size: 14px; }
+.sign-in-notice-body .button { align-self: flex-start; margin-top: 6px; padding: 4px 12px; }
+.sign-in-notice .icon-button { width: 24px; height: 24px; color: var(--muted); }
+.account-menu .nav-unread { margin-left: auto; }
+.sign-ins-dialog { width: min(520px, calc(100% - 32px)); }
+.sign-ins { margin: 0 0 12px; padding: 0; list-style: none; display: flex; flex-direction: column; }
+.sign-ins li { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-top: 1px solid var(--border); }
+.sign-ins li:last-child { border-bottom: 1px solid var(--border); }
+.sign-in-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.sign-in-text small { color: var(--muted); font-size: 13px; }

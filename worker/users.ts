@@ -7,8 +7,14 @@ import { checkSystemPrompt, type ChatSystemPrompt } from "../shared/system-promp
 import { checkSkill, MAX_SKILL_PROPOSALS, MAX_USER_SKILLS, SkillError, type SavedSkillOrigin, type SkillInfo, type SkillInput, type SkillResult } from "../shared/skills.ts";
 import { BUILTIN_SKILLS, builtinSkill, parseSkillFile } from "./skills/index.ts";
 import { titleFromMessage, UNNAMED_CHAT } from "./agent/title.ts";
-import { applyAuthChange, type McpAuthChange, type McpAuthRecord, type McpAuthStore } from "./mcp/oauth.ts";
-import { mcpServers } from "./mcp/servers.ts";
+import type { McpAuthChange, McpAuthRecord, McpAuthStore } from "./mcp/oauth.ts";
+import type { SignInCheck } from "./mcp/background.ts";
+import { McpSignIns } from "./mcp/sign-ins.ts";
+import { PushSubscriptions, vapidKeys, type PushMessage } from "./push/subscriptions.ts";
+import type { PushSubscriptionKeys } from "./push/web-push.ts";
+import { mcpTokensKey } from "./storage/index.ts";
+import type { McpSignInView, SignInNotice } from "../shared/sign-ins.ts";
+import { memoAsync } from "../shared/util.ts";
 import { AgentStore, type AgentSave } from "./agents/store.ts";
 import type { AgentDefinition, AgentOrigin, AgentResult } from "../shared/agents.ts";
 
@@ -65,14 +71,18 @@ export interface SkillPackageFiles {
 export class UserDirectory extends DurableObject<Env> {
   /** The user's agents (worker/agents/store.ts). */
   readonly #agents: AgentStore;
+  /** The user's sign-ins to servers that sign in each user (worker/mcp/sign-ins.ts). */
+  readonly #signIns: McpSignIns;
+  /** The browsers the user turned notifications on in (worker/push/subscriptions.ts). */
+  readonly #push: PushSubscriptions;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.#agents = new AgentStore(ctx.storage.sql);
+    this.#push = new PushSubscriptions(ctx.storage.sql);
     ctx.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS chats (id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS artifacts (id TEXT PRIMARY KEY, title TEXT NOT NULL, chat_id TEXT NOT NULL, latest INTEGER NOT NULL, updated_at INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS mcp_auth (server TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS skills (name TEXT PRIMARY KEY, description TEXT NOT NULL, instructions TEXT NOT NULL, tools TEXT NOT NULL, origin TEXT NOT NULL, enabled INTEGER NOT NULL, updated_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS builtin_skills_off (name TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS shared_chats (id TEXT PRIMARY KEY, owner_uid TEXT NOT NULL, owner_name TEXT NOT NULL, title TEXT NOT NULL, joined_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
@@ -97,10 +107,20 @@ export class UserDirectory extends DurableObject<Env> {
     if (this.#addColumn("artifacts", "seen", "INTEGER NOT NULL DEFAULT 0")) ctx.storage.sql.exec("UPDATE artifacts SET seen = latest");
     // A sidebar's socket stays open for hours: answer its keep-alive pings without waking this object.
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair(SOCKET_PING.request, SOCKET_PING.response));
-    // Forget sign-ins to servers this deployment no longer has, tokens included.
-    const configured = mcpServers(env).map((server) => server.name);
-    const placeholders = configured.map(() => "?").join(", ");
-    ctx.storage.sql.exec(`DELETE FROM mcp_auth${configured.length ? ` WHERE server NOT IN (${placeholders})` : ""}`, ...configured);
+    const uid = ctx.id.name!;
+    this.#signIns = new McpSignIns({
+      sql: ctx.storage.sql,
+      env,
+      key: memoAsync(() => mcpTokensKey(env, uid)),
+      changed: () => this.#changed("sign-ins"),
+      notify: async (notice, message) => {
+        this.#changed(notice);
+        await this.#pushIfAway(message);
+      },
+      // The chat object's name, as chatAgentName (worker/chat-agent.ts) builds it: that module imports this one.
+      signedIn: (chatId, server) => exports.ChatAgent.getByName(`${uid}:${chatId}`).signedIn(server),
+      setAlarm: (at) => void (at === null ? ctx.storage.deleteAlarm() : ctx.storage.setAlarm(at)),
+    });
   }
 
   /** Add a column a table made before it lacks; true when it was added. `table`, `column` and `type` are written here, never input. */
@@ -112,16 +132,81 @@ export class UserDirectory extends DurableObject<Env> {
   }
 
   /** This user's OAuth state for one MCP server (worker/mcp/oauth.ts): registration, tokens, a sign-in in progress. */
-  mcpAuth(server: string): McpAuthRecord {
-    const row = this.ctx.storage.sql.exec<{ data: string }>("SELECT data FROM mcp_auth WHERE server = ?", server).toArray()[0];
-    return row ? (JSON.parse(row.data) as McpAuthRecord) : {};
+  mcpAuth(server: string): Promise<McpAuthRecord> {
+    return this.#signIns.record(server);
   }
 
-  /** Read, change and write in one step: this object runs one call at a time, and nothing here awaits. */
-  updateMcpAuth(server: string, change: McpAuthChange): void {
-    const record = applyAuthChange(this.mcpAuth(server), change);
-    if (Object.keys(record).length === 0) this.ctx.storage.sql.exec("DELETE FROM mcp_auth WHERE server = ?", server);
-    else this.ctx.storage.sql.exec("INSERT INTO mcp_auth (server, data) VALUES (?, ?) ON CONFLICT(server) DO UPDATE SET data = excluded.data", server, JSON.stringify(record));
+  /** Read, change and write in one step: McpSignIns runs one record change at a time. */
+  updateMcpAuth(server: string, change: McpAuthChange): Promise<void> {
+    return this.#signIns.update(server, change);
+  }
+
+  /** The account menu's list of sign-ins: each server that signs in each user, with when (no tokens). */
+  mcpSignIns(): McpSignInView[] {
+    return this.#signIns.list();
+  }
+
+  /** Remove the stored sign-in to `server`, tokens and registration. */
+  async disconnectMcp(server: string): Promise<McpSignInView[]> {
+    await this.#signIns.disconnect(server);
+    return this.#signIns.list();
+  }
+
+  dismissSignInNotice(server: string): McpSignInView[] {
+    this.#signIns.dismiss(server);
+    return this.#signIns.list();
+  }
+
+  /**
+   * For scheduled runs (worker/agents/runs): the servers one chat's runs use, kept refreshed daily and warned about
+   * before their grant ends. Replaces that chat's list; empty clears it.
+   */
+  setRunServers(chatId: string, servers: readonly string[]): void {
+    this.#signIns.setRunServers(chatId, servers);
+  }
+
+  /** Before a run: whether each server's sign-in works with nobody present (refreshed now). See McpSignIns.check. */
+  checkSignIns(servers: readonly string[]): Promise<Record<string, SignInCheck>> {
+    return this.#signIns.check(servers);
+  }
+
+  /**
+   * A run needs a new sign-in to `server`: a notice with the sign-in link in the sidebar, the browser, and a push when no
+   * app is open, once until they sign in. With `chatId`, that chat hears `ChatAgent.signedIn(server)` when they do.
+   */
+  notifySignInNeeded(server: string, context: { chatId?: string; what?: string } = {}): Promise<void> {
+    return this.#signIns.needed(server, context);
+  }
+
+  /** The sign-in callback finished for `server` (worker/mcp-routes.ts). */
+  onSignedIn(server: string): Promise<void> {
+    return this.#signIns.onSignedIn(server);
+  }
+
+  /** Warnings before sign-ins end, and the daily keep-alive refresh of the ones runs use (McpSignIns.alarm). */
+  async alarm(): Promise<void> {
+    await this.#signIns.alarm();
+  }
+
+  addPushSubscription(sub: PushSubscriptionKeys): void {
+    this.#push.add(sub);
+  }
+
+  removePushSubscription(endpoint: string): void {
+    this.#push.remove(endpoint);
+  }
+
+  /**
+   * Push a notification to every browser this user turned notifications on in, for when the app is closed. `body` says
+   * only that something arrived, never data. Nothing happens without the VAPID secrets.
+   */
+  push(message: PushMessage): Promise<void> {
+    return this.#push.push(message, vapidKeys(this.env as { PUSH_VAPID_PUBLIC_KEY?: string; PUSH_VAPID_PRIVATE_KEY?: string; PUSH_SUBJECT?: string }));
+  }
+
+  /** Push only when no app of this user's is open: an open one hears it on its socket and shows it itself. */
+  async #pushIfAway(message: PushMessage): Promise<void> {
+    if (this.ctx.getWebSockets().length === 0) await this.push(message);
   }
 
   /**
@@ -150,7 +235,7 @@ export class UserDirectory extends DurableObject<Env> {
   }
 
   /** Tell the open sidebars that a list changed, or that someone tagged this user. */
-  #changed(message: SidebarList | MentionNotice): void {
+  #changed(message: SidebarList | MentionNotice | SignInNotice): void {
     const sent = typeof message === "string" ? message : JSON.stringify(message);
     for (const ws of this.ctx.getWebSockets()) {
       try {
@@ -294,6 +379,7 @@ export class UserDirectory extends DurableObject<Env> {
     const set = "title = ?, updated_at = ?, activity_at = CASE WHEN ? THEN ? ELSE activity_at END, mentioned_at = CASE WHEN ? THEN ? ELSE mentioned_at END";
     if (!this.#updateChat(id, ownerUid, set, title, now, byOther ? 1 : 0, now, tag ? 1 : 0, now) || !tag) return;
     this.#changed({ type: "mention", chatId: id, ...(!named && { title }), ...tag });
+    this.ctx.waitUntil(this.#pushIfAway({ title: "You were mentioned", body: "Someone mentioned you in a chat.", url: `/c/${id}`, tag: `mention:${id}` }));
   }
 
   removeSharedChat(id: string, ownerUid: string): void {

@@ -19,6 +19,9 @@ import { carriesFiles, fromDrop } from "./files/pick.ts";
 import { isPicked, type Picks } from "./files/picks.ts";
 import { isBoolean, MenuButton, ResizeHandle, SectionHead, useMediaQuery, useStoredState } from "./layout.tsx";
 import { useLatest, useSidebarSocket } from "./sidebar.ts";
+import { SignInNotices, useSignInAlerts } from "./SignIns.tsx";
+import { onPushOpen } from "./push.ts";
+import type { McpSignInView } from "../shared/sign-ins.ts";
 import { SkillsView } from "./skills/SkillsView.tsx";
 
 /** The app's location, path and query, and a way to go elsewhere in it without loading the page again. */
@@ -256,7 +259,13 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, naviga
   // may have saved some (run_python), so they are read again after each one.
   // Someone tagging the user shows in the app, and in the browser while it is in the background.
   const notices = useMentionNotices(chatId, navigate);
-  useSidebarSocket({ chats: loadChats, artifacts: loadArtifacts, skills: loadSkills }, notices.onMention);
+  // Sign-ins to servers that sign in each user: the account menu lists them, and the sidebar shows those that need the
+  // user (a run waiting, or a sign-in about to run out).
+  const [signIns, loadSignIns, setSignIns] = useLatest<McpSignInView[]>(api.signIns, []);
+  const onSignIn = useSignInAlerts(loadSignIns);
+  useSidebarSocket({ chats: loadChats, artifacts: loadArtifacts, skills: loadSkills, "sign-ins": loadSignIns }, notices.onMention, onSignIn);
+  // A click on a pushed notification while the app is open moves it to the chat the push names.
+  useEffect(() => onPushOpen(navigate), [navigate]);
   // Another chat shows its own artifacts: the one asked for at once, else the newest it published once it loads.
   // Going to the same chat without one asked for (its sidebar link, Back) keeps what it shows: the chat does not load
   // again, so it would not offer its newest artifact.
@@ -392,6 +401,7 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, naviga
               </button>
             )}
           </div>
+          <SignInNotices list={signIns} onChange={(list) => setSignIns(() => list)} />
           {/* Chats scroll here; artifacts, skills and the files panel stay below them. */}
           <div className="sidebar-scroll">
             <h3>Chats</h3>
@@ -450,7 +460,7 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, naviga
             onOpenFile={openFile}
             onDeleted={onFilesDeleted}
           />
-          <AccountMenu label={label} onSignOut={onSignOut} />
+          <AccountMenu label={label} onSignOut={onSignOut} signIns={signIns} onSignInsChange={(list) => setSignIns(() => list)} />
         </aside>
       )}
       <ResizeHandle

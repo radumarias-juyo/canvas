@@ -16,6 +16,7 @@ import { formatCursor, NEXT_PART_HEADER, parseCursor } from "../shared/data-expo
 import { DICTATION_ROUTE, DICTATION_TYPE } from "../shared/dictation.ts";
 import type { MentionOptions } from "../shared/mentions.ts";
 import type { ModelCatalog } from "../shared/models.ts";
+import type { McpSignInView } from "../shared/sign-ins.ts";
 import type { ChatSystemPrompt } from "../shared/system-prompt.ts";
 import { skillPath, type SkillInfo, type SkillInput } from "../shared/skills.ts";
 import { FILE_ROUTE, VIEW_PARAM, ZIP_ROUTE } from "../shared/uploads.ts";
@@ -201,6 +202,18 @@ export const api = {
   /** (owner) Bring one of their agents into the chat. */
   addChatAgent: (chatId: string, agentId: string) => request<ChatAgentView[]>(chatPath(chatId, "/agents"), post({ agentId })),
   removeChatAgent: (chatId: string, agentId: string) => request<ChatAgentView[]>(chatPath(chatId, `/agents/${agentId}`), { method: "DELETE" }),
+  /** The user's sign-ins to servers that sign in each user: which, since when, and any notice about them. */
+  signIns: () => request<McpSignInView[]>("/api/mcp/sign-ins"),
+  /** Forget the stored sign-in to `server`: the next use asks for a new one. */
+  disconnect: (server: string) => request<McpSignInView[]>(`/api/mcp/sign-ins/${encodeURIComponent(server)}`, { method: "DELETE" }),
+  dismissSignInNotice: (server: string) => request<McpSignInView[]>(`/api/mcp/notices/${encodeURIComponent(server)}`, { method: "DELETE" }),
+  /** The key to subscribe to push with, or null when this deployment sends none. */
+  pushKey: async (): Promise<string | null> => {
+    const { response, body } = await fetchJson("/api/push/key");
+    return response.ok ? ((body as { publicKey?: string } | null)?.publicKey ?? null) : null;
+  },
+  subscribePush: (subscription: PushSubscriptionJSON) => request<object>("/api/push/subscribe", post(subscription)),
+  unsubscribePush: (endpoint: string) => request<object>("/api/push/unsubscribe", post({ endpoint })),
   skills: () => request<SkillInfo[]>("/api/skills"),
   /** Save one of the user's skills, from its fields or from a SKILL.md file's text. */
   saveSkill: (skill: (SkillInput | { markdown: string }) & { enabled?: boolean }) => request<SkillInfo>("/api/skills", post(skill)),

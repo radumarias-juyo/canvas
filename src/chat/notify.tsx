@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import type { MentionNotice } from "../../shared/protocol.ts";
 import { Icon } from "../Icon.tsx";
 import { useStoredState } from "../layout.tsx";
+import { enablePush } from "../push.ts";
 import { useVisible } from "../sidebar.ts";
 
 /** How long a tag shows in the app once the window is in view. */
@@ -24,8 +25,12 @@ const permissionStore = (() => {
   const set = (next: Permission) => {
     if (next === current) return;
     current = next;
+    // Allowed: this browser also gets pushes while the app is closed (src/push.ts).
+    if (next === "granted") void enablePush();
     for (const listener of listeners) listener();
   };
+  // Allowed before: the subscription is renewed (a new key, or one the browser dropped).
+  if (current === "granted") void enablePush();
   if (supported) {
     navigator.permissions
       ?.query({ name: "notifications" })
@@ -124,7 +129,7 @@ export function MentionToasts({ toasts, dismiss, open, asking }: ReturnType<type
           <BellIcon />
           <div className="toast-body">
             <strong>Get notified when someone mentions you</strong>
-            <span className="toast-text">Your browser shows it even while you are in another tab or app.</span>
+            <span className="toast-text">Your browser shows it even while you are in another tab or app, or the app is closed.</span>
             <div className="notify-ask-actions">
               <button type="button" className="primary" onClick={ask}>
                 Turn on notifications
