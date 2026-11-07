@@ -580,6 +580,18 @@ export class AgentRuns {
   }
 
   /**
+   * The sessions an agent's newest runs here worked in (an item's), newest first, with whether the run still goes: what
+   * its owner's window lists (shared/agent-window.ts). A reply's session is listed by its turn.
+   */
+  sessionsOf(agentId: string, limit = 20): { session: string; dueAt: number; running: boolean }[] {
+    return this.#rows("agent_id = ? AND session IS NOT NULL ORDER BY started_at DESC LIMIT ?", agentId, limit).map((row) => ({
+      session: row.session!,
+      dueAt: row.due_at,
+      running: row.status === "running",
+    }));
+  }
+
+  /**
    * Whether any item waits for its owner to decide a held call: its run waiting, or still going (another item in its
    * pass), or waiting for a sign-in. One left waiting under a run that ended counts not: nothing reopens it.
    */

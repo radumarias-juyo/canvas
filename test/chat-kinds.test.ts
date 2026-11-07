@@ -225,6 +225,19 @@ describe("ChatRows: what each person changes in their own sidebar", () => {
     ]);
   });
 
+  it("names a chat as the sidebar shows it, for an agent's used-in list: the user's own name first", () => {
+    const { rows, own, theirs } = sidebar();
+    own("mine", T0);
+    theirs("theirs", T0);
+    rows.change("mine", { title: "Q3 signups" });
+    expect(rows.shownTitle("mine")).toBe("Q3 signups");
+    expect(rows.shownTitle("theirs", "bea")).toBe("Chat theirs");
+    // Only the person whose chat it is: another owner's id, or a chat the sidebar has not got, names none.
+    expect(rows.shownTitle("theirs", "cal")).toBeNull();
+    expect(rows.shownTitle("theirs")).toBeNull();
+    expect(rows.shownTitle("gone")).toBeNull();
+  });
+
   it("pins, keeping when it was first pinned, and unpins", () => {
     const { rows, own } = sidebar();
     own("one", T0);

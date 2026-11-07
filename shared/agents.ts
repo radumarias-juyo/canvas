@@ -617,9 +617,10 @@ export type ChatAgentReplyData = {
    * the chat's router picked this agent. `unprompted`: nobody did: the agent spoke up after a pause in a conversation
    * close to its job ("speak-up"), or offers to pick up a question nobody answered ("follow-up"); `name` is then the
    * person whose message it answers. `drafts`: its owner said Yes to the next step its reply offered, and the turn
-   * may only read and draft the routine (worker/agents/turns.ts, draftTools).
+   * may only read and draft the routine (worker/agents/turns.ts, draftTools). `window`: its owner told it from the
+   * agent's window (shared/agent-window.ts), not in the chat: its ask is in no log and no shared session, only its fork.
    */
-  calledBy: { name: string; uid?: string; agentId?: string; schedule?: true; routed?: true; unprompted?: UnpromptedKind; drafts?: true };
+  calledBy: { name: string; uid?: string; agentId?: string; schedule?: true; routed?: true; unprompted?: UnpromptedKind; drafts?: true; window?: true };
   /** The turn's id in the chat's turn table. */
   turn: number;
   /** How many hand-offs led to this turn: 0 when a person called it. */
@@ -692,9 +693,17 @@ export interface ChatAgents {
 export const CHAT_TURN_KIND = "chat.turn";
 /**
  * What a turn's input entry says of it: its turn, who called it, its hop, and for a turn handed to pi the chain it is
- * in (`root`) and the person who started that chain (`by`, whom the turns pi's answer hands on count for).
+ * in (`root`), the person who started that chain (`by`, whom the turns pi's answer hands on count for) and pi's place
+ * in it (`piTurn`, which ends once pi's answer is in the log).
  */
-export type ChatTurnData = { turn: number; calledBy: ChatAgentReplyData["calledBy"]; hop: number; root?: number; by?: string };
+export type ChatTurnData = {
+  turn: number;
+  calledBy: ChatAgentReplyData["calledBy"];
+  hop: number;
+  root?: number;
+  by?: string;
+  piTurn?: number;
+};
 
 /** How an agent is labelled in the lines its sessions read: "[research · agent]", "[Ana · person · your owner]". */
 export function speakerLabel(speaker: { name: string; kind: "person" | "agent"; owner?: boolean }): string {
@@ -707,6 +716,8 @@ export function speakerLabel(speaker: { name: string; kind: "person" | "agent"; 
   return `[${name} · ${speaker.kind}${speaker.owner ? " · your owner" : ""}]`;
 }
 
+/** The tool an agent searches its chat's whole log with (worker/agents/history.ts). */
+export const CHAT_HISTORY_TOOL = "chat_history";
 /** The tool the model proposes an agent with (saved off, for its owner to review). */
 export const AGENT_PROPOSE_TOOL = "agent_propose";
 /** What agent_propose's result carries, for the app to show the draft card. A type, so pi can store it. */

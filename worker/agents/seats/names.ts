@@ -1,11 +1,14 @@
 import { AGENT_NAME_PATTERN, copyName, RESERVED_AGENT_NAMES } from "../../../shared/agents.ts";
+import { sha256Hex } from "../../../shared/util.ts";
 
 /**
- * The chat of its owner's whose object a member's agent has its seats in: one per agent, apart from the owner's own
- * chats (no route reaches a chat id with a hyphen). The agent's own home conversation can take this over.
+ * The chat of its owner's whose object a member's agent has its seat in for one room: one per agent and room, apart
+ * from the owner's own chats (no route reaches a chat id with a hyphen). Per room, because everything a chat object
+ * keeps by its chat (pages and drafts, saved files and results, the sandbox, held actions, its kind) must never pass
+ * from one room to another, whose people differ. The room by its owner and chat, hashed: two owners' chats can share an id.
  */
-export function seatChatId(agentId: string): string {
-  return `seat-${agentId}`;
+export async function seatChatId(agentId: string, room: { ownerUid: string; chatId: string }): Promise<string> {
+  return `seat-${agentId}-${(await sha256Hex(`${room.ownerUid}:${room.chatId}`)).slice(0, 16)}`;
 }
 
 /**
