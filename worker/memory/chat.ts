@@ -52,10 +52,10 @@ export interface ChatMemoryDeps {
   piByOwner(): Promise<boolean>;
   /**
    * Have the next model request of a conversation (pi's for none, else a session) start its prompt afresh, leaving out
-   * every earlier one: an earlier prompt held the owner's own notes, which its readers may no longer see. With
-   * `compacting`, a compaction it could not stop summarizes the earlier context: once that settles, it is due again.
+   * every earlier one: an earlier prompt held the owner's own notes, which its readers may no longer see. Resolves once
+   * written; `done`, once no compaction is left that read them (false: not sure yet, the next turn tries again).
    */
-  freshPrompt(conversation: string | undefined): Promise<{ compacting?: Promise<unknown>; placed: Promise<unknown> }>;
+  freshPrompt(conversation: string | undefined): Promise<{ done: Promise<boolean> }>;
   directory(uid: string): NotesDirectory;
   /** Where the chat keeps which notes each conversation's prompt already held, so a note's use counts once in each. */
   kv: { get<T>(key: string): T | undefined; put(key: string, value: unknown): void };
@@ -124,10 +124,8 @@ export class ChatMemory {
   readonly #deps: ChatMemoryDeps;
   /** Each conversation's section, as its turn started, with who could read the chat then (`#audience`). */
   readonly #sections = new Map<string, { audience: string; section: Promise<Section> }>();
-  /** The conversations whose prompt is being started afresh now (#forgetOwn). */
+  /** The conversations whose prompt is being started afresh now (#forgetOwn), till it is done. */
   readonly #freshening = new Map<string, Promise<void>>();
-  /** The conversations whose fresh start waits for a compaction's summary (#forgetOwn): that wait starts it again. */
-  readonly #awaitingSummary = new Set<string>();
 
   constructor(deps: ChatMemoryDeps) {
     this.#deps = deps;
@@ -189,35 +187,30 @@ export class ChatMemory {
   }
 
   /**
-   * Start afresh the prompt of conversation `key` when it held the owner's own notes, which `reader` does not read. One
-   * at a time for each conversation: a refresh and audienceChanged at once write one fresh start, not two.
+   * Start afresh the prompt of conversation `key` when it held the owner's own notes, which `reader` does not read.
+   * Resolves once the edits are written; until freshPrompt is done (no compaction left that read them), each request
+   * leaves summaries out (leavesOutSummaries), and `key` stays marked under both lists, so if this object goes away
+   * first, the next turn starts it again. One at a time for each conversation: a refresh and audienceChanged at once
+   * write one fresh start, not two.
    */
   #forgetOwn(key: string, reader: MemoryReader): Promise<void> {
-    if (readsOwnNotes(reader) || !this.#own().includes(key) || this.#awaitingSummary.has(key)) return Promise.resolve();
+    if (readsOwnNotes(reader) || !this.#own().includes(key)) return Promise.resolve();
     const going = this.#freshening.get(key);
     if (going) return going;
-    const fresh = this.#deps
-      .freshPrompt(key === PI ? undefined : key)
-      .then(({ compacting, placed }) => {
-        // Marked until the summary is left out too: if this object goes away first, the next turn does it.
-        if (compacting) {
-          // Each request leaves summaries out until the edits that do are in (leavesOutSummaries).
-          this.#mark(SUMMARIES_KEY, key);
-          this.#awaitingSummary.add(key);
-          void compacting
-            .finally(() => this.#awaitingSummary.delete(key))
-            // Read as the conversation reads now: its agent's, or pi's.
-            .then(() => this.#forgetOwn(key, this.#reader(key === PI ? null : this.#deps.agentFor(key))))
-            .catch((error: unknown) => console.error("memory prompt:", errorMessage(error)));
-        } else {
-          this.#unmark(OWN_KEY, key);
-          if (this.#marked(SUMMARIES_KEY).includes(key))
-            void placed.then(() => this.#unmark(SUMMARIES_KEY, key)).catch((error: unknown) => console.error("memory prompt:", errorMessage(error)));
-        }
+    this.#mark(SUMMARIES_KEY, key);
+    const started = this.#deps.freshPrompt(key === PI ? undefined : key);
+    const written = started.then(() => undefined);
+    this.#freshening.set(key, written);
+    void started
+      .then(({ done }) => done)
+      .then((clean) => {
+        if (!clean) return;
+        this.#unmark(OWN_KEY, key);
+        this.#unmark(SUMMARIES_KEY, key);
       })
+      .catch((error: unknown) => console.error("memory prompt:", errorMessage(error)))
       .finally(() => this.#freshening.delete(key));
-    this.#freshening.set(key, fresh);
-    return fresh;
+    return written;
   }
 
   /**

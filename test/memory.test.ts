@@ -454,14 +454,13 @@ describe("ChatMemory", () => {
    * A chat of the owner's: its kind, who is in it (both may change: `state`), the agent each session is, whether pi's
    * turn answers the owner, and the conversations whose prompt was started afresh.
    */
-  function chat(chatId: string, kind: ChatKind, alone: boolean, owner = directory()) {
-    const state: { kind: ChatKind; alone: boolean; piByOwner: boolean; compacting?: Promise<unknown>; placed?: Promise<unknown> } = {
+  function chat(chatId: string, kind: ChatKind, alone: boolean, owner = directory(), kv = new Map<string, unknown>()) {
+    const state: { kind: ChatKind; alone: boolean; piByOwner: boolean; done?: Promise<boolean> } = {
       kind,
       alone,
       piByOwner: true,
     };
     const sessions = new Map<string, MemoryAgent>();
-    const kv = new Map<string, unknown>();
     const fresh: (string | undefined)[] = [];
     let used: string[] = [];
     const memory = new ChatMemory({
@@ -473,7 +472,7 @@ describe("ChatMemory", () => {
       piByOwner: async () => state.piByOwner,
       freshPrompt: async (conversation) => {
         fresh.push(conversation);
-        return { placed: state.placed ?? Promise.resolve(), ...(state.compacting && { compacting: state.compacting }) };
+        return { done: state.done ?? Promise.resolve(true) };
       },
       directory: () => ({
         readNotes: (reader) => owner.memory.read(reader),
@@ -559,31 +558,37 @@ describe("ChatMemory", () => {
     expect(fresh).toEqual([undefined]);
   });
 
-  it("starts a prompt afresh again once a compaction it could not stop has placed its summary", async () => {
+  it("leaves summaries out of each request until the fresh start is done, and starts it again after a restart", async () => {
     const owner = directory();
     saved(owner.memory.add({ text: "My salary is private.", scope: "user" }));
-    const { memory, host, state, fresh } = chat(PRIVATE, "private", true, owner);
+    const kv = new Map<string, unknown>();
+    const { memory, host, state, fresh } = chat(PRIVATE, "private", true, owner, kv);
     await memory.refresh();
-    let settled!: () => void;
-    state.compacting = new Promise<void>((resolve) => (settled = resolve));
+    let done!: (clean: boolean) => void;
+    state.done = new Promise<boolean>((resolve) => (done = resolve));
     state.kind = "group";
     await memory.audienceChanged();
     expect(fresh).toEqual([undefined]);
-    // Until the edits that leave it out are in, each request leaves the summary out itself.
     expect(host.leavesOutSummaries("root")).toBe(true);
-    state.compacting = undefined;
-    let placed!: () => void;
-    state.placed = new Promise<void>((resolve) => (placed = resolve));
-    settled();
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(fresh).toEqual([undefined, undefined]);
-    expect(host.leavesOutSummaries("root")).toBe(true);
-    placed();
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(host.leavesOutSummaries("root")).toBe(false);
-    // Done then: nothing more to leave out.
+    // Not done yet: no second fresh start meanwhile.
     await memory.refresh();
-    expect(fresh).toHaveLength(2);
+    expect(fresh).toHaveLength(1);
+    // The object goes away before it is done: the next one starts it again, and leaves summaries out till then.
+    const after = chat(PRIVATE, "group", true, owner, kv);
+    expect(after.host.leavesOutSummaries("root")).toBe(true);
+    after.state.done = Promise.resolve(false);
+    await after.memory.refresh();
+    expect(after.fresh).toEqual([undefined]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(after.host.leavesOutSummaries("root")).toBe(true);
+    after.state.done = Promise.resolve(true);
+    await after.memory.refresh();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(after.host.leavesOutSummaries("root")).toBe(false);
+    // Done then: nothing more to leave out.
+    await after.memory.refresh();
+    expect(after.fresh).toHaveLength(2);
+    done(true);
   });
 
   it("lets pi save as the owner only in a turn that answers the owner's own message", async () => {

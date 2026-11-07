@@ -11,6 +11,7 @@ import {
   type Harness,
   type LiveState,
   type Submission,
+  type TaskId,
 } from "@earendil-works/pi-durable";
 import { MEMORY_FORGET_TOOL, MEMORY_RECALL_TOOL } from "../../shared/memory.ts";
 
@@ -61,24 +62,55 @@ function leaveOutNotes(entries: readonly EntryRecord[]): ContextEdit[] {
 /** The harness calls freshPrompt stops a compaction with. */
 export type Compactions = Pick<Harness, "inspect" | "abortTask" | "abortSubmission" | "waitForTask">;
 
+/** How many times freshPrompt looks again for a compaction that read the notes before it gives up (the next turn tries again). */
+const MAX_LOOKS = 5;
+
 /**
  * Make `conversation`'s next model request carry no note it read so far: its prompt starts afresh (every earlier
  * prompt entry left out, so the planner finds none and writes all of the sections and tools again, as they are
- * then), and what memory_recall found is left out. The transcript keeps them; no model reads them. Placed at once when
- * the conversation is idle, else at its next step.
+ * then), and what memory_recall found is left out. The transcript keeps them; no model reads them. Resolves once those
+ * edits are written: they are placed at once when the conversation is idle, else at its next step.
  *
- * A compaction going now summarizes the context as it was, notes included, and its summary would come in after these
- * edits. One the conversation runs on its own is stopped, its summary too if it waits to be placed (a later one
- * compacts again), and a summary placed meanwhile is left out as well. One a turn waits for cannot be stopped (the
- * turn would fail): `compacting` resolves once it has placed its summary, and then freshPrompt is due again (until
- * its edits are in, withoutSummaries leaves the summary out of each request). `placed`: resolves once they are.
+ * Until they are placed, a compaction may summarize the context as it was, notes included, and place its summary after
+ * them. So `done` looks again once they are in, and again after each look that found one: a compaction the
+ * conversation runs on its own is stopped, its summary too if it waits to be placed (a later one compacts again); one a
+ * turn waits for cannot be (the turn would fail), and is waited for; and every summary placed since the first look is
+ * left out too. True once a look finds none; false when MAX_LOOKS were not enough. Until then the caller has each
+ * request leave summaries out (withoutSummaries).
  */
 export async function freshPrompt(
   conversation: Pick<Conversation, "id" | "context" | "submit" | "viewState">,
   harness: Compactions,
-): Promise<{ compacting?: Promise<unknown>; placed: Promise<unknown> }> {
+): Promise<{ done: Promise<boolean> }> {
   const view = await conversation.context(BACKGROUND_CONTEXT);
-  const writes = [await leaveOut(conversation, view.entries)];
+  const seen = new Set(view.entries.map((entry) => entry.id));
+  const written = await leaveOut(conversation, view.entries);
+  return { done: lookAgain(conversation, harness, seen, written) };
+}
+
+async function lookAgain(
+  conversation: Pick<Conversation, "id" | "context" | "submit" | "viewState">,
+  harness: Compactions,
+  seen: Set<EntryRecord["id"]>,
+  written: Submission | undefined,
+): Promise<boolean> {
+  for (let look = 0; look < MAX_LOOKS; look++) {
+    await written?.wait(BACKGROUND_CONTEXT);
+    const waited = await stopCompactions(conversation, harness);
+    await Promise.allSettled(waited.map((taskId) => harness.waitForTask(taskId, BACKGROUND_CONTEXT)));
+    const late = (await conversation.context(BACKGROUND_CONTEXT)).entries.filter((entry) => !seen.has(entry.id) && CompactionEntry.is(entry));
+    if (!late.length && !waited.length) return true;
+    for (const entry of late) seen.add(entry.id);
+    written = await leaveOut(conversation, late);
+  }
+  return false;
+}
+
+/**
+ * Stop the conversation's compactions that it runs on its own, and the summaries waiting to be placed; the ids of those
+ * a turn waits for, which cannot be stopped.
+ */
+async function stopCompactions(conversation: Pick<Conversation, "id" | "viewState">, harness: Compactions): Promise<TaskId[]> {
   const live = await conversation.viewState(BACKGROUND_CONTEXT);
   let compactions: LiveState["compactions"];
   try {
@@ -87,7 +119,7 @@ export async function freshPrompt(
     live.dispose();
   }
   await Promise.all(compactions?.filter((each) => !each.blocking).map((each) => harness.abortTask(each.taskId, BACKGROUND_CONTEXT)) ?? []);
-  // After the tasks: one that finished meanwhile has its summary waiting here, or placed already (below).
+  // After the tasks: one that finished meanwhile has its summary waiting here, or placed already (the caller's look).
   const { submissions } = await harness.inspect(BACKGROUND_CONTEXT);
   await Promise.all(
     submissions
@@ -97,13 +129,7 @@ export async function freshPrompt(
       )
       .map((each) => harness.abortSubmission(each.id, BACKGROUND_CONTEXT, conversation.id)),
   );
-  const seen = new Set(view.entries.map((entry) => entry.id));
-  const late = (await conversation.context(BACKGROUND_CONTEXT)).entries.filter((entry) => !seen.has(entry.id) && CompactionEntry.is(entry));
-  writes.push(await leaveOut(conversation, late));
-  const placed = Promise.all(writes.map((write) => write?.wait(BACKGROUND_CONTEXT)));
-  const waited = compactions?.filter((each) => each.blocking) ?? [];
-  if (!waited.length) return { placed };
-  return { compacting: Promise.allSettled(waited.map((each) => harness.waitForTask(each.taskId, BACKGROUND_CONTEXT))), placed };
+  return compactions?.filter((each) => each.blocking).map((each) => each.taskId) ?? [];
 }
 
 /** Write the edits that leave the notes of `entries` out, if any. */
