@@ -173,11 +173,11 @@ describe("checkAgent: nothing hidden", () => {
     const checked = agent({
       job: `Finds sources\u200b${hidden}`,
       instructions: `1. Search.\u3164\ufe01${hidden}`,
-      workflow: [{ kind: "work", prompt: `Sum it up.\u202e${hidden}` }],
+      workflow: [{ kind: "work", prompt: `Sum it up.\u202e${hidden}`, skill: `summarise${hidden}` }],
     });
     expect(checked.job).toBe("Finds sources");
     expect(checked.instructions).toBe("1. Search.");
-    expect(checked.workflow).toEqual([{ kind: "work", prompt: "Sum it up." }]);
+    expect(checked.workflow).toEqual([{ kind: "work", prompt: "Sum it up.", skill: "summarise" }]);
     // Emoji keep their joiner and presentation selector.
     expect(agent({ job: "Pings the \u{1F469}\u200d\u{1F4BB} team \u2764\ufe0f" }).job).toBe("Pings the \u{1F469}\u200d\u{1F4BB} team \u2764\ufe0f");
     // The non-joiner keeps Persian letters apart; the Arabic number sign draws as one.

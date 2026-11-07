@@ -342,7 +342,7 @@ function checkSteps(value: unknown, depth = 0, count = { steps: 0 }): AgentStep[
       case "look":
         return checkLook(step, "A look step");
       case "work": {
-        const skill = str(step.skill, field("A work step", "a", "skill"), 64, { required: false });
+        const skill = str(step.skill, field("A work step", "a", "skill"), 64, { required: false, seen: true });
         const model = str(step.model, field("A work step", "a", "model"), 200, { required: false });
         const prompt = str(step.prompt, field("A work step", "a", "prompt"), 4_000, { seen: true })!;
         return { kind: "work", prompt, ...(skill && { skill }), ...(model && { model }) };
