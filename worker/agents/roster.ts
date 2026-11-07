@@ -546,8 +546,9 @@ export class ChatRoster {
   /**
    * Let an ended turn's reply go to the chat as `reply` (a held one as its owner posts it, maybe edited), handing pi a
    * turn when it names pi: it is then delivered. Nothing when it has nothing to deliver (delivered or discarded already).
+   * `posts`: a done reply with text, or one its owner posts: only then are its fork's pages and files the chat's.
    */
-  release(id: number, reply: ChatAgentReplyData, toPi: boolean): void {
+  release(id: number, reply: ChatAgentReplyData, toPi: boolean, posts: boolean): void {
     const row = this.#sql
       .exec(
         `UPDATE chat_agent_turns SET held = 0, reply = ?, to_pi = ? WHERE id = ? AND ${PENDING} RETURNING session, forked`,
@@ -557,7 +558,7 @@ export class ChatRoster {
       )
       .toArray()[0] as Pick<TurnRow, "session" | "forked"> | undefined;
     // Its fork's pages and files are the chat's now, as its reply is.
-    if (row?.forked === 1 && row.session !== null) this.#sql.exec("UPDATE chat_agent_forks SET posted = 1 WHERE session = ?", row.session);
+    if (posts && row?.forked === 1 && row.session !== null) this.#sql.exec("UPDATE chat_agent_forks SET posted = 1 WHERE session = ?", row.session);
   }
 
   /** Drop a held reply, as its owner discards it: it never reaches the chat. */

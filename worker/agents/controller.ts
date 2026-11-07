@@ -341,9 +341,10 @@ export class AgentTurns {
         ...(forked && { forked: true as const }),
         ...(sources.length && { sources }),
       };
-      if (done && text && review && sources.length) {
-        // Its owner sees it first: nothing of it reaches the chat, pi or other agents until they post it.
-        if (roster.end(turn.id, "done", { reply, toPi: false, held: true })) this.#host.drafted(current.ownerUid);
+      if (review && sources.length) {
+        // Its owner sees it first: nothing of it reaches the chat, pi or other agents until they post it. A failed or
+        // empty one too: what its fork published or saved stays withheld until they post or discard it.
+        if (roster.end(turn.id, done ? "done" : "failed", { reply, toPi: false, held: true })) this.#host.drafted(current.ownerUid);
       } else if (roster.end(turn.id, done ? "done" : "failed", { reply, toPi: false })) {
         delivering = this.#release(turn.id, reply, done);
       }
@@ -356,7 +357,8 @@ export class AgentTurns {
   /**
    * An ended turn's reply goes to the chat: the agents it names get the next turns, within what its chain may still
    * make, and it is delivered. The turn ended in the roster just before, with no await in between, so a restart never
-   * loses its hand-offs or queues them twice.
+   * loses its hand-offs or queues them twice. Only a done reply with text (or one its owner posts) makes its fork's
+   * outputs the chat's: a failed or empty one's stay withheld.
    */
   #release(id: number, reply: ChatAgentReplyData, done: boolean): Promise<void> {
     const roster = this.#host.roster;
@@ -364,7 +366,7 @@ export class AgentTurns {
     const left = MAX_HOPS - roster.handOffsFrom(turn.root);
     const next = done && left > 0 ? handOffs(reply.text, reply.agentId, turn.hop, roster.list()).slice(0, left) : [];
     // A chain no person started never hands pi a turn: pi has the owner's full tools. It reads the reply instead.
-    roster.release(id, reply, !turn.unattended && next.includes(AGENT_NAME));
+    roster.release(id, reply, !turn.unattended && next.includes(AGENT_NAME), done && !!reply.text);
     const agents = next.filter((agentId) => agentId !== AGENT_NAME);
     // A hand-off can only read, whoever started the chain: agents cannot give each other permission.
     const ask = askOf({ name: reply.name, kind: "agent" }, reply.text, MAX_ASK_CHARS);
@@ -406,8 +408,11 @@ export class AgentTurns {
     const text = edited === undefined ? held.reply.text : edited.trim();
     if (!text) return { error: "A reply needs some text; discard it instead." };
     const current = roster.get(held.agentId);
+    // A failed one its owner posts is theirs now, as they wrote or kept it.
+    const { failed, ...kept } = held.reply;
+    void failed;
     const reply: ChatAgentReplyData = {
-      ...held.reply,
+      ...kept,
       ...(current && { name: current.name, avatar: current.avatar, color: current.color }),
       text,
       postedBy: uid,

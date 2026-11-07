@@ -962,6 +962,46 @@ describe("Member agents: what the review of private turns found", () => {
     expect(chat.roster.withheld()).toEqual(new Set([second]));
   });
 
+  it("keeps a failed or empty fork's outputs withheld: held for its owner when it read a private server and review is on", async () => {
+    const chat = room();
+    const end = (turn: number, result: TurnResult, entries: EntryRecord[]) => {
+      const session = chat.sessions.sessionOf(turn);
+      chat.sessions.entries.set(`${session}|${turn}`, entries);
+      chat.sessions.run(session, operationId(turn)).resolve(result);
+    };
+    const calendar = [result("calendar_events", [{ id: "e1", title: "x" }])];
+    const reviewed = chat.add(RADU, "planner", { servers: ["db", "calendar"], reviewBeforePosting: true });
+    // Failed after it read the calendar (a model error, a step limit), and done with no text: both held, both withheld.
+    const [failed] = chat.turns.call([reviewed.agentId], chat.say(RADU, "@planner my week"));
+    await settle();
+    const failedFork = chat.sessions.sessionOf(failed.id);
+    end(failed.id, { status: "unanswered", reason: "model error", text: "Board dinner Friday" }, calendar);
+    await settle();
+    const [empty] = chat.turns.call([reviewed.agentId], chat.say(RADU, "@planner again"));
+    await settle();
+    const emptyFork = chat.sessions.sessionOf(empty.id);
+    end(empty.id, { status: "done", text: "  " }, calendar);
+    await settle();
+    expect(chat.posts).toEqual([]);
+    expect(chat.roster.held(RADU.uid).map((held) => held.turn)).toEqual([failed.id, empty.id]);
+    expect(chat.roster.withheld()).toEqual(new Set([failedFork, emptyFork]));
+    // Its owner posts the failed one as theirs: its outputs are the chat's now, and it reads as a reply, not a failure.
+    expect(await chat.turns.post(RADU.uid, reviewed.agentId, failed.id)).toBeNull();
+    expect(chat.posts).toEqual([expect.objectContaining({ text: "Board dinner Friday", postedBy: RADU.uid })]);
+    expect(chat.posts[0]).not.toHaveProperty("failed");
+    expect(chat.roster.withheld()).toEqual(new Set([emptyFork]));
+
+    // Without review the failure posts at once, but what its fork made stays withheld, as a discarded draft's does.
+    const open = chat.add(RADU, "helper", { servers: ["db", "calendar"] });
+    const [unreviewed] = chat.turns.call([open.agentId], chat.say(RADU, "@helper my week"));
+    await settle();
+    const openFork = chat.sessions.sessionOf(unreviewed.id);
+    end(unreviewed.id, { status: "unanswered", reason: "model error" }, calendar);
+    await settle();
+    expect(chat.posts.at(-1)).toMatchObject({ turn: unreviewed.id, failed: "model error" });
+    expect(chat.roster.withheld()).toEqual(new Set([emptyFork, openFork]));
+  });
+
   it("gives a seat its turn again when the call was cut off, and stops it there when giving fails", async () => {
     const chat = room();
     const planner = chat.add(ANA, "planner");
