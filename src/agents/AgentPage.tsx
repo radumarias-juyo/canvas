@@ -32,11 +32,11 @@ export interface AgentTabProps {
   /** The field to scroll to and focus as the tab opens (a draft card's Change). */
   field?: string;
   /**
-   * Save the tab's changes: the user's own agent changed from the version it showed, a new one made, or for a shared
-   * one their own copy. Resolves with what was saved; rejects with the reason, shown by the tab.
+   * Save the tab's changes: the user's own agent changed from `version` (the one the tab started from), a new one made,
+   * or for a shared one their own copy of `version`. Resolves with what was saved; rejects with the reason, shown by the tab.
    */
-  save: (fields: AgentInput) => Promise<AgentDefinition>;
-  /** Say something under the header that outlasts the tab (which starts again with each version): a save, a conflict. */
+  save: (fields: AgentInput, version: number | undefined) => Promise<AgentDefinition>;
+  /** Say something under the header that outlasts the tab (which starts again for another agent): a save, a conflict. */
   notice: (notice: PageNotice | null) => void;
   /** Whether the tab has changes not saved yet: the header holds what would make a new version meanwhile. */
   onDirty?: (dirty: boolean) => void;
@@ -124,18 +124,19 @@ export function AgentPage({
 
   const tab = tabFor(TABS, place);
   const save = useCallback(
-    async (fields: AgentInput): Promise<AgentDefinition> => {
+    async (fields: AgentInput, version: number | undefined): Promise<AgentDefinition> => {
       if (!subject) throw new Error("This agent is not loaded yet.");
       let saved: AgentDefinition;
       if (subject.kind === "own") {
         const { agent } = subject;
         const kept = Object.fromEntries(KEPT.filter((key) => !tab.fields.includes(key)).map((key) => [key, agent[key]]));
-        saved = await api.saveAgent(agent.id, { ...kept, ...fields, version: agent.version });
+        // The version the tab started from: a change made since is refused, rather than undone.
+        saved = await api.saveAgent(agent.id, { ...kept, ...fields, version: version ?? agent.version });
       } else if (subject.kind === "new") saved = await api.createAgent(fields);
       else {
         // A copy takes what the tab leaves out from the original, so what the tab cleared is said as cleared (null).
         const cleared: AgentChanges = Object.fromEntries(tab.fields.map((key) => [key, null]));
-        saved = await api.copyAgent(subject.chatId, subject.agent.id, { ...cleared, ...fields });
+        saved = await api.copyAgent(subject.chatId, subject.agent.id, { ...cleared, ...fields, version: version ?? subject.agent.version });
       }
       // The user directory tells the sidebar's socket too, which reads the list again.
       putAgent(saved);
@@ -176,7 +177,8 @@ export function AgentPage({
   return (
     <div className="agent-page">
       {back}
-      <AgentHeader subject={subject} navigate={navigate} onMenu={onMenu} dirty={dirty} />
+      {/* Its own state (a delete being asked) is about one agent: another starts with none. */}
+      <AgentHeader key={place.id} subject={subject} navigate={navigate} onMenu={onMenu} dirty={dirty} />
       {notice?.agentId === place.id && (
         <p className={notice.error ? "form-error agent-notice" : "skills-note agent-notice"} role="status">
           {notice.text}
@@ -199,9 +201,9 @@ export function AgentPage({
         </nav>
       )}
       <div role="tabpanel" aria-label={tab.label}>
-        {/* A new tab state for each agent and version: a save, or a change elsewhere, shows the definition as it is now. */}
+        {/* A new tab state for each agent; a tab follows its newer versions itself, keeping changes not yet saved. */}
         <tab.Component
-          key={subject.kind === "new" ? NEW_AGENT : `${subject.agent.id}:${subject.agent.version}`}
+          key={subject.kind === "new" ? NEW_AGENT : subject.agent.id}
           subject={subject}
           field={place.field}
           save={save}

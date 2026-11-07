@@ -19,7 +19,11 @@ import { sha256Hex } from "./util.ts";
  *   files/<path>                   the user's files
  */
 export const EXPORT_FORMAT = "pi-artifacts-export";
-export const EXPORT_VERSION = 1;
+/**
+ * Counts up when an export carries what an older deployment cannot read, which then refuses the zip as a whole: 2 adds
+ * the agents and each chat's roster (chat_agents). Every older version stays readable.
+ */
+export const EXPORT_VERSION = 2;
 
 export const ARCHIVE = {
   manifest: "manifest.json",

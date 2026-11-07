@@ -10,7 +10,7 @@ import { titleFromMessage, UNNAMED_CHAT } from "./agent/title.ts";
 import { applyAuthChange, type McpAuthChange, type McpAuthRecord, type McpAuthStore } from "./mcp/oauth.ts";
 import { mcpServers } from "./mcp/servers.ts";
 import { AgentStore, type AgentSave } from "./agents/store.ts";
-import type { AgentChanges, AgentChatUse, AgentDefinition, AgentInput, AgentOrigin, AgentResult } from "../shared/agents.ts";
+import { withoutSignInShares, type AgentChanges, type AgentChatUse, type AgentDefinition, type AgentInput, type AgentOrigin, type AgentResult } from "../shared/agents.ts";
 
 /** One user's OAuth state for one MCP server. `uid` must come from a verified identity. */
 export function mcpAuthStore(uid: string, server: string): McpAuthStore {
@@ -523,6 +523,10 @@ export class UserDirectory extends DurableObject<Env> {
    * proposes is saved off, for the user to review and turn on.
    */
   saveAgent(input: unknown, origin: AgentOrigin, enabled?: boolean, save?: AgentSave): AgentResult {
+    if (origin === "agent") {
+      const signIn = new Set(mcpServers(this.env).flatMap((server) => (server.auth === "oauth" ? [server.name] : [])));
+      input = withoutSignInShares(input, (server) => signIn.has(server));
+    }
     const saved = this.#agents.save(input, origin, enabled, save);
     if (!("error" in saved)) this.#changed("agents");
     return saved;

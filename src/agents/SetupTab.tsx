@@ -51,6 +51,9 @@ const SETUP_ASSUMED: Record<string, readonly string[]> = {
   servers: ASSUMED_FIELDS.reads,
 };
 
+/** The version of the definition a form shows; none for a new one. */
+const versionOf = (subject: AgentSubject) => (subject.kind === "new" ? undefined : subject.agent.version);
+
 /** The deployment's MCP servers, one read for the forms open at once: read again as a form opens, so a sign-in shows. */
 const readServers = singleFlight(api.agentServers);
 
@@ -116,8 +119,18 @@ function changed(a: Form, b: Form): boolean {
  * makes their own copy.
  */
 export function SetupTab({ subject, field, save, notice, onDirty }: AgentTabProps) {
-  const initial = useRef(formOf(subject)).current;
-  const [form, setForm] = useState(initial);
+  // The definition the form started from, and its version: what Undo goes back to, and what a save changes.
+  const [start, setStart] = useState(() => ({ form: formOf(subject), version: versionOf(subject) }));
+  const [form, setForm] = useState(start.form);
+  const initial = start.form;
+  // A newer version (a change made elsewhere) shows at once while the form has no changes of its own. With changes it
+  // keeps them, and saving them meets the conflict rather than undoing the newer one.
+  const version = versionOf(subject);
+  if (version !== start.version && !changed(form, start.form)) {
+    const next = { form: formOf(subject), version };
+    setStart(next);
+    setForm(next.form);
+  }
   const [servers, setServers] = useState<AgentServerInfo[] | null>(null);
   const [serversError, setServersError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -175,7 +188,13 @@ export function SetupTab({ subject, field, save, notice, onDirty }: AgentTabProp
     setSaving(true);
     setError(null);
     try {
-      const saved = await save(inputOf(form));
+      const saved = await save(inputOf(form), start.version);
+      if (subject.kind === "own") {
+        // The form goes on from what was saved.
+        const next = { form: formOf({ kind: "own", agent: saved }), version: saved.version };
+        setStart(next);
+        setForm(next.form);
+      }
       notice({
         agentId: saved.id,
         text:
@@ -189,6 +208,7 @@ export function SetupTab({ subject, field, save, notice, onDirty }: AgentTabProp
       const message = errorMessage(e);
       if (subject.kind === "own" && /changed since you read it/.test(message)) {
         // The newer version shows in place of this one: the user makes their change again on it.
+        setForm(start.form);
         notice({
           agentId: subject.agent.id,
           text: "Someone changed this agent since you opened it, so it was reloaded with their changes. Make yours again.",

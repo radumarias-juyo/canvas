@@ -211,7 +211,7 @@ export const api = {
   /** (owner) Share one of the chat's agents with its people, or stop. */
   shareChatAgent: (chatId: string, agentId: string, shared: boolean) => request<ChatAgentView[]>(chatPath(chatId, `/agents/${agentId}`), send("PATCH", { shared })),
   /** The user's own copy of an agent shared in a chat, with their changes: saved off, with where it came from. */
-  copyAgent: (chatId: string, agentId: string, changes: AgentChanges) => request<AgentDefinition>(chatPath(chatId, `/agents/${agentId}/copy`), post(changes)),
+  copyAgent: (chatId: string, agentId: string, changes: AgentChanges & { version: number }) => request<AgentDefinition>(chatPath(chatId, `/agents/${agentId}/copy`), post(changes)),
   /** A dry run of an agent on today's data, nothing sent or changed. Throws with status 404 where testing is not there yet. */
   testAgent: (id: string) => request<unknown>(`/api/agents/${id}/test`, post({})),
   skills: () => request<SkillInfo[]>("/api/skills"),

@@ -1,5 +1,6 @@
 import { CURRENT_SQLITE_SCHEMA_VERSION } from "@earendil-works/pi-durable/storage/sqlite";
 import { CHAT_PART_BYTES, type ChatDumpCursor, type ChatDumpPage, type ChatDumpPart, type SqlCell, type SqlRow } from "../shared/data-export.ts";
+import { CHAT_AGENT_KIND, CHAT_TURN_KIND } from "../shared/agents.ts";
 import { fromBase64, toBase64 } from "../shared/util.ts";
 
 /** The part of a Durable Object's SQL API a dump needs; the tests put node:sqlite behind it. */
@@ -204,5 +205,21 @@ export function importedRoster(sql: DumpSql, uid: string, kept: readonly string[
     .toArray()
     .map((row) => String(row.agent_id));
   const through = has("pi_entries") ? Number(sql.exec("SELECT COALESCE(MAX(id), -1) AS n FROM pi_entries").toArray()[0].n) : -1;
+  // The agents' sessions came along with the operations their turns ran ("turn:<id>"), but not the turns: new turns
+  // number on from the log's, so none takes an old one's id (and its finished answer).
+  if (has("chat_agent_turns") && has("pi_entries")) {
+    const last = Number(
+      sql
+        .exec(
+          "SELECT COALESCE(MAX(json_extract(record, '$.data.turn')), 0) AS n FROM pi_entries WHERE json_extract(record, '$.kind') IN (?, ?)",
+          CHAT_TURN_KIND,
+          CHAT_AGENT_KIND,
+        )
+        .toArray()[0].n,
+    );
+    const sequence = sql.exec("SELECT seq FROM sqlite_sequence WHERE name = 'chat_agent_turns'").toArray();
+    if (sequence.length) sql.exec("UPDATE sqlite_sequence SET seq = MAX(seq, ?) WHERE name = 'chat_agent_turns'", last);
+    else sql.exec("INSERT INTO sqlite_sequence (name, seq) VALUES ('chat_agent_turns', ?)", last);
+  }
   return { agents, through };
 }

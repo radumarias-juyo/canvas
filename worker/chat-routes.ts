@@ -47,7 +47,8 @@ import type { UserDirectory } from "./users.ts";
  *   GET    /api/chats/:id/agents/:agentId     one agent of the chat, read-only (SharedAgentView): its owner, or anyone
  *                                             in the chat while the owner shares it there
  *   PATCH  /api/chats/:id/agents/:agentId     (owner) {shared}: share it with the people of the chat, or stop
- *   POST   /api/chats/:id/agents/:agentId/copy  {…fields}: someone's own copy of a shared agent, with their changes,
+ *   POST   /api/chats/:id/agents/:agentId/copy  {…fields, version}: someone's own copy of the version of a shared agent
+ *                                             they read (a newer one refuses), with their changes,
  *                                             saved off in their directory with copiedFrom; it runs with their sign-ins
  *   POST   /api/invites/accept                {token}: join the chat an invite link is for
  * With `?as=second`, a chat's routes (but its files) take the owner as their second seat in it, and refuse anyone else.
@@ -209,8 +210,12 @@ export async function chatRoute(
  * Its owner copies their own agent the same way. The copy says where it came from, from the chat's word, not the body's.
  */
 async function copyAgent(request: Request, directory: DurableObjectStub<UserDirectory>, shared: SharedAgentView): Promise<Response> {
-  const body = await readJson<AgentChanges>(request);
-  if (!body || typeof body !== "object") return json({ error: "Expected the copy's fields as JSON (content-type: application/json)." }, 400);
+  const body = await readJson<AgentChanges & { version?: unknown }>(request);
+  if (!body || typeof body !== "object" || typeof body.version !== "number") {
+    return json({ error: "Expected the copy's fields and the version read, as JSON (content-type: application/json)." }, 400);
+  }
+  // The copy is of the version they read: their changes never mix with a newer one's other fields.
+  if (body.version !== shared.version) return json({ error: `@${shared.name} changed since you read it: open it again to see it as it is now.` }, 409);
   const saved = await directory.copyAgent(copyInput(shared, body), { owner: shared.ownerUid, id: shared.id, version: shared.version });
   return "error" in saved ? json(saved, 400) : json(saved, 201);
 }

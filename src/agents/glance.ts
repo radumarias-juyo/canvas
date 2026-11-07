@@ -134,7 +134,8 @@ export function glanceRows(agent: Pick<AgentDefinition, "name" | "trigger" | "sc
       "Reads",
       "servers",
       reads.length ? reads.join(", ") : agent.servers ? "No servers" : "Every server",
-      reads.length ? undefined : "it may use",
+      // Without a list it may use every server: those its steps name are only the ones it surely reads.
+      agent.servers ? (reads.length ? undefined : "it may use") : reads.length ? "and any other: it may use every server" : "it may use",
     ),
     tells.length
       ? row(

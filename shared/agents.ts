@@ -406,6 +406,15 @@ export type CopiedField = (typeof COPIED_FIELDS)[number];
 /** Changes to a definition's fields, as a request carries them: null clears an optional one (checkAgent reads it as none). */
 export type AgentChanges = { [K in keyof AgentInput]?: AgentInput[K] | null };
 
+/**
+ * A definition the model drafted, without the servers that sign in each user (`signsIn`) among those it shares: a
+ * shared chat could make it read what its owner sees there. Only its owner adds one, in Setup, under its warning.
+ */
+export function withoutSignInShares(input: unknown, signsIn: (server: string) => boolean): unknown {
+  if (!isObject(input) || !Array.isArray(input.sharedServers)) return input;
+  return { ...input, sharedServers: input.sharedServers.filter((server) => typeof server !== "string" || !signsIn(server)) };
+}
+
 /** The fields a copy takes of `agent`, those it has. */
 export function copiedFields(agent: Pick<AgentInput, CopiedField>): Pick<AgentInput, CopiedField> {
   const fields: AgentChanges = {};

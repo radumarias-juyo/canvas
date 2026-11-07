@@ -4,6 +4,7 @@ import {
   copyInput,
   copyName,
   proposedBy,
+  withoutSignInShares,
   type AgentChanges,
   type AgentDefinition,
   type AgentInput,
@@ -78,6 +79,17 @@ describe("AgentStore: turning on confirms what was assumed", () => {
     // A save keeps the guesses the user has not confirmed yet, as the form sends them.
     const again = saved(store.save({ ...research, assumed: ["model"] }, "user", undefined, { id: on.id }));
     expect(saved(store.setEnabled(again.id, false)).assumed).toEqual(["model"]);
+  });
+});
+
+describe("a drafted agent's shares", () => {
+  it("never include a server that signs in each user; the rest stay as drafted", () => {
+    const signsIn = (server: string) => server === "calendar";
+    const drafted = { ...research, servers: ["db", "calendar"], sharedServers: ["db", "calendar"] };
+    expect(withoutSignInShares(drafted, signsIn)).toEqual({ ...drafted, sharedServers: ["db"] });
+    // Without a list it shares the default, which leaves sign-in servers out already.
+    expect(withoutSignInShares(research, signsIn)).toBe(research);
+    expect(withoutSignInShares("not an agent", signsIn)).toBe("not an agent");
   });
 });
 
@@ -204,7 +216,7 @@ describe("a chat's export carries its agents", () => {
       sql.exec(
         "INSERT INTO pi_entries VALUES (?, 1, ?)",
         id,
-        JSON.stringify({ kind: "chat.agent", data: { agentId: "aaaaaaaaaaaaaaaa", ownerUid: OLD_UID } }),
+        JSON.stringify({ kind: id === 5 ? "chat.turn" : "chat.agent", data: { agentId: "aaaaaaaaaaaaaaaa", ownerUid: OLD_UID, turn: id + 10 } }),
       );
     }
     const roster = new ChatRoster(sql, () => T0);
@@ -244,6 +256,8 @@ describe("a chat's export carries its agents", () => {
       expect.objectContaining({ agentId: "cccccccccccccccc", ownerUid: NEW_UID, name: "alpha", session: "2", shared: false }),
     ]);
     expect(roster.hasWork()).toBe(false);
+    // Its session ran turns up to 15: a new one is numbered on from there, never as one of those.
+    expect(roster.enqueue({ agentId: "cccccccccccccccc", hop: 0, calledBy: { name: "Ann", uid: NEW_UID }, byOwner: true, ask: "go" }).id).toBe(16);
     // Its replies in the log point at its new id too.
     const record = JSON.parse(String(target.exec("SELECT record FROM pi_entries WHERE id = 1").toArray()[0].record)) as { data: { agentId: string } };
     expect(record.data.agentId).toBe("cccccccccccccccc");
@@ -260,6 +274,9 @@ describe("a chat's export carries its agents", () => {
     const manifest = { format: EXPORT_FORMAT, version: EXPORT_VERSION, uid: "u", chats: [], artifacts: [], files: [], sharedWithMe: [] };
     expect(checkManifest({ ...manifest, account: { skills: [], agents: {} } })).toEqual({ error: expect.any(String) });
     expect(checkManifest({ ...manifest, account: { skills: [], agents: [] } })).not.toHaveProperty("error");
+    // An export from before agents still reads; one newer than this deployment is refused as a whole.
+    expect(checkManifest({ ...manifest, version: 1, account: { skills: [] } })).not.toHaveProperty("error");
+    expect(checkManifest({ ...manifest, version: EXPORT_VERSION + 1, account: { skills: [] } })).toEqual({ error: expect.any(String) });
     expect(checkManifest({ ...manifest, account: { skills: [] } })).not.toHaveProperty("error");
   });
 });
@@ -333,6 +350,9 @@ describe("the draft card's words", () => {
     const plain = glanceRows(agent());
     expect(plain.find((row) => row.key === "runs")?.value).toBe("When someone calls @research");
     expect(plain.find((row) => row.key === "reads")?.value).toBe("Every server");
+    // With no list of its own, a step naming one server does not make it the only one.
+    const any = glanceRows(agent({ workflow: [{ kind: "look", server: "web", tool: "get", input: {} }] })).find((row) => row.key === "reads");
+    expect(any).toMatchObject({ value: "web", note: "and any other: it may use every server" });
   });
 
   it("finds the proposal in a tool result, and nothing in a failed one or another tool's", () => {
