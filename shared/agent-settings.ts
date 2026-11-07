@@ -5,6 +5,7 @@
 // Worker answer the same question.
 
 import { answersEveryMessage, type ChatKind } from "./chat-kinds.ts";
+import { checkSpeakUpLimits, SpeakUpLimitsError, type SpeakUpLimits } from "./speak-up.ts";
 import { isObject } from "./util.ts";
 
 /** What the chat's owner sets, as the chat keeps it. An absent field is the default. */
@@ -22,6 +23,11 @@ export interface ChatAgentSettings {
    * too) may use together; DEFAULT_MESSAGE_TOKENS when absent (messageBudget).
    */
   messageTokens?: number;
+  /**
+   * How often agents may speak up here, and the router pick one (shared/speak-up.ts): the stricter of these and each
+   * agent's own holds; the defaults when neither sets one.
+   */
+  speakUpLimits?: SpeakUpLimits;
 }
 
 /** What everyone in the chat sees of its settings, and what the owner's panel shows. */
@@ -70,6 +76,16 @@ export function checkAgentSettings(input: unknown, current: ChatAgentSettings): 
       throw new AgentSettingsError("servers is a list of server names, or null for all of them.");
     else if (servers.length > MAX_CHAT_SERVERS) throw new AgentSettingsError(`A chat lists at most ${MAX_CHAT_SERVERS} servers.`);
     else next.servers = [...new Set((servers as string[]).map((server) => server.trim()))];
+  }
+  if (Object.hasOwn(input, "speakUpLimits")) {
+    try {
+      const limits = checkSpeakUpLimits(input.speakUpLimits);
+      if (limits) next.speakUpLimits = limits;
+      else delete next.speakUpLimits;
+    } catch (error) {
+      if (error instanceof SpeakUpLimitsError) throw new AgentSettingsError(error.message);
+      throw error;
+    }
   }
   const budgets = [
     ["dailyTokens", "A daily budget", "none"],
