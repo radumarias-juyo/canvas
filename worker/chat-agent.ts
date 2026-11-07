@@ -513,6 +513,8 @@ export class ChatAgent extends DurableObject<Env> {
       look: lookFrom(env.CHECK_LOOK_MODEL, env.AI),
       review: () => this.#pageReviewer(),
       publishUnchecked: env.AUTH_MODE === "demo",
+      // Only a turn that runs its changes (the owner's own) may give a page tools that change data (see #callerOf).
+      mayAddWrites: (session) => this.#callerOf({ kind: "session", session }, { server: "" }).then((caller) => caller.level === 4, () => false),
       failedChecks: new FailedChecks(),
       react: (emoji) => this.#agentReact(emoji),
     });
