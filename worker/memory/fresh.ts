@@ -5,6 +5,7 @@ import {
   LiveDoc,
   SystemEntry,
   ToolResultEntry,
+  type AgentEvent,
   type ContextEdit,
   type Conversation,
   type EntryRecord,
@@ -23,6 +24,39 @@ const LEFT_OUT: Readonly<Record<string, string>> = {
   [MEMORY_RECALL_TOOL]: "(The notes this call found are left out: more people read this chat now. Call it again for those you may read.)",
   [MEMORY_FORGET_TOOL]: "(What this call said is left out: more people read this chat now.)",
 };
+
+/** `entry` with a memory_recall or memory_forget result in it put in place of one that says it is left out. */
+export function withoutNoteResult(entry: EntryRecord): EntryRecord {
+  const [result, ...rest] = entry.model ?? [];
+  const leftOut = result?.role === "toolResult" ? LEFT_OUT[result.toolName] : undefined;
+  if (result?.role !== "toolResult" || !leftOut) return entry;
+  return { ...entry, model: [{ ...result, content: [{ type: "text", text: leftOut }], details: undefined }, ...rest] };
+}
+
+/**
+ * What a socket of someone other than the owner gets of `event`: what memory_recall found and what memory_forget said
+ * left out, in the transcript's entries and in a call's running output. They may hold the owner's own notes, read in
+ * this chat before others were in it (from any of the owner's chats).
+ */
+export function withoutNoteResults(event: AgentEvent): AgentEvent {
+  switch (event.type) {
+    case "snapshot":
+      return {
+        ...event,
+        entries: event.entries.map(withoutNoteResult),
+        tools: event.tools.map((slot) => (LEFT_OUT[slot.name] ? { ...slot, output: undefined, details: undefined } : slot)),
+      };
+    case "message_end":
+    case "entry_appended":
+      return { ...event, entry: withoutNoteResult(event.entry) };
+    case "tool_execution_end":
+      return event.entry ? { ...event, entry: withoutNoteResult(event.entry) } : event;
+    case "tool_execution_update":
+      return LEFT_OUT[event.toolName] ? { ...event, output: undefined, details: undefined } : event;
+    default:
+      return event;
+  }
+}
 
 /** How a compaction's summary is asked to be placed: its write's request id starts with it. */
 const SUMMARY_REQUEST = "compaction:";

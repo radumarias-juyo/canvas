@@ -23,13 +23,14 @@ import {
 import type { McpToolInfo } from "../worker/agent/mcp.ts";
 import { AgentRuns } from "../worker/agents/runs/store.ts";
 import { allowedTools } from "../worker/agents/turns.ts";
-import type { EntryRecord } from "@earendil-works/pi-durable";
+import type { AgentEvent, EntryRecord } from "@earendil-works/pi-durable";
 import { CHAT_TURN_KIND } from "../shared/agents.ts";
 import { CHAT_MESSAGE_KIND } from "../shared/protocol.ts";
 import { ChatMemory, MAX_RUN_PAGES, runAskedByOwner, type MemoryAgent } from "../worker/memory/chat.ts";
 import { coverageOf } from "../worker/memory/coverage.ts";
 import { UserMemory } from "../worker/memory/memory.ts";
 import { recalledText } from "../worker/memory/tools.ts";
+import { withoutNoteResults } from "../worker/memory/fresh.ts";
 import { memorySql } from "./fakes.ts";
 
 const T0 = 1_000_000;
@@ -736,5 +737,34 @@ describe("a run's sessions", () => {
     for (const session of ["7", "8", "9"]) expect(runs.agentOfSession(session)).toBe(RESEARCH);
     // Only where sessions are kept: a delivery key, a sent list or any other value of the detail is none.
     for (const session of ["1", "2"]) expect(runs.agentOfSession(session)).toBeNull();
+  });
+});
+
+describe("what someone other than the owner sees of a chat's events", () => {
+  const result = (toolName: string, text: string, id = 1) =>
+    ({
+      id,
+      conversationId: "1",
+      kind: "pi.tool_result",
+      model: [{ role: "toolResult", toolCallId: `c${id}`, toolName, content: [{ type: "text", text }], isError: false, timestamp: 0 }],
+    }) as unknown as EntryRecord;
+
+  it("leaves out what memory_recall found and memory_forget said, in the history and as calls run", () => {
+    const snapshot = {
+      type: "snapshot",
+      entries: [result(MEMORY_RECALL_TOOL, "- [a1] (about the owner) My salary is private."), result(MEMORY_FORGET_TOOL, "Forgot [a2]: “My bonus.”", 2), result("files_read", "salary.csv", 3)],
+      tools: [{ callId: "c4", name: MEMORY_RECALL_TOOL, status: "running", output: "My salary" }],
+    } as unknown as AgentEvent;
+    const shown = JSON.stringify(withoutNoteResults(snapshot));
+    expect(shown).not.toContain("My salary is private");
+    expect(shown).not.toContain("My bonus");
+    expect(shown).not.toContain('"output":"My salary"');
+    // Other tools' results stay as they are, and every call stays answered.
+    expect(shown).toContain("salary.csv");
+    expect(shown).toContain('"toolCallId":"c1"');
+    const appended = withoutNoteResults({ type: "entry_appended", entry: result(MEMORY_RECALL_TOOL, "My salary is private.") });
+    expect(JSON.stringify(appended)).not.toContain("salary");
+    const update = { type: "tool_execution_update", toolCallId: "c5", toolName: MEMORY_RECALL_TOOL, output: { set: "My salary" } } as AgentEvent;
+    expect(JSON.stringify(withoutNoteResults(update))).not.toContain("salary");
   });
 });
