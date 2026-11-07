@@ -1,7 +1,7 @@
 import { auth } from "@modelcontextprotocol/sdk/client/auth.js";
 import { isReadOnly, type ToolInfo } from "../../shared/protocol.ts";
 import { errorMessage } from "../../shared/util.ts";
-import { connectStreamableHttp } from "./connect.ts";
+import { connectStreamableHttp, fetchWithin, REQUEST_TIMEOUT_MS } from "./connect.ts";
 import { McpFailure, type McpConnection, type McpHub } from "./hub.ts";
 import { McpOAuthClient, type McpAuthRecord, type McpAuthStore } from "./oauth.ts";
 import type { McpServerConfig } from "./servers.ts";
@@ -30,7 +30,7 @@ export const KEEP_ALIVE_RETRY_MS = 60 * 60 * 1000;
  * How long each request of a check may take: a token endpoint that stalls is `unavailable`, and the alarm moves on. As
  * long as a chat's MCP requests may take: a slow refresh that succeeds must not lose its rotated refresh token.
  */
-export const CHECK_REQUEST_MS = 90_000;
+export const CHECK_REQUEST_MS = REQUEST_TIMEOUT_MS;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -85,10 +85,7 @@ export async function checkSignIn(
 }
 
 /** fetch, with each request given up after CHECK_REQUEST_MS (an abort the SDK asked for still works). */
-const timedFetch = (url: string | URL, init?: RequestInit): Promise<Response> => {
-  const timeout = AbortSignal.timeout(CHECK_REQUEST_MS);
-  return fetch(url, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout });
-};
+const timedFetch = fetchWithin(CHECK_REQUEST_MS);
 
 /**
  * The tools of `server` a run may use: only those the server marks read-only. A scheduled run reads; anything that

@@ -5,8 +5,17 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { checkSignIn } from "../worker/mcp/background.ts";
 import { connectStreamableHttp } from "../worker/mcp/connect.ts";
-import { McpFailure } from "../worker/mcp/hub.ts";
-import { applyAuthChange, finishSignIn, McpOAuthClient, serverOfState, startSignIn, type McpAuthChange, type McpAuthRecord, type McpAuthStore } from "../worker/mcp/oauth.ts";
+import { McpFailure, McpHub } from "../worker/mcp/hub.ts";
+import {
+  applyAuthChange,
+  finishSignIn,
+  McpOAuthClient,
+  serverOfState,
+  startSignIn,
+  type McpAuthChange,
+  type McpAuthRecord,
+  type McpAuthStore,
+} from "../worker/mcp/oauth.ts";
 import type { McpServerConfig } from "../worker/mcp/servers.ts";
 import { listen } from "./fakes.ts";
 
@@ -93,8 +102,11 @@ class FakePortal {
       if (form.get("grant_type") === "authorization_code") {
         const grant = this.codes.get(form.get("code")!);
         this.codes.delete(form.get("code")!);
-        const challenge = createHash("sha256").update(form.get("code_verifier") ?? "").digest("base64url");
-        const ok = grant && grant.challenge === challenge && grant.redirectUri === form.get("redirect_uri") && grant.clientId === form.get("client_id");
+        const challenge = createHash("sha256")
+          .update(form.get("code_verifier") ?? "")
+          .digest("base64url");
+        const ok =
+          grant && grant.challenge === challenge && grant.redirectUri === form.get("redirect_uri") && grant.clientId === form.get("client_id");
         return ok ? send(200, this.issue(grant.user)) : send(400, { error: "invalid_grant" });
       }
       if (form.get("grant_type") === "refresh_token") {
@@ -109,7 +121,11 @@ class FakePortal {
       const token = req.headers.authorization?.replace(/^Bearer /, "");
       const session = token ? this.access.get(token) : undefined;
       if (!session || session.expires < Date.now()) {
-        return send(401, { error: "invalid_token" }, { "www-authenticate": `Bearer resource_metadata="${this.origin}/.well-known/oauth-protected-resource/mcp"` });
+        return send(
+          401,
+          { error: "invalid_token" },
+          { "www-authenticate": `Bearer resource_metadata="${this.origin}/.well-known/oauth-protected-resource/mcp"` },
+        );
       }
       const server = new McpServer({ name: "stand-in", version: "1.0.0" });
       server.registerTool("data_whoami", { description: "Who am I", annotations: { readOnlyHint: true } }, async () => ({
@@ -154,7 +170,10 @@ beforeEach(() => {
 
 /** What a chat does: connect with the user's stored tokens, non-interactively. */
 async function whoami(store: MemoryStore) {
-  const connection = await connectStreamableHttp(config, new McpOAuthClient(store, "Portal", { redirectUrl: store.record.redirectUrl ?? REDIRECT, interactive: false }));
+  const connection = await connectStreamableHttp(
+    config,
+    new McpOAuthClient(store, "Portal", { redirectUrl: store.record.redirectUrl ?? REDIRECT, interactive: false }),
+  );
   try {
     const result = await connection.callTool("data_whoami", {});
     return JSON.parse((result.content[0] as { text: string }).text).user as string;
@@ -250,7 +269,9 @@ describe("per-user MCP sign-in", () => {
     const started = await startSignIn(config.url, "Portal", ada, REDIRECT);
     const { code, state } = portal.approve((started as { url: string }).url, "ada@example.com");
     portal.tokenBlocked = true;
-    await expect(finishSignIn(config.url, "Portal", ada, code, state)).rejects.toThrow(/error code: 1014.*\[POST http:\/\/127\.0\.0\.1:\d+\/token answered 403 \(Cloudflare Ray ID abc123-ARN\)\]/);
+    await expect(finishSignIn(config.url, "Portal", ada, code, state)).rejects.toThrow(
+      /error code: 1014.*\[POST http:\/\/127\.0\.0\.1:\d+\/token answered 403 \(Cloudflare Ray ID abc123-ARN\)\]/,
+    );
   });
 
   it("keeps tokens another chat refreshed when this chat's refresh is rejected", async () => {
@@ -268,6 +289,18 @@ describe("per-user MCP sign-in", () => {
     await chatB.tokens();
     await chatB.invalidateCredentials("tokens");
     expect(ada.record.tokens).toBeUndefined();
+  });
+
+  it("sends a call made across a new sign-in again on a fresh connection, as the new sign-in", async () => {
+    const ada = new MemoryStore();
+    await signIn(ada, "ada@example.com");
+    const hub = new McpHub([config], (server) =>
+      connectStreamableHttp(server, new McpOAuthClient(ada, "Portal", { redirectUrl: REDIRECT, interactive: false })),
+    );
+    const whoamiNow = async () => JSON.parse((await hub.call("Portal", "data_whoami", {})).content[0].text as string).user as string;
+    expect(await whoamiNow()).toBe("ada@example.com");
+    await signIn(ada, "ada+new@example.com");
+    expect(await whoamiNow()).toBe("ada+new@example.com");
   });
 });
 

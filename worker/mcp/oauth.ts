@@ -76,6 +76,13 @@ export function applyAuthChange(stored: McpAuthRecord, change: McpAuthChange): M
   return sameTokens(tokens, change.clearTokensIf) ? rest : stored;
 }
 
+/**
+ * A connection's next request, when the user signed in again since it opened: it was not sent, and a fresh connection
+ * sends it with the new sign-in (the hub retries what is not an McpFailure once, and worker/mcp/connect.ts lets this
+ * through as it is).
+ */
+export class SignInReplaced extends Error {}
+
 /** The callback path the authorization server sends the browser back to. */
 export const OAUTH_CALLBACK_PATH = "/api/mcp/oauth/callback";
 
@@ -159,7 +166,7 @@ export class McpOAuthClient implements OAuthClientProvider {
     const { tokens, grant } = await this.#store.get();
     if (tokens) {
       this.#bound ??= { grant };
-      if (this.#bound.grant !== grant) throw new Error(`Signed in to ${this.#server} again since this connection opened.`);
+      if (this.#bound.grant !== grant) throw new SignInReplaced(`Signed in to ${this.#server} again since this connection opened.`);
     }
     this.#readTokens = tokens;
     return tokens;

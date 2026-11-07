@@ -24,13 +24,22 @@ export async function sealAuthRecord(key: CryptoKey, server: string, record: Mcp
   return JSON.stringify({ sealed: PREFIX + toBase64(out) });
 }
 
-export async function openAuthRecord(key: CryptoKey, server: string, stored: string): Promise<{ record: McpAuthRecord; plain: boolean }> {
+/**
+ * `plain`: to be written again sealed. `olderSignIn`: code from before encryption signed in (its sign-in starts a record
+ * afresh, so no `sealed` is left in it), or the record was never sealed: when its grant started is not known.
+ */
+export async function openAuthRecord(
+  key: CryptoKey,
+  server: string,
+  stored: string,
+): Promise<{ record: McpAuthRecord; plain: boolean; olderSignIn: boolean }> {
   // `v1.…` alone, not in JSON: sealed before records were wrapped. It opens, and is written again in the JSON form.
-  if (stored.startsWith(PREFIX)) return { record: await open(key, server, stored), plain: true };
+  if (stored.startsWith(PREFIX)) return { record: await open(key, server, stored), plain: true, olderSignIn: false };
   const { sealed, ...rest } = JSON.parse(stored) as McpAuthRecord & { sealed?: unknown };
-  // Fields beside `sealed` are a plain record that code from before encryption wrote over it: those are the newer.
-  if (typeof sealed !== "string" || Object.keys(rest).length > 0) return { record: rest, plain: true };
-  return { record: await open(key, server, sealed), plain: false };
+  if (typeof sealed !== "string") return { record: rest, plain: true, olderSignIn: true };
+  // Fields beside `sealed` are what code from before encryption changed in it (a refresh): those are the newer.
+  if (Object.keys(rest).length > 0) return { record: rest, plain: true, olderSignIn: false };
+  return { record: await open(key, server, sealed), plain: false, olderSignIn: false };
 }
 
 async function open(key: CryptoKey, server: string, sealed: string): Promise<McpAuthRecord> {

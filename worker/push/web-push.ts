@@ -100,14 +100,14 @@ export async function vapidAuthorization(endpoint: string, vapid: VapidKeys, now
   return `vapid t=${unsigned}.${toBase64url(new Uint8Array(signature))}, k=${vapid.publicKey}`;
 }
 
+/** How long a push service may take to take a push: the alarm that sends one waits for it. */
+const PUSH_TIMEOUT_MS = 15_000;
+
 /**
  * Sends one push message: `payload` as JSON, encrypted for `sub`, with a VAPID token. `gone` is a 404 or 410 from the
  * push service: the subscription has ended, and the caller should forget it. A `topic` that is not 1 to 32 characters
  * of the base64url alphabet is left out.
  */
-/** How long a push service may take to take a push: the alarm that sends one waits for it. */
-const PUSH_TIMEOUT_MS = 15_000;
-
 export async function sendPush(
   sub: PushSubscriptionKeys,
   payload: unknown,
@@ -124,7 +124,15 @@ export async function sendPush(
     authorization: await vapidAuthorization(sub.endpoint, vapid, options.now),
   };
   if (options.topic !== undefined && /^[A-Za-z0-9_-]{1,32}$/.test(options.topic)) headers.topic = options.topic;
-  const response = await (options.fetch ?? fetch)(sub.endpoint, { method: "POST", headers, body, signal: AbortSignal.timeout(PUSH_TIMEOUT_MS) });
+  // A timer cleared once the answer came, not AbortSignal.timeout's, which stays pending (keeping the object awake).
+  const timeout = new AbortController();
+  const timer = setTimeout(() => timeout.abort(new Error(`no answer within ${PUSH_TIMEOUT_MS / 1000} s`)), PUSH_TIMEOUT_MS);
+  let response: Response;
+  try {
+    response = await (options.fetch ?? fetch)(sub.endpoint, { method: "POST", headers, body, signal: timeout.signal });
+  } finally {
+    clearTimeout(timer);
+  }
   // Nothing in the push service's answer is needed: let the connection go.
   await response.body?.cancel().catch(() => {});
   const { status } = response;

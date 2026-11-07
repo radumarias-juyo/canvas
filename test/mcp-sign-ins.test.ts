@@ -88,7 +88,7 @@ describe("sealed sign-in records", () => {
     const sealed = await sealAuthRecord(await key(), "Portal", record);
     expect(JSON.parse(sealed)).toEqual({ sealed: expect.stringMatching(/^v1\./) });
     expect(sealed).not.toContain("rt-1");
-    expect(await openAuthRecord(await key(), "Portal", sealed)).toEqual({ record, plain: false });
+    expect(await openAuthRecord(await key(), "Portal", sealed)).toEqual({ record, plain: false, olderSignIn: false });
     await expect(openAuthRecord(await key(), "Other", sealed)).rejects.toThrow();
     const otherUser = await deriveUserAesKey(MASTER_KEY, "MCP_TOKENS_KEY", "pi-artifacts/mcp-tokens/v1", "bob");
     await expect(openAuthRecord(otherUser, "Portal", sealed)).rejects.toThrow();
@@ -129,6 +129,7 @@ describe("sealed sign-in records", () => {
     expect(await openAuthRecord(await key(), "Portal", JSON.stringify(newer))).toEqual({
       record: { client: CLIENT, tokens: { ...TOKENS, access_token: "at-old-code" } },
       plain: true,
+      olderSignIn: false,
     });
   });
 
@@ -333,6 +334,13 @@ describe("sign-ins with nobody present", () => {
     reopened.at(T0 + 10 * DAY);
     await reopened.signIns.record("Portal");
     expect(reopened.row()).toMatchObject({ signed_in_at: T0 + 10 * DAY });
+    // A refresh old code made keeps `sealed` beside its fields: the grant keeps its start.
+    const sealedNow = String(reopened.row()!.data);
+    sql.exec("UPDATE mcp_auth SET data = ? WHERE server = 'Portal'", JSON.stringify({ ...JSON.parse(sealedNow), client: CLIENT, tokens: TOKENS }));
+    const refreshed = setup({ sql });
+    refreshed.at(T0 + 20 * DAY);
+    await refreshed.signIns.record("Portal");
+    expect(refreshed.row()).toMatchObject({ signed_in_at: T0 + 10 * DAY });
     sql.exec("UPDATE mcp_auth SET data = ? WHERE server = 'Portal'", JSON.stringify({ client: CLIENT, state: "s" }));
     const signedOut = setup({ sql });
     await signedOut.signIns.record("Portal");
