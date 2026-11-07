@@ -212,6 +212,7 @@ import {
   isPiConversation,
   piBusy,
   piLogEntry,
+  readsAlone,
   runTools,
   sharedServer,
   speakersFor,
@@ -3695,7 +3696,9 @@ export class ChatAgent extends DurableObject<Env> {
         return uid();
       },
       definition: async (entry) => this.#inThisChat(await this.#index(entry.ownerUid).getAgent(entry.agentId)),
-      configure: (entry, agent, turn) => this.#configureAgent(sessionOf(entry, turn), agent, turn, this.#nameOf(entry.ownerUid)),
+      // Alone with the owner, a turn reads every server of its agent's only where nobody else will read it: apart.
+      configure: (entry, agent, turn) =>
+        this.#configureAgent(sessionOf(entry, turn), agent, { ...turn, alone: readsAlone(turn, !this.members.hasAny()) }, this.#nameOf(entry.ownerUid)),
       logSince: (after) => this.#log({ order: "descending", minEntryId: (after + 1) as EntryId }),
       write: (session, text, requestId) => this.#writeTo(session, text, requestId),
       submit: (session, input, operationId, data) => this.#submitTo(session, input, operationId, data),
@@ -3737,6 +3740,7 @@ export class ChatAgent extends DurableObject<Env> {
       waitUntil: (promise) => this.ctx.waitUntil(promise),
       fork: (session) => this.#fork(session),
       newest: (session) => this.#newestEntry(session),
+      alone: () => !this.members.hasAny(),
       sources: async (entry, entries) => {
         const agent = await this.#index(entry.ownerUid).getAgent(entry.agentId);
         return agent ? this.#sources(agent, entries) : { items: [], sources: [] };
@@ -3956,8 +3960,9 @@ export class ChatAgent extends DurableObject<Env> {
             agent,
             turn.calledBy ? turnLevel({ byOwner: turn.byOwner, calledBy: turn.calledBy }).level === 4 : turn.byOwner,
             this.#signsIn,
-            // A seat's turn is never alone: its reply goes to a room with other people in it.
-            { unprompted: !!turn.calledBy?.unprompted, alone: turn.alone ?? !this.members.hasAny() },
+            // Alone only as the caller says (readsAlone, for a turn apart): a seat's turn never is, its reply goes to a
+            // room with other people in it.
+            { unprompted: !!turn.calledBy?.unprompted, alone: turn.alone === true },
           );
     await this.#configureSession(session, this.#agentChoice(agent), agentInstructions(agent, ownerName), allowed);
   }
