@@ -324,7 +324,9 @@ test("k. a run's write waits for the owner's approval, and one a guardrail block
     servers: ["crm"],
     trigger: { kind: "schedule", at: "10:00", tz: "UTC" },
     autonomy: 3,
-    guardrails: [{ id: "nolost", server: "crm", tool: "update_deal", arg: "stage", kind: "never", value: ["lost"], effect: "block", note: "People mark deals lost." }],
+    guardrails: [
+      { id: "nolost", server: "crm", tool: "update_deal", arg: "stage", kind: "never", value: ["lost"], effect: "block", note: "People mark deals lost." },
+    ],
     workflow: [
       { kind: "do", server: "crm", tool: "update_deal", input: { id: "d1", stage: "negotiation" } },
       { kind: "do", server: "crm", tool: "update_deal", input: { id: "d3", stage: "lost" } },
