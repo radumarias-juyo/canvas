@@ -323,7 +323,10 @@ describe("UserMemory", () => {
     saved(owner.memory.forget(gone.id));
     const exported = owner.memory.exported();
     saved(owner.memory.forget(kept.id));
-    expect(owner.memory.import(exported)).toEqual([{ id: kept.id, skipped: true }, { id: gone.id, skipped: true }]);
+    expect(owner.memory.import(exported)).toEqual([
+      { id: kept.id, skipped: true },
+      { id: gone.id, skipped: true },
+    ]);
     expect(owner.memory.list()).toHaveLength(2);
     expect(owner.memory.list().every((each) => each.forgottenAt !== undefined)).toBe(true);
   });
