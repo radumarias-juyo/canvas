@@ -70,7 +70,9 @@ with `@cloudflare/vite-plugin`, pnpm; configured and deployed with the `cf` CLI 
   of the seat's session, its calls go through the member's write gate (`seatCaller`: only the member's own message
   changes data), what it holds has its card in the room for the member alone, and it reads as the room's kind. A turn
   ends with its reply in its row (an outbox),
-  together with the hand-offs it queues; the reply is then posted as a `chat.agent` entry. `@name` hands off (MAX_HOPS
+  together with the hand-offs it queues; the reply is then posted as a `chat.agent` entry. The agents one person's message
+  names (in order), then their hand-offs, go one after another, each once the reply before it is in the log
+  (`ChatRoster.startNext`); another message's chain may run alongside. `@name` hands off (MAX_HOPS
   per person's message, a hand-off to pi counted on the handing turn); pi's own answers are read from its log for the
   agents they name (`#piScan`, from a cursor).
   Agents that run on their own (`worker/agents/runs/`): each has a home conversation (a chat marked with it in

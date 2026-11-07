@@ -187,9 +187,10 @@ export class AgentTurns {
       const agent = await this.#host.definition(entry);
       if (!live()) return;
       if (!agent) {
-        // Its owner deleted it: it leaves the roster, and what waited for it with it.
+        // Its owner deleted it: it leaves the roster, and what waited for it with it. The next speakers go on.
         roster.remove(agentId);
         this.#host.changed();
+        this.#pumpAfter();
         return;
       }
       const refreshed = roster.refresh(agentId, { name: agent.name, avatar: agent.avatar, color: agent.color, job: agent.job, off: !agent.enabled });
@@ -383,7 +384,7 @@ export class AgentTurns {
           this.#host.ended?.(turn, outcome(done ? "passed" : "failed", now.startedAt ?? now.createdAt, roster.now()));
         }
         this.#host.changed();
-        this.pump(entry.agentId);
+        this.#pumpAfter(entry.agentId);
         return;
       }
       // Only a turn whose input went in has outputs in its session.
@@ -432,7 +433,7 @@ export class AgentTurns {
       }
     }
     this.#host.changed();
-    this.pump(entry.agentId);
+    this.#pumpAfter(entry.agentId);
     await delivering;
   }
 
@@ -559,6 +560,18 @@ export class AgentTurns {
       console.error("agent reply:", errorMessage(error));
     }
     roster.markDelivered(id);
+    // The next speaker of its chain reads it in the log now (ChatRoster.startNext).
+    this.#pumpAfter();
+  }
+
+  /**
+   * A turn ended, its reply reached the log, or turns stopped: the agent's next turn may start (`agentId`), and so may
+   * the next speaker of a chain that waited for it, whichever agent's (ChatRoster.startNext decides which may).
+   */
+  #pumpAfter(agentId?: string): void {
+    const waiting = new Set(this.#host.roster.waitingAgents());
+    if (agentId !== undefined) waiting.add(agentId);
+    for (const each of waiting) this.pump(each);
   }
 
   /**
@@ -614,7 +627,10 @@ export class AgentTurns {
     }
     aborts.push(...[...sessions].map((session) => this.#host.abort(session)));
     await Promise.all(aborts.map((abort) => abort.catch((error: unknown) => console.error("agent stop:", errorMessage(error)))));
-    if (stopped.length) this.#host.changed();
+    if (stopped.length) {
+      this.#host.changed();
+      this.#pumpAfter();
+    }
     return stopped.length > 0;
   }
 
