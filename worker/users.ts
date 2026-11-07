@@ -694,7 +694,8 @@ export class UserDirectory extends DurableObject<Env> {
         kind: "tag",
         ref: `tag:${id}:${tag.at}`,
         at: tag.at,
-        title: tag.added ? `${tag.from} added you to ${title}` : `${tag.from} mentioned you in ${title}`,
+        // A chat named after this very message is not named again: its text says it.
+        title: tag.added ? `${tag.from} added you to ${title}` : `${tag.from} mentioned you${named ? "" : ` in ${title}`}`,
         ...(!tag.added && tag.text && { text: tag.text }),
         from: { name: tag.from },
         open: { to: "chat", chatId: id },
