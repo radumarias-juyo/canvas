@@ -42,7 +42,7 @@ export function itemStatusLabel(status: RunItemStatus): string {
 /** How a run's items went, when it had a scope: "3 of 6 acted · 3 not today". Empty for a run with one item. */
 export function itemsLabel(items: AgentRunView["items"]): string {
   if (items.total <= 1) return "";
-  return [`${items.acted} of ${items.total} acted`, items.notToday && `${items.notToday} not today`, items.failed && `${items.failed} failed`]
+  return [`${items.acted} of ${items.total} acted`, items.notToday && `${items.notToday} not today`, items.failed && `${items.failed} failed`, items.waiting && `${items.waiting} wait for you`]
     .filter(Boolean)
     .join(" · ");
 }

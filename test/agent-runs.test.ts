@@ -461,6 +461,38 @@ describe("scheduled runs", () => {
       expect(host.runs.list(definition.id)[0].status).toBe("sent");
     });
 
+    it("leaves an item waiting when its run ended meanwhile, keeping nothing of the decision", async () => {
+      const { host, runner, definition } = await held();
+      host.runs.update(definition.id, T0, { status: "not_today", summary: "Skipped once you signed in: a newer run went instead." });
+      await runner.decided(ref(definition), actedOf({ status: "done", result: "ok" })!);
+      await host.settled();
+      expect(host.runs.items(definition.id, T0)[0].status).toBe("waiting");
+      expect(host.runs.get(definition.id, T0)?.detail.acted?.[":1"]?.end).toBe("waiting");
+      expect(host.works).toHaveLength(0);
+    });
+
+    it("goes on with what its reads had before it waited, not a fresh read", async () => {
+      const gated: AgentStep[] = [sales, { kind: "onlyIf", condition: "sales.total > 100" }, ...workflow.slice(1)];
+      const { host, runner, definition } = await held(agent({ workflow: gated, autonomy: 3 }));
+      // Overnight, the total fell below the condition: the item still goes on past it, as the owner approved.
+      host.values.set("crm.weekly_sales", { total: 90, lastYear: 1000 });
+      await runner.decided({ ...ref(definition), step: "2" }, actedOf({ status: "done", result: "ok" })!);
+      await host.settled();
+      expect(host.reads.map((read) => read.call)).toEqual(["crm.weekly_sales"]);
+      expect(host.runs.items(definition.id, T0)[0].status).toBe("acted");
+      expect(host.delivered).toHaveLength(1);
+    });
+
+    it("stops the item when its workflow changed while it waited", async () => {
+      const { host, runner, definition } = await held();
+      host.definitions.set(definition.id, { ...definition, version: 2, workflow: [sales, { kind: "work", prompt: "Only report." }] });
+      await runner.decided(ref(definition), actedOf({ status: "done", result: "ok" })!);
+      await host.settled();
+      expect(host.runs.items(definition.id, T0)[0]).toMatchObject({ status: "not_today", reason: "Its workflow changed while it waited: it stopped there." });
+      expect(host.works).toHaveLength(0);
+      expect(host.runs.list(definition.id)[0].status).toBe("not_today");
+    });
+
     it("ends the item once it expired, and the run with it", async () => {
       const { host, runner, definition } = await held();
       await runner.decided(ref(definition), actedOf({ status: "expired" })!);
@@ -489,6 +521,9 @@ describe("scheduled runs", () => {
       await host.settled();
       expect(host.runs.items(definition.id, T0).map((item) => item.status)).toEqual(["waiting", "waiting"]);
       expect(host.runs.list(definition.id)[0].summary).toBe("Waiting for you to approve a call for 2 items.");
+      expect(host.runs.list(definition.id)[0].items).toMatchObject({ total: 2, waiting: 2 });
+      // The list changed meanwhile: the run goes on with the items it had.
+      host.values.set("crm.regions", [{ name: "east" }]);
       await runner.decided({ agentId: definition.id, dueAt: T0, item: "north", step: "0" }, actedOf({ status: "done", result: "ok" })!);
       await host.settled();
       // North went through; south still waits, so nothing is sent yet.
@@ -501,6 +536,7 @@ describe("scheduled runs", () => {
       expect(host.runs.items(definition.id, T0).map((item) => item.status)).toEqual(["acted", "acted"]);
       expect(host.delivered).toHaveLength(1);
       expect(host.runs.list(definition.id)[0].status).toBe("sent");
+      expect(host.reads.filter((read) => read.call === "crm.regions")).toHaveLength(1);
     });
 
     it("takes an item decided while the run still goes on through before it sends", async () => {

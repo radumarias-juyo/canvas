@@ -88,8 +88,8 @@ export interface AgentRunView {
   endedAt?: number;
   /** In dollars, every work step of every item. */
   cost: number;
-  /** How many items it had, acted on, or stopped at a condition ("not today"). */
-  items: { total: number; acted: number; notToday: number; failed: number };
+  /** How many items it had, acted on, stopped at a condition ("not today"), failed, or wait for a decision. */
+  items: { total: number; acted: number; notToday: number; failed: number; waiting: number };
   /** The report's first line, or why it failed. */
   summary?: string;
   /** The servers whose sign-in it waits for (status needs_sign_in). */

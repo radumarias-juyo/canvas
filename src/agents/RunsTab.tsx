@@ -193,7 +193,7 @@ function RunPage({ agent, dueAt, chat, navigate }: { agent: AgentDefinition; due
           {[
             whyLabel(run.why),
             run.when,
-            run.endedAt !== undefined && `took ${tookFor(run.endedAt - run.startedAt)}`,
+            run.status !== "waiting" && run.endedAt !== undefined && `took ${tookFor(run.endedAt - run.startedAt)}`,
             run.cost > 0 && formatCost(run.cost),
           ]
             .filter(Boolean)

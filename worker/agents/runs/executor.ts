@@ -17,6 +17,7 @@ import {
   type StepInput,
   type StepValue,
 } from "../../../shared/agents.ts";
+import { canonicalJson } from "../../../shared/canonical.ts";
 import { ConditionError, evaluate, holds, type Value } from "../../../shared/conditions.ts";
 import { excerpt, firstLine } from "../../../shared/replies.ts";
 import {
@@ -38,6 +39,8 @@ import type { ActedStep, AgentRuns, RunRecord } from "./store.ts";
 
 /** How much of a read's result goes into the run's session: the rest is cut, with a note. */
 const MAX_RESULT_CHARS = 12_000;
+/** The largest look result an item keeps for going through again (its scope's list may be four times that). */
+const MAX_KEPT_CHARS = 64_000;
 /** How much of a result a step's trace row shows. */
 const DETAIL_CHARS = 160;
 
@@ -137,6 +140,11 @@ export function resultName(step: LookStep): string {
   return step.as ?? (step.tool.replace(/[^A-Za-z0-9_]/g, "_").replace(/^(\d)/, "_$1") || "result");
 }
 
+/** What a run going on must find unchanged: its agent's workflow and scope. */
+function shapeOf(agent: AgentDefinition): string {
+  return canonicalJson({ workflow: workflowOf(agent), scope: agent.scope ?? null });
+}
+
 /** The skills a workflow's work steps name. */
 function skillsNamed(steps: readonly AgentStep[]): string[] {
   return [...walkSteps(steps)].flatMap(({ step }) => (step.kind === "work" && step.skill ? [step.skill] : []));
@@ -231,6 +239,8 @@ interface ItemRun {
   texts: string[];
   /** The item's text as it was at each delivery step it reached, while later work steps add to it. */
   textAt: Record<string, string>;
+  /** What its look steps read before it went through again, by step key: read again only when not kept. */
+  looked: Record<string, Value>;
   cost: number;
   configured?: string;
   when: string;
@@ -274,6 +284,7 @@ export class RunExecutor {
       ...(watch !== undefined && { watch }),
       ...(previous !== undefined && { previous }),
       used: { skills: skillsNamed(workflowOf(agent)), servers: serversNamed(agent, { reads: true }), models: [] },
+      shape: shapeOf(agent),
     });
     const run = this.#run(agent, begun).finally(() => this.#active.delete(key));
     this.#active.set(key, run);
@@ -290,7 +301,11 @@ export class RunExecutor {
     try {
       const missing = await this.#host.needsSignIn(runServers(agent, await this.#host.signInServers()));
       if (missing.length) return this.#waitForSignIn(agent, run, missing);
-      const elements = await this.#elements(agent);
+      // Its workflow changed while it waited (or a restart cut it off): what did not end stops, and what it reached goes.
+      if (!started && run.detail.shape !== undefined && run.detail.shape !== shapeOf(agent)) {
+        runs.stopItems(agent.id, dueAt, "Its workflow changed while it waited: it stopped there.");
+      }
+      const elements = await this.#elements(agent, run);
       let outcomes: RunItemView[];
       // An item decided while the others ran is running again: it goes through again before the run ends. The read
       // and the update after it have no await between them, so a decision is never lost between them.
@@ -333,13 +348,15 @@ export class RunExecutor {
   }
 
   /** The run's items: each element of its scope's list (read once), or the run itself. */
-  async #elements(agent: AgentDefinition): Promise<{ key: string; label: string; value?: Value }[]> {
+  async #elements(agent: AgentDefinition, run: RunRecord): Promise<{ key: string; label: string; value?: Value }[]> {
     if (!agent.scope) return [{ key: "", label: "" }];
-    // Listed again by a run cut off by a restart: the items it ended are read back as they were (#item).
+    // A run that goes on goes through the list it kept; one too large to keep is listed again (the items it ended are
+    // read back as they were, #item).
+    if (run.detail.elements) return run.detail.elements as { key: string; label: string; value?: Value }[];
     const list = agent.scope.list;
     const result = await readFor(this.#host, agent, list, list.input);
     const seen = new Set<string>();
-    return itemsOf(result)
+    const elements = itemsOf(result)
       .slice(0, MAX_RUN_ITEMS)
       .map((value, index) => {
         let { key, label } = itemKey(value, index);
@@ -347,6 +364,8 @@ export class RunExecutor {
         seen.add(key);
         return { key, label, value };
       });
+    if (jsonOf(elements).length <= MAX_KEPT_CHARS * 4) this.#host.runs.update(agent.id, run.dueAt, { detail: { elements } });
+    return elements;
   }
 
   /** One item through the workflow, in a session of its own; an item that ended already is read back as it was. */
@@ -368,6 +387,7 @@ export class RunExecutor {
       reached: [],
       texts: [],
       textAt: {},
+      looked: runs.looked(agent.id, run.dueAt, element.key) as Record<string, Value>,
       cost: 0,
       when,
       ...(agent.scope && { element: { label: element.label, value: element.value ?? null } }),
@@ -418,11 +438,15 @@ export class RunExecutor {
           const input = fillInput(step.input, state.scope);
           const label = `${STEP_LABELS.look} ${step.server}.${step.tool}`;
           let value: Value;
-          try {
-            value = await readFor(this.#host, state.agent, step, input);
-          } catch (error) {
-            if (!(error instanceof SignInNeeded)) record(label, false, errorMessage(error));
-            throw error;
+          if (key in state.looked) value = state.looked[key];
+          else {
+            try {
+              value = await readFor(this.#host, state.agent, step, input);
+            } catch (error) {
+              if (!(error instanceof SignInNeeded)) record(label, false, errorMessage(error));
+              throw error;
+            }
+            if (jsonOf(value).length <= MAX_KEPT_CHARS) this.#host.runs.setLooked(state.agent.id, state.run.dueAt, state.item, key, value);
           }
           const name = resultName(step);
           state.scope[name] = value;
@@ -545,8 +569,10 @@ export class RunExecutor {
     const runs = this.#host.runs;
     const mark = `${item}:${step}`;
     if (runs.get(agentId, dueAt)?.detail.acted?.[mark]?.end !== "waiting") return false;
+    // Reopened first: the outcome is kept only for an item that goes through again (no await between the two).
+    if (!runs.reopen(agentId, dueAt, item)) return false;
     runs.setActed(agentId, dueAt, mark, acted);
-    return runs.reopen(agentId, dueAt, item);
+    return true;
   }
 
   /**

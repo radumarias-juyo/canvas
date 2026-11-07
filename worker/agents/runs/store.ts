@@ -18,8 +18,8 @@ function rowKey(item: string): string {
   return item || "*";
 }
 
-type Counts = { total: number; acted: number | null; not_today: number | null; failed: number | null; cost: number | null };
-const NO_ITEMS: Counts = { total: 0, acted: 0, not_today: 0, failed: 0, cost: 0 };
+type Counts = { total: number; acted: number | null; not_today: number | null; failed: number | null; waiting: number | null; cost: number | null };
+const NO_ITEMS: Counts = { total: 0, acted: 0, not_today: 0, failed: 0, waiting: 0, cost: 0 };
 
 type RunRow = {
   agent_id: string;
@@ -56,6 +56,13 @@ export interface RunDetail {
    * calls that change data once.
    */
   acted?: Record<string, ActedStep>;
+  /**
+   * Its scope's elements as first listed, when small enough to keep: a run that goes on (after a restart, or once its
+   * owner decided a held call) goes through the same items, not a list read again hours later.
+   */
+  elements?: { key: string; label: string; value?: unknown }[];
+  /** Its agent's workflow and scope as it started (canonical JSON): a run going on after they changed stops instead. */
+  shape?: string;
 }
 
 /** A do step's outcome, as a run keeps it (RunDetail.acted). */
@@ -80,6 +87,11 @@ interface ItemDetail {
   reached?: string[];
   /** For a delivery step it reached before its last work step: its text as it was then (by the step's key). */
   textAt?: Record<string, string>;
+  /**
+   * What its look steps read, by step key, when small enough to keep: an item that goes through again (after a
+   * restart, or once its owner decided a held call) sees the same results and takes the same way to where it stopped.
+   */
+  looked?: Record<string, unknown>;
 }
 
 /** A run as its own row has it. */
@@ -190,15 +202,16 @@ export class AgentRuns {
     return { run: this.get(agentId, dueAt)!, started: written > 0 };
   }
 
-  /** Keep the newest KEPT_RUNS runs of an agent, items included. */
+  /** Keep the newest KEPT_RUNS runs of an agent, items included, and any run waiting for its owner to decide a call. */
   #prune(agentId: string): void {
     this.#sql.exec(
       `DELETE FROM agent_runs WHERE agent_id = ? AND due_at < (
          SELECT MIN(due_at) FROM (SELECT due_at FROM agent_runs WHERE agent_id = ? AND item = '' ORDER BY due_at DESC LIMIT ?)
-       )`,
+       ) AND due_at NOT IN (SELECT due_at FROM agent_runs WHERE agent_id = ? AND item = '' AND status = 'waiting')`,
       agentId,
       agentId,
       KEPT_RUNS,
+      agentId,
     );
   }
 
@@ -228,9 +241,12 @@ export class AgentRuns {
 
   /**
    * The owner decided a do step an item waited at: the item and its run go back to running, to go on from that step
-   * (the step's outcome is in the run's `acted`). False when the item was not waiting.
+   * (the step's outcome is in the run's `acted`). False when the item was not waiting, or its run ended meanwhile (a
+   * newer run went instead, a later pass failed): nothing would go through it again, so it stays as it was.
    */
   reopen(agentId: string, dueAt: number, item: string): boolean {
+    const run = this.get(agentId, dueAt);
+    if (!run || !(["waiting", "running", "needs_sign_in"] as RunStatus[]).includes(run.status)) return false;
     const reopened = this.#sql.exec(
       "UPDATE agent_runs SET status = 'running', ended_at = NULL WHERE agent_id = ? AND due_at = ? AND item = ? AND status = 'waiting'",
       agentId,
@@ -291,15 +307,46 @@ export class AgentRuns {
     return row ? itemOf(row) : null;
   }
 
-  /** An item ended: its status, steps, part of the report and cost. */
+  #itemDetail(agentId: string, dueAt: number, item: string): ItemDetail {
+    const row = this.#rows("agent_id = ? AND due_at = ? AND item = ?", agentId, dueAt, rowKey(item))[0];
+    return parse<ItemDetail>(row?.detail ?? null, { steps: [] });
+  }
+
+  /** What an item's look steps read before, by step key (see ItemDetail.looked). */
+  looked(agentId: string, dueAt: number, item: string): Record<string, unknown> {
+    return this.#itemDetail(agentId, dueAt, item).looked ?? {};
+  }
+
+  /** Keep what an item's look step read. */
+  setLooked(agentId: string, dueAt: number, item: string, key: string, value: unknown): void {
+    const detail = this.#itemDetail(agentId, dueAt, item);
+    detail.looked = { ...detail.looked, [key]: value };
+    this.#sql.exec("UPDATE agent_runs SET detail = ? WHERE agent_id = ? AND due_at = ? AND item = ?", JSON.stringify(detail), agentId, dueAt, rowKey(item));
+  }
+
+  /** A run's items that did not end (running, or waiting for a decision) end as not today, with why. */
+  stopItems(agentId: string, dueAt: number, reason: string): void {
+    this.#sql.exec(
+      `UPDATE agent_runs SET status = 'not_today', ended_at = ?, detail = json_set(COALESCE(detail, '{"steps":[]}'), '$.reason', ?)
+       WHERE agent_id = ? AND due_at = ? AND item != '' AND status IN ('running', 'waiting')`,
+      this.#now(),
+      reason,
+      agentId,
+      dueAt,
+    );
+  }
+
+  /** An item ended: its status, steps, part of the report and cost (what its look steps read is kept). */
   endItem(agentId: string, dueAt: number, item: string, end: { status: RunItemStatus; cost: number } & ItemDetail): void {
-    const { status, cost, ...detail } = end;
+    const { status, cost, ...rest } = end;
+    const { looked } = this.#itemDetail(agentId, dueAt, item);
+    const detail: ItemDetail = { ...rest, ...(looked && { looked }) };
     this.#sql.exec(
       "UPDATE agent_runs SET status = ?, ended_at = ?, cost = ?, detail = ? WHERE agent_id = ? AND due_at = ? AND item = ?",
       status,
       this.#now(),
       cost,
-      JSON.stringify(detail satisfies ItemDetail),
+      JSON.stringify(detail),
       agentId,
       dueAt,
       rowKey(item),
@@ -316,7 +363,7 @@ export class AgentRuns {
     const rows = this.#sql
       .exec(
         `SELECT due_at, COUNT(*) AS total, SUM(status = 'acted') AS acted, SUM(status = 'not_today') AS not_today, SUM(status = 'failed') AS failed,
-           SUM(cost) AS cost
+           SUM(status = 'waiting') AS waiting, SUM(cost) AS cost
          FROM agent_runs WHERE agent_id = ? AND due_at IN (${dueAts.map(() => "?").join(", ")}) AND item != '' GROUP BY due_at`,
         agentId,
         ...dueAts,
@@ -337,7 +384,7 @@ export class AgentRuns {
       startedAt: run.startedAt,
       ...(run.endedAt !== undefined && { endedAt: run.endedAt }),
       cost: counts.cost ?? 0,
-      items: { total: counts.total, acted: counts.acted ?? 0, notToday: counts.not_today ?? 0, failed: counts.failed ?? 0 },
+      items: { total: counts.total, acted: counts.acted ?? 0, notToday: counts.not_today ?? 0, failed: counts.failed ?? 0, waiting: counts.waiting ?? 0 },
       ...(run.summary !== undefined && { summary: run.summary }),
       ...(run.detail.needsSignIn?.length && { needsSignIn: run.detail.needsSignIn }),
     };

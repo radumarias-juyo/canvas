@@ -3545,14 +3545,18 @@ export class ChatAgent extends DurableObject<Env> {
     this.ctx.waitUntil(this.#directory.removeNeedsYou(this.chatId, view.id).catch((error: unknown) => console.error("needs you:", errorMessage(error))));
     const origin = this.actions.origin(view.id);
     const session = origin?.session ?? (origin?.run && this.runs.item(origin.run.agentId, origin.run.dueAt, origin.run.item)?.session);
-    const conversation = session ? await this.harness.conversation(session) : undefined;
-    if (conversation) {
+    try {
+      const conversation = session ? await this.harness.conversation(session) : undefined;
       const message: UserMessage = { role: "user", content: approvalNote(view), timestamp: Date.now() };
-      await conversation.submit({ type: "write", requestId: `approval:${view.id}`, entry: { kind: APP_APPROVAL_KIND, model: [message] } }, BACKGROUND_CONTEXT);
+      await conversation?.submit({ type: "write", requestId: `approval:${view.id}`, entry: { kind: APP_APPROVAL_KIND, model: [message] } }, BACKGROUND_CONTEXT);
+    } catch (error) {
+      // A note that cannot be written never keeps a run's item waiting: nothing would decide it again.
+      console.error("approval note:", errorMessage(error));
     }
     // A run's item waited at this step: it goes on from there (after the note above, which its later steps read).
-    const acted = origin?.run && actedOf(view);
-    if (origin?.run && acted) this.ctx.waitUntil(this.runner.decided(origin.run, acted).catch((error: unknown) => console.error("run:", errorMessage(error))));
+    const run = origin?.run;
+    const acted = run ? actedOf(view) : null;
+    if (run && acted) this.ctx.waitUntil(this.runner.decided(run, acted).catch((error: unknown) => console.error("run:", errorMessage(error))));
   }
 
   /**
