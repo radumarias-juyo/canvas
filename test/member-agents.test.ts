@@ -544,12 +544,12 @@ describe("Member agents: a seat in the member's own object", () => {
     ]);
     const [shared, fork] = [ana.sessions.sessionOf(1), ana.sessions.sessionOf(2)];
     expect(fork).not.toBe(shared);
-    // Once its turns end the room's kind is not known: nothing is read there, and nothing saved as its owner's. A fork
-    // whose turn the room took is no seat's: the chat object reads it as nobody's (ChatMemory's Whose), so nothing.
+    // Once its turns end the room's kind is not known: nothing is read there, and nothing saved as its owner's. A
+    // session no seat has is nobody's (ChatMemory's Whose), so nothing either.
     for (const id of [1, 2, 3]) ana.sessions.finish(id, "Done.");
     await settle();
-    expect(ana.seats.memoryAgent(shared)).toMatchObject({ byOwner: false, room: inRoom(null) });
-    expect(ana.seats.memoryAgent(fork)).toBeUndefined();
+    for (const session of [shared, fork]) expect(ana.seats.memoryAgent(session)).toMatchObject({ byOwner: false, room: inRoom(null) });
+    expect(ana.seats.memoryAgent("no such session")).toBeUndefined();
   });
 
   it("keeps an agent id to whoever brought it first: another person's agent with the same id is refused", () => {
@@ -1050,5 +1050,135 @@ describe("Member agents: what the review of private turns found", () => {
     expect(chat.roster.refresh("a1", view("data"))?.entry.name).toBe("data");
     expect(add("a2", "planner-ana", true)).toBeNull();
     expect(chat.roster.refresh("a2", view("planner"))?.entry.name).toBe("planner-ana");
+  });
+});
+
+describe("Member agents: a seat's turn given again while it is set up, or after the room took it", () => {
+  /** The member's object, with `wait` as the harness answers it: an operation never submitted is "not_found". */
+  class SlowSeat implements SeatHost {
+    readonly uid = ANA.uid;
+    readonly ended: { turn: number; result: SeatResult }[] = [];
+    readonly submits: string[] = [];
+    readonly configures: string[] = [];
+    readonly runs = new Map<string, Deferred<TurnResult>>();
+    readonly kept: Promise<unknown>[] = [];
+    /** The next configure waits on this (a slow refresh before the turn). */
+    gate: Deferred<void> | undefined;
+    #made = 0;
+    async definition() {
+      return definition("p", "planner");
+    }
+    room(): RoomLink {
+      return {
+        log: async () => ({ from: 0, through: -1, text: "", turn: 0 }),
+        ended: async (turn, result) => {
+          this.ended.push({ turn, result });
+          return true;
+        },
+      };
+    }
+    async create() {
+      return `s${++this.#made}`;
+    }
+    async fork(session: string) {
+      return `${session}-fork${++this.#made}`;
+    }
+    async write() {}
+    async configure(session: string) {
+      this.configures.push(session);
+      const gate = this.gate;
+      this.gate = undefined;
+      if (gate) await gate.promise;
+    }
+    async submit(session: string, _input: string, op: string) {
+      if (!this.submits.includes(`${session}|${op}`)) this.submits.push(`${session}|${op}`);
+    }
+    run(session: string, op: string): Deferred<TurnResult> {
+      const key = `${session}|${op}`;
+      let run = this.runs.get(key);
+      if (!run) this.runs.set(key, (run = deferred()));
+      return run;
+    }
+    async wait(session: string, op: string): Promise<TurnResult> {
+      if (!this.submits.includes(`${session}|${op}`)) return { status: "unanswered", reason: "not_found" };
+      return this.run(session, op).promise;
+    }
+    async abort() {}
+    async turnEntries(): Promise<readonly EntryRecord[]> {
+      return [];
+    }
+    async sources() {
+      return { items: [], sources: [] };
+    }
+    waitUntil(promise: Promise<unknown>) {
+      this.kept.push(promise);
+    }
+    later() {}
+  }
+  const turn = (id: number, byOwner = false): SeatTurn => ({
+    turn: id,
+    calledBy: byOwner ? { name: ANA.name, uid: ANA.uid } : { name: MIA.name, uid: MIA.uid },
+    hop: 0,
+    ask: "[Mia · person]: hi",
+    input: "Your turn",
+    ownerName: "Ana",
+    kind: "group",
+    byOwner,
+  });
+
+  it("leaves a turn still being set up to its give: a give again or a wake meanwhile ends nothing, and its reply reaches the room", async () => {
+    for (const again of ["give", "wake"] as const) {
+      const host = new SlowSeat();
+      const seats = new AgentSeats(memorySql(), host);
+      const gate = (host.gate = deferred());
+      const first = seats.give(ROOM, "p", turn(1));
+      await settle();
+      if (again === "give") await seats.give(ROOM, "p", turn(1));
+      else seats.wake();
+      await settle();
+      expect(host.ended).toEqual([]);
+      gate.resolve();
+      await first;
+      await settle();
+      expect(host.submits).toEqual(["s1|turn:1"]);
+      host.run("s1", "turn:1").resolve({ status: "done", text: "The real answer." });
+      await settle();
+      expect(host.ended).toEqual([{ turn: 1, result: expect.objectContaining({ status: "done", text: "The real answer." }) }]);
+    }
+  });
+
+  it("sets up again a turn whose give died before its input was in, in the same session, once", async () => {
+    const sql = memorySql();
+    const host = new SlowSeat();
+    host.gate = deferred();
+    void new AgentSeats(sql, host).give(ROOM, "p", turn(1, true));
+    await settle();
+    // The object went away while the give was configuring: a new one finds the row, never submitted.
+    const later = new SlowSeat();
+    const seats = new AgentSeats(sql, later);
+    seats.wake();
+    await settle();
+    const [fork] = host.configures;
+    expect(later.configures).toEqual([fork]);
+    expect(later.submits).toEqual([`${fork}|turn:1`]);
+    later.run(fork, "turn:1").resolve({ status: "done", text: "Done." });
+    await settle();
+    expect(later.ended).toEqual([{ turn: 1, result: expect.objectContaining({ status: "done" }) }]);
+  });
+
+  it("runs nothing for a late give of a turn the room took already", async () => {
+    const host = new SlowSeat();
+    const seats = new AgentSeats(memorySql(), host);
+    await seats.give(ROOM, "p", turn(1, true));
+    await settle();
+    const [session, op] = host.submits[0].split("|");
+    host.run(session, op).resolve({ status: "done", text: "Done." });
+    await settle();
+    expect(host.ended).toHaveLength(1);
+    await seats.give(ROOM, "p", turn(1, true));
+    seats.wake();
+    await settle();
+    expect(host.submits).toHaveLength(1);
+    expect(host.ended).toHaveLength(1);
   });
 });

@@ -53,8 +53,15 @@ type SeatTurnRow = {
   turn: number;
   session: string;
   forked: number;
-  status: "running" | "ended";
+  /** `taken`: the room took its result, kept a while (TAKEN_KEEP) so a late give of it runs nothing. */
+  status: "running" | "ended" | "taken";
   result: string | null;
+  /** Its input is in its session (submit returned): only then is there a run to wait on. */
+  submitted: number;
+  /** The turn as given, checked (SeatTurn JSON): what sets it up again when its give died before it submitted. */
+  given: string | null;
+  /** When the room took its result (`taken`). */
+  taken_at: number | null;
   /** The room's kind and the agent's name as the turn started: what its memory notes go by (memoryAgent). */
   kind: string | null;
   name: string | null;
@@ -64,8 +71,11 @@ type SeatTurnRow = {
 const REPORT_RETRIES = [1_000, 5_000, 30_000];
 /** When a seat tries again a result its room has not taken after REPORT_RETRIES: an alarm wakes it. */
 const REPORT_LATER = 5 * 60_000;
+/** How long a turn the room took is remembered, so a late give of it (a retry, a re-give after a restart) runs nothing. */
+const TAKEN_KEEP = 24 * 60 * 60_000;
 
 const refOf = (row: Pick<SeatRow, "room_owner" | "room_chat">): RoomRef => ({ ownerUid: row.room_owner, chatId: row.room_chat });
+const turnKey = (ref: RoomRef, turn: number) => `${ref.ownerUid}:${ref.chatId}:${turn}`;
 
 /**
  * The seats in one person's object: per room and agent, a pi session and the newest log entry it took (`delivered`);
@@ -77,6 +87,8 @@ export class AgentSeats {
   readonly #host: SeatHost;
   /** The turns this object waits on, so a wake does not wait on one twice. */
   readonly #waiting = new Set<string>();
+  /** The turns a give here is setting up (until their input is in): a resume leaves them to it. */
+  readonly #starting = new Set<string>();
   /** Whether a wake for the results no room took is set already (#report): one alarm wakes them all. */
   #later = false;
 
@@ -93,7 +105,13 @@ export class AgentSeats {
         forked INTEGER NOT NULL, status TEXT NOT NULL, result TEXT, PRIMARY KEY (room_owner, room_chat, turn)
       );
     `);
-    addColumns(sql, "agent_seat_turns", { kind: "TEXT", name: "TEXT" });
+    addColumns(sql, "agent_seat_turns", {
+      kind: "TEXT",
+      name: "TEXT",
+      submitted: "INTEGER NOT NULL DEFAULT 1",
+      given: "TEXT",
+      taken_at: "INTEGER",
+    });
     // memoryAgent looks a session up on every model request of every conversation in this object.
     sql.exec(`
       CREATE INDEX IF NOT EXISTS agent_seats_session ON agent_seats (session);
@@ -201,10 +219,12 @@ export class AgentSeats {
   async give(ref: RoomRef, agentId: string, turn: SeatTurn, batch: SeatBatch | null = null): Promise<number> {
     const known = this.#turn(ref, turn.turn);
     if (known) {
-      // Given again (the room did not hear back): it runs, or its result goes to the room again.
+      // Given again (the room did not hear back): it runs, or its result goes to the room again; one the room took
+      // already runs nothing.
       this.#resume(known);
       return this.delivered(ref, agentId);
     }
+    this.#prune();
     const agent = await this.#agent(agentId);
     const seat = await this.#ensure(ref, agentId, true);
     // The room gives an agent one turn at a time: one still running here is one the room ended (a give it thought
@@ -220,7 +240,8 @@ export class AgentSeats {
     // Given meanwhile by a retry: that one runs.
     if (this.#turn(ref, turn.turn)) return delivered;
     this.#sql.exec(
-      "INSERT INTO agent_seat_turns (room_owner, room_chat, agent_id, turn, session, forked, status, kind, name) VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?)",
+      `INSERT INTO agent_seat_turns (room_owner, room_chat, agent_id, turn, session, forked, status, kind, name, submitted, given)
+       VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, 0, ?)`,
       ref.ownerUid,
       ref.chatId,
       agentId,
@@ -230,26 +251,68 @@ export class AgentSeats {
       // From the room by RPC: one that sends none (older code mid-deploy) still gives its turn, read as no kind.
       isChatKind(turn.kind) ? turn.kind : null,
       agent.name,
+      JSON.stringify(checked),
     );
+    await this.#start(this.#turn(ref, turn.turn)!, agent, checked, seat.session);
+    return delivered;
+  }
+
+  /**
+   * Set a turn's session up and put its input in, then wait on its run; a failure ends it. While this runs, a resume
+   * of the turn (a give again, a wake) leaves it alone: there is no run to wait on before its input is in.
+   */
+  async #start(row: SeatTurnRow, agent: AgentDefinition, turn: SeatTurn, seatSession: string): Promise<void> {
+    const ref = refOf(row);
+    const key = turnKey(ref, row.turn);
+    if (this.#starting.has(key)) return;
+    this.#starting.add(key);
     try {
       // Its input goes only into the fork: the seat's session reads the ask as context (the batch left it out).
-      const apart = forked ? this.#host.write(seat.session, askedApart(turn.ask), `apart:${turn.turn}`) : undefined;
-      await Promise.all([apart, this.#host.configure(session, agent, checked)]);
-      await this.#host.submit(session, turn.input, operationId(turn.turn), { turn: turn.turn, calledBy: turn.calledBy, hop: turn.hop });
+      const apart = row.forked === 1 ? this.#host.write(seatSession, askedApart(turn.ask), `apart:${row.turn}`) : undefined;
+      await Promise.all([apart, this.#host.configure(row.session, agent, turn)]);
+      // The operation id places it once, also when a give that died after it is set up again.
+      await this.#host.submit(row.session, turn.input, operationId(row.turn), { turn: row.turn, calledBy: turn.calledBy, hop: turn.hop });
+      this.#sql.exec(
+        "UPDATE agent_seat_turns SET submitted = 1 WHERE room_owner = ? AND room_chat = ? AND turn = ?",
+        ref.ownerUid,
+        ref.chatId,
+        row.turn,
+      );
     } catch (error) {
-      this.#end(ref, turn.turn, { status: "unanswered", reason: errorMessage(error), published: [], items: [], sources: [] });
-      this.#host.waitUntil(this.#report(ref, turn.turn));
-      return delivered;
+      this.#end(ref, row.turn, { status: "unanswered", reason: errorMessage(error), published: [], items: [], sources: [] });
+      this.#host.waitUntil(this.#report(ref, row.turn));
+      return;
+    } finally {
+      this.#starting.delete(key);
     }
-    this.#host.waitUntil(this.#await(this.#turn(ref, turn.turn)!));
-    return delivered;
+    const started = this.#turn(ref, row.turn);
+    if (started) this.#host.waitUntil(this.#await(started));
+  }
+
+  /** A turn kept from a give that died before its input was in: set it up again from the turn as it was given. */
+  async #restart(row: SeatTurnRow): Promise<void> {
+    const ref = refOf(row);
+    try {
+      const seat = this.#seat(ref, row.agent_id);
+      if (!seat || !row.given) throw new Error("This turn's seat is gone.");
+      await this.#start(row, await this.#agent(row.agent_id), JSON.parse(row.given) as SeatTurn, seat.session);
+    } catch (error) {
+      this.#end(ref, row.turn, { status: "unanswered", reason: errorMessage(error), published: [], items: [], sources: [] });
+      await this.#report(ref, row.turn);
+    }
+  }
+
+  /** Forget the turns the rooms took more than TAKEN_KEEP ago. */
+  #prune(): void {
+    this.#sql.exec("DELETE FROM agent_seat_turns WHERE status = 'taken' AND taken_at < ?", Date.now() - TAKEN_KEEP);
   }
 
   /** Wait for a turn's run to end, keep its result, and post it to the room. */
   async #await(row: SeatTurnRow): Promise<void> {
     const ref = refOf(row);
-    const key = `${row.room_owner}:${row.room_chat}:${row.turn}`;
-    if (this.#waiting.has(key)) return;
+    const key = turnKey(ref, row.turn);
+    // Ended meanwhile, or let go (dropped, taken): nothing to wait on.
+    if (this.#waiting.has(key) || this.#turn(ref, row.turn)?.status !== "running") return;
     this.#waiting.add(key);
     try {
       let result: TurnResult;
@@ -287,9 +350,14 @@ export class AgentSeats {
     );
   }
 
-  /** Go on with a turn kept here: wait on it again while it runs, or post its result to the room again. */
+  /**
+   * Go on with a turn kept here: post its result to the room again, or wait on its run again. One a give here is still
+   * setting up is left to it; one whose give died before its input was in is set up again. One the room took: nothing.
+   */
   #resume(row: SeatTurnRow): void {
-    this.#host.waitUntil(row.status === "ended" ? this.#report(refOf(row), row.turn) : this.#await(row));
+    if (row.status === "taken" || this.#starting.has(turnKey(refOf(row), row.turn))) return;
+    if (row.status === "ended") this.#host.waitUntil(this.#report(refOf(row), row.turn));
+    else this.#host.waitUntil(row.submitted === 1 ? this.#await(row) : this.#restart(row));
   }
 
   /**
@@ -332,7 +400,14 @@ export class AgentSeats {
       if (row?.status !== "ended" || !row.result) return;
       try {
         if (await this.#host.room(ref, row.agent_id).ended(turn, JSON.parse(row.result) as SeatResult)) {
-          this.#sql.exec("DELETE FROM agent_seat_turns WHERE room_owner = ? AND room_chat = ? AND turn = ?", ref.ownerUid, ref.chatId, turn);
+          // Kept a while as taken, so a late give of it runs nothing (#prune lets it go).
+          this.#sql.exec(
+            "UPDATE agent_seat_turns SET status = 'taken', result = NULL, given = NULL, taken_at = ? WHERE room_owner = ? AND room_chat = ? AND turn = ?",
+            Date.now(),
+            ref.ownerUid,
+            ref.chatId,
+            turn,
+          );
         }
         return;
       } catch (error) {
@@ -367,8 +442,8 @@ export class AgentSeats {
     if (!ref) this.#later = false;
     const rows = (
       ref
-        ? this.#sql.exec("SELECT * FROM agent_seat_turns WHERE room_owner = ? AND room_chat = ?", ref.ownerUid, ref.chatId)
-        : this.#sql.exec("SELECT * FROM agent_seat_turns")
+        ? this.#sql.exec("SELECT * FROM agent_seat_turns WHERE room_owner = ? AND room_chat = ? AND status != 'taken'", ref.ownerUid, ref.chatId)
+        : this.#sql.exec("SELECT * FROM agent_seat_turns WHERE status != 'taken'")
     ).toArray() as SeatTurnRow[];
     for (const row of rows) this.#resume(row);
   }
