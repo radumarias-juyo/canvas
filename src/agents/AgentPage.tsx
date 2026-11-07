@@ -16,6 +16,7 @@ import { stateLabel } from "./glance.ts";
 import { agentPath, NEW_AGENT, type AgentPlace } from "./nav.ts";
 import { RunsTab } from "./RunsTab.tsx";
 import { SetupTab } from "./SetupTab.tsx";
+import { KnowsTab } from "../memory/KnowsTab.tsx";
 import { WorkflowTab } from "./WorkflowTab.tsx";
 import { dropAgent, putAgent, reloadAgents, useAgents } from "./store.ts";
 import { FollowButton } from "../feed/FeedNav.tsx";
@@ -76,6 +77,7 @@ export const TABS: AgentTab[] = [
   },
   { id: "workflow", label: "Workflow", fields: ["trigger", "scope", "workflow"], Component: WorkflowTab },
   { id: "runs", label: "Runs", fields: [], Component: RunsTab },
+  { id: "knows", label: "Knows", fields: [], Component: KnowsTab },
 ];
 
 /** The tab a place opens: the one asked for, else the one that edits its field, else the first. */
