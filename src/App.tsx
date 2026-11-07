@@ -20,7 +20,7 @@ import { isPicked, type Picks } from "./files/picks.ts";
 import { isBoolean, MenuButton, ResizeHandle, SectionHead, useMediaQuery, useStoredState } from "./layout.tsx";
 import { useLatest, useSidebarSocket } from "./sidebar.ts";
 import { SignInNotices, useSignInAlerts } from "./SignIns.tsx";
-import { disablePush, onPushOpen } from "./push.ts";
+import { disablePush, onPushOpen, setPushUser } from "./push.ts";
 import type { McpSignInView } from "../shared/sign-ins.ts";
 import { SkillsView } from "./skills/SkillsView.tsx";
 
@@ -268,6 +268,8 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, naviga
   useSidebarSocket({ chats: loadChats, artifacts: loadArtifacts, skills: loadSkills, "sign-ins": loadSignIns }, notices.onMention, onSignIn);
   // A click on a pushed notification while the app is open moves it to the chat the push names.
   useEffect(() => onPushOpen(navigate), [navigate]);
+  // Pushes reach this browser for the user signed in here, and no one else.
+  useEffect(() => setPushUser(uid), [uid]);
   // Another chat shows its own artifacts: the one asked for at once, else the newest it published once it loads.
   // Going to the same chat without one asked for (its sidebar link, Back) keeps what it shows: the chat does not load
   // again, so it would not offer its newest artifact.

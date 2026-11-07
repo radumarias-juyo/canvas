@@ -32,7 +32,12 @@ self.addEventListener("notificationclick", (event) => {
   event.waitUntil(
     (async () => {
       const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
-      const open = windows.find((client) => new URL(client.url).origin === self.location.origin);
+      // A window of the app itself: not a page the Worker serves (a sign-in's result, a file, a published page), which
+      // would hear nothing.
+      const open = windows.find((client) => {
+        const at = new URL(client.url);
+        return at.origin === self.location.origin && !at.pathname.startsWith("/api/") && !at.pathname.startsWith("/u/");
+      });
       if (!open) return self.clients.openWindow(url);
       // The app moves there itself (src/push.ts), without a reload.
       open.postMessage({ type: "open", url });

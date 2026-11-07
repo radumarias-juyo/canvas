@@ -157,15 +157,16 @@ An agent's scheduled runs use your sign-ins while you are away (`worker/mcp/back
 
 - **Before a run** the app refreshes each sign-in it needs (`UserDirectory.checkSignIns`): per server `ok`,
   `needs_sign_in` or `unavailable`. A run with `needs_sign_in` does not start. You get a notice with the sign-in link in
-  the sidebar, as a browser notification, and as a push when the app is closed (once until you sign in), and the run
-  goes again after the sign-in callback (`UserDirectory.onSignedIn` → `ChatAgent.signedIn`).
+  the sidebar, as a browser notification, and as a push when the app is closed (once until you sign in). After the
+  sign-in callback, each chat with a run waiting hears it (`UserDirectory.onSignedIn` → `ChatAgent.signedIn`), so the
+  run can go again.
 - **How long a sign-in lasts** is not something Access or OAuth says, so the app counts it from the sign-in:
   `MCP_GRANT_DAYS` (default 30) should match the grant session duration of the portal's Access application. Three days
   before it ends, you get one warning per sign-in.
 - **Keep-alive:** sign-ins that runs use are refreshed about once a day, in case the authorization server ends a
   session idle for 24 hours.
-- **Runs only read:** `readOnlyTools` offers a run only tools the server marks read-only, and `assertReadOnly` refuses
-  any other call before it reaches the server.
+- **Runs only read:** the helpers for the run code, `readOnlyTools` and `assertReadOnly`, offer a run only the tools a
+  server marks read-only and refuse any other call before it reaches the server.
 - **The refresh token is the real credential:** 2FA protects a new sign-in, not a refresh. Access checks its Allow
   policy again on every refresh, so removing someone from it ends their runs' access at the next refresh.
 
@@ -174,7 +175,8 @@ An agent's scheduled runs use your sign-ins while you are away (`worker/mcp/back
 With the VAPID secrets set, the app also reaches people while it is closed (Web Push, `worker/push/`): RFC 8291
 payload encryption and an RFC 8292 VAPID token, with WebCrypto alone. Turning on notifications in the app subscribes
 the browser (a service worker, `public/sw.js`); a push goes out only when none of the user's apps is open, says only
-that something arrived (never its content), and opens the chat when clicked. Endpoints are taken only at the known push
+that something arrived (never its content), and opens the chat when clicked. A subscription belongs to the user signed
+in when it was made: signing out ends it, and a browser where another user signs in next gets a new one. Endpoints are taken only at the known push
 services, and ones a push service reports gone are forgotten. Other code sends one with `UserDirectory.push({ title,
 body, url, tag })`. Without the secrets nothing is pushed and the rest works as before.
 

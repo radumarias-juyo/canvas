@@ -164,8 +164,22 @@ export async function generateVapidKeys(): Promise<{ publicKey: string; privateK
   return { publicKey: toBase64url(publicKey), privateKey: jwk.d };
 }
 
+/** Imported VAPID keys by their pair: a push to several browsers imports the key once, not once per browser. */
+const vapidKeyCache = new Map<string, Promise<CryptoKey>>();
+
 /** The VAPID private key, imported as a JWK: d from `privateKey`, x and y from the public point. */
-async function importVapidPrivateKey(vapid: VapidKeys): Promise<CryptoKey> {
+function importVapidPrivateKey(vapid: VapidKeys): Promise<CryptoKey> {
+  const id = `${vapid.publicKey}.${vapid.privateKey}`;
+  let key = vapidKeyCache.get(id);
+  if (!key) {
+    key = importVapidKey(vapid);
+    vapidKeyCache.set(id, key);
+    key.catch(() => vapidKeyCache.delete(id));
+  }
+  return key;
+}
+
+async function importVapidKey(vapid: VapidKeys): Promise<CryptoKey> {
   const point = fromBase64url(vapid.publicKey);
   const d = fromBase64url(vapid.privateKey);
   if (point.byteLength !== 65 || point[0] !== 0x04) throw new Error("The VAPID public key is not an uncompressed P-256 key.");

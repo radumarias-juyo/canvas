@@ -9,29 +9,60 @@ import { api } from "./api.ts";
 const supported = typeof navigator !== "undefined" && "serviceWorker" in navigator && typeof window !== "undefined" && "PushManager" in window;
 
 let enabling: Promise<void> | undefined;
+/** Who is signed in to this window (setPushUser): a subscription is made for them alone. */
+let user: string | undefined;
+/** Which user this browser's subscription was made for, kept across sessions. */
+const SUBSCRIBED_FOR = "push.uid";
 
-/** Subscribe this browser, once per page load; a subscription made for another key is replaced. Failures are logged. */
+/** The signed-in user: subscribes this browser for them when notifications are allowed already. */
+export function setPushUser(uid: string): void {
+  user = uid;
+  if (supported && Notification.permission === "granted") void enablePush();
+}
+
+/**
+ * Subscribe this browser for the signed-in user, once per page load; a subscription made for another key, or for
+ * another user (one whose session ended without signing out here), is replaced. Failures are logged.
+ */
 export function enablePush(): Promise<void> {
-  if (!supported) return Promise.resolve();
-  enabling ??= subscribe().catch((error: unknown) => {
+  if (!supported || !user) return Promise.resolve();
+  enabling ??= subscribe(user).catch((error: unknown) => {
     enabling = undefined;
     console.warn("push:", error);
   });
   return enabling;
 }
 
-async function subscribe(): Promise<void> {
+async function subscribe(uid: string): Promise<void> {
   const key = await api.pushKey();
   if (!key) return;
   const registration = await navigator.serviceWorker.register("/sw.js");
   const serverKey = fromBase64url(key);
   let subscription = await registration.pushManager.getSubscription();
-  if (subscription && !sameKey(subscription.options.applicationServerKey, serverKey)) {
+  // Another user's subscription is ended at the push service, so their directory forgets it on its next push (410).
+  if (subscription && (!sameKey(subscription.options.applicationServerKey, serverKey) || stored(SUBSCRIBED_FOR) !== uid)) {
     await forget(subscription);
     subscription = null;
   }
   subscription ??= await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: serverKey });
+  store(SUBSCRIBED_FOR, uid);
   await api.subscribePush(subscription.toJSON());
+}
+
+function stored(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function store(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Without storage, a later page load cannot tell whose it is and makes a new subscription; nothing else is lost.
+  }
 }
 
 /**
@@ -40,8 +71,11 @@ async function subscribe(): Promise<void> {
  */
 export async function disablePush(): Promise<void> {
   if (!supported) return;
+  const pending = enabling;
   enabling = undefined;
   const stop = (async () => {
+    // A subscribe still going would otherwise finish after this, and subscribe the browser again.
+    await pending;
     const subscription = await (await navigator.serviceWorker.getRegistration())?.pushManager.getSubscription();
     if (subscription) await forget(subscription);
   })().catch((error: unknown) => console.warn("push:", error));

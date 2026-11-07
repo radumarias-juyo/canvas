@@ -239,13 +239,13 @@ export class McpSignIns {
       if (!config || row.keep_at > now) return;
       const result = await this.#check(config);
       if (result === "needs_sign_in") await this.needed(row.server);
-      // An ok refresh saved new tokens, which set the next one; one that did not reach the server tries again soon.
-      else
-        this.#host.sql.exec(
-          "UPDATE mcp_auth SET keep_at = ? WHERE server = ?",
-          this.#now() + (result === "ok" ? KEEP_ALIVE_MS : KEEP_ALIVE_RETRY_MS),
-          row.server,
-        );
+      // An ok refresh saved new tokens, which set the next one; any other result tries again soon. A sign-in still
+      // signed in after `needs_sign_in` (its tokens kept) must move on too, or the next alarm is due at once, forever.
+      this.#host.sql.exec(
+        "UPDATE mcp_auth SET keep_at = ? WHERE server = ?",
+        this.#now() + (result === "ok" ? KEEP_ALIVE_MS : KEEP_ALIVE_RETRY_MS),
+        row.server,
+      );
     });
     await Promise.all([...warnings, ...keepAlives]);
     this.#schedule();
@@ -306,6 +306,9 @@ export class McpSignIns {
     });
     if (!opened) {
       await this.#write(server, {}, {});
+      // #write saw no tokens before or after: say here that the sign-in went.
+      this.#host.changed();
+      this.#schedule();
       return {};
     }
     if (opened.plain) await this.#write(server, opened.record, opened.record);

@@ -63,7 +63,12 @@ export async function checkSignIn(
   if (!record.tokens || !record.client || !redirectUrl) return "needs_sign_in";
   const client = new McpOAuthClient(store, server.name, { redirectUrl, interactive: false });
   try {
-    if (record.tokens.refresh_token) return (await auth(client, { serverUrl: server.url })) === "AUTHORIZED" ? "ok" : "needs_sign_in";
+    if (record.tokens.refresh_token) {
+      if ((await auth(client, { serverUrl: server.url })) === "AUTHORIZED") return "ok";
+      // A refused grant clears the tokens (invalidateCredentials). The SDK also gives up on a refresh the server could
+      // not answer (a server_error, a 5xx) and asks for a sign-in instead: with the tokens kept, that is the server.
+      return (await store.get()).tokens ? "unavailable" : "needs_sign_in";
+    }
     const connection = await connect(server, client);
     await connection.close().catch(() => {});
     return "ok";

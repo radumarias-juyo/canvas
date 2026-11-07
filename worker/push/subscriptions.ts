@@ -12,7 +12,7 @@ export interface PushMessage {
   tag: string;
 }
 
-/** Subscriptions kept per user: one per browser they turned notifications on in; the oldest goes past this. */
+/** Subscriptions kept per user: one per browser they turned notifications on in; the one least recently subscribed goes past this (the app subscribes again on each load). */
 export const MAX_PUSH_SUBS = 10;
 
 /**
@@ -52,7 +52,7 @@ export class PushSubscriptions {
 
   add(sub: PushSubscriptionKeys, now = Date.now()): void {
     this.#sql.exec(
-      "INSERT INTO push_subs (endpoint, p256dh, auth, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(endpoint) DO UPDATE SET p256dh = excluded.p256dh, auth = excluded.auth",
+      "INSERT INTO push_subs (endpoint, p256dh, auth, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(endpoint) DO UPDATE SET p256dh = excluded.p256dh, auth = excluded.auth, created_at = excluded.created_at",
       sub.endpoint,
       sub.p256dh,
       sub.auth,
