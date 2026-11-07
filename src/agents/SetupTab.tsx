@@ -13,6 +13,7 @@ import {
   type AgentTurnView,
 } from "../../shared/agents.ts";
 import { AUTO_MODEL } from "../../shared/models.ts";
+import { SPEAK_UP_DEFAULTS, SPEAK_UP_FIELDS, SPEAK_UP_LABELS, type SpeakUpLimitField, type SpeakUpLimits } from "../../shared/speak-up.ts";
 import { errorMessage, plural } from "../../shared/util.ts";
 import { api } from "../api.ts";
 import { ModelPicker, useCatalog } from "../chat/ModelPicker.tsx";
@@ -23,6 +24,7 @@ import type { AgentSubject, AgentTabProps } from "./AgentPage.tsx";
 import { AssumedBadge } from "./AssumedBadge.tsx";
 import { ASSUMED_FIELDS, CONFLICT_NOTICE, isAssumed, isConflict, withoutAssumed } from "./glance.ts";
 import { goTo } from "./nav.ts";
+import { ServersTable } from "./ServersTable.tsx";
 import { readServers, reloadAgents } from "./store.ts";
 
 /** What Auto means for an agent: the model of the chat it answers in. Stable, so the memoized picker keeps it. */
@@ -43,8 +45,17 @@ interface Form {
   review: boolean;
   /** It may post unprompted in chats that allow it (AgentDefinition.speaksUp). */
   speaksUp: boolean;
+  /** How often it may (AgentDefinition.speakUpLimits), as typed: empty leaves one to the chat or the default. */
+  limits: Record<SpeakUpLimitField, string>;
   assumed: string[];
 }
+
+/** The speaking-up limits as the form types them. */
+const limitsForm = (limits: SpeakUpLimits | undefined): Record<SpeakUpLimitField, string> =>
+  Object.fromEntries(SPEAK_UP_FIELDS.map((field) => [field, limits?.[field] === undefined ? "" : String(limits[field])])) as Record<
+    SpeakUpLimitField,
+    string
+  >;
 
 /** The fields of the Setup tab that a guess of the model can be about, by the name the form gives each. */
 const SETUP_ASSUMED: Record<string, readonly string[]> = {
@@ -76,6 +87,7 @@ function formOf(subject: AgentSubject): Form {
       sharedServers: null,
       review: false,
       speaksUp: false,
+      limits: limitsForm(undefined),
       assumed: [],
     };
   const { agent } = subject;
@@ -91,6 +103,7 @@ function formOf(subject: AgentSubject): Form {
     sharedServers: agent.sharedServers ? new Set(agent.sharedServers) : null,
     review: "reviewBeforePosting" in agent && agent.reviewBeforePosting === true,
     speaksUp: agent.speaksUp === true,
+    limits: limitsForm(agent.speakUpLimits),
     assumed: subject.kind === "own" ? (subject.agent.assumed ?? []) : [],
   };
 }
@@ -118,15 +131,23 @@ function inputOf(form: Form): AgentInput {
     ...(form.sharedServers && { sharedServers: sorted(form.sharedServers).filter((name) => !form.servers || form.servers.has(name)) }),
     ...(form.review && { reviewBeforePosting: true }),
     ...(form.speaksUp && { speaksUp: true }),
+    ...(limitsOf(form) && { speakUpLimits: limitsOf(form) }),
     ...(form.assumed.length && { assumed: form.assumed }),
   };
+}
+
+/** The limits typed, as numbers (checkAgent says what is wrong with one that is not a whole number in range); none when all are empty. */
+function limitsOf(form: Form): SpeakUpLimits | undefined {
+  const typed = SPEAK_UP_FIELDS.filter((field) => form.limits[field].trim());
+  return typed.length ? Object.fromEntries(typed.map((field) => [field, Number(form.limits[field].trim())])) : undefined;
 }
 
 const sameSet = (a: Set<string> | null, b: Set<string> | null) =>
   a === null || b === null ? a === b : a.size === b.size && [...a].every((x) => b.has(x));
 function changed(a: Form, b: Form): boolean {
   const plain = (["name", "job", "instructions", "avatar", "color", "model", "effort", "review", "speaksUp"] as const).some((key) => a[key] !== b[key]);
-  return plain || !sameSet(a.servers, b.servers) || !sameSet(a.sharedServers, b.sharedServers) || a.assumed.join() !== b.assumed.join();
+  const limits = SPEAK_UP_FIELDS.some((field) => a.limits[field].trim() !== b.limits[field].trim());
+  return plain || limits || !sameSet(a.servers, b.servers) || !sameSet(a.sharedServers, b.sharedServers) || a.assumed.join() !== b.assumed.join();
 }
 
 /**
@@ -388,6 +409,20 @@ export function SetupTab({ subject, field, save, notice, onDirty }: AgentTabProp
           <input type="checkbox" checked={form.speaksUp} onChange={(e) => set("speaksUp", e.target.checked)} />
           May speak up unprompted
         </label>
+        <div className="agent-speak-limits">
+          <small>How often at most, in any chat (a chat's owner may set stricter ones; empty leaves it to the chat):</small>
+          {SPEAK_UP_FIELDS.map((field) => (
+            <label key={field}>
+              {SPEAK_UP_LABELS[field]}
+              <input
+                inputMode="numeric"
+                value={form.limits[field]}
+                placeholder={`Default (${SPEAK_UP_DEFAULTS[field]})`}
+                onChange={(e) => set("limits", { ...form.limits, [field]: e.target.value })}
+              />
+            </label>
+          ))}
+        </div>
       </div>
       {error && <p className="form-error">{error}</p>}
       <div className="agent-form-actions">
@@ -429,80 +464,6 @@ function Field({
       </label>
       {children}
     </div>
-  );
-}
-
-/**
- * The servers table: each of the deployment's MCP servers with whether it signs in each user, and two switches, for
- * the agent itself and for shared chats. A server that signs in as the owner and is on for shared chats says that the
- * chat sees what the agent reads from it.
- */
-function ServersTable({
-  servers,
-  error,
-  own,
-  shared,
-  name,
-  onToggle,
-}: {
-  servers: AgentServerInfo[] | null;
-  error: string | null;
-  own: Set<string>;
-  shared: Set<string>;
-  name: string;
-  onToggle: (column: "servers" | "sharedServers", server: string, on: boolean) => void;
-}) {
-  if (error) return <p className="form-error">Could not read the servers: {error}</p>;
-  if (!servers) return <p className="skills-note">Reading the servers…</p>;
-  if (!servers.length) return <p className="skills-note">This deployment has no MCP servers: the agent works with what it is told and its tools.</p>;
-  return (
-    <table className="agent-servers">
-      <thead>
-        <tr>
-          <th scope="col">Server</th>
-          <th scope="col">This agent</th>
-          <th scope="col">Shared chats</th>
-        </tr>
-      </thead>
-      <tbody>
-        {servers.map((server) => {
-          const mine = own.has(server.name);
-          const theirs = shared.has(server.name) && mine;
-          return (
-            <tr key={server.name}>
-              <th scope="row">
-                <span className="agent-server-name">{server.name}</span>
-                <small>{server.signsIn ? (server.signedIn ? "signed in as you" : "signs in as you · not yet") : "no sign-in"}</small>
-                {server.signsIn && theirs && (
-                  <small className="agent-server-warn">
-                    Anyone in a shared chat can make @{name || "it"} read this as you, and sees what it reads.
-                  </small>
-                )}
-              </th>
-              <td>
-                <Switch label={`${server.name} for this agent`} on={mine} onChange={(on) => onToggle("servers", server.name, on)} />
-              </td>
-              <td>
-                <Switch
-                  label={`${server.name} in shared chats`}
-                  on={theirs}
-                  disabled={!mine}
-                  onChange={(on) => onToggle("sharedServers", server.name, on)}
-                />
-              </td>
-            </tr>
-          );
-        })}
-      </tbody>
-    </table>
-  );
-}
-
-function Switch({ label, on, disabled, onChange }: { label: string; on: boolean; disabled?: boolean; onChange: (on: boolean) => void }) {
-  return (
-    <label className="skill-toggle agent-switch" title={label}>
-      <input type="checkbox" checked={on} disabled={disabled} onChange={(e) => onChange(e.target.checked)} aria-label={label} />
-    </label>
   );
 }
 

@@ -27,7 +27,7 @@ function agentState(agent: ChatAgentView): string {
  * Who is in the chat: its people first, each in their colour with a dot for those who have it open now; then, after a
  * divider, pi and the chat's other agents, each with its own badge colour, a dot on the one working and a faded badge
  * for one its owner turned off. Names, job lines and owners show on hover. Each agent opens a menu: what it does, its
- * latest turns, and Remove for the chat's owner and the agent's. Everyone's Agents button adds their own agents: a
+ * latest turns, its window for its owner, and Remove for the chat's owner and the agent's. Everyone's Agents button adds their own agents: a
  * member's runs as them, from their own object. Without `bar` (a chat of the owner alone, with no agents yet) only that
  * button shows.
  */
@@ -41,6 +41,7 @@ export function PeopleBar({
   live,
   settings,
   bar = true,
+  onWindow,
 }: {
   chatId: string;
   people: ChatPeople;
@@ -53,6 +54,8 @@ export function PeopleBar({
   /** The chat's agent settings (useChat), for the owner's panel. */
   settings: ChatAgentSettingsView | null;
   bar?: boolean;
+  /** Open the window on one of the viewer's own agents (AgentWindow). */
+  onWindow?: (agentId: string) => void;
 }) {
   // Each open window is a socket; someone no longer in the chat may still show for a moment, so only people in it count.
   const windows = new Map(online.map((presence) => [presence.uid, presence.windows]));
@@ -133,6 +136,13 @@ export function PeopleBar({
           uid={uid}
           mayRemove={isOwner || agent.ownerUid === uid}
           onClose={close}
+          onWindow={
+            onWindow &&
+            (() => {
+              onWindow(agent.id);
+              close();
+            })
+          }
         />
       )}
       {open === ADDING && <AddAgents chatId={chatId} roster={agents} uid={uid} isOwner={isOwner} settings={settings} onClose={close} />}
@@ -158,6 +168,7 @@ function AgentMenu({
   uid,
   mayRemove,
   onClose,
+  onWindow,
 }: {
   chatId: string;
   agent: ChatAgentView;
@@ -165,6 +176,8 @@ function AgentMenu({
   uid: string;
   mayRemove: boolean;
   onClose: () => void;
+  /** Open its window: offered to its owner alone. */
+  onWindow?: () => void;
 }) {
   const [turns, setTurns] = useState<AgentTurnView[] | null>(null);
   const [error, setError] = useState<string>();
@@ -221,6 +234,11 @@ function AgentMenu({
         <AppLink path={pagePath} className="agent-menu-page">
           {mine ? "Open its page" : "See how it is set up"}
         </AppLink>
+      )}
+      {mine && onWindow && (
+        <button type="button" className="agent-menu-window" onClick={onWindow} title="See its sessions here, and steer it as it works: only you">
+          Open its window
+        </button>
       )}
       <p className="agent-menu-state">
         {/* Keyed by its turn: a new turn counts from its own start, not the one before's. */}

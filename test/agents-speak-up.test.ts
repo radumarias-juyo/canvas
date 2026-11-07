@@ -2,7 +2,17 @@ import { createAssistantMessageEventStream, type AssistantMessage, type Models, 
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { isRetryableAssistantError } from "@earendil-works/pi-ai/utils/retry";
 import { describe, expect, it } from "vitest";
-import { agentRouterOn, AgentSettingsError, budgetNotice, chatAllowsServer, checkAgentSettings, MIN_DAILY_TOKENS } from "../shared/agent-settings.ts";
+import {
+  agentRouterOn,
+  AgentSettingsError,
+  budgetNotice,
+  chatAllowsServer,
+  checkAgentSettings,
+  DEFAULT_MESSAGE_TOKENS,
+  messageBudget,
+  messageBudgetNotice,
+  MIN_DAILY_TOKENS,
+} from "../shared/agent-settings.ts";
 import { CHAT_AGENT_KIND, type AgentDefinition } from "../shared/agents.ts";
 import { CHAT_MESSAGE_KIND } from "../shared/protocol.ts";
 import {
@@ -10,14 +20,21 @@ import {
   answered,
   cosine,
   embedder,
+  countMessagesSince,
   gateRefusal,
   INTEREST_THRESHOLD,
+  interestPenalty,
+  limitRefusal,
+  MAX_PENALTY,
+  MUTE_PENALTY,
+  PASS_PENALTY,
+  PENALTY_HALF_LIFE_MS,
+  raisedPenalty,
+  type Penalty,
   isPass,
   lateRefusal,
   looksLikeAsk,
-  MAX_UNPROMPTED_PER_DAY,
   recentText,
-  UNPROMPTED_COOLDOWN_MS,
   unpromptedInput,
   type GateState,
 } from "../worker/agents/funnel.ts";
@@ -31,7 +48,10 @@ import {
   routesAgents,
   ROUTE_THRESHOLD,
   selectAgents,
+  withinRouteLimits,
 } from "../worker/agents/router.ts";
+import { checkSpeakUpLimits, SPEAK_UP_DEFAULTS, SpeakUpLimitsError, strictestLimits, type SpeakUpLimits } from "../shared/speak-up.ts";
+import { limitsWith } from "../src/chat/AgentSettings.tsx";
 import { routeHistory } from "../worker/agent/route.ts";
 import { ChatRoster } from "../worker/agents/roster.ts";
 import { SpeakUp, type FunnelEvent, type SpeakUpHost } from "../worker/agents/speak-up.ts";
@@ -173,7 +193,7 @@ describe("the agent router", () => {
 });
 
 describe("the funnel's gates", () => {
-  const open: GateState = { muted: false, off: false, busy: false, postsToday: 0, now: T0, budgetLeft: true };
+  const open: GateState = { muted: false, off: false, busy: false, budgetLeft: true };
 
   it("lets an agent past when every gate is open", () => {
     expect(gateRefusal(open)).toBeNull();
@@ -183,10 +203,75 @@ describe("the funnel's gates", () => {
     expect(gateRefusal({ ...open, off: true, muted: true })).toBe("off");
     expect(gateRefusal({ ...open, muted: true, busy: true })).toBe("muted");
     expect(gateRefusal({ ...open, busy: true })).toBe("busy");
-    expect(gateRefusal({ ...open, postsToday: MAX_UNPROMPTED_PER_DAY })).toBe("daily");
-    expect(gateRefusal({ ...open, lastAt: T0 - UNPROMPTED_COOLDOWN_MS + 1 })).toBe("cooldown");
-    expect(gateRefusal({ ...open, lastAt: T0 - UNPROMPTED_COOLDOWN_MS })).toBeNull();
     expect(gateRefusal({ ...open, budgetLeft: false })).toBe("budget");
+  });
+
+  it("holds an agent to the limits: posts a day, minutes between posts, messages between posts, the chat's quiet", () => {
+    const limits = SPEAK_UP_DEFAULTS;
+    const fresh = { postsToday: 0, now: T0 };
+    expect(limitRefusal(fresh, limits)).toBeNull();
+    expect(limitRefusal({ ...fresh, postsToday: limits.perDay }, limits)).toBe("daily");
+    const gap = limits.gapMinutes * 60_000;
+    expect(limitRefusal({ ...fresh, lastAt: T0 - gap + 1, messagesSince: 99 }, limits)).toBe("cooldown");
+    // A while ago, but too few of the people's messages since: not every few messages.
+    expect(limitRefusal({ ...fresh, lastAt: T0 - gap, messagesSince: limits.perMessages - 1 }, limits)).toBe("messages");
+    expect(limitRefusal({ ...fresh, lastAt: T0 - gap, messagesSince: limits.perMessages }, limits)).toBeNull();
+    expect(limitRefusal({ ...fresh, quietMs: limits.pauseMinutes * 60_000 - 1 }, limits)).toBe("pause");
+    // A follow-up has no pause.
+    expect(limitRefusal(fresh, { ...limits, pauseMinutes: 600 })).toBeNull();
+  });
+
+  it("takes the stricter of the chat's and the agent's limits, each one set, else the default", () => {
+    expect(strictestLimits(undefined, undefined)).toEqual(SPEAK_UP_DEFAULTS);
+    // The chat lets agents post more often; the agent's owner set none: the chat's hold.
+    expect(strictestLimits({ gapMinutes: 5, perDay: 10 }, undefined)).toEqual({ ...SPEAK_UP_DEFAULTS, gapMinutes: 5, perDay: 10 });
+    expect(strictestLimits({ gapMinutes: 5, perDay: 10, perMessages: 2 }, { gapMinutes: 60, perDay: 1, pauseMinutes: 10 })).toEqual({
+      pauseMinutes: 10,
+      gapMinutes: 60,
+      perDay: 1,
+      perMessages: 2,
+    });
+    expect(checkSpeakUpLimits({ perMessages: 3, gapMinutes: null })).toEqual({ perMessages: 3 });
+    expect(checkSpeakUpLimits({})).toBeUndefined();
+    expect(() => checkSpeakUpLimits({ perDay: 0 })).toThrow(/Posts a day is a whole number from 1 to 50/);
+    expect(() => checkSpeakUpLimits({ gapMinutes: 1.5 })).toThrow(SpeakUpLimitsError);
+  });
+
+  it("raises an agent's threshold for a while after a PASS or a mute, fading by half every few days, never past a cap", () => {
+    const passed = raisedPenalty(undefined, PASS_PENALTY, T0);
+    expect(interestPenalty(passed, T0)).toBeCloseTo(PASS_PENALTY);
+    expect(interestPenalty(passed, T0 + PENALTY_HALF_LIFE_MS)).toBeCloseTo(PASS_PENALTY / 2);
+    const muted = raisedPenalty(passed, MUTE_PENALTY, T0 + PENALTY_HALF_LIFE_MS);
+    expect(interestPenalty(muted, T0 + PENALTY_HALF_LIFE_MS)).toBeCloseTo(PASS_PENALTY / 2 + MUTE_PENALTY);
+    let many: Penalty | undefined;
+    for (let i = 0; i < 10; i++) many = raisedPenalty(many, MUTE_PENALTY, T0);
+    expect(interestPenalty(many, T0)).toBe(MAX_PENALTY);
+    expect(interestPenalty(undefined, T0)).toBe(0);
+  });
+
+  it("counts the people's messages after a time, newest first, only as far as it needs", async () => {
+    const pages = async function* () {
+      yield [message("mia", "c", T0 + 3), agentReply("research", "x"), message("ana", "b", T0 + 2)];
+      yield [message("mia", "a", T0 + 1), message("mia", "old", T0)];
+      throw new Error("read too far");
+    };
+    expect(await countMessagesSince(pages(), T0, 10)).toBe(3);
+    expect(await countMessagesSince(pages(), T0, 2)).toBe(2);
+    expect(await countMessagesSince(pages(), T0 + 2, 10)).toBe(1);
+  });
+
+  it("lets the router pick an agent only once per so many of the people's messages, this one counted", async () => {
+    const agents = [{ agentId: "a" }, { agentId: "b" }, { agentId: "c" }];
+    const last: Record<string, number | undefined> = { a: T0, b: T0 };
+    const since: Record<number, number> = { [T0]: 1 };
+    const within = await withinRouteLimits(
+      agents,
+      (agentId) => last[agentId],
+      async (entry) => (entry.agentId === "a" ? 3 : 2),
+      async (at, max) => Math.min(since[at] ?? 0, max),
+    );
+    // a: one message since its last pick, this one makes two of three: not yet. b: two of two. c: never picked.
+    expect(within.map((entry) => entry.agentId)).toEqual(["b", "c"]);
   });
 
   it("then reads the owner's word: the agent is on, may speak up, and its owner's spend has room", () => {
@@ -301,11 +386,16 @@ function speakUpChat(names: readonly string[], over: Partial<{ speakUp: boolean;
   const vector = (text: string) =>
     axes.map((word) => (text.toLowerCase().includes(word) ? 1 : 0)).map((x, i, all) => (all.some(Boolean) ? x : i === 2 ? 1 : 0));
   const embedded: string[] = [];
+  /** When the people's messages were sent (host.messagesSince counts them). */
+  const messagesAfter: number[] = [];
+  const penalties = new Map<string, Penalty>();
+  /** The chat's speaking-up limits (ChatAgentSettings.speakUpLimits). */
+  const limits: { set?: SpeakUpLimits } = {};
   const events: FunnelEvent[] = [];
   const given: { agentId: string; request: Parameters<SpeakUpHost["give"]>[1] }[] = [];
   const host: SpeakUpHost = {
     roster,
-    settings: () => ({ speakUp: over.speakUp ?? true }),
+    settings: () => ({ speakUp: over.speakUp ?? true, ...(limits.set && { speakUpLimits: limits.set }) }),
     definition: async (entry) => definitions.get(entry.agentId) ?? null,
     budgetLeft: () => over.budgetLeft ?? true,
     spendLeft: async () => over.spendLeft ?? true,
@@ -325,9 +415,14 @@ function speakUpChat(names: readonly string[], over: Partial<{ speakUp: boolean;
     },
     observe: (event) => events.push(event),
     now: () => clock.now,
+    messagesSince: async (at, max) => Math.min(max, messagesAfter.filter((sentAt) => sentAt > at).length),
+    penalties: { get: (key) => penalties.get(key), put: (key, value) => void penalties.set(key, value) },
   };
-  return { roster, definitions, host, speakUp: new SpeakUp(host), events, given, clock, embedded };
+  return { roster, definitions, host, speakUp: new SpeakUp(host), events, given, clock, embedded, messagesAfter, penalties, limits };
 }
+
+/** The default time between one agent's unprompted posts in a chat. */
+const GAP_MS = SPEAK_UP_DEFAULTS.gapMinutes * 60_000;
 
 describe("agents that speak up", () => {
   // @finance's job is about totals; @builder's about pages.
@@ -421,27 +516,75 @@ describe("agents that speak up", () => {
   it("keeps to the cooldown and the posts a day per agent", async () => {
     const chat = speakUpChat(["finance"]);
     jobs(chat);
+    // Plenty said in between: the messages between posts hold no one back here.
+    chat.messagesAfter.push(...Array(SPEAK_UP_DEFAULTS.perMessages).fill(Number.MAX_SAFE_INTEGER));
     expect(await chat.speakUp.afterPause(talk, { line: "x" })).toBe("id-finance");
     // Its turn waits: busy.
     expect(await chat.speakUp.afterPause(talk, { line: "x" })).toBeUndefined();
     expect(chat.events.at(-1)?.refusal).toBe("busy");
-    for (let posted = 1; posted < MAX_UNPROMPTED_PER_DAY; posted++) {
+    for (let posted = 1; posted < SPEAK_UP_DEFAULTS.perDay; posted++) {
       chat.roster.end(chat.roster.startNext("id-finance")!.id, "done");
       chat.clock.now += 1_000;
       expect(await chat.speakUp.afterPause(talk, { line: "x" })).toBeUndefined();
       expect(chat.events.at(-1)?.refusal).toBe("cooldown");
-      chat.clock.now += UNPROMPTED_COOLDOWN_MS;
+      chat.clock.now += GAP_MS;
       expect(await chat.speakUp.afterPause(talk, { line: "x" })).toBe("id-finance");
     }
     chat.roster.end(chat.roster.startNext("id-finance")!.id, "done");
-    chat.clock.now += UNPROMPTED_COOLDOWN_MS;
+    chat.clock.now += GAP_MS;
     expect(await chat.speakUp.afterPause(talk, { line: "x" })).toBeUndefined();
     expect(chat.events.at(-1)?.refusal).toBe("daily");
+  });
+
+  it("speaks up at most once per so many of the people's messages, and keeps to the stricter of the chat's and its own limits", async () => {
+    const chat = speakUpChat(["finance"]);
+    jobs(chat);
+    chat.limits.set = { perMessages: 3, gapMinutes: 1 };
+    expect(await chat.speakUp.afterPause(talk, { line: "x" })).toBe("id-finance");
+    chat.roster.end(chat.roster.startNext("id-finance")!.id, "done");
+    const posted = chat.clock.now;
+    chat.clock.now += 2 * 60_000;
+    chat.messagesAfter.push(posted + 1, posted + 2);
+    expect(await chat.speakUp.afterPause(talk, { line: "x" })).toBeUndefined();
+    expect(chat.events.at(-1)?.refusal).toBe("messages");
+    chat.messagesAfter.push(posted + 3);
+    expect(await chat.speakUp.afterPause(talk, { line: "x" })).toBe("id-finance");
+    chat.roster.end(chat.roster.startNext("id-finance")!.id, "done");
+    // Its owner wants it rarer: the stricter gap holds, though the chat allows a minute.
+    chat.definitions.set("id-finance", definition("finance", { job: "Reports the totals", speakUpLimits: { gapMinutes: 120 } }));
+    chat.clock.now += 10 * 60_000;
+    chat.messagesAfter.push(...Array(5).fill(Number.MAX_SAFE_INTEGER));
+    expect(await chat.speakUp.afterPause(talk, { line: "x" })).toBeUndefined();
+    expect(chat.events.at(-1)?.refusal).toBe("cooldown");
+    // And a pause it wants longer than the chat's.
+    chat.definitions.set("id-finance", definition("finance", { job: "Reports the totals", speakUpLimits: { pauseMinutes: 30 } }));
+    expect(await chat.speakUp.afterPause(talk, { line: "x" }, 5 * 60_000)).toBeUndefined();
+    expect(chat.events.at(-1)?.refusal).toBe("pause");
+    expect(await chat.speakUp.afterPause(talk, { line: "x" }, 30 * 60_000)).toBe("id-finance");
+  });
+
+  it("stays quiet a while where it answered PASS or was muted: its threshold goes up there, then fades", async () => {
+    const chat = speakUpChat(["finance"]);
+    // Close, but not by much: 0.6 against the threshold of 0.55.
+    chat.definitions.set("id-finance", definition("finance", { job: "Reports the totals" }));
+    const near = { id: "fake", embed: async (texts: string[]) => texts.map((_, i) => (i === 0 ? [1, 0] : [0.6, 0.8])) };
+    const speakUp = new SpeakUp({ ...chat.host, embedder: near });
+    expect(await speakUp.afterPause(talk, { line: "x" })).toBe("id-finance");
+    chat.roster.end(chat.roster.startNext("id-finance")!.id, "done");
+    speakUp.lowered("id-finance", "mute");
+    chat.clock.now += GAP_MS;
+    chat.messagesAfter.push(...Array(5).fill(Number.MAX_SAFE_INTEGER));
+    expect(await speakUp.afterPause(talk, { line: "x" })).toBeUndefined();
+    expect(chat.events.at(-1)).toMatchObject({ stage: "interest", passed: false });
+    // A few days on, the mute has faded below what it takes.
+    chat.clock.now += 3 * PENALTY_HALF_LIFE_MS;
+    expect(await speakUp.afterPause(talk, { line: "x" })).toBe("id-finance");
   });
 
   it("keeps to the cooldown across midnight (UTC), while the posts a day start again", async () => {
     const chat = speakUpChat(["finance"]);
     jobs(chat);
+    chat.messagesAfter.push(...Array(SPEAK_UP_DEFAULTS.perMessages).fill(Number.MAX_SAFE_INTEGER));
     chat.clock.now = Date.parse("2026-11-07T23:55:00Z");
     expect(await chat.speakUp.afterPause(talk, { line: "x" })).toBe("id-finance");
     chat.roster.end(chat.roster.startNext("id-finance")!.id, "done");
@@ -479,14 +622,15 @@ describe("agents that speak up", () => {
   it("embeds an agent's profile once per version of its definition", async () => {
     const chat = speakUpChat(["finance"]);
     jobs(chat);
+    chat.messagesAfter.push(...Array(SPEAK_UP_DEFAULTS.perMessages).fill(Number.MAX_SAFE_INTEGER));
     await chat.speakUp.afterPause(talk, { line: "x" });
     chat.roster.stopAll();
-    chat.clock.now += UNPROMPTED_COOLDOWN_MS;
+    chat.clock.now += GAP_MS;
     await chat.speakUp.afterPause(talk, { line: "x" });
     expect(chat.embedded.filter((text) => text.startsWith("finance:"))).toHaveLength(1);
     chat.definitions.set("id-finance", definition("finance", { job: "Reports the totals", version: 2 }));
     chat.roster.stopAll();
-    chat.clock.now += UNPROMPTED_COOLDOWN_MS;
+    chat.clock.now += GAP_MS;
     await chat.speakUp.afterPause(talk, { line: "x" });
     expect(chat.embedded.filter((text) => text.startsWith("finance:"))).toHaveLength(2);
   });
@@ -633,6 +777,31 @@ describe("a chat's agent settings", () => {
     expect(() => checkAgentSettings({ dailyTokens: MIN_DAILY_TOKENS - 1 }, {})).toThrow(AgentSettingsError);
     expect(() => checkAgentSettings({ dailyTokens: 12_345.5 }, {})).toThrow(AgentSettingsError);
     expect(() => checkAgentSettings({ servers: [""] }, {})).toThrow(AgentSettingsError);
+    expect(() => checkAgentSettings({ messageTokens: MIN_DAILY_TOKENS - 1 }, {})).toThrow(/budget per message/);
+  });
+
+  it("keeps the chat's limits on speaking up, replaced as a whole, and cleared by null or when none is left", () => {
+    const set = checkAgentSettings({ speakUpLimits: { perMessages: 4, pauseMinutes: 5 } }, { speakUp: true });
+    expect(set).toEqual({ speakUp: true, speakUpLimits: { perMessages: 4, pauseMinutes: 5 } });
+    expect(checkAgentSettings({ speakUpLimits: null }, set)).toEqual({ speakUp: true });
+    expect(checkAgentSettings({ speakUpLimits: {} }, set)).toEqual({ speakUp: true });
+    expect(() => checkAgentSettings({ speakUpLimits: { perMessages: 0 } }, set)).toThrow(AgentSettingsError);
+    // The panel changes one at a time.
+    expect(limitsWith(set.speakUpLimits, "perMessages", 6)).toEqual({ perMessages: 6, pauseMinutes: 5 });
+    expect(limitsWith(set.speakUpLimits, "pauseMinutes", null)).toEqual({ perMessages: 4 });
+    expect(limitsWith({ perDay: 2 }, "perDay", null)).toBeNull();
+  });
+
+  it("keeps a budget per message, the default until the owner sets one", () => {
+    expect(messageBudget({})).toBe(DEFAULT_MESSAGE_TOKENS);
+    const set = checkAgentSettings({ messageTokens: 200_000 }, {});
+    expect(set).toEqual({ messageTokens: 200_000 });
+    expect(messageBudget(set)).toBe(200_000);
+    expect(checkAgentSettings({ messageTokens: null }, set)).toEqual({});
+    expect(messageBudgetNotice(200_000, 210_500, ["bard", "pi"])).toBe(
+      "The agents' turns for this message used 210,500 tokens, past its budget of 200,000, so @bard, @pi did not get their turns. " +
+        "The chat's owner can raise the budget per message in the chat's agent settings.",
+    );
   });
 
   it("routes by default only in a private chat, and allows every server until the chat names some", () => {
