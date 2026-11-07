@@ -1,4 +1,4 @@
-import type { AssistantMessage, UserMessage } from "@earendil-works/pi-ai";
+import type { UserMessage } from "@earendil-works/pi-ai";
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { CHAT_AGENT_KIND, CHAT_TURN_KIND, proposedBy, type ChatAgentReplyData } from "../../shared/agents.ts";
 import { entryItems, mergeItems, type ItemRef } from "../../shared/items.ts";
@@ -6,9 +6,6 @@ import { CHAT_MESSAGE_KIND, CHAT_PEOPLE_KIND, publishedBy, type ChatMessageData,
 import { CHAT_BUDGET_KIND, CHAT_COPY_KIND, CHAT_EVENT_KIND, type ChatCopyData } from "../../shared/chat-kinds.ts";
 import { CHAT_CHECKLIST_KIND, checklistOf, type ChatChecklistData } from "../../shared/checklist.ts";
 import { entryOffer } from "../../shared/offers.ts";
-
-// Shared with the chat object, which checks a Yes against the same offer (ChatAgent.takeOffer).
-export { assistantOffer, entryOffer } from "../../shared/offers.ts";
 
 /** When an entry was sent, for one that has a time: messages from before chats kept `sentAt` have only the time pi wrote them, and asides not even that. */
 export function sentAt(entry: EntryRecord): number | undefined {

@@ -146,7 +146,7 @@ import {
   type ChatAgentView,
   type SharedAgentView,
 } from "../shared/agents.ts";
-import { AgentTurns, sessionOf, type TurnHost, type TurnOutcome } from "./agents/controller.ts";
+import { AgentTurns, sessionOf, type PiChain, type TurnHost, type TurnOutcome } from "./agents/controller.ts";
 import { isTurnEntry, TurnFilter } from "./agents/live.ts";
 import { ChatRoster, type AgentTurn, type RosterEntry } from "./agents/roster.ts";
 import { reportOf, SignInNeeded, whenOf, type DeliveryRequest } from "./agents/runs/executor.ts";
@@ -333,7 +333,7 @@ const IMPORTED_KEY = "imported";
  * within the chain's cap. Set when the first agent joins, so pi's earlier answers start nothing.
  */
 const PI_SCAN_KEY = "piScan";
-type PiScan = { through: number; chain?: { hop: number; root?: number; unattended?: true } };
+type PiScan = { through: number; chain?: PiChain };
 /**
  * Set on an agent's home conversation: the agent whose own chat this is (the owner's directory marks the chat with
  * it too). There the agent is on the roster and answers every message that calls nobody else; its runs run here.
@@ -1468,14 +1468,13 @@ export class ChatAgent extends DurableObject<Env> {
   /**
    * The owner's Yes to the next step the reply `entryId` offers (shared/offers.ts): a reply to it the chat writes
    * (OFFER_YES, never the offer's words as the owner's), whose turn may only read and draft the routine (draftTools).
-   * pi's tools change for its whole run, so not while it works on another (checked again as it goes in, #piTools).
+   * pi's tools change for its whole run, so not while it works on another (#piTools refuses it then).
    */
   async takeOffer(author: Person, entryId: unknown): Promise<void> {
     if (author.uid !== this.uid) throw new Error("Only the chat's owner answers an offer.");
     const entry = await this.#entryAt(entryId);
     // The offer as the app shows it (entryOffer), so Yes is taken only where it is offered.
     if (!entry || entryOffer(entry) === undefined) throw new Error("That message offers no next step.");
-    if (entry.kind !== CHAT_AGENT_KIND && (await this.#replying())) throw new Error(PI_BUSY_FOR_YES);
     await this.prompt(OFFER_YES, author, [], [], entry.id, true);
   }
 
@@ -1499,12 +1498,17 @@ export class ChatAgent extends DurableObject<Env> {
     }
     // Marked first: a change that fails halfway is undone with the next message.
     this.ctx.storage.kv.put(DRAFTING_KEY, true);
+    await root.configure({ tools: this.#installedTools((names) => draftTools(names, this.#mcpTools, {})) }, BACKGROUND_CONTEXT);
+  }
+
+  /** The installed tools `allowed` keeps of them, by name, in install order. */
+  #installedTools(allowed: (installed: readonly string[]) => readonly string[]) {
     const installed = this.registry
       .snapshot()
       .tools()
       .map(({ tool }) => tool);
-    const keep = new Set(draftTools(installed.map((tool) => tool.name), this.#mcpTools, {}));
-    await root.configure({ tools: installed.filter((tool) => keep.has(tool.name)) }, BACKGROUND_CONTEXT);
+    const keep = new Set(allowed(installed.map((tool) => tool.name)));
+    return installed.filter((tool) => keep.has(tool.name));
   }
 
   /** The messages the chat is getting ready to put in, oldest first (see IncomingMessage). */
@@ -1979,7 +1983,9 @@ export class ChatAgent extends DurableObject<Env> {
       this.#publishStatus(status);
       this.#quietFrom(Date.now());
       // A Yes's run is over: pi gets all its tools back, in turn with the messages going in (a Yes's among them).
-      void this.#place(() => this.#piTools(false)).catch((error: unknown) => console.error("pi tools:", errorMessage(error)));
+      if (this.ctx.storage.kv.get(DRAFTING_KEY)) {
+        void this.#place(() => this.#piTools(false)).catch((error: unknown) => console.error("pi tools:", errorMessage(error)));
+      }
     }, SETTLE_MS);
   }
 
@@ -3410,12 +3416,7 @@ export class ChatAgent extends DurableObject<Env> {
     allowed: (installed: readonly string[]) => readonly string[],
   ): Promise<void> {
     const [found, choice] = await Promise.all([this.#conversation(session), choosing]);
-    const installed = this.registry
-      .snapshot()
-      .tools()
-      .map(({ tool }) => tool);
-    const keep = new Set(allowed(installed.map((tool) => tool.name)));
-    const enabled = installed.filter((tool) => keep.has(tool.name));
+    const enabled = this.#installedTools(allowed);
     const deferred = enabled.filter((tool) => tool.deferred);
     // The page the chat is on (or a branch came from), as it is now: told every turn, as an agent's catch-up may have
     // left out the note about it.

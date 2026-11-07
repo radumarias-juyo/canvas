@@ -49,7 +49,8 @@ export class ToolResults {
     if (!isToolResult(path)) return null;
     const key = this.#prefix + path.slice(TOOL_RESULTS.length);
     const object = await this.#bucket.get(key, { ssecKey: this.#key });
-    if (!object || this.#now() - +object.uploaded <= TOOL_RESULT_MS) return object;
+    if (!object || !this.#expired(object)) return object;
+    await object.body.cancel();
     await this.#bucket.delete(key);
     return null;
   }
@@ -59,10 +60,15 @@ export class ToolResults {
     await deletePrefix(this.#bucket, this.#prefix);
   }
 
+  /** Whether a saved result is past TOOL_RESULT_MS: gone, whether or not it was pruned yet. */
+  #expired(object: Pick<R2Object, "uploaded">): boolean {
+    return this.#now() - +object.uploaded > TOOL_RESULT_MS;
+  }
+
   /** Drop those past TOOL_RESULT_MS and, newest first, past MAX_TOOL_RESULTS; never `kept`, just saved. */
   async #prune(kept: string): Promise<void> {
     const objects = (await listPrefix(this.#bucket, this.#prefix)).sort((a, b) => +b.uploaded - +a.uploaded);
-    const old = objects.filter((o, i) => o.key !== this.#prefix + kept && (i >= MAX_TOOL_RESULTS || this.#now() - +o.uploaded > TOOL_RESULT_MS));
+    const old = objects.filter((o, i) => o.key !== this.#prefix + kept && (i >= MAX_TOOL_RESULTS || this.#expired(o)));
     await deleteKeys(
       this.#bucket,
       old.map((o) => o.key),

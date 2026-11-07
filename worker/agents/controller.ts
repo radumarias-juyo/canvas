@@ -329,7 +329,7 @@ export class AgentTurns {
    * was in (`root` and `hop` when another agent handed pi that turn; none when a person asked it). `unattended`: a chain
    * that may never hand pi a turn (a Yes's run).
    */
-  fromPi(text: string, entry: number, chain: { hop: number; root?: number; unattended?: true } = { hop: 0 }): void {
+  fromPi(text: string, entry: number, chain: PiChain = { hop: 0 }): void {
     const roster = this.#host.roster;
     const left = chain.root === undefined ? MAX_HOPS : MAX_HOPS - roster.handOffsFrom(chain.root);
     const agents = left > 0 ? handOffs(text, AGENT_NAME, chain.hop, roster.list()).slice(0, left) : [];
@@ -345,6 +345,9 @@ export class AgentTurns {
     });
   }
 }
+
+/** The chain pi's turn was in, as fromPi takes it: `root` and `hop` of a hand-off to pi, `unattended` for a Yes's run. */
+export type PiChain = { hop: number; root?: number; unattended?: true };
 
 /** The session a turn runs in: its own, else its agent's. */
 export function sessionOf(entry: Pick<RosterEntry, "session">, turn: Pick<AgentTurn, "session">): string {

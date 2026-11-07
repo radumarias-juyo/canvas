@@ -1,9 +1,9 @@
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
 import { AGENT_PROPOSE_TOOL, CHAT_AGENT_KIND } from "../shared/agents.ts";
-import { MAX_OFFER, OFFER_PREFIX, OFFER_RULE, OFFER_YES, offerOf } from "../shared/offers.ts";
+import { assistantOffer, entryOffer, MAX_OFFER, OFFER_PREFIX, OFFER_RULE, OFFER_YES, offerOf } from "../shared/offers.ts";
 import { CHAT_MESSAGE_KIND } from "../shared/protocol.ts";
-import { assistantOffer, entryOffer, liveOffer } from "../src/chat/entries.ts";
+import { liveOffer } from "../src/chat/entries.ts";
 
 describe("offerOf", () => {
   it("takes a plain last line that starts with the prefix", () => {
