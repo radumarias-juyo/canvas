@@ -388,7 +388,6 @@ export class ChatAgent extends DurableObject<Env> {
     kind: () => this.kinds.kind(),
     alone: () => !this.members.hasAny(),
     agentFor: (conversation) => this.#memoryAgent(conversation),
-    piByOwner: () => this.#piByOwner(),
     freshPrompt: async (session) => freshPrompt(session === undefined ? await this.#root() : await this.#conversation(session)),
     directory: (uid) => this.#index(uid),
     kv: this.ctx.storage.kv,
@@ -551,24 +550,14 @@ export class ChatAgent extends DurableObject<Env> {
       const entry = entries.find((known) => known.agentId === each.agentId);
       return !!entry && sessionOf(entry, each) === conversation;
     });
-    const ran = this.runs.agentOfSession(conversation);
-    const agentId = turn?.agentId ?? entries.find((each) => each.session === conversation)?.agentId ?? ran ?? undefined;
+    // Asked only when neither knows it: it looks through the runs' rows.
+    const known = turn?.agentId ?? entries.find((each) => each.session === conversation)?.agentId;
+    const ran = known === undefined || turn?.session !== undefined ? this.runs.agentOfSession(conversation) : null;
+    const agentId = known ?? ran ?? undefined;
     if (agentId === undefined) return null;
     // A run's agent is on its home roster; one taken off it still reads only its own notes, never pi's.
     const entry = entries.find((each) => each.agentId === agentId);
     return { agentId, ownerUid: entry?.ownerUid ?? this.uid, name: entry?.name ?? "agent", byOwner: turn?.byOwner === true, ...(ran && { run: true }) };
-  }
-
-  /**
-   * pi's turn answers the owner's own message: the newest of pi's inputs in the log is one of theirs, not an agent's
-   * hand-off (CHAT_TURN_KIND), which nobody may have asked for. Owner's second seat included: it is the owner.
-   */
-  async #piByOwner(): Promise<boolean> {
-    for await (const page of this.#log({ order: "descending" }, 100, 5)) {
-      const input = page.find((entry) => (entry.kind === CHAT_MESSAGE_KIND && !(entry.data as ChatMessageData | undefined)?.aside) || entry.kind === CHAT_TURN_KIND);
-      if (input) return input.kind === CHAT_MESSAGE_KIND && (input.data as ChatMessageData | undefined)?.uid === this.uid;
-    }
-    return false;
   }
 
   /** The uid is this object's name, which the Worker sets from a verified identity. */
@@ -1462,7 +1451,7 @@ export class ChatAgent extends DurableObject<Env> {
       recent && this.refreshSkills({ text: skillText, recent }),
       calling && this.refreshFiles(),
       calling && this.refreshUserPrompt(),
-      calling && this.memory.refresh(),
+      calling && this.memory.refresh(undefined, { byOwner }),
     ]);
     // The files they named of their own are named too: "@pi notes.md" is not a call.
     const named = [...mentions, ...own];
@@ -2702,7 +2691,8 @@ export class ChatAgent extends DurableObject<Env> {
       },
       handToPi: async (input, data) => {
         await this.#watchRuns().catch((error: unknown) => console.error("chat status:", errorMessage(error)));
-        await Promise.all([this.#refreshForTurn(input), this.memory.refresh()]);
+        // A hand-off: nobody may have asked for it, so pi saves nothing as the owner in it.
+        await Promise.all([this.#refreshForTurn(input), this.memory.refresh(undefined, { byOwner: false })]);
         // The handing turn names the input: handed again after a restart, it is placed once. Its entry says which chain
         // pi's answer is in (#piScan).
         try {

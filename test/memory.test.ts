@@ -6,7 +6,6 @@ import {
   checkNoteInput,
   MAX_NOTE_CHARS,
   MAX_UNCONFIRMED,
-  MAX_UNCONFIRMED_PER_CHAT,
   MEMORY_FORGET_TOOL,
   MEMORY_NOTE_TOOL,
   MEMORY_RECALL_TOOL,
@@ -188,7 +187,7 @@ describe("UserMemory", () => {
     expect(learned.note).toMatchObject({ confirmed: false, source: "learned", learnedBy: "pi", chatId: PRIVATE });
     const here = reader(PRIVATE, "private", true);
     expect(memory.read(here).notes).toEqual([]);
-    expect(memory.recall(here, "target")).toEqual([]);
+    expect(memory.recall(here, "target", [])).toEqual([]);
     saved(memory.change(learned.note.id, { confirmed: true }));
     expect(memory.read(here).notes.map((each) => each.text)).toEqual(["The Q3 target is 1.2M."]);
   });
@@ -200,8 +199,8 @@ describe("UserMemory", () => {
     saved(memory.add({ text: "Cite sources.", scope: "agent", agentId: RESEARCH }));
     const member = reader(GROUP, "group", false, RESEARCH);
     expect(memory.read(member).notes.map((each) => each.text)).toEqual(["Standup is at nine.", "Cite sources."]);
-    expect(memory.recall(member, "salary")).toEqual([]);
-    expect(memory.recall(reader(GROUP, "group", false), "")).toHaveLength(1);
+    expect(memory.recall(member, "salary", [])).toEqual([]);
+    expect(memory.recall(reader(GROUP, "group", false), "", [])).toHaveLength(1);
   });
 
   it("forgets, shows the forgotten note, and brings it back", () => {
@@ -238,8 +237,8 @@ describe("UserMemory", () => {
     const here = reader(PRIVATE, "private", true);
     memory.read(here);
     expect(memory.store.get(kept.id)?.uses).toBe(0);
-    memory.recall(here, "euros");
-    memory.recall(here, "dollars");
+    memory.recall(here, "euros", []);
+    memory.recall(here, "dollars", []);
     memory.use([kept.id, kept.id]);
     expect(memory.store.get(kept.id)?.uses).toBe(2);
   });
@@ -262,7 +261,7 @@ describe("UserMemory", () => {
 
   it("lets turns the owner did not ask for fill only their own chat's waiting notes, and dismisses one by deleting it", () => {
     const { memory } = directory();
-    for (let i = 0; i < MAX_UNCONFIRMED_PER_CHAT; i++)
+    for (let i = 0; i < MAX_UNCONFIRMED; i++)
       saved(memory.learn(writer(GROUP, "group", false, false), { text: `Ana says ${i}.`, scope: "chat", kind: "preference" }));
     const refused = memory.learn(writer(GROUP, "group", false, false), { text: "One more.", scope: "chat", kind: "preference" });
     expect(refused).toHaveProperty("error");
@@ -413,7 +412,7 @@ describe("ChatMemory", () => {
    * turn answers the owner, and the conversations whose prompt was started afresh.
    */
   function chat(chatId: string, kind: ChatKind, alone: boolean, owner = directory()) {
-    const state = { kind, alone, piByOwner: true };
+    const state = { kind, alone };
     const sessions = new Map<string, MemoryAgent>();
     const kv = new Map<string, unknown>();
     const fresh: (string | undefined)[] = [];
@@ -424,7 +423,6 @@ describe("ChatMemory", () => {
       kind: () => state.kind,
       alone: () => state.alone,
       agentFor: (conversation) => sessions.get(conversation) ?? null,
-      piByOwner: async () => state.piByOwner,
       freshPrompt: async (conversation) => void fresh.push(conversation),
       directory: () => ({
         readNotes: (reader) => owner.memory.read(reader),
@@ -512,13 +510,13 @@ describe("ChatMemory", () => {
 
   it("lets pi save as the owner only in a turn that answers the owner's own message", async () => {
     const owner = directory();
-    const { host, state } = chat(PRIVATE, "private", true, owner);
-    state.piByOwner = false;
+    const { memory, host } = chat(PRIVATE, "private", true, owner);
+    await memory.refresh(undefined, { byOwner: false });
     const handed = saved(await host.note("root", { text: "Use dollars.", scope: "user", kind: "preference" }));
     expect(handed.note.confirmed).toBe(false);
     const kept = saved(owner.memory.add({ text: "Use euros.", scope: "user" }));
     expect(await host.forget("root", kept.id)).toHaveProperty("error");
-    state.piByOwner = true;
+    await memory.refresh(undefined, { byOwner: true });
     expect(saved(await host.note("root", { text: "Short answers.", scope: "user", kind: "preference" })).note.confirmed).toBe(true);
   });
 

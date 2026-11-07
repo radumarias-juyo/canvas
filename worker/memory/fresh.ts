@@ -2,10 +2,10 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { SystemEntry, type ContextEdit, type Conversation, type EntryRecord } from "@earendil-works/pi-durable";
 
 /** The entry that leaves a conversation's earlier prompts out of its context (see freshPrompt). */
-export const MEMORY_FRESH_KIND = "chat.memory-fresh";
+const MEMORY_FRESH_KIND = "chat.memory-fresh";
 
 /** Edits that leave every prompt entry (`pi.system`) of `entries` out of the model's context. */
-export function omitPrompts(entries: readonly EntryRecord[]): ContextEdit[] {
+function omitPrompts(entries: readonly EntryRecord[]): ContextEdit[] {
   return entries.filter((entry) => SystemEntry.is(entry)).map((entry) => ({ target: entry.id, action: "omit" }));
 }
 

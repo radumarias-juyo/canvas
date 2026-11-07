@@ -842,7 +842,7 @@ export class UserDirectory extends DurableObject<Env> {
     this.#memory.use(ids);
   }
 
-  recallNotes(reader: MemoryReader, query: string, shown: readonly string[] = []): MemoryNote[] {
+  recallNotes(reader: MemoryReader, query: string, shown: readonly string[]): MemoryNote[] {
     return this.#memory.recall(reader, query, shown);
   }
 

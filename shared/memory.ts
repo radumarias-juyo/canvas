@@ -25,9 +25,7 @@ export const MAX_NOTE_CHARS = 500;
 /** How many notes one user keeps, forgotten ones included. */
 export const MAX_NOTES = 500;
 /** How many notes learned in conversations may wait to be confirmed at once. */
-export const MAX_UNCONFIRMED = 30;
-/** How many notes saved in turns the owner did not ask for wait in one chat at once: others cannot fill the owner's. */
-export const MAX_UNCONFIRMED_PER_CHAT = 10;
+export const MAX_UNCONFIRMED = 20;
 /** How much of a prompt the notes take at most: the rest are found with memory_recall. */
 export const PROMPT_NOTES_CHARS = 4_000;
 /** How many notes memory_recall returns at most. */
@@ -152,20 +150,30 @@ export function waitsForConfirm(note: Pick<MemoryNote, "confirmed" | "forgottenA
   return !note.confirmed && note.forgottenAt === undefined;
 }
 
+/** A learned note that waits for a confirm: nothing read it, so dismissing it deletes it (no forgotten copy is kept). */
+export function dismisses(note: Pick<MemoryNote, "source" | "confirmed" | "forgottenAt">): boolean {
+  return note.source === "learned" && waitsForConfirm(note);
+}
+
+/**
+ * Whether a save of the same text as a note kept already confirms it: a confirmed save confirms a waiting preference,
+ * but a waiting fact only when the owner writes it themselves, as a fact waits for their confirm whoever said it.
+ */
+export function confirmsKept(save: Pick<MemoryNote, "source" | "confirmed">, kept: Pick<MemoryNote, "kind" | "confirmed">): boolean {
+  return save.confirmed && !kept.confirmed && (save.source === "person" || kept.kind === "preference");
+}
+
 /** A note not forgotten. */
 export function inUse(note: Pick<MemoryNote, "forgottenAt">): boolean {
   return note.forgottenAt === undefined;
 }
 
 /**
- * The notes a prompt holds, of those `reader` reads: within PROMPT_NOTES_CHARS, pinned ones first, then the most used,
- * then the newest; then put back in the order they were made, so a new note adds to the end and the rest of the prompt
- * stays as it was.
+ * The notes a prompt holds, of those `reader` reads: within PROMPT_NOTES_CHARS, by rank (byRank: pinned, then the
+ * newest); then put back in the order they were made, so a new note adds to the end and the rest of the prompt stays
+ * as it was.
  */
-export function promptNotes<T extends Pick<MemoryNote, "id" | "text" | "pinned" | "uses" | "createdAt" | "updatedAt">>(
-  notes: readonly T[],
-  budget = PROMPT_NOTES_CHARS,
-): T[] {
+export function promptNotes<T extends Ranked & Pick<MemoryNote, "id" | "text">>(notes: readonly T[], budget = PROMPT_NOTES_CHARS): T[] {
   const ranked = [...notes].sort(byRank);
   const kept: T[] = [];
   let size = 0;

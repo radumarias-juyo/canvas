@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import type { AgentDefinition } from "../../shared/agents.ts";
 import {
+  dismisses,
   inUse,
   offRecord,
   MAX_NOTE_CHARS,
@@ -247,10 +248,10 @@ function NoteRow({ note, targets }: { note: MemoryNoteView; targets: NoteTargets
               <button
                 type="button"
                 disabled={busy}
-                title={waitsForConfirm(note) && note.source === "learned" ? "Not kept: nothing read it yet" : "Read no more, until you bring it back"}
+                title={dismisses(note) ? "Not kept: nothing read it yet" : "Read no more, until you bring it back"}
                 onClick={() => void run(() => api.forgetNote(note.id))}
               >
-                {waitsForConfirm(note) && note.source === "learned" ? "Dismiss" : "Forget"}
+                {dismisses(note) ? "Dismiss" : "Forget"}
               </button>
             </>
           )}

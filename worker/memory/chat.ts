@@ -38,8 +38,6 @@ export interface ChatMemoryDeps {
   alone(): boolean;
   /** The roster's agent whose conversation `conversation` is; null for pi's. */
   agentFor(conversation: string): MemoryAgent | null;
-  /** pi's turn now answers the owner's own message, not a hand-off from an agent (which nobody may have asked for). */
-  piByOwner(): Promise<boolean>;
   /**
    * Have the next model request of a conversation (pi's for none, else a session) start its prompt afresh, leaving out
    * every earlier one: an earlier prompt held the owner's own notes, which its readers may no longer see.
@@ -60,6 +58,8 @@ const MAX_SHOWN = 1_000;
 
 /** A conversation's section as its turn started: its text, and the notes it holds. */
 type Section = { text: string; ids: string[] };
+/** A conversation as the memos key it (PI, or its session), and its agent (null for pi's). */
+type Who = { key: string; agent: MemoryAgent | null };
 
 /**
  * The memory notes of one chat: who reads and who saves them for each conversation in it (pi's, and each agent's
@@ -79,12 +79,14 @@ export class ChatMemory {
   readonly #deps: ChatMemoryDeps;
   /** Each conversation's section, as its turn started, with who could read the chat then (`#audience`). */
   readonly #sections = new Map<string, { audience: string; section: Promise<Section> }>();
+  /** pi's turn now answers the owner's own message (refresh): not after a restart, nor in a hand-off's turn. */
+  #piByOwner = false;
 
   constructor(deps: ChatMemoryDeps) {
     this.#deps = deps;
   }
 
-  #who(conversation: string): { key: string; agent: MemoryAgent | null } {
+  #who(conversation: string): Who {
     const agent = this.#deps.agentFor(conversation);
     return { key: agent ? conversation : PI, agent };
   }
@@ -103,9 +105,9 @@ export class ChatMemory {
     };
   }
 
-  async #writer(agent: MemoryAgent | null): Promise<MemoryWriter> {
+  #writer(agent: MemoryAgent | null): MemoryWriter {
     const reader = this.#reader(agent);
-    const byOwner = agent ? agent.byOwner : reader.alone && (await this.#deps.piByOwner().catch(() => false));
+    const byOwner = agent ? agent.byOwner : reader.alone && this.#piByOwner;
     return { ...reader, byOwner, learnedBy: agent ? agent.name : AGENT_NAME };
   }
 
@@ -118,59 +120,70 @@ export class ChatMemory {
     return this.#deps.kv.get<string[]>(OWN_KEY) ?? [];
   }
 
-  #setOwn(key: string, held: boolean): void {
-    const own = this.#own().filter((each) => each !== key);
-    this.#deps.kv.put(OWN_KEY, held ? [...own, key] : own);
+  #markOwn(key: string): void {
+    const own = this.#own();
+    if (!own.includes(key)) this.#deps.kv.put(OWN_KEY, [...own, key]);
+  }
+
+  #clearOwn(key: string): void {
+    this.#deps.kv.put(
+      OWN_KEY,
+      this.#own().filter((each) => each !== key),
+    );
   }
 
   /** Start afresh the prompt of conversation `key` when it held the owner's own notes, which `reader` does not read. */
   async #forgetOwn(key: string, reader: MemoryReader): Promise<void> {
     if (readsOwnNotes(reader) || !this.#own().includes(key)) return;
     await this.#deps.freshPrompt(key === PI ? undefined : key);
-    this.#setOwn(key, false);
+    this.#clearOwn(key);
   }
 
   /**
-   * Read a conversation's notes again as its turn starts: pi's (no `conversation`), or an agent's session's. Counts a
-   * use of each note its prompt holds for the first time; starts its prompt afresh when an earlier one held the
-   * owner's own notes and it reads them no longer. Never rejects: on a failure the section says it.
+   * Read a conversation's notes again as its turn starts: pi's (no `conversation`; `byOwner`: the turn answers the
+   * owner's own message, not an agent's hand-off), or an agent's session's. Starts its prompt afresh first when an
+   * earlier one held the owner's own notes and it reads them no longer, and counts a use of each note its prompt holds
+   * for the first time. Never rejects: on a failure the section says it.
    */
-  refresh(conversation?: string): Promise<string> {
-    return this.#refresh(conversation, true).then((section) => section.text);
+  async refresh(conversation?: string, pi?: { byOwner: boolean }): Promise<string> {
+    if (conversation === undefined) this.#piByOwner = pi?.byOwner === true;
+    const who = conversation === undefined ? { key: PI, agent: null } : this.#who(conversation);
+    await this.#forgetOwn(who.key, this.#reader(who.agent)).catch((error: unknown) => console.error("memory prompt:", errorMessage(error)));
+    return (await this.#refresh(who)).text;
   }
 
-  #refresh(conversation: string | undefined, fresh: boolean): Promise<Section> {
-    const { key, agent } = conversation === undefined ? { key: PI, agent: null } : this.#who(conversation);
-    const section = this.#read(key, agent, fresh);
-    this.#sections.set(key, { audience: this.#audience(), section });
+  /** Read `who`'s section, kept for its turn. Not while a request is prepared (see #section): the next refresh does it. */
+  #refresh(who: Who): Promise<Section> {
+    const section = this.#read(who.key, who.agent);
+    this.#sections.set(who.key, { audience: this.#audience(), section });
     return section;
   }
 
   /**
    * The chat was shared, or changed its kind: every conversation whose prompt held the owner's own notes starts it
    * afresh at its next request, a turn already going included. Never rejects: a failure is logged, and the
-   * conversation's next turn tries again.
+   * conversation's next turn tries again (refresh).
    */
   async audienceChanged(): Promise<void> {
     const reader = this.#reader(null);
     if (readsOwnNotes(reader)) return;
-    for (const key of this.#own()) {
-      this.#sections.delete(key);
-      await this.#forgetOwn(key, reader).catch((error: unknown) => console.error("memory prompt:", errorMessage(error)));
-    }
+    await Promise.all(
+      this.#own().map((key) => {
+        this.#sections.delete(key);
+        return this.#forgetOwn(key, reader).catch((error: unknown) => console.error("memory prompt:", errorMessage(error)));
+      }),
+    );
   }
 
-  async #read(key: string, agent: MemoryAgent | null, fresh: boolean): Promise<Section> {
+  async #read(key: string, agent: MemoryAgent | null): Promise<Section> {
     const reader = this.#reader(agent);
     const directory = this.#directory(agent);
     try {
-      // Not while a request is being prepared (a section read again then): the next turn's refresh does it.
-      if (fresh) await this.#forgetOwn(key, reader);
       const { notes, more, off } = await directory.readNotes(reader);
       // Off the record as the owner's directory knows it (its sidebar's kind, or a chat not theirs): say so, as the
       // tools refuse there.
       if (off) return { text: memorySection({ kinds: ["off_record"] }, []), ids: [] };
-      if (notes.some((note) => note.scope === "user") && !this.#own().includes(key)) this.#setOwn(key, true);
+      if (notes.some((note) => note.scope === "user")) this.#markOwn(key);
       const shown = new Set(this.#deps.kv.get<string[]>(SHOWN_KEY + key) ?? []);
       const ids = notes.map((note) => note.id);
       const unseen = ids.filter((id) => !shown.has(id));
@@ -186,31 +199,30 @@ export class ChatMemory {
     }
   }
 
-  /** A conversation's section as it is kept, or read again when the chat's audience changed since. */
-  #section(conversation: string): Promise<Section> {
-    const { key } = this.#who(conversation);
-    const kept = this.#sections.get(key);
-    return kept && kept.audience === this.#audience() ? kept.section : this.#refresh(conversation, false);
+  /** `who`'s section as it is kept, or read again when the chat's audience changed since. */
+  #section(who: Who): Promise<Section> {
+    const kept = this.#sections.get(who.key);
+    return kept && kept.audience === this.#audience() ? kept.section : this.#refresh(who);
   }
 
   /** What the memory tools and section run on (worker/memory/tools.ts). */
   host(): MemoryHost {
     return {
       // Read again when the chat was shared or changed its kind since: never a section read for fewer readers.
-      section: async (conversation) => (await this.#section(conversation)).text,
+      section: async (conversation) => (await this.#section(this.#who(conversation))).text,
       note: async (conversation, note) => {
         const { agent } = this.#who(conversation);
-        return this.#directory(agent).learnNote(await this.#writer(agent), note);
+        return this.#directory(agent).learnNote(this.#writer(agent), note);
       },
       // The notes the prompt does not hold first: those it holds the model has already.
       recall: async (conversation, query) => {
-        const { agent } = this.#who(conversation);
-        const { ids } = await this.#section(conversation);
-        return this.#directory(agent).recallNotes(this.#reader(agent), query, ids);
+        const who = this.#who(conversation);
+        const { ids } = await this.#section(who);
+        return this.#directory(who.agent).recallNotes(this.#reader(who.agent), query, ids);
       },
       forget: async (conversation, id) => {
         const { agent } = this.#who(conversation);
-        return this.#directory(agent).forgetNoteFor(await this.#writer(agent), id);
+        return this.#directory(agent).forgetNoteFor(this.#writer(agent), id);
       },
     };
   }

@@ -16,7 +16,7 @@ import {
   type MemoryReader,
   type MemoryScope,
   type MemoryWriter,
-  waitsForConfirm,
+  dismisses,
 } from "../../shared/memory.ts";
 import { searchWords } from "../../shared/util.ts";
 import type { Sql } from "../members.ts";
@@ -104,7 +104,7 @@ export class UserMemory {
     if (typeof text !== "string") return text;
     const place = placeNote(this.#checked(writer), input.scope, input.kind);
     if ("error" in place) return place;
-    const added = this.store.add({ ...place, text, source: "learned", kind: input.kind, learnedBy: writer.learnedBy, byOwner: writer.byOwner });
+    const added = this.store.add({ ...place, text, source: "learned", kind: input.kind, learnedBy: writer.learnedBy });
     if ("error" in added) return added;
     this.#deps.changed();
     return { ...added, ...(place.narrowed && { narrowed: true as const }) };
@@ -134,7 +134,7 @@ export class UserMemory {
    * The notes `reader` reads that hold every word of `query` (all for none), up to MAX_RECALLED: those not among
    * `shown` (the ones its prompt holds) first, then by rank.
    */
-  recall(reader: MemoryReader, query = "", shown: readonly string[] = []): MemoryNote[] {
+  recall(reader: MemoryReader, query: string, shown: readonly string[]): MemoryNote[] {
     const words = searchWords(query);
     const inPrompt = new Set(shown);
     const found = this.store
@@ -173,11 +173,7 @@ export class UserMemory {
   /** Forget a note; one learned that waits for a confirm is dismissed: deleted, as nothing read it. */
   forget(id: string): MemoryNote | { error: string } {
     const note = this.store.get(id);
-    if (note?.source === "learned" && waitsForConfirm(note)) {
-      this.store.delete(id);
-      this.#deps.changed();
-      return note;
-    }
+    if (note && dismisses(note)) return this.delete(id) ?? note;
     const forgotten = this.store.forget(id);
     if ("error" in forgotten) return forgotten;
     if (forgotten.changed) this.#deps.changed();

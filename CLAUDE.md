@@ -40,7 +40,10 @@ with `@cloudflare/vite-plugin`, pnpm; configured and deployed with the `cf` CLI 
 - Memory notes (`shared/memory.ts`, `worker/memory/`): a `memory` table in the owner's `UserDirectory`, scoped just me /
   this agent / this chat. Who reads a note is `reads`, where a learned note goes is `placeNote`: the owner's own notes
   only in a private chat with nobody else in it; nothing from or into a chat off the record (`mayLeave`); a learned fact,
-  and anything pi saves in a chat others are in, waits unconfirmed until the owner confirms it. Keep those rules in code.
+  and anything pi saves in a chat others are in or in an agent's hand-off, waits unconfirmed until the owner confirms it.
+  A run's sessions never read the owner's own notes (their reports reach other chats). A prompt stays in the transcript:
+  once one held the owner's own notes and the chat is shared, its conversation starts the prompt afresh
+  (`worker/memory/fresh.ts`, `ChatMemory.audienceChanged`). Keep those rules in code.
 - Shared chats (`worker/chat-routes.ts`, `worker/members.ts`): the owner invites people by single-use link; they share
   the one conversation and the one agent, which always acts as the owner (owner's MCP sign-ins, files, skills; artifacts
   owned by the owner). The chat object checks membership on every socket and prompt; keep it that way. Once a chat
