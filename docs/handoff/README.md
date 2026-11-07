@@ -4,7 +4,9 @@ Radu stopped the agents implementation on 2026-11-07 (about 18:28 UTC) and asked
 agent. This folder is that handoff. It was written from the repository, the Git history, the open PRs, every task thread and
 the lead thread's files in the project's shared folder. Nothing was merged, deployed or force-pushed to produce it.
 
-Start here, then read the two unfinished-PR documents:
+Start here. (Update, ~19:00 UTC: Radu approved merging the two open PRs, and both are now merged into `feat/agents`;
+see section 4. The two PR documents are kept as the record of what remains unverified.)
+
 
 - [pr-113-agent-limits.md](pr-113-agent-limits.md) — T6, autonomy levels, guardrails, approvals (PR #113)
 - [pr-110-members-agents.md](pr-110-members-agents.md) — T8, members bring their own agents (PR #110)
@@ -65,7 +67,8 @@ flag in the final PR; see [original-plan.md](original-plan.md) decision 5):
   offers / metrics** (`worker/agents/router.ts`, `speak-up.ts`, `funnel.ts`, `spend.ts`, `worker/metrics.ts`).
 - **E2E** (`e2e/`, `pnpm e2e`): Playwright against the dev server with a scripted model (`DEV_MODEL=script`,
   `worker/dev-model.ts`) and stand-in MCP servers (`e2e/stand-in.ts`, `test/fake-portal.ts`).
-- Not yet in `feat/agents`: the write gate and Limits UI (#113) and seats / private forks (#110).
+- The write gate and Limits UI (#113, merged 60168c6) and seats / private forks (#110, merged a8cac57). A seat's writes are
+  currently refused (see section 4).
 
 ## 3. Completed work (merged into `feat/agents`, head b2f2422, verified from `git log`)
 
@@ -87,41 +90,49 @@ flag in the final PR; see [original-plan.md](original-plan.md) decision 5):
 | #120 | 4993ba3 | runs round 4 | lead branch |
 | #114 | 17dd6c8 | T10 speak up, router, budgets, checklists, offers, metrics | "Let agents speak up, add metrics" |
 | #121 | b2f2422 | end-to-end check: 12 browser flows on a scripted model | lead |
+| #113 | 60168c6 | T6 autonomy levels, guardrails, approvals, Needs you (incl. round 4 from `wip/pr113-round4`) | "Add agent limits and approvals" |
+| #110 | a8cac57 | T8 members' own agents: seats, private forks, review before posting (incl. the #121 merge and `drafted`, and a merge of #113) | "Let members bring their own agents" |
 
-(#104-#109, #111, #112, #114-#121 as in project memory; #110 and #113 are the two open ones.) Leftover low-severity gaps from
+(#104-#114 and #115-#121 as in project memory, plus #110 and #113 merged on 2026-11-07 ~19:00 UTC.) Leftover low-severity gaps from
 those PRs are in [known-gaps.md](known-gaps.md) — include them in the final PR description. Per-task lead reviews are in
 [reviews/](reviews/); the briefs each task started from are in [briefs/](briefs/). The lead's final status table is
 [lead-status-2026-11-07-0846.md](lead-status-2026-11-07-0846.md).
 
-## 4. Unfinished work
+## 4. Unfinished work (after the merges)
 
-1. **PR #113 (T6)** — round 4 (items 34-41) fixed and tested but only on `wip/pr113-round4`; not verified by the lead, no security
-   review of round 4; item 9 (seat owner) waits for #110. -> [pr-113-agent-limits.md](pr-113-agent-limits.md)
-2. **PR #110 (T8)** — round 3 (items 28-35) claimed fixed but never verified; the #121 merge and `drafted` work only on
-   `wip/pr110-merge-e2e`; item 17 waits for #113. -> [pr-110-members-agents.md](pr-110-members-agents.md)
-3. Un-skip three e2e flows (limits, members' agents, speak-up needs `INTEREST_MODEL`).
+Both open PRs were merged into `feat/agents` (head **a8cac57**) with Radu's approval, #113 first. What was merged was not fully
+verified by the lead; these remain, in order:
+
+1. **Verify what was merged unverified**: #113 round 4 (items 34-41, [reviews/pr113.md](reviews/pr113.md)) with a `/security-review`
+   of it, and the undecided code-review finding (a routed turn alone with the owner can read sign-in servers; its session keeps
+   the results after the chat is later shared; `ChatMemory.audienceChanged` does not refresh that session);
+   #110 round 3 (items 28-35, [reviews/pr110.md](reviews/pr110.md)). Details: [pr-113-agent-limits.md](pr-113-agent-limits.md),
+   [pr-110-members-agents.md](pr-110-members-agents.md).
+2. **Seat owner in the write gate** (#113 item 9 / #110 item 17): `#callerOf` in `worker/chat-agent.ts` does not know a seat's
+   turns, so a member's agent's writes in a shared chat are refused (fail closed). Make the gate treat the seat's owner as "the
+   owner" and add a test.
+3. Un-skip three e2e flows (limits, members' agents, speak-up needs `INTEREST_MODEL`) and settle the e2e flake (flow f).
 4. Final full-branch `/complete-review-and-fix`, preview deploy to a separate Worker, screenshots, the draft PR into `main`.
    -> [remaining-work.md](remaining-work.md)
 
-All other task threads (T1-T5, T7, T9, T10, E2E) are finished and merged; their threads hold nothing unpushed (checked: see
+All other task threads (T1-T5, T7, T9, T10) are finished and merged; their threads hold nothing unpushed (see
 [branches-and-artifacts.md](branches-and-artifacts.md)).
 
-## 5. Merge order
+## 5. Merge order (done)
 
-1. Verify and merge **#113** into `feat/agents` (squash, by the lead with Radu's agreement).
-2. Merge feat/agents into **#110**, verify its round 3, add the seat owner work (#113 item 9 / #110 item 17), merge it.
-3. Un-skip e2e flows, final review, preview deploy, draft PR `feat/agents` -> `main`.
+#113 was merged first (60168c6), then #110 after merging `feat/agents` into it and resolving 11 conflicted files (a8cac57).
+Next: step 3-4 above, and the one draft PR `feat/agents` -> `main`, which only Radu merges.
 
-`feat/agents` is currently up to date with `main` (main is 6e1b667; 0 commits behind, 16 ahead). Keep it rebased/merged on `main`
-if `main` moves. Other open PRs against `main` (#26 local runtime models, #102 MCP sign-in after a domain move, #103 chat cost on
-phones) are unrelated to this feature; #102 touches MCP sign-in and may conflict with T3's `worker/mcp/oauth.ts` work.
+`feat/agents` was up to date with `main` (main 6e1b667) when this was written. Keep it merged with `main` if `main` moves. Other
+open PRs against `main` (#26 local runtime models, #102 MCP sign-in after a domain move, #103 chat cost on phones) are unrelated;
+#102 touches MCP sign-in and may conflict with T3's `worker/mcp/oauth.ts` work.
 
 ## 6. Dependencies, bindings and config the feature needs (names only, no values)
 
 Deploy configuration the final PR must list (from the lead's notes and `cloudflare.config.ts`):
 
 - `AGENT_ROUTER_MODEL`, `INTEREST_MODEL`, `RUNS_DAILY_USD`; optional `METRICS` Analytics Engine dataset (#114).
-- `AGENT_TURNS` rate-limit binding, namespace 4204, 10 per 60 s (added by #110 only).
+- `AGENT_TURNS` rate-limit binding, namespace 4204, 10 per 60 s (added by #110, now in `feat/agents`).
 - `PAGE_AI` rate-limit binding (namespace 4202) and `PAGE_AI_MODEL`, `PAGE_AI_DAILY_USD` — from PR #89, already in
   `cloudflare.config.ts` on feat/agents (check that production has the binding).
 - Push: secrets `PUSH_VAPID_PUBLIC_KEY`, `PUSH_VAPID_PRIVATE_KEY`, `PUSH_SUBJECT` (generate with `scripts/vapid-keys.ts`); optional
@@ -146,20 +157,22 @@ Chromium for `pnpm e2e` and the page check tests (in the cloud container set `E2
 
 ## 8. Verification done for this handoff (2026-11-07, UTC)
 
-- Branch and PR state read from GitHub (open PRs: #26, #102, #103, #110, #113; no review threads or check runs on #110/#113).
-- Heads confirmed with `git ls-remote`: `feat/agents` b2f2422, #110 be0d051, #113 d3cd761, `main` 6e1b667.
-- The lead's merge branch `claude/project-thread-slcjuk` has a tree identical to `feat/agents` (empty `git diff`).
+- Branch and PR state read from GitHub; no review threads or check runs existed on #110/#113.
+- Heads confirmed with `git ls-remote` before the merges: `feat/agents` b2f2422, #110 be0d051, #113 d3cd761, `main` 6e1b667.
+  After the merges: `feat/agents` **a8cac57** (its tree equals PR branch `claude/project-thread-bkbjsb` at c146fc7, empty diff).
+- The lead's merge branch `claude/project-thread-slcjuk` has a tree identical to the earlier `feat/agents` b2f2422 (empty `git diff`).
 - Every task thread read to its latest status; the T6 and T8 threads were asked to push uncommitted work and did, to the two
   `wip/*` branches. The lead thread reported all its worktrees are clean checkouts of pushed heads.
 - Test, typecheck and e2e results (fresh installs from the lockfile, Node 22.23, pnpm 10.28):
 
 | Ref | `pnpm typecheck` | `pnpm test` | `pnpm e2e` |
 | --- | --- | --- | --- |
-| `feat/agents` b2f2422 | exit 0 | 1364 passed, 2 skipped | 7 passed, 1 failed, 4 not run (note below) |
-| #110 be0d051 | exit 0 | 1428 passed, 2 skipped | not run |
+| `feat/agents` b2f2422 (before the merges) | exit 0 | 1364 passed, 2 skipped | 7 passed, 1 failed, 4 not run (note below) |
+| #110 be0d051 (before) | exit 0 | 1428 passed, 2 skipped | not run |
 | `wip/pr110-merge-e2e` 489bf77 | exit 0 | 1436 passed, 2 skipped | 7 passed, 1 failed, 4 not run (same) |
-| #113 d3cd761 | exit 0 | 1445 passed, 2 skipped | not run |
+| #113 d3cd761 (before) | exit 0 | 1445 passed, 2 skipped | not run |
 | `wip/pr113-round4` cc66f3e | exit 0 | 1457 passed, 2 skipped | 7 passed, 1 failed, 4 not run (same) |
+| **merged tree = `feat/agents` a8cac57** (= #110 branch c146fc7) | exit 0 | **1529 passed, 2 skipped** (91 files passed, 1 skipped) | **not run** |
 
 `pnpm e2e` (run in this cloud container with `E2E_CHROMIUM=/opt/pw-browsers/chromium`, 15 tests defined): on `feat/agents`
 b2f2422, `wip/pr113-round4` and `wip/pr110-merge-e2e` alike, flows a-e and g (7 tests) pass, **flow "f. bob follows ada's agent and
@@ -175,10 +188,10 @@ sense is `pnpm typecheck` plus the review skills.
 
 ## 9. What needs Radu's approval
 
-- Every merge (task PRs into `feat/agents` were pre-approved on 2026-11-06 for the lead thread; with the lead stopped, ask again
-  or confirm that the next agent is the lead), and above all the final PR into `main` — never merged by an agent.
-- Pushes to the open PR branches `claude/project-thread-h00jsq` (#113) and `claude/project-thread-bkbjsb` (#110), or force pushes
-  to anything. Force pushes of rewritten task branches were refused by the permission classifier before; use merge commits or new
+- Every further merge. Radu approved merging #110 and #113 into `feat/agents` on 2026-11-07 ("you merge them as you see fit,
+  approved"); that covered those two PRs only, not `main`. The final PR into `main` is never merged by an agent.
+- Pushes to any PR branch, or force pushes to anything (the pushes to the #110 and #113 branches in this handoff were covered by
+  the merge approval). Force pushes of rewritten task branches were refused by the permission classifier before; use merge commits or new
   branches.
 - Any deploy, including a preview deploy: needs Radu's `cf` device-login code, and a separate Worker name.
 - Creating the `AGENT_TURNS` binding or any new secret on a real account.

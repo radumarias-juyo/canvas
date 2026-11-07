@@ -6,13 +6,13 @@ Checked 2026-11-07 ~18:45 UTC against `git ls-remote`, GitHub and the shared pro
 
 | Branch | Head | State |
 | --- | --- | --- |
-| `main` | 6e1b667 | production source; `feat/agents` is 16 ahead, 0 behind |
-| `feat/agents` | b2f2422 | long-lived integration branch; #104-#109, #111, #112, #114-#121 squash-merged into it |
-| `claude/project-thread-bkbjsb` | be0d051 | PR #110 (T8), open |
+| `main` | 6e1b667 | production source; `feat/agents` is ahead, 0 behind |
+| `feat/agents` | a8cac57 | long-lived integration branch; #104-#109, #111-#121, #113 (60168c6) and #110 (a8cac57) squash-merged into it |
+| `claude/project-thread-bkbjsb` | c146fc7 | PR #110 (T8), merged as a8cac57; head = wip/pr110-merge-e2e + merge of feat/agents (#113) |
 | `wip/pr110-merge-e2e` | 489bf77 | #110 + feat/agents b2f2422 merged + `drafted` (saved from the T8 thread during this handoff) |
-| `claude/project-thread-h00jsq` | d3cd761 | PR #113 (T6), open |
+| `claude/project-thread-h00jsq` | cc66f3e | PR #113 (T6), merged as 60168c6; head = wip/pr113-round4 |
 | `wip/pr113-round4` | cc66f3e | #113 + round 4 fixes + feat/agents b2f2422 merged (saved from the T6 thread during this handoff) |
-| `handoff/agents-continuation` | this branch | docs only, cut from feat/agents b2f2422 |
+| `handoff/agents-continuation` | this branch | docs only, cut from feat/agents b2f2422 and merged with a8cac57 |
 | `claude/project-thread-slcjuk` | 4ea664c | lead's integration/e2e branch; tree identical to feat/agents (empty diff), fully merged via #121 |
 | `claude/project-thread-8plygb` (T1), `778l4e` (T2), `s4mewb` (T3), `55r4nj` (T4), `bpnddo` (T5), `w2h5lv` (T7), `bgfa9m` (T9), `8zkqto` (T10) | various | task branches, all squash-merged (the PRs above); kept for history, nothing to continue |
 

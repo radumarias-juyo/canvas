@@ -2,6 +2,15 @@
 
 Handoff written 2026-11-07 ~18:40 UTC. Read [README.md](README.md) first for the project, branch model and rules.
 
+> **UPDATE 2026-11-07 ~19:00 UTC — MERGED.** Radu approved the merges. `wip/pr110-merge-e2e` (489bf77) plus a merge of
+> `feat/agents` 60168c6 (#113) with conflict fixes (commit c146fc7, typecheck clean, `pnpm test` 1529 passed / 2 skipped) was pushed
+> onto the PR branch (a fast-forward of be0d051) and PR #110 was squash-merged into `feat/agents` as **a8cac57**. The text below
+> describes the state before the merge; read "What remains" as open follow-ups. Round 3 (items 28-35) was never verified by the lead and
+> `pnpm e2e` flows for members' agents were never written. Merge-conflict decisions: the controller's `Caller` is imported in
+> `worker/chat-agent.ts` as `TurnCaller` (the write gate has its own `Caller`); `#configureAgent` takes an optional `alone` flag and a
+> seat's turn passes `alone: false`, so the "alone with the owner reads sign-in servers" rule from #113 never applies to a seat
+> (its reply goes to a room with other people); the Setup tab saves both `assumed` and `reviewBeforePosting`.
+
 ## Goal and acceptance
 
 Goal: a member of a shared chat can add one of their own agents to it. The agent runs as a **seat**: a pi session for that

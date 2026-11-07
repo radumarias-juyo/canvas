@@ -2,6 +2,15 @@
 
 Handoff written 2026-11-07 ~18:40 UTC. Read [README.md](README.md) first for the project, branch model and rules.
 
+> **UPDATE 2026-11-07 ~19:00 UTC — MERGED.** Radu approved the merges ("you merge them as you see fit"). `wip/pr113-round4`
+> (cc66f3e) was pushed onto the PR branch (a fast-forward of d3cd761) and PR #113 was squash-merged into `feat/agents` as
+> **60168c6**, so round 4 (items 34-41) *is* in `feat/agents` (the tree of 60168c6 equals cc66f3e). The text below describes the state
+> before the merge; read "What remains" as the list of open follow-ups: round 4 was never verified by the lead, had no
+> `/security-review`, the open code-review finding (step 5) is undecided, and item 9 (seat owner in `#callerOf`) is still open.
+> Item 9 status after #110 merged: a seat's turn is not found by `#callerOf` (seats keep their turns in `agent_seat_turns`, not
+> in the roster), so a member's agent's writes through a seat are **refused** ("this session has no turn that may change anything"),
+> i.e. fail closed. Making them work as the seat owner is still to do.
+
 ## Goal and acceptance
 
 Goal: every MCP call that is not read-only goes through one write gate in the hub. What happens depends on the agent's
@@ -71,7 +80,7 @@ there is no data to migrate.
 
 ## What remains, in exact execution order
 
-1. **Get the round 4 work onto a branch that Radu has agreed on** (see Approvals): `wip/pr113-round4` (cc66f3e) is the
+1. **Get the round 4 work onto a branch that Radu has agreed on** (see Approvals): `wip/pr113-round4` (cc66f3e, now merged) was the
    state to continue from. It already contains the fixes below.
 2. Round 4 items (from [reviews/pr113.md](reviews/pr113.md)), all fixed in 6938338 and its two review-pass commits, but
    NOT yet checked by the lead:

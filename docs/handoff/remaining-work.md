@@ -3,12 +3,14 @@
 Source: the lead thread's last plan (status posts up to 08:45 UTC and the relay at 18:32 UTC), `original-plan.md`, and Radu's rules.
 Steps 1-2 are detailed in [pr-113-agent-limits.md](pr-113-agent-limits.md) and [pr-110-members-agents.md](pr-110-members-agents.md).
 
-1. **#113 round 4**: take `wip/pr113-round4` (cc66f3e), verify items 34-41 (see [reviews/pr113.md](reviews/pr113.md) round 4),
-   run `/security-review` on the round, decide the one open code-review finding, then merge into `feat/agents`. *Approval: Radu
-   (merge, push to the PR branch).*
-2. **#110 round 3**: take `wip/pr110-merge-e2e` (489bf77), merge `feat/agents` in again (it will have #113), verify items 28-35
-   ([reviews/pr110.md](reviews/pr110.md) round 3), do the seat owner work in the write gate (#113 item 9 / #110 item 17), run
-   `pnpm e2e`, then merge into `feat/agents`. *Approval: Radu.*
+**Status 2026-11-07 ~19:00 UTC: #113 (60168c6) and #110 (a8cac57) are merged into `feat/agents`** with Radu's approval, so the old steps 1-2
+became verification work:
+
+1. **Verify #113 round 4** (items 34-41, [reviews/pr113.md](reviews/pr113.md)), run `/security-review` on it, decide the one open
+   code-review finding. Fix in PRs into `feat/agents`.
+2. **Verify #110 round 3** (items 28-35, [reviews/pr110.md](reviews/pr110.md)) the same way, and **make the write gate know a seat's
+   turns** (`#callerOf`, #113 item 9 / #110 item 17): today a member's agent's writes are refused, which is safe but unfinished.
+   Mind the merge decisions listed in [pr-110-members-agents.md](pr-110-members-agents.md) (`alone: false` for seats).
 3. **End-to-end flows for the two PRs.** In `e2e/agents.spec.ts` replace the three `test.skip` placeholders (lines ~316-318):
    limits and approvals (do steps waiting for the owner), members' own agents in a shared chat, and speaking up unprompted. The
    third needs `INTEREST_MODEL` (Workers AI embeddings), which `PI_OFFLINE=1` leaves empty, so it needs a stand-in or stays a
