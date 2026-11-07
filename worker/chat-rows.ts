@@ -28,6 +28,8 @@ type Row = {
   kind: string | null;
   pinned_at: number;
   closed_at: number;
+  agent_id: string | null;
+  preview: string | null;
 };
 
 /**
@@ -51,6 +53,9 @@ export class ChatRows {
         own_title: "TEXT",
       });
     }
+    // An agent's own conversation: the agent it is the home of, and its last post, shown like a contact's.
+    addColumns(sql, "chats", { agent_id: "TEXT", preview: "TEXT" });
+    sql.exec("CREATE INDEX IF NOT EXISTS chats_by_agent ON chats (agent_id) WHERE agent_id IS NOT NULL");
     sql.exec(`
       CREATE TABLE IF NOT EXISTS page_chats (artifact_id TEXT PRIMARY KEY, chat_id TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS branch_counts (root TEXT PRIMARY KEY, n INTEGER NOT NULL);
@@ -59,13 +64,14 @@ export class ChatRows {
   }
 
   /** The user's own chats and the ones shared with them, most recent first, as their sidebar shows them. */
-  list(): ChatSummary[] {
+  list(contact: (agentId: string | null, preview: string | null) => Pick<ChatSummary, "agent"> = () => ({})): ChatSummary[] {
     const rows = this.#sql
       .exec(
         `SELECT id, COALESCE(own_title, title) AS title, created_at, updated_at, NULL AS shared_by, shared, status,
-           (activity_at > seen_at OR marked_unread = 1) AS unread, mentioned_at > seen_at AS mentioned, kind, pinned_at, closed_at FROM chats
+           (activity_at > seen_at OR marked_unread = 1) AS unread, mentioned_at > seen_at AS mentioned, kind, pinned_at, closed_at,
+           agent_id, preview FROM chats
          UNION ALL SELECT id, COALESCE(own_title, title), joined_at, updated_at, owner_name, 0, status,
-           (activity_at > seen_at OR marked_unread = 1), mentioned_at > seen_at, kind, pinned_at, closed_at FROM shared_chats
+           (activity_at > seen_at OR marked_unread = 1), mentioned_at > seen_at, kind, pinned_at, closed_at, NULL, NULL FROM shared_chats
          ORDER BY updated_at DESC`,
       )
       .toArray() as Row[];
@@ -81,6 +87,7 @@ export class ChatRows {
       ...(row.mentioned === 1 && { mentioned: true as const }),
       ...(row.pinned_at > 0 && { pinnedAt: row.pinned_at }),
       ...(row.closed_at > 0 && { closed: true as const }),
+      ...contact(row.agent_id, row.preview),
     }));
   }
 

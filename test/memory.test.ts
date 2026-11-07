@@ -18,6 +18,7 @@ import {
   type MemoryWriter,
 } from "../shared/memory.ts";
 import type { McpToolInfo } from "../worker/agent/mcp.ts";
+import { AgentRuns } from "../worker/agents/runs/store.ts";
 import { allowedTools } from "../worker/agents/turns.ts";
 import { ChatMemory, type MemoryAgent } from "../worker/memory/chat.ts";
 import { coverageOf } from "../worker/memory/coverage.ts";
@@ -514,5 +515,17 @@ describe("export manifest", () => {
     };
     expect(checkManifest(manifest)).toHaveProperty("error");
     expect(checkManifest({ ...manifest, account: { skills: [], memory: [] } })).not.toHaveProperty("error");
+  });
+});
+
+describe("a run's sessions", () => {
+  it("are its agent's, so its turns read that agent's notes and never pi's", async () => {
+    const runs = new AgentRuns(memorySql(), () => 1_000);
+    runs.begin(RESEARCH, 500, "schedule", false);
+    await runs.beginItem(RESEARCH, 500, "", "", async () => "item-session");
+    runs.setReplySession(RESEARCH, 500, "reply-session");
+    runs.update(RESEARCH, 500, { detail: { sessions: { page: "page-session" } } });
+    for (const session of ["item-session", "reply-session", "page-session"]) expect(runs.agentOfSession(session)).toBe(RESEARCH);
+    expect(runs.agentOfSession("pi-session")).toBeNull();
   });
 });

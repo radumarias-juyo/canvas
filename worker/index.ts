@@ -20,12 +20,14 @@ import { catalogSource, loadCatalog } from "./models.ts";
 import { skillsRoute } from "./skills-routes.ts";
 import { agentsRoute } from "./agents-routes.ts";
 import { memoryRoute } from "./memory-routes.ts";
+import { runsRoute } from "./runs-routes.ts";
 import { chatAgentName } from "./chat-agent.ts";
 import { newId, PathError, Storage } from "./storage/index.ts";
 
 export { ChatAgent } from "./chat-agent.ts";
 export { Sandbox } from "./sandbox.ts";
 export { UserDirectory } from "./users.ts";
+export { Source } from "./source.ts";
 
 /**
  * Where each artifact lives. That never changes once an artifact exists, so a
@@ -206,6 +208,8 @@ async function route(request: Request, env: Env): Promise<Response> {
     mcpServers(env),
   );
   if (agents) return agents;
+  const runs = await runsRoute(request, uid, directory, env.DEV_TOOLS === "true");
+  if (runs) return runs;
 
   const memory = await memoryRoute(request, directory);
   if (memory) return memory;

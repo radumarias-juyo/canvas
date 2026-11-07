@@ -4,7 +4,7 @@
 import type { AssistantMessage, UserMessage } from "@earendil-works/pi-ai";
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { TOOL_SEARCH_TOOL_NAME } from "@earendil-works/pi-durable/tool-search";
-import { CHAT_AGENT_KIND, MAX_HOPS, speakerLabel, type AgentDefinition, type ChatAgentReplyData } from "../../shared/agents.ts";
+import { CHAT_AGENT_KIND, MAX_HOPS, mayUseServer, speakerLabel, type AgentDefinition, type ChatAgentReplyData } from "../../shared/agents.ts";
 import { textOf } from "../../shared/canonical.ts";
 import { MEMORY_RECALL_TOOL } from "../../shared/memory.ts";
 import { CHAT_CONTEXT_KIND, CHAT_COPY_KIND, type ChatCopyData } from "../../shared/chat-kinds.ts";
@@ -175,8 +175,10 @@ export function askLine(entry: EntryRecord, self: string, ownerUid: string): str
   }
   if (entry.kind === CHAT_AGENT_KIND) {
     const data = entry.data as unknown as ChatAgentReplyData & { copied?: true };
-    // Its own replies are in its session, unless copied into a branch, where its session started afresh.
-    if ((data.agentId === self && !data.copied) || !data.text) return undefined;
+    if (!data.text) return undefined;
+    // Its own replies are in its session already (unless copied into a branch, where its session started afresh), but
+    // for those of its runs (a report, a reply in a run's own session).
+    if (data.agentId === self && !data.copied) return data.run ? `[you, in a run]: ${said(data.text)}` : undefined;
     return askOf({ name: data.name, kind: "agent" }, data.text);
   }
   const message = entry.model?.[0];
@@ -241,13 +243,26 @@ export function allowedTools(
   byOwner: boolean,
   signsIn: (server: string) => boolean,
 ): string[] {
-  const own = (server: string) => !agent.servers || agent.servers.includes(server);
+  const own = (server: string) => mayUseServer(agent, server);
   const shared = (server: string) => own(server) && (agent.sharedServers ? agent.sharedServers.includes(server) : !signsIn(server));
   return tools.filter((name) => {
     if (NEVER_FOR_AGENTS.includes(name)) return false;
     const info = mcp.get(name);
     if (byOwner) return !info || own(info.server);
     return info ? info.readOnly && shared(info.server) : READ_TOOLS.includes(name);
+  });
+}
+
+/**
+ * The tools a run's work step may use, by name, of `tools`: as a turn its owner did not ask for, only reading tools,
+ * but the read-only MCP tools of all of its own servers (`servers`, every server when absent), those that sign in each
+ * user too: a run reads as its owner, with nobody else in it.
+ */
+export function runTools(tools: readonly string[], mcp: ReadonlyMap<string, McpToolInfo>, agent: Pick<AgentDefinition, "servers">): string[] {
+  return tools.filter((name) => {
+    if (NEVER_FOR_AGENTS.includes(name)) return false;
+    const info = mcp.get(name);
+    return info ? info.readOnly && mayUseServer(agent, info.server) : READ_TOOLS.includes(name);
   });
 }
 
