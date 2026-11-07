@@ -1,6 +1,6 @@
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
-import { CHAT_AGENT_KIND, checkAgent, type AgentDefinition, type ChatAgentReplyData, type ChatTurnData } from "../shared/agents.ts";
+import { AGENT_PROPOSE_TOOL, CHAT_AGENT_KIND, checkAgent, type AgentDefinition, type ChatAgentReplyData, type ChatTurnData } from "../shared/agents.ts";
 import { CHAT_MESSAGE_KIND, PUBLISH_TOOL } from "../shared/protocol.ts";
 import { FILES_WRITE_TOOL } from "../worker/chat-traces.ts";
 import type { McpToolInfo } from "../worker/agent/mcp.ts";
@@ -688,8 +688,19 @@ describe("Member agents: a seat in the member's own object", () => {
     chat.members.delete(ANA.uid);
     await expect(chat.seatLog(ANA.uid, planner.agentId, -1, 1)).rejects.toThrow(/not in the chat/);
     // A reply from a seat no longer in the chat is let go, and posts nothing.
-    expect(await chat.seatEnded(ANA.uid, planner.agentId, 1, { status: "done", text: "hi", published: [], items: [], sources: [] })).toBe(true);
+    expect(await chat.seatEnded(ANA.uid, planner.agentId, 1, { status: "done", text: "hi", published: [], drafted: [], items: [], sources: [] })).toBe(true);
     expect(chat.posts).toEqual([]);
+  });
+
+  it("posts the agents a seat's turn drafted with its reply: saved in the member's directory, their card is the member's", async () => {
+    const chat = room();
+    const planner = chat.add(ANA, "planner");
+    const [turn] = chat.turns.call([planner.agentId], chat.say(ANA, "@planner draft me a weekly digest"));
+    await settle();
+    const drafted = { agentId: "0123456789abcdef", name: "digest", version: 1 };
+    chat.member(ANA.uid).sessions.finish(turn.id, "Drafted it.", [tool(AGENT_PROPOSE_TOOL, drafted)]);
+    await settle();
+    expect(chat.posts).toEqual([expect.objectContaining({ turn: turn.id, ownerUid: ANA.uid, drafted: [drafted] })]);
   });
 
   it("posts a seat's reply once though the seat sends it again after a restart", async () => {
@@ -700,7 +711,7 @@ describe("Member agents: a seat in the member's own object", () => {
     const ana = chat.member(ANA.uid);
     ana.sessions.finish(turn.id, "Hello.");
     await settle();
-    const ended: SeatResult = { status: "done", text: "Hello.", published: [], items: [], sources: [] };
+    const ended: SeatResult = { status: "done", text: "Hello.", published: [], drafted: [], items: [], sources: [] };
     expect(await chat.seatEnded(ANA.uid, planner.agentId, turn.id, ended)).toBe(true);
     expect(chat.posts).toHaveLength(1);
   });

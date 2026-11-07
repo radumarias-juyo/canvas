@@ -12,6 +12,7 @@
     "types": "cf workers types",
     "typecheck": "cf workers types && tsc -b",
     "test": "vitest run",
+    "e2e": "playwright test -c e2e/playwright.config.ts --trace off",
     "prices": "node --experimental-strip-types scripts/prices.ts"
   },
   "dependencies": {
@@ -38,6 +39,7 @@
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "beta",
+    "@playwright/test": "1.63.0",
     "@types/node": "^22.20.5",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",

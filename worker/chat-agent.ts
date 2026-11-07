@@ -139,6 +139,7 @@ import {
   type Catalog,
 } from "./models.ts";
 import { withFailuresReported } from "./model-health.ts";
+import { scriptModel, scriptOn, SCRIPT_MODEL } from "./dev-model.ts";
 import { chatAgentName, parseChatAgentName } from "./chat-name.ts";
 import { inboxIds, queuedIdsOf, queuedMessages } from "./queue.ts";
 import { mcpAuthStore, readSystemPrompt, saveSystemPrompt, SYSTEM_PROMPT_KEY, type Tag } from "./users.ts";
@@ -487,7 +488,8 @@ export class ChatAgent extends DurableObject<Env> {
         // A new chat starts on its user's last pick, else on Auto (startingSetting); PiHarness then finds the root and
         // leaves it as it is.
         if (!(await pi.conversation(ROOT_CONVERSATION_ID, context))) {
-          const setting = startingSetting(await this.#savedModel(), this.env.ROUTER_MODEL);
+          // The scripted dev model is the picker's only choice: nothing for Auto to pick among.
+          const setting = startingSetting(await this.#savedModel(), scriptOn(this.env) ? "" : this.env.ROUTER_MODEL);
           if (isAuto(setting)) this.ctx.storage.kv.put(AUTO_KEY, true);
           else if (setting) await pi.root(context, { agent: this.#agentChange(setting) });
         }
@@ -498,7 +500,7 @@ export class ChatAgent extends DurableObject<Env> {
       return pi;
     },
     // What a chat runs on until someone picks a model, or Auto picks one for it.
-    defaults: this.#defaults(defaultModelChoice(this.env.MODEL, this.env.THINKING_LEVEL)),
+    defaults: this.#defaults(),
   });
   readonly members = new ChatMembers(this.ctx.storage.sql);
   /** The chat's kind, the page it discusses and the chat it branched off from (worker/chat-kind.ts). */
@@ -812,7 +814,10 @@ export class ChatAgent extends DurableObject<Env> {
     }
   }
 
-  #defaults({ model, thinkingLevel }: ModelChoice) {
+  /** The deployment's default model: MODEL at THINKING_LEVEL, or with DEV_MODEL=script the scripted model (worker/dev-model.ts). */
+  #defaults(): { model: Model<Api>; thinkingLevel: ModelChoice["thinkingLevel"] } {
+    if (scriptOn(this.env)) return { model: scriptModel().model as Model<Api>, thinkingLevel: "off" };
+    const { model, thinkingLevel } = defaultModelChoice(this.env.MODEL, this.env.THINKING_LEVEL);
     return { model: this.ai(model), thinkingLevel };
   }
 
@@ -971,7 +976,7 @@ export class ChatAgent extends DurableObject<Env> {
 
   /** The picker's id of the model `agent` runs on. */
   #modelOf(agent: Pick<AgentState, "model">): string {
-    return agent.model ? modelKey(agent.model.provider, agent.model.modelId) : this.env.MODEL;
+    return agent.model ? modelKey(agent.model.provider, agent.model.modelId) : scriptOn(this.env) ? SCRIPT_MODEL : this.env.MODEL;
   }
 
   /**
@@ -1051,7 +1056,8 @@ export class ChatAgent extends DurableObject<Env> {
   #models(): Models {
     const source = catalogSource(this.env, this.storage.models);
     // Metered: each call counted for the chat's day and its owner's, tagged for AI Gateway, refused past the budget.
-    return this.spend.models(withFailuresReported(piModels(this.ai.provider, this.gemini), (id, error) => this.ctx.waitUntil(markFailing(source, id, error))));
+    const models = piModels(this.ai.provider, this.gemini, { scripted: source.scripted });
+    return this.spend.models(withFailuresReported(models, (id, error) => this.ctx.waitUntil(markFailing(source, id, error))));
   }
 
   /** The chat's one conversation. PiHarness has made it by the time pi() resolves. */

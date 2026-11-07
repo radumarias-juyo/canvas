@@ -4,3 +4,6 @@ dist/
 .dev.vars
 .cloudflare/
 mcp-servers.json
+e2e/screens/
+e2e/.state/
+e2e/.results/

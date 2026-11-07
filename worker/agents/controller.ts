@@ -14,6 +14,7 @@ import {
   entryAskKey,
   handOffs,
   itemsIn,
+  draftedIn,
   MAX_ASK_CHARS,
   publishedIn,
   turnAskKey,
@@ -26,9 +27,9 @@ import {
  * private servers it called, whether it ran in a fork (only its reply reaches the shared session, from the log), and
  * whether its owner reviews it before it is posted.
  */
-export type Outputs = Required<Pick<ChatAgentReplyData, "published" | "items" | "sources">> &
+export type Outputs = Required<Pick<ChatAgentReplyData, "published" | "drafted" | "items" | "sources">> &
   Pick<ChatAgentReplyData, "saved"> & { forked?: boolean; review?: boolean };
-export const NO_OUTPUTS: Outputs = { published: [], items: [], sources: [] };
+export const NO_OUTPUTS: Outputs = { published: [], drafted: [], items: [], sources: [] };
 
 /** How one operation in an agent's session ended, as PiHarness.wait says. */
 export interface TurnResult {
@@ -376,7 +377,7 @@ export class AgentTurns {
         return;
       }
       // Only a turn whose input went in has outputs in its session.
-      const { published, items, sources, review, saved, ...out } = outputs ?? (now.submitted ? await this.#outputs(entry, now) : NO_OUTPUTS);
+      const { published, drafted, items, sources, review, saved, ...out } = outputs ?? (now.submitted ? await this.#outputs(entry, now) : NO_OUTPUTS);
       const forked = out.forked === true || now.forked === true;
       // Its owner sees a reply built on a private server first, when they review those (`held`).
       const held = review === true && sources.length > 0;
@@ -399,6 +400,7 @@ export class AgentTurns {
         ...(!done && { failed: result.reason ?? "it ended without an answer" }),
         ...(shows && published.length && { published }),
         ...(shows && saved?.length && { saved }),
+        ...(shows && drafted.length && { drafted }),
         ...(turn.run && { run: turn.run }),
         ...(items.length && { items }),
         ...(forked && { forked: true as const }),
@@ -632,7 +634,7 @@ export class AgentTurns {
  * sources are unknown, and its owner reviews it when they review such replies.
  */
 export function unreadOutputs(forked: boolean, review: boolean): Outputs {
-  return { published: [], items: [], sources: [UNKNOWN_SOURCE], ...(forked && { forked: true }), ...(review && { review: true }) };
+  return { published: [], drafted: [], items: [], sources: [UNKNOWN_SOURCE], ...(forked && { forked: true }), ...(review && { review: true }) };
 }
 
 /** How long a call between objects waits before it is made again (retried), after each failure a retry may get past. */
@@ -652,7 +654,8 @@ async function retried<T>(call: () => Promise<T>): Promise<T> {
 }
 
 /**
- * What a turn left among its session's entries: the pages it published, and the records its results held; for one in
+ * What a turn left among its session's entries: the pages it published, the agents it drafted (saved in its owner's
+ * directory, wherever its session runs: a seat's in the member's), and the records its results held; for one in
  * a fork, only those `sources` keeps (the shared servers'), with the private servers it called.
  */
 export async function outputsOf(
@@ -660,10 +663,10 @@ export async function outputsOf(
   forked: boolean,
   sources: () => Promise<Pick<Outputs, "items" | "sources" | "review">>,
 ): Promise<Outputs> {
-  const published = publishedIn(entries);
-  if (!forked) return { published, items: itemsIn(entries), sources: [] };
+  const [published, drafted] = [publishedIn(entries), draftedIn(entries)];
+  if (!forked) return { published, drafted, items: itemsIn(entries), sources: [] };
   const saved = [...chatTraces(entries).files];
-  return { published, forked: true, ...(saved.length && { saved }), ...(await sources()) };
+  return { published, drafted, forked: true, ...(saved.length && { saved }), ...(await sources()) };
 }
 
 /**

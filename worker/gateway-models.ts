@@ -15,8 +15,8 @@ import type { ModelFailures } from "./model-health.ts";
 
 type ModelCost = Model<Api>["cost"];
 
-/** A provider AI Gateway reaches with a key it holds (Workers AI needs none). */
-export type GatewayProviderId = Exclude<ProviderId, "workers-ai">;
+/** A provider AI Gateway reaches with a key it holds (Workers AI needs none; the scripted dev model is no provider of it). */
+export type GatewayProviderId = Exclude<ProviderId, "workers-ai" | "script">;
 
 /** A model as a provider's own list describes it: its id, and whatever else the list says. */
 export interface ListedModel {

@@ -626,6 +626,8 @@ export type ChatAgentReplyData = {
    * reply, as posted, so it finds them again.
    */
   saved?: string[];
+  /** Agents it drafted in this turn (agent_propose, saved off in its owner's directory), for their draft cards. */
+  drafted?: AgentProposedDetails[];
   /** Set on a run's report and on a reply continuing it: which run, so a reply to it continues that run (shared/runs.ts). */
   run?: RunRef;
   /**
