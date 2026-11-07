@@ -7,10 +7,11 @@
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { conditionProblem, MAX_CONDITION } from "./conditions.ts";
 import type { ItemRef } from "./items.ts";
+import { checkRules, GuardrailError, MAX_APPROVAL_HOURS, type GuardrailRule } from "./limits.ts";
 import { AGENT_NAME } from "./mentions.ts";
 import { EFFORT_LABELS } from "./models.ts";
 import type { RunRef } from "./runs.ts";
-import { isObject, withoutUnseen } from "./util.ts";
+import { isObject, isTimeZone, withoutUnseen } from "./util.ts";
 
 /** An agent's handle, as "@name" calls it: a lowercase letter, then letters, digits or hyphens. */
 export const AGENT_NAME_PATTERN = /^[a-z][a-z0-9-]{1,23}$/;
@@ -112,8 +113,17 @@ export interface AgentInput {
   scope?: { list: LookStep; each: true };
   workflow?: AgentStep[];
   autonomy?: AutonomyLevel;
+  /** Rules on the inputs of the calls it makes that change data (shared/limits.ts), besides its owner's for all agents. */
+  guardrails?: GuardrailRule[];
+  /** How long an action of its waits for its owner before it expires; DEFAULT_APPROVAL_HOURS when absent. */
+  approvalHours?: number;
   /** The fields the model guessed, shown as "Assumed" until a person confirms them. */
   assumed?: string[];
+  /**
+   * A reply built on a private server (one not shared with the chat) shows first as a draft only its owner sees, who
+   * posts it to the chat, edits it, or discards it.
+   */
+  reviewBeforePosting?: boolean;
   /**
    * It may post in a chat unasked, when the chat allows it too: after a pause in a conversation close to its job, or to
    * offer to pick up a question nobody answered (worker/agents/funnel.ts). Off when absent.
@@ -201,17 +211,6 @@ function names(value: unknown, field: string): string[] | undefined {
 function checkTime(value: unknown): string {
   if (typeof value !== "string" || !/^([01]\d|2[0-3]):[0-5]\d$/.test(value)) fail('A schedule\'s time is "HH:MM", 24-hour, such as "07:00".');
   return value;
-}
-
-/** Whether the runtime knows `tz` as an IANA time zone. */
-export function isTimeZone(tz: unknown): tz is string {
-  if (typeof tz !== "string" || !tz || tz.length > 64) return false;
-  try {
-    new Intl.DateTimeFormat("en", { timeZone: tz });
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function checkLook(value: unknown, what: string): LookStep {
@@ -412,7 +411,20 @@ export function checkAgent(input: unknown): AgentInput {
     const outside = serversNamed({ trigger, scope, workflow }).find((server) => !servers.includes(server));
     if (outside) fail(`A step names ${outside}, which is not one of the agent's servers: add it to its servers, or change the step.`);
   }
+  let guardrails: GuardrailRule[] | undefined;
+  try {
+    guardrails = input.guardrails === undefined || input.guardrails === null ? undefined : checkRules(input.guardrails);
+  } catch (error) {
+    if (error instanceof GuardrailError) fail(`An agent's limits: ${error.message}`);
+    throw error;
+  }
+  const hours = input.approvalHours ?? undefined;
+  if (hours !== undefined && (typeof hours !== "number" || !Number.isInteger(hours) || hours < 1 || hours > MAX_APPROVAL_HOURS)) {
+    fail(`Actions wait 1 to ${MAX_APPROVAL_HOURS} hours for approval.`);
+  }
   const assumed = names(input.assumed, "assumed fields");
+  const review = input.reviewBeforePosting ?? undefined;
+  if (review !== undefined && typeof review !== "boolean") fail("An agent's review before posting is true or false.");
   const speaksUp = input.speaksUp ?? undefined;
   if (speaksUp !== undefined && typeof speaksUp !== "boolean") fail("An agent's speaksUp is true or false.");
   return {
@@ -429,7 +441,10 @@ export function checkAgent(input: unknown): AgentInput {
     ...(scope && { scope }),
     ...(workflow && { workflow }),
     ...(autonomy !== undefined && { autonomy: autonomy as AutonomyLevel }),
+    ...(guardrails?.length && { guardrails }),
+    ...(hours !== undefined && { approvalHours: hours as number }),
     ...(assumed?.length && { assumed }),
+    ...(review && { reviewBeforePosting: true }),
     ...(speaksUp && { speaksUp: true }),
   };
 }
@@ -471,6 +486,18 @@ export interface ChatAgentView {
   shared?: true;
   /** Someone in the chat muted it here: it posts nothing unprompted in this chat (its owner's agent settings can undo it). */
   muted?: true;
+  /** It runs in its owner's own agent object (a member's agent), as a seat: the chat sends it turns and reads its replies. */
+  seat?: true;
+}
+
+/**
+ * A reply that waits for its agent's owner to review it before it reaches the chat (reviewBeforePosting): only they see
+ * it, with the private servers it read, and Post to chat, Edit or Discard.
+ */
+export interface AgentDraftView {
+  turn: number;
+  agentId: string;
+  reply: ChatAgentReplyData;
 }
 
 /** An MCP server of the deployment, as the agent editor lists it: whether it signs in each user, and this one now. */
@@ -485,6 +512,8 @@ export interface AgentServerInfo {
 /** One chat an agent is in, as its owner's directory keeps it (the chats tell it when they add or remove the agent). */
 export interface AgentChatUse {
   chatId: string;
+  /** The chat's owner, for one of someone else's the agent's owner brought it into as a member. */
+  ownerUid?: string;
   /** The chat's title in the owner's list. */
   title: string;
   /** Whether its owner shares the agent with the people of that chat. */
@@ -519,6 +548,8 @@ export const COPIED_FIELDS = [
   "speaksUp",
 ] as const satisfies readonly (keyof AgentInput)[];
 export type CopiedField = (typeof COPIED_FIELDS)[number];
+/** The fields a copy takes only as its new owner sets them when they copy it, never from the one it copies. */
+export const OWN_FIELDS = ["reviewBeforePosting"] as const satisfies readonly (keyof AgentInput)[];
 
 /** Changes to a definition's fields, as a request carries them: null clears an optional one (checkAgent reads it as none). */
 export type AgentChanges = { [K in keyof AgentInput]?: AgentInput[K] | null };
@@ -541,7 +572,8 @@ export function copiedFields(agent: Pick<AgentInput, CopiedField>): Pick<AgentIn
 
 /**
  * The fields of someone's copy of `original`: what they changed (`changes`, a request's body, checked by checkAgent when
- * saved), else the original's. Only the fields a copy takes: never its state, its guesses or where it came from.
+ * saved), else the original's. Only the fields a copy takes, and its own (OWN_FIELDS) as they set them: never its
+ * state, its guesses or where it came from.
  */
 export function copyInput(original: Pick<AgentInput, CopiedField>, changes: AgentChanges): AgentChanges {
   const fields: AgentChanges = {};
@@ -549,6 +581,7 @@ export function copyInput(original: Pick<AgentInput, CopiedField>, changes: Agen
     const value = Object.hasOwn(changes, field) ? changes[field] : original[field];
     if (value !== undefined) Object.assign(fields, { [field]: value });
   }
+  for (const field of OWN_FIELDS) if (changes[field] !== undefined) Object.assign(fields, { [field]: changes[field] });
   return fields;
 }
 
@@ -595,12 +628,32 @@ export type ChatAgentReplyData = {
   failed?: string;
   /** Artifacts it published in this turn, for the app to show their cards. */
   published?: { artifactId: string; title: string; version: number }[];
+  /**
+   * The files a forked turn saved (its agent's shared session never saw the calls): what its agent reads with its
+   * reply, as posted, so it finds them again.
+   */
+  saved?: string[];
   /** Agents it drafted in this turn (agent_propose, saved off in its owner's directory), for their draft cards. */
   drafted?: AgentProposedDetails[];
   /** Set on a run's report and on a reply continuing it: which run, so a reply to it continues that run (shared/runs.ts). */
   run?: RunRef;
-  /** The records its tool results held (shared/items.ts), as chips under the reply: from the servers, never its text. */
+  /**
+   * The records its tool results held (shared/items.ts), as chips under the reply: from the servers, never its text. A
+   * reply from a private turn has only those of the servers its agent shares with the chat.
+   */
   items?: ItemRef[];
+  /**
+   * The servers outside its shared-chat list the turn read (its owner asked it, in a fork of its session): the source
+   * chip, "from Ana's calendar · posted by Ana". As the app recorded the calls, never as the model says.
+   */
+  sources?: string[];
+  /**
+   * Its turn ran in a fork of its session (its owner asked it, and it may reach private servers): the agent's shared
+   * session never saw it, and reads the reply, as posted, in its next catch-up.
+   */
+  forked?: true;
+  /** Posted by its owner from a draft they reviewed (reviewBeforePosting): their uid. */
+  postedBy?: string;
 };
 
 export type AgentTurnStatus = "queued" | "running" | "done" | "failed" | "stopped";
@@ -635,7 +688,11 @@ export interface ChatAgents {
  * then the turn that named pi, and `root` the chain it is in, which pi's answer carries on.
  */
 export const CHAT_TURN_KIND = "chat.turn";
-export type ChatTurnData = { turn: number; calledBy: ChatAgentReplyData["calledBy"]; hop: number; root?: number };
+/**
+ * What a turn's input entry says of it: its turn, who called it, its hop, and for a turn handed to pi the chain it is
+ * in (`root`) and the person who started that chain (`by`, whom the turns pi's answer hands on count for).
+ */
+export type ChatTurnData = { turn: number; calledBy: ChatAgentReplyData["calledBy"]; hop: number; root?: number; by?: string };
 
 /** How an agent is labelled in the lines its sessions read: "[research · agent]", "[Ana · person · your owner]". */
 export function speakerLabel(speaker: { name: string; kind: "person" | "agent"; owner?: boolean }): string {

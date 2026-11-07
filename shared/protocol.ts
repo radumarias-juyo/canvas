@@ -7,9 +7,10 @@ import type { EntryRecord } from "@earendil-works/pi-durable";
 import type { EntryReactions, Reactions } from "./reactions.ts";
 import type { Attachment, AttachmentInput } from "./attachments.ts";
 import type { Mention, MentionInput } from "./mentions.ts";
-import type { AgentColor, ChatAgentView } from "./agents.ts";
+import type { AgentColor, AgentDraftView, ChatAgentView } from "./agents.ts";
 import type { ChatKind, ChatPage } from "./chat-kinds.ts";
 import type { ChatAgentSettingsView } from "./agent-settings.ts";
+import type { PendingActionView } from "./limits.ts";
 
 export type McpErrorCode =
   | "server_not_connected"
@@ -631,6 +632,8 @@ export type ChatServerMessage =
   | { type: "callHint"; entry: number }
   /** The chat's agents besides pi (shared/agents.ts): on connect, and whenever one is added, removed, starts or ends a turn. */
   | { type: "agents"; agents: ChatAgentView[] }
+  /** The replies of this person's agents held for them to review (reviewBeforePosting): only their sockets get it. */
+  | { type: "agentDrafts"; drafts: AgentDraftView[] }
   /** The chat's agent settings (shared/agent-settings.ts): on connect, and whenever its owner changes them or an agent is muted. */
   | { type: "agentSettings"; settings: ChatAgentSettingsView }
   /**
@@ -639,6 +642,11 @@ export type ChatServerMessage =
    * call has run; then one batch per commit, until the turn ends (the `agents` message says so).
    */
   | { type: "agentEvents"; agent: string; turn: number; events: unknown[]; toolsElapsedMs?: Record<string, number> }
+  /**
+   * The chat's actions that wait, or waited, for its owner (shared/limits.ts), newest first: on connect, and whenever one
+   * is made or ends. The cards in the log (CHAT_ACTION_KIND entries) show their state from it.
+   */
+  | { type: "actions"; actions: PendingActionView[] }
   /** Sent just before the chat closes a removed person's socket, in case the close code is lost on the way. */
   | { type: "removed" }
   /** Sent to everyone just before the chat closes their sockets, when its owner deleted it. */

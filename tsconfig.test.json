@@ -82,6 +82,7 @@
     "worker/artifacts/manifest.ts",
     "worker/auth/access.ts",
     "worker/members.ts",
+    "worker/chat-name.ts",
     "worker/chat-kind.ts",
     "worker/chat-rows.ts",
     "worker/branch.ts",
@@ -130,6 +131,9 @@
     "src/agents/nav.ts",
     "src/agents/runs.ts",
     "src/agents/workflow.ts",
+    "src/agents/limits/rules.ts",
+    "src/chat/ActionCard.tsx",
+    "src/chat/people.tsx",
     "src/SignIns.tsx",
     "src/push.ts",
     "src/sidebar.ts"

@@ -68,7 +68,7 @@ import {
   type ModelChoice,
   type ModelSetting,
 } from "../shared/models.ts";
-import { deadline, errorMessage, formatBytes, listSome, mapLimit, memoAsync, serial, sha256Hex, singleFlight } from "../shared/util.ts";
+import { abortable, deadline, errorMessage, formatBytes, listSome, mapLimit, memoAsync, serial, sha256Hex, singleFlight } from "../shared/util.ts";
 import type { ChatSystemPrompt } from "../shared/system-prompt.ts";
 import type { SkillFileInfo } from "../shared/skill-files.ts";
 import { attachmentContent, parseAttachments, withoutImageData, type ToMarkdown } from "./agent/attachments.ts";
@@ -98,6 +98,7 @@ import { clearImported, DumpError, dumpChat, hasConversation, importedRoster, re
 import { idRemapper, type ChatDumpCursor, type ChatDumpPage, type ChatDumpPart, type ChatImportStart } from "../shared/data-export.ts";
 import {
   afterPublish,
+  announcePublished,
   checkDraft,
   FailedChecks,
   publishDraft,
@@ -105,6 +106,7 @@ import {
   type PublishedHost,
   type PublishScope,
   type PublishTarget,
+  type SessionRules,
   type WriteInput,
 } from "./agent/publish.ts";
 import { CheckBrowser } from "./artifacts/browser.ts";
@@ -116,9 +118,15 @@ import { chatOutFolder, chatTraces, type ChatTraces } from "./chat-traces.ts";
 import { Storage } from "./storage/index.ts";
 import { literalPath } from "./storage/paths.ts";
 import { newestFirst, type FileEntry } from "./storage/user-files.ts";
-import { connectStreamableHttp, signInRequired } from "./mcp/connect.ts";
-import { McpOAuthClient } from "./mcp/oauth.ts";
-import { McpFailure, McpHub } from "./mcp/hub.ts";
+import { connectAs } from "./mcp-connect.ts";
+import { CallHeld, McpFailure, McpHub } from "./mcp/hub.ts";
+import { ChatActions, type NewAction } from "./agents/limits/actions.ts";
+import { WriteGate, type Caller, type GateCall, type GateContext, type GateHost } from "./agents/limits/gate.ts";
+import { approvalEnd } from "./agents/limits/feed.ts";
+import { toolInput } from "./agents/limits/tell.ts";
+import { inputLevel, lowestLevel, turnLevel } from "./agents/limits/levels.ts";
+import { APP_APPROVAL_KIND, callLine, CHAT_ACTION_KIND, valueAt, type ActionActor, type ChatActionData, type PendingActionView } from "../shared/limits.ts";
+import { instantOf, wallClock } from "./agents/runs/schedule.ts";
 import { mcpServers, oauthServerNames, sharesResults, watchableForAll, type McpServerConfig } from "./mcp/servers.ts";
 import { CacheWarmer } from "./cache-warmer.ts";
 import { GeminiCompat } from "./gemini.ts";
@@ -140,38 +148,55 @@ import { withFailuresReported } from "./model-health.ts";
 import { scriptModel, scriptOn, SCRIPT_MODEL } from "./dev-model.ts";
 import { chatAgentName, parseChatAgentName } from "./chat-name.ts";
 import { inboxIds, queuedIdsOf, queuedMessages } from "./queue.ts";
-import { mcpAuthStore, readSystemPrompt, saveSystemPrompt, SYSTEM_PROMPT_KEY, type Tag } from "./users.ts";
+import { readSystemPrompt, saveSystemPrompt, SYSTEM_PROMPT_KEY, type Tag } from "./users.ts";
 import {
   AGENT_ID_PATTERN,
-  AUTONOMY_LABELS,
   CHAT_AGENT_KIND,
   CHAT_TURN_KIND,
   inputOf,
   copiedFields,
+  mayUseServer,
   runServers,
   stepServers,
   type AgentDefinition,
+  type AgentDraftView,
   type AgentStep,
   type AgentTurnView,
   type ChatAgentReplyData,
   type ChatAgents,
   type ChatAgentView,
+  type ChatTurnData,
   type SharedAgentView,
+  type StepInput,
 } from "../shared/agents.ts";
-import { AgentTurns, sessionOf, type PiChain, type TurnHost, type TurnOutcome } from "./agents/controller.ts";
+import { AgentTurns, type Caller as TurnCaller, type Outputs, type PiChain, type TurnHost, type TurnOutcome } from "./agents/controller.ts";
 import { isTurnEntry, TurnFilter } from "./agents/live.ts";
-import { ChatRoster, type AgentTurn, type RosterEntry } from "./agents/roster.ts";
-import { reportOf, SignInNeeded, whenOf, type DeliveryRequest } from "./agents/runs/executor.ts";
+import {
+  ChatRoster,
+  newestShown,
+  sessionOf,
+  shownOf,
+  type AgentTurn,
+  type HeldPage,
+  type PostedPage,
+  type RosterEntry,
+  type RunningTurn,
+} from "./agents/roster.ts";
+import { actedOf, jsonOf, missedDecisions, reportOf, SignInNeeded, whenOf, type ActContext, type ActResult, type DeliveryRequest } from "./agents/runs/executor.ts";
 import { AgentRunner, type RunAlarm, type RunnerHost, type WatchAlarm } from "./agents/runs/runner.ts";
-import { AgentRuns, type RunRecord } from "./agents/runs/store.ts";
+import { actedMark, AgentRuns, type EndedRun, type RunRecord } from "./agents/runs/store.ts";
 import { answeredIn, reportContext, runInstructions, RUN_STEP_KIND, workSpend, type RunStepData } from "./agents/runs/report.ts";
 import { publishedAlready, publishFindings, publishRebuilt, readOnlyDeclaration, runMark } from "./agents/runs/page.ts";
 import { compileWorkflow } from "./agents/runs/compile.ts";
 import { sourceName } from "./agents/runs/source.ts";
 import type { Value } from "../shared/conditions.ts";
 import { runRef, type AgentRunDetail, type AgentRunList, type RunDelivery, type RunRef } from "../shared/runs.ts";
+import type { RoomLink, RoomRef, SeatBatch, SeatLink, SeatResult, SeatTurn } from "./agents/seats/link.ts";
+import { memberAgentName, seatChatId } from "./agents/seats/names.ts";
+import { addRefusal, mayRemove, mayShare, seatedEntry, type ChatRules } from "./agents/seats/rules.ts";
+import { AgentSeats, type SeatHost } from "./agents/seats/seat.ts";
 import { agentsExtension } from "./agents/tools.ts";
-import { ChatMemory, runAskedByOwner, type MemoryAgent } from "./memory/chat.ts";
+import { ChatMemory, runAskedByOwner, type Whose } from "./memory/chat.ts";
 import { freshPrompt, withoutNoteResults } from "./memory/fresh.ts";
 import { memoryExtension } from "./memory/tools.ts";
 import { coverageOf } from "./memory/coverage.ts";
@@ -188,7 +213,9 @@ import {
   piBusy,
   piLogEntry,
   runTools,
+  sharedServer,
   speakersFor,
+  turnSources,
 } from "./agents/turns.ts";
 import { entryOffer, OFFER_YES } from "../shared/offers.ts";
 import {
@@ -220,7 +247,7 @@ import {
   type ChatAgentSettings,
   type ChatAgentSettingsView,
 } from "../shared/agent-settings.ts";
-import { agentRouterId, agentRouterModel, AGENT_ROUTE_MS, piPicks, routeAgents, routesAgents } from "./agents/router.ts";
+import { agentRouterId, agentRouterModel, AGENT_ROUTE_MS, piPicks, routableAgents, routeAgents, routesAgents } from "./agents/router.ts";
 import { answered, embedder, FOLLOW_UP_AFTER_MS, looksLikeAsk, PAUSE_MS } from "./agents/funnel.ts";
 import { SpeakUp, type FunnelEvent } from "./agents/speak-up.ts";
 import { ChatSpend, meterExtension, type Spent } from "./agents/spend.ts";
@@ -239,8 +266,8 @@ export interface ChatRefusal {
   status: 400 | 403 | 404 | 409;
 }
 
-/** A turn as the people in the chat see it: never the message that asked for it. */
-const turnView = ({ root: _root, ask: _ask, submitted: _submitted, ...turn }: AgentTurn): AgentTurnView => turn;
+/** A turn as the people in the chat see it: never the message that asked for it, nor the session it ran in. */
+const turnView = ({ root: _root, ask: _ask, submitted: _submitted, session: _session, ...turn }: AgentTurn): AgentTurnView => turn;
 
 function refuse(status: ChatRefusal["status"], error: string): ChatRefusal {
   return { error, status };
@@ -257,6 +284,8 @@ function personOf({ uid, name }: Person): { uid: string; name: string } {
 }
 
 const DELETED = "This chat was deleted.";
+/** How long the refresh before a turn holds for the same ask (#refreshForTurn): the steps that set one turn up. */
+const REFRESHED_FOR = 10_000;
 const DELETING = "This chat is being deleted.";
 const PAGE_CLOSED = "This chat is no longer open to everyone who can see the page.";
 const GONE_KEY = "deleted";
@@ -348,7 +377,16 @@ const IMPORTED_KEY = "imported";
  * within the chain's cap. Set when the first agent joins, so pi's earlier answers start nothing.
  */
 const PI_SCAN_KEY = "piScan";
-type PiScan = { through: number; chain?: PiChain };
+/**
+ * What the chat's sessions name (#readTraces): the chat's (`shared`), what the forks whose replies were not posted
+ * named (`withheld`), and of those what is in no other session (`hidden`): not the chat's for anyone but its owner.
+ */
+type SessionTraces = { shared: ChatTraces; withheld: ChatTraces; hidden: ChatTraces };
+/** What some of the chat's sessions name (#readTraces): how far each was read, and those read to their end for good. */
+type SeenTraces = { through: Map<string, number>; settled: Set<string>; traces: ChatTraces };
+const seenTraces = (): SeenTraces => ({ through: new Map(), settled: new Set(), traces: chatTraces([]) });
+/** How far #piScan read pi's log, the chain pi's next answer is in, and the person who started it (`by`, whom its turns count for). */
+type PiScan = { through: number; chain?: PiChain; by?: string };
 /**
  * Set on an agent's home conversation: the agent whose own chat this is (the owner's directory marks the chat with
  * it too). There the agent is on the roster and answers every message that calls nobody else; its runs run here.
@@ -364,7 +402,7 @@ const RUN_STALE_MS = 60_000;
 /** Who a run's tell step names for its owner's own conversation. */
 const OWNER_TARGETS = new Set(["owner", "me", "you", "home", "chat"]);
 
-/** How many of pi's sessions #transcriptTraces reads at once: a chat with agents (or many runs) has many. */
+/** How many of pi's sessions #readTraces reads at once: a chat with agents (or many runs) has many. */
 const TRACE_READS_AT_ONCE = 6;
 
 /** The newest transcript entries, read at most once per message (see #recentEntries). */
@@ -477,6 +515,8 @@ export class ChatAgent extends DurableObject<Env> {
   /** The chat's agents besides pi, each in a session of its own, and their turns (worker/agents/). */
   readonly roster = new ChatRoster(this.ctx.storage.sql);
   readonly turns = new AgentTurns(this.#turnHost());
+  /** The seats of this user's agents in other people's chats, when this object is where one of them runs (worker/agents/seats/). */
+  readonly seats = new AgentSeats(this.ctx.storage.sql, this.#seatHost());
   /** The router that picks agents for a message naming nobody (AGENT_ROUTER_MODEL); undefined: none picks. */
   readonly #agentRouter = agentRouterModel(this.env.AGENT_ROUTER_MODEL);
   /** Agents that speak up (worker/agents/speak-up.ts). */
@@ -513,6 +553,8 @@ export class ChatAgent extends DurableObject<Env> {
     kv: this.ctx.storage.kv,
   });
   readonly reactions = new ChatReactions(this.ctx.storage.sql);
+  /** The calls that wait, or waited, for the owner: proposals and approvals (worker/agents/limits/). */
+  readonly actions = new ChatActions(this.ctx.storage.sql, () => this.chatId);
   readonly sockets = new ChatSockets({
     events: () => this.harness.session().events(),
     runStartedAt: (snapshot) => this.runStartedAt(snapshot),
@@ -526,6 +568,7 @@ export class ChatAgent extends DurableObject<Env> {
     takeOffer: (author, entry) => this.takeOffer(author, entry),
     abort: (by, agent) => this.abort(by, agent),
     agents: () => this.agentViews(),
+    drafts: (uid) => this.draftsFor(uid),
     agentSettings: () => this.#settingsView(),
     runningAgents: () => this.roster.runningSessions(),
     agentEvents: (session) => this.harness.session(session).events(),
@@ -534,15 +577,24 @@ export class ChatAgent extends DurableObject<Env> {
     auto: () => this.#auto(),
     reactions: () => this.reactions.all(),
     react: (by, entry, emoji, on) => this.react(by, entry, emoji, on),
+    actions: () => this.actions.list(),
   });
   /** The runs of the agent whose home this chat is, its schedules and watches (worker/agents/runs/). */
-  readonly runs = new AgentRuns(this.ctx.storage.sql, Date.now, (run) => this.#runEnded(run));
+  readonly runs = new AgentRuns(
+    this.ctx.storage.sql,
+    Date.now,
+    (run) => this.#runEnded(run),
+    (agentId, dueAt) => this.ctx.waitUntil(this.#directory.runResumed(agentId, dueAt).catch((error: unknown) => console.error("feed:", errorMessage(error)))),
+  );
   readonly runner = new AgentRunner(this.#runnerHost(), this.ctx.storage.sql);
   /** Shares the object's alarm with pi: runs at local times, watches on intervals. */
   readonly scheduler = new Scheduler({
     callbacks: {
       run: (payload: RunAlarm) => this.#onAlarm(() => this.runner.fired(payload)),
       watch: (payload: WatchAlarm) => this.#onAlarm(() => this.runner.watchTick(payload)),
+      // A seat's results its rooms have not taken yet go again (AgentSeats.#report).
+      seats: () => this.#onAlarm(async () => this.seats.wake()),
+      expire: (payload: { id: string }) => this.#onAlarm(() => this.#expireAction(payload.id)),
       // Agents that speak up (worker/agents/speak-up.ts): after a pause in the chat, and once a question waited long.
       pause: () => this.#onAlarm(() => this.#afterPause()),
       followUp: () => this.#onAlarm(() => this.#followUps()),
@@ -596,12 +648,20 @@ export class ChatAgent extends DurableObject<Env> {
   #kindWrites: Promise<unknown> = Promise.resolve();
   /** The last read of the queue, by the inbox ids it was for: every socket asks after the same commit. */
   #queuedRead: { key: string; read: Promise<QueuedMessage[]> } | undefined;
-  /** What the transcript names, and how far each of pi's sessions was read for it (see #transcriptTraces). */
-  #seen: { through: Map<string, number>; traces: ChatTraces } = { through: new Map(), traces: chatTraces([]) };
+  /** What the transcript names, and how far each of pi's sessions was read for it (see #readTraces). */
+  #seen: SeenTraces = seenTraces();
+  /** The same, of the forks whose replies were not posted (ChatRoster.withheld): only the owner's (see #readTraces). */
+  #seenWithheld: SeenTraces = seenTraces();
+  /** The pages only forks whose replies were not posted published, as last read with no fork running (#withheldPage). */
+  #hiddenPages: Set<string> | undefined;
+  /** How often the roster's turns changed (#broadcastAgents): what keeps #hiddenPages from a read that raced one. */
+  #rosterChanges = 0;
   /** Set while a broadcast of the agents' view waits for the current task to end (#broadcastAgents). */
   #agentsChanged = false;
   /** The asking line the skill classifier last read for an agent's turn (#skillsForTurn). */
   #skillsAsked: string | undefined;
+  /** The last refresh before a turn (#refreshForTurn), for the ask it was for. */
+  #refreshed: { ask: string; at: number; done: Promise<void> } | undefined;
   /** See #oneShotModels. */
   #oneShot: Models | undefined;
   /** What tells whether an aside is meant for the agent (CALL_HINT_MODEL); undefined when hints are off. */
@@ -634,8 +694,17 @@ export class ChatAgent extends DurableObject<Env> {
       artifacts: this.storage.artifacts,
       // Deriving the user's key is not free, so derive it once per object.
       files: memoAsync(() => this.storage.userFiles(this.uid)),
-      onPublished: (artifact, chatId) => afterPublish(this.#published, artifact, chatId),
+      onPublished: (artifact, chatId, session) => {
+        // A version a conversation apart from the chat published (an agent's private turn): kept by version, before
+        // anything else, so members never reach it before its reply is posted, nor hear of it (ChatRoster.release).
+        const held = session !== undefined && chatId === this.chatId && this.roster.recordPage(session, artifact.id, artifact.latest);
+        return afterPublish(this.#published, artifact, chatId, held);
+      },
+      rulesFor: (session) => this.#rulesFor(session),
+      onSaving: (session, paths) => this.roster.recordFiles(session, paths),
+      onDrafted: (session, id) => this.roster.recordDraft(session, id),
       broughtIn: (id) => this.#broughtIn().includes(id),
+      heldIn: (chatId, artifactId) => this.#heldIn(chatId, artifactId),
       proposeSkill: (skill) => this.#directory.saveSkill(skill, "agent", false),
       proposeAgent: (input) => this.#directory.saveAgent(input, "agent", false),
       checkPage: (input, signal) =>
@@ -649,9 +718,13 @@ export class ChatAgent extends DurableObject<Env> {
       look: lookFrom(env.CHECK_LOOK_MODEL, env.AI),
       review: () => this.#pageReviewer(),
       publishUnchecked: env.AUTH_MODE === "demo",
+      // Only a turn that runs its changes (the owner's own) may give a page tools that change data (see #callerOf).
+      mayPublishWrites: (session) => this.#callerOf({ kind: "session", session }, { server: "" }).then((caller) => caller.level === 4, () => false),
       failedChecks: new FailedChecks(),
       react: (emoji) => this.#agentReact(emoji),
     });
+    // Every call of a tool that changes data asks the gate first: who calls, how far they may go, the rules.
+    this.hub.guard(new WriteGate(this.#gateHost()));
     this.registry.install(promptExtension);
     this.registry.install(
       peopleExtension(
@@ -680,11 +753,15 @@ export class ChatAgent extends DurableObject<Env> {
   /**
    * The roster agent whose conversation `conversation` is, for its memory notes: its own session, a turn's own (a
    * reply to a run's report, in a fork of the run's), or one of its runs' (only reading tools, nobody asking: never
-   * the owner's turn). Null for pi's.
+   * the owner's turn), or a seat's (AgentSeats.memoryAgent). Null for pi's own conversation only; undefined for a
+   * session nobody knows any more (a fork whose turn ended), which reads and saves nothing.
    */
-  #memoryAgent(conversation: string): MemoryAgent | null {
+  #memoryAgent(conversation: string): Whose {
     // pi's own conversation is no agent's, whatever a run's rows hold.
     if (isPiConversation(conversation)) return null;
+    // A seat's session (this user's agent in someone else's chat) reads as that chat, never as this object's.
+    const seated = this.seats.memoryAgent(conversation);
+    if (seated) return seated;
     const entries = this.roster.list();
     const running = this.roster.allRunning();
     const turn = running.find((each) => {
@@ -696,9 +773,10 @@ export class ChatAgent extends DurableObject<Env> {
     const known = turn?.agentId ?? entries.find((each) => each.session === conversation)?.agentId;
     const ran = known === undefined || turn?.session !== undefined ? this.runs.agentOfSession(conversation) : null;
     const agentId = known ?? ran ?? undefined;
-    if (agentId === undefined) return null;
-    // A run's agent is on its home roster; one taken off it still reads only its own notes, never pi's.
-    const entry = entries.find((each) => each.agentId === agentId);
+    if (agentId === undefined) return undefined;
+    // A run's agent is on its home roster; one taken off it still reads only its own notes, never pi's. Never a member's
+    // seat with the same id (agent ids are unique per user only): its sessions run in its owner's object, not here.
+    const entry = entries.find((each) => each.agentId === agentId && each.seat === undefined);
     return { agentId, ownerUid: entry?.ownerUid ?? this.uid, name: entry?.name ?? "agent", byOwner: turn?.byOwner === true, ...(ran && { run: true }) };
   }
 
@@ -723,9 +801,16 @@ export class ChatAgent extends DurableObject<Env> {
    */
   onStart(): void {
     if (this.#gone) return;
-    // The agents' turns that were running, or waiting, go on: cheap when there are none. So do runs cut off.
+    // An approved call cut off by a restart may or may not have reached its server: never run again on its own.
+    const interrupted = this.#endInterruptedActions();
+    // The agents' turns that were running, or waiting, go on, and the seats here post what the rooms have not taken:
+    // cheap when there are none. So do runs cut off.
     this.turns.resume();
+    this.seats.wake();
     this.runner.resume();
+    // After the resume, which goes on only with runs that were running: a run a missed decision reopens goes on once,
+    // through AgentRunner.decided. Those just ended above hear through #actionEnded, after its note.
+    this.#tellRunsDecided(interrupted);
     this.#keepResuming();
     this.#reconcileHome();
     // An answer pi gave before the restart may not have been read for the agents it names, even once its run ended.
@@ -1381,12 +1466,8 @@ export class ChatAgent extends DurableObject<Env> {
   }
 
   /** Public servers connect as they are; a server with `auth: "oauth"` connects with this chat's user's own tokens. */
-  async #connect(server: McpServerConfig) {
-    if (server.auth !== "oauth") return connectStreamableHttp(server);
-    const store = mcpAuthStore(this.uid, server.name);
-    const { tokens, redirectUrl } = await store.get();
-    if (!tokens || !redirectUrl) throw signInRequired(server.name);
-    return connectStreamableHttp(server, new McpOAuthClient(store, server.name, { redirectUrl, interactive: false }));
+  #connect(server: McpServerConfig) {
+    return connectAs(this.uid)(server);
   }
 
   /** The owner, or a member: who may open this chat, prompt it and load its pages' per-user data. */
@@ -1633,7 +1714,7 @@ export class ChatAgent extends DurableObject<Env> {
         anyOn: roster.some((entry) => !entry.off),
         underBudget,
       });
-    const agentPicking = routes ? this.#pickAgents(agentRouter, roster, text, everyMessage, recentOnce) : undefined;
+    const agentPicking = routes ? this.#pickAgents(agentRouter, roster, author.uid, text, everyMessage, recentOnce) : undefined;
     // Pi's paid picks wait for that pick (capped at AGENT_ROUTE_MS): a message it hands to agents is not pi's (piPicks).
     // The free work goes ahead meanwhile.
     const picks = Promise.resolve(agentPicking ?? []).then((picked) => piPicks({ calling, underBudget, handedOn: picked.length > 0 }));
@@ -1753,14 +1834,16 @@ export class ChatAgent extends DurableObject<Env> {
       // the agent's session here, which has the report only.
       const continued =
         byOwner && repliesTo && speakers.includes(repliesTo) ? await this.#continuedRun(replied).catch(() => undefined) : undefined;
-      const caller = {
+      const caller: TurnCaller = {
         calledBy: { name: author.name, uid: author.uid, ...(routed && { routed: true as const }), ...(drafts && { drafts: true as const }) },
         // A Yes's chain never hands pi a turn: pi would run it with the owner's full tools.
         ...(drafts && { unattended: true as const }),
-        // The catch-up leaves the message out (askKey), so the input carries all of it a hand-off would.
-        ask: `${askOf({ name: author.name, kind: "person", owner: byOwner }, written, MAX_ASK_CHARS)}${files}`,
+        // The catch-up leaves the message out (askKey), so the input carries all of it a hand-off would. Each agent's
+        // owner is its own: a member's agent takes their messages as its owner's, and the chat owner's as anyone's (`call`
+        // holds byOwner only for the agents of the person who asked).
+        ask: (own) => `${askOf({ name: author.name, kind: "person", owner: own }, written, MAX_ASK_CHARS)}${files}`,
         askKey: messageAskKey({ uid: author.uid, sentAt }),
-        byOwner,
+        byOwner: true,
       };
       const others = continued ? speakers.filter((id) => id !== continued.agentId) : speakers;
       // One message, one chain: the other agents' turns share the continued one's, so MAX_HOPS holds for all of them.
@@ -1866,17 +1949,91 @@ export class ChatAgent extends DurableObject<Env> {
 
   /** Whether `path` of the owner's files belongs to this chat: attached to its messages, saved by its agent, or in its out/ folder. */
   async #isChatFile(path: string): Promise<boolean> {
-    return this.#inChat(path, await this.#transcriptTraces());
+    return this.#inChat(path, await this.#readTraces());
   }
 
-  #inChat(path: string, traces: ChatTraces): boolean {
-    return path.startsWith(chatOutFolder(this.chatId)) || traces.files.has(path);
+  /**
+   * Whether a file is the chat's: named in its sessions, or in its out/ folder, but for one only a fork whose reply was
+   * not posted saved (what an agent's private turn saved is the chat's once its reply is).
+   */
+  #inChat(path: string, { shared, hidden }: SessionTraces): boolean {
+    return !hidden.files.has(path) && (shared.files.has(path) || path.startsWith(chatOutFolder(this.chatId)));
   }
 
   /** The owner's files that belong to this chat (#isChatFile) and are still there, as the people it is shared with see them. */
   async chatFiles(): Promise<FileEntry[]> {
-    const [traces, listed] = await Promise.all([this.#transcriptTraces(), this.scope.files().then((files) => files.list())]);
-    return listed.filter((file) => this.#inChat(file.path, traces));
+    return (await this.#chatFiles(false)).files;
+  }
+
+  /**
+   * The chat's files that are still there (chatFiles), with the traces they were read by; `forOwner`: also those only a
+   * fork whose reply was not posted saved, which are the chat's for its owner.
+   */
+  async #chatFiles(forOwner: boolean): Promise<{ files: FileEntry[]; traces: SessionTraces }> {
+    const [traces, listed] = await Promise.all([this.#readTraces(), this.scope.files().then((files) => files.list())]);
+    const inChat = (path: string) => this.#inChat(path, traces) || (forOwner && traces.withheld.files.has(path));
+    return { files: listed.filter((file) => inChat(file.path)), traces };
+  }
+
+  /**
+   * Whether only a fork whose reply was not posted published `artifactId`: a page that is not the chat's yet, but for
+   * its owner. On a page's every call: read from the last trace read while no fork runs, as only a running fork adds
+   * such a page (#hiddenPages, which a change of the roster's turns lets go).
+   */
+  async #withheldPage(artifactId: string): Promise<boolean> {
+    if (!this.roster.anyWithheld()) return false;
+    return this.roster.withheldVersion(artifactId, 1) || (await this.#hiddenTracePages()).has(artifactId);
+  }
+
+  /** The pages only forks whose replies were not posted named (SessionTraces.hidden), kept while no fork runs (#hiddenPages). */
+  async #hiddenTracePages(): Promise<ReadonlySet<string>> {
+    // A turn apart from the chat (a fork, a run's reply session) adds to them while it runs.
+    const forking = () => this.roster.allRunning().some((turn) => turn.forked || turn.session !== undefined);
+    let hidden = this.#hiddenPages;
+    if (!hidden || forking()) {
+      const changes = this.#rosterChanges;
+      hidden = (await this.#readTraces()).hidden.artifacts;
+      // Kept only when no turn started or ended during the read.
+      if (changes === this.#rosterChanges && !forking()) this.#hiddenPages = hidden;
+    }
+    return hidden;
+  }
+
+  /** The pages not the chat's yet, but for their makers: those only unposted forks named, and those turns apart made. */
+  #hiddenArtifacts(tracePages: ReadonlySet<string>): Set<string> {
+    return new Set([...tracePages, ...this.roster.madeApart()]);
+  }
+
+  /** Whether `version` of a page is not the chat's yet: the page (#withheldPage), or that version (a fork's of a page the chat has). */
+  async #withheldVersion(artifactId: string, version: number): Promise<boolean> {
+    return this.roster.withheldVersion(artifactId, version) || (await this.#withheldPage(artifactId));
+  }
+
+  /**
+   * What conversation `session` may see and change while turns run apart from the chat (PublishScope.rulesFor): not the
+   * pages and versions other such turns made, and, apart itself with its reply reviewed, nothing the chat already has.
+   */
+  async #rulesFor(session: string): Promise<SessionRules> {
+    // With no turn apart from the chat waiting to be posted, nothing is withheld (and nothing is reviewed).
+    if (!this.roster.anyWithheld())
+      return { hidden: new Set(), hiddenVersion: () => false, own: new Set(), reviewed: false, chatFile: () => true, hiddenDraft: () => false };
+    const fork = this.roster.fork(session);
+    const reviewed = !!fork && !fork.posted && fork.review;
+    // The chat's files matter only to a reviewed session (which may change none): only it waits for the whole read.
+    const [pages, traces] = await Promise.all([this.#hiddenTracePages(), reviewed ? this.#readTraces() : undefined]);
+    const own = this.roster.pagesOf(session);
+    const drafts = this.roster.withheldDrafts(session);
+    const versions = new Map<string, Set<number>>();
+    const withheldOf = (artifactId: string) =>
+      versions.get(artifactId) ?? versions.set(artifactId, this.roster.withheldVersions(artifactId, session)).get(artifactId)!;
+    return {
+      hidden: new Set([...this.#hiddenArtifacts(pages)].filter((id) => !own.has(id))),
+      hiddenVersion: (artifactId, version) => withheldOf(artifactId).has(version),
+      own,
+      reviewed,
+      chatFile: (path) => !traces || this.#inChat(path, traces),
+      hiddenDraft: (id) => drafts.has(id),
+    };
   }
 
   /**
@@ -1885,8 +2042,21 @@ export class ChatAgent extends DurableObject<Env> {
    */
   async contents(uid: string): Promise<ChatContents | null> {
     if (!this.isInChat(uid)) return null;
-    const [files, artifacts] = await Promise.all([this.chatFiles(), this.#directory.listChatArtifacts(this.chatId)]);
-    return { files: newestFirst(files), artifacts: uid === this.uid ? artifacts : artifacts.map(({ unread: _, ...artifact }) => artifact) };
+    const owner = uid === this.uid;
+    const [{ files, traces }, artifacts] = await Promise.all([this.#chatFiles(owner), this.#directory.listChatArtifacts(this.chatId)]);
+    if (owner) return { files: newestFirst(files), artifacts };
+    const hidden = this.#hiddenArtifacts(traces.hidden.artifacts);
+    // A page's newest version they may see: not one a turn apart from the chat published with its reply not posted.
+    const withheld = this.roster.anyWithheld();
+    const visible = artifacts.flatMap(({ unread: _, ...artifact }) => {
+      const latest = hidden.has(artifact.id)
+        ? 0
+        : withheld
+          ? newestShown(artifact.latest, this.roster.withheldVersions(artifact.id))
+          : artifact.latest;
+      return latest ? [{ ...artifact, latest }] : [];
+    });
+    return { files: newestFirst(files), artifacts: visible };
   }
 
   /** Paths someone other than the owner uploaded through this chat (noteUploads): the owner's files they may attach. */
@@ -1905,7 +2075,7 @@ export class ChatAgent extends DurableObject<Env> {
   async #attachable(uid: string, attachments: readonly AttachmentInput[]): Promise<AttachmentInput[]> {
     if (attachments.length === 0) return [];
     const uploaded = new Set(this.#uploads(uid));
-    const traces = await this.#transcriptTraces();
+    const traces = await this.#readTraces();
     return attachments.filter((attachment) => uploaded.has(attachment.path) || this.#inChat(attachment.path, traces));
   }
 
@@ -2289,6 +2459,8 @@ export class ChatAgent extends DurableObject<Env> {
       gone.map(async (member) => {
         await this.#withdrawQueued(member.uid).catch((error: unknown) => console.error("withdraw queued:", errorMessage(error)));
         await this.turns.leave(member.uid);
+        // Their agents leave with them; their past replies stay.
+        await Promise.all(this.roster.ownedBy(member.uid).map((entry) => this.#dropAgent(entry)));
       }),
     );
     await Promise.all(gone.filter((member) => this.#hasSidebar(member.uid)).map((member) => this.#index(member.uid).removeSharedChat(this.chatId, this.uid)));
@@ -2418,6 +2590,28 @@ export class ChatAgent extends DurableObject<Env> {
     this.#notice({ kind: CHAT_EVENT_KIND, data: { event: "page", page } satisfies ChatEventData });
     await this.#contextWrite("page", pageNote(page, "has a new version"));
     this.sockets.broadcastPeople();
+  }
+
+  /** Versions a turn apart published are the chat's now (its reply was posted): what afterPublish held is announced. */
+  async #announceVersions(pages: readonly PostedPage[]): Promise<void> {
+    // Each page's newest only: its followers and its chat hear once of a reply that posted several versions of it.
+    const newest = new Map<string, number>();
+    for (const { artifactId, version } of pages) newest.set(artifactId, Math.max(version, newest.get(artifactId) ?? 0));
+    await Promise.all(
+      [...newest].map(async ([artifactId, version]) => {
+        const meta = await this.storage.artifacts.readMeta(artifactId);
+        if (!meta || !isOwnedBy(meta, this.uid, this.chatId)) return;
+        // A newer version that is the chat's is out already: they heard of that one. One still held is not.
+        if (newestShown(meta.latest, this.roster.withheldVersions(artifactId)) > version) return;
+        const summary = {
+          id: meta.id,
+          title: meta.title,
+          latest: version,
+          updatedAt: meta.versions.find((v) => v.version === version)?.publishedAt ?? meta.updatedAt,
+        };
+        await announcePublished(this.#published, summary, this.chatId);
+      }),
+    ).catch((error: unknown) => console.error("announce:", errorMessage(error)));
   }
 
   /** Where `afterPublish` records a version and finds the chat that discusses its page. */
@@ -2589,7 +2783,15 @@ export class ChatAgent extends DurableObject<Env> {
       const toDelete = traces.files.filter((path) => confirmed.has(path));
       const members = this.#listingMembers();
       this.sockets.disconnect();
+      // Members' agents run in their owners' objects: their seats for this chat go, and their indexes forget it.
+      const seated = this.roster.list().filter((entry) => entry.seat !== undefined);
       await Promise.all([
+        ...seated.map((entry) =>
+          this.#seatLink(entry)
+            .drop()
+            .catch((error: unknown) => console.error("delete, seat:", errorMessage(error))),
+        ),
+        ...seated.map((entry) => this.#noteAgentChat(entry, false)),
         ...members.map((member) => this.#index(member.uid).removeSharedChat(this.chatId, this.uid)),
         // The store checks each is this chat's: the transcript's ids come from tool results.
         ...traces.artifacts.map((id) => this.storage.artifacts.delete(id, this.uid, this.chatId)),
@@ -2695,7 +2897,7 @@ export class ChatAgent extends DurableObject<Env> {
     if (agents.length) kv.put(PI_SCAN_KEY, { through } satisfies PiScan);
     kv.delete(IMPORTING_KEY);
     kv.put(IMPORTED_KEY, true);
-    await Promise.all(agents.map((agentId) => this.#noteAgentChat(agentId, true)));
+    await Promise.all(agents.map((agentId) => this.#noteAgentChat({ agentId, ownerUid: this.uid }, true)));
     return { kind };
   }
 
@@ -2704,27 +2906,64 @@ export class ChatAgent extends DurableObject<Env> {
    * one the list missed goes too), and the files it attached or saved. Read a page of the history at a time.
    */
   async #traces(): Promise<{ artifacts: string[]; files: string[] }> {
-    const [traces, ids] = await Promise.all([this.#transcriptTraces(), this.#directory.chatArtifactIds(this.chatId)]);
-    return { artifacts: [...new Set([...traces.artifacts, ...ids])], files: [...traces.files] };
+    const [{ shared, withheld }, ids] = await Promise.all([this.#readTraces(), this.#directory.chatArtifactIds(this.chatId)]);
+    return {
+      artifacts: [...new Set([...shared.artifacts, ...withheld.artifacts, ...ids])],
+      files: [...new Set([...shared.files, ...withheld.files])],
+    };
   }
 
   /**
    * What the transcript names (chatTraces), in every one of pi's sessions (the chat's, and each agent's, whose tool
    * calls publish and save for the chat as pi's do), read on from where the last read stopped: entries never change once
-   * written, so a chat's files are known without reading its whole history on every request.
+   * written, so a chat's files are known without reading its whole history on every request. `withheld`: what the
+   * forks whose replies were not posted named (ChatRoster.withheld), the chat's only for its owner until they are; a
+   * fork's reply posted, its session is read again into `shared`.
    */
-  readonly #transcriptTraces = singleFlight(async (): Promise<ChatTraces> => {
-    const seen = this.#seen;
+  readonly #readTraces = singleFlight(async (): Promise<SessionTraces> => {
     // Sessions are read side by side (traces only ever add, so the order does not matter), a few at a time.
     await mapLimit(await this.harness.sessions.list(), TRACE_READS_AT_ONCE, async ({ id }) => {
-      const query = { order: "ascending", minEntryId: ((seen.through.get(id) ?? -1) + 1) as EntryId } as const;
-      for await (const page of entryPages(await this.harness.conversation(id), query, 500)) {
-        chatTraces(page, seen.traces);
-        const last = page.at(-1);
-        if (last) seen.through.set(id, last.id as number);
+      // Asked per session, as a fork may be made while the read goes on (it holds only what it inherited until then).
+      const fork = this.roster.fork(id);
+      const apart = !!fork && !fork.posted;
+      const seen = apart ? this.#seenWithheld : this.#seen;
+      // A fork whose turn ended takes no more entries: read to its end once, it is not read again.
+      if (seen.settled.has(id)) return;
+      // Entries after `after` and through `through` (to the end without), on from where `key` was read to.
+      const read = async (into: SeenTraces, after: number, through?: number, key = id) => {
+        const from = Math.max(into.through.get(key) ?? -1, after) + 1;
+        if (through !== undefined && from > through) return;
+        const query = { order: "ascending", minEntryId: from as EntryId, ...(through !== undefined && { maxEntryId: through as EntryId }) } as const;
+        for await (const page of entryPages(await this.harness.conversation(id), query, 500)) {
+          chatTraces(page, into.traces);
+          const last = page.at(-1);
+          if (last) into.through.set(key, last.id as number);
+        }
+      };
+      // A session later turns run in again (a run's reply session) is the chat's up to its first turn apart, then each
+      // turn's window is the chat's once that turn's reply is posted (ChatRoster.windows). A window posted later is read
+      // again into the chat's, by a cursor of its own.
+      if (fork?.reused) {
+        const windows = this.roster.windows(id);
+        await read(this.#seen, -1, windows[0]?.from);
+        for (const window of windows)
+          await read(window.posted ? this.#seen : this.#seenWithheld, window.from, window.through, `${id}#${window.turn}`);
+        return;
       }
+      // A fork is read from its own first entry: what it inherited is its parent's, read there.
+      await read(seen, fork?.from ?? -1);
+      if (fork?.ended) seen.settled.add(id);
     });
-    return seen.traces;
+    const [shared, held] = [this.#seen.traces, this.#seenWithheld.traces];
+    const only = (of: Set<string>, but: Set<string>) => new Set([...of].filter((value) => !but.has(value)));
+    // Files recorded as a session apart saved them (recordFiles): withheld whatever the transcript says, also over a
+    // file the chat had (its content is the session's now).
+    const saved = this.roster.withheldFiles();
+    return {
+      shared,
+      withheld: { artifacts: held.artifacts, files: new Set([...held.files, ...saved]) },
+      hidden: { artifacts: only(held.artifacts, shared.artifacts), files: new Set([...only(held.files, shared.files), ...saved]) },
+    };
   });
 
   /**
@@ -2784,6 +3023,9 @@ export class ChatAgent extends DurableObject<Env> {
 
   /** Tell everyone's app the agents' view, once for the changes one task makes. */
   #broadcastAgents(): void {
+    // A fork started, ended or was posted: which pages are the chat's may change.
+    this.#hiddenPages = undefined;
+    this.#rosterChanges++;
     if (this.#agentsChanged) return;
     this.#agentsChanged = true;
     queueMicrotask(() => {
@@ -2795,64 +3037,119 @@ export class ChatAgent extends DurableObject<Env> {
   }
 
   /**
-   * The owner brings one of their agents into the chat: it gets a pi session of its own, configured at its first turn.
-   * Only an agent that is on. Adding one already here changes nothing.
+   * Someone in the chat brings one of their agents (on) into it. The owner's gets a pi session of its own here,
+   * configured at its first turn. A member's runs as a seat in their own agent object (worker/agents/seats/), with
+   * their sign-ins, files, skills and budget: the chat sees only its name, badge and job line, and a name taken here
+   * gets theirs ("planner-ana"). Adding one already here changes nothing.
    */
   async addAgent(by: Person, agentId: unknown): Promise<ChatAgentView[] | ChatRefusal> {
-    if (by.uid !== this.uid) return refuse(403, "Only the chat's owner can add agents to it.");
     if (this.#gone) return refuse(404, DELETED);
+    const refusal = addRefusal(this.#rules, by.uid);
+    if (refusal) return refuse(403, refusal);
     if (typeof agentId !== "string" || !AGENT_ID_PATTERN.test(agentId)) return refuse(400, "Expected {agentId}.");
-    if (this.roster.get(agentId)) return this.agentViews();
-    const agent = await this.#directory.getAgent(agentId);
+    const here = this.roster.get(agentId);
+    if (here) return here.ownerUid === by.uid ? this.agentViews() : refuse(409, "Another agent with this id is in the chat.");
+    const agent = await this.#index(by.uid).getAgent(agentId);
     if (!agent) return refuse(404, "No such agent.");
     if (!agent.enabled) return refuse(409, `@${agent.name} is off: turn it on first.`);
-    const refused = await this.#addToRoster(agent);
-    if (refused) return refuse(409, refused.error);
-    this.#notePeople(by, "agent-added", agent.name);
-    await this.#noteAgentChat(agentId, true);
+    const added = await this.#addToRoster(agent, by);
+    if ("error" in added) return refuse(409, added.error);
+    this.#notePeople(by, "agent-added", added.name);
+    await this.#noteAgentChat(this.roster.get(agentId)!, true);
     return this.agentViews();
   }
 
-  /** Tell the owner's directory which chats an agent is in ("used in M chats"). Only an index: a failure is logged. */
-  async #noteAgentChat(agentId: string, inChat: boolean, shared = false): Promise<void> {
-    await this.#directory.noteAgentChat(agentId, this.chatId, inChat, shared).catch((error: unknown) => console.error("agent index:", errorMessage(error)));
+  /** Tell an agent's owner's directory which chats it is in ("used in M chats"). Only an index: a failure is logged. */
+  async #noteAgentChat(entry: Pick<RosterEntry, "agentId" | "ownerUid">, inChat: boolean, shared = false): Promise<void> {
+    const room = entry.ownerUid === this.uid ? undefined : this.uid;
+    await this.#index(entry.ownerUid)
+      .noteAgentChat(entry.agentId, this.chatId, inChat, shared, room)
+      .catch((error: unknown) => console.error("agent index:", errorMessage(error)));
   }
 
-  /** The owner takes an agent out of the chat: its turns stop, and its past replies stay in the log. */
+  /**
+   * Take an agent out of the chat, as the chat's owner or the agent's: its turns stop, its seat goes, and its past
+   * replies stay in the log.
+   */
   async removeAgent(by: Person, agentId: string): Promise<ChatAgentView[] | ChatRefusal> {
-    if (by.uid !== this.uid) return refuse(403, "Only the chat's owner can remove agents from it.");
     const entry = this.roster.get(agentId);
     if (!entry) return refuse(404, "No such agent in this chat.");
-    await this.turns.stop(agentId);
-    this.roster.remove(agentId);
-    this.#broadcastAgents();
+    if (!mayRemove(this.#rules, by.uid, entry)) return refuse(403, "Only the chat's owner, or the agent's, can take it out of the chat.");
+    await this.#dropAgent(entry);
     this.#notePeople(by, "agent-removed", entry.name);
-    await this.#noteAgentChat(agentId, false);
     return this.agentViews();
   }
 
-  /**
-   * The owner deleted one of their agents (the Worker calls this for each chat its index lists): it leaves the roster
-   * now, rather than at its next turn, and every open app hears it. Its past replies stay.
-   */
-  async agentDeleted(agentId: string): Promise<void> {
-    if (!this.roster.get(agentId)) return;
-    await this.turns.stop(agentId);
-    this.roster.remove(agentId);
+  /** An agent leaves the roster: its turns stop, its seat (for a member's) goes, and its owner's index forgets the chat. */
+  async #dropAgent(entry: RosterEntry, index = true): Promise<void> {
+    await this.turns.stop(entry.agentId);
+    this.roster.remove(entry.agentId);
     this.#broadcastAgents();
+    this.#tellDrafts(entry.ownerUid);
+    await Promise.all([
+      entry.seat !== undefined &&
+        this.#seatLink(entry)
+          .drop()
+          .catch((error: unknown) => console.error("agent seat:", errorMessage(error))),
+      index && this.#noteAgentChat(entry, false),
+    ]);
   }
 
   /**
-   * (owner) Share an agent of the roster with the people of the chat, or stop: they can then open it read-only and
-   * copy it, and it keeps running as its owner.
+   * An agent's owner deleted it (the Worker calls this for each chat their index lists): it leaves the roster now,
+   * rather than at its next turn, and every open app hears it. Its past replies stay. Only an agent of `ownerUid`'s.
+   */
+  async agentDeleted(agentId: string, ownerUid: string = this.uid): Promise<void> {
+    const entry = this.roster.get(agentId);
+    if (!entry || entry.ownerUid !== ownerUid) return;
+    // Its index went with it.
+    await this.#dropAgent(entry, false);
+  }
+
+  /**
+   * (the agent's owner) Share an agent of the roster with the people of the chat, or stop: they can then open it
+   * read-only and copy it, and it keeps running as its owner.
    */
   async setAgentShared(by: Person, agentId: string, shared: unknown): Promise<ChatAgentView[] | ChatRefusal> {
-    if (by.uid !== this.uid) return refuse(403, "Only the chat's owner can share its agents.");
+    const entry = this.roster.get(agentId);
+    if (!entry) return refuse(404, "No such agent in this chat.");
+    if (!mayShare(this.#rules, by.uid, entry)) return refuse(403, "Only the agent's owner can share it.");
     if (typeof shared !== "boolean") return refuse(400, "Expected {shared: true | false}.");
-    if (!this.roster.setShared(agentId, shared)) return refuse(404, "No such agent in this chat.");
+    this.roster.setShared(agentId, shared);
     this.#broadcastAgents();
-    await this.#noteAgentChat(agentId, true, shared);
+    await this.#noteAgentChat(entry, true, shared);
     return this.agentViews();
+  }
+
+  /** The replies of `uid`'s agents held for them to review; only theirs. */
+  draftsFor(uid: string): AgentDraftView[] {
+    if (!this.isInChat(uid)) return [];
+    return this.roster.held(uid);
+  }
+
+  /** Tell `uid`'s sockets the replies of their agents held for review, as they are now. */
+  #tellDrafts(uid: string): void {
+    this.sockets.sendTo(uid, { type: "agentDrafts", drafts: this.draftsFor(uid) });
+  }
+
+  /**
+   * (the agent's owner) Post a reply held for review to the chat, as they edited it (`text`), or discard it. A reply
+   * posted is theirs: it shows "posted by" them.
+   */
+  async reviewDraft(
+    by: Person,
+    agentId: string,
+    input: { turn?: unknown; action?: unknown; text?: unknown } | null,
+  ): Promise<AgentDraftView[] | ChatRefusal> {
+    this.#requireInChat(by);
+    const { turn, action, text } = input ?? {};
+    if (typeof turn !== "number" || (action !== "post" && action !== "discard") || (text !== undefined && typeof text !== "string")) {
+      return refuse(400, 'Expected {turn, action: "post" | "discard", text?}.');
+    }
+    if (typeof text === "string" && text.length > MAX_ASK_CHARS) return refuse(400, `A reply is at most ${MAX_ASK_CHARS} characters.`);
+    const refused = action === "discard" ? this.turns.discard(by.uid, agentId, turn) : await this.turns.post(by.uid, agentId, turn, text);
+    if (refused) return refuse(404, refused.error);
+    return this.draftsFor(by.uid);
   }
 
   /**
@@ -2961,21 +3258,31 @@ export class ChatAgent extends DurableObject<Env> {
   }
 
   /**
-   * The agents the router picks for a message that names nobody (worker/agents/router.ts), best first: at most two of
-   * the roster's agents that are on. None when it fails or is unsure, which the metrics count.
+   * The agents the router picks for `author`'s message that names nobody (worker/agents/router.ts), best first: at most
+   * two of the roster's agents it may pick (routableAgents: a member's only when they let it speak unasked). None when
+   * it fails or is unsure, which the metrics count.
    */
   async #pickAgents(
     model: NonNullable<ReturnType<typeof agentRouterModel>>,
     roster: readonly RosterEntry[],
+    author: string,
     text: string,
     piAnswers: boolean,
     recent: RecentEntries,
   ): Promise<string[]> {
-    const agents = roster.filter((entry) => !entry.off).map(({ agentId, name, job }) => ({ id: agentId, name, job }));
+    // Pi's picks wait for this one: the members' definitions are read within the router's time, not on top of it (one
+    // not read by then is left out).
+    const cap = AbortSignal.timeout(AGENT_ROUTE_MS);
+    const speaksUp = async (entry: RosterEntry) => (await abortable(this.#index(entry.ownerUid).getAgent(entry.agentId), cap))?.speaksUp === true;
+    // The conversation is read while the members' definitions are (memoised: the other pickers share it).
+    void recent().catch(() => {});
+    const may = await routableAgents(roster, this.uid, this.#account(author), speaksUp);
+    if (!may.length) return [];
+    const agents = may.map(({ agentId, name, job }) => ({ id: agentId, name, job }));
     const started = Date.now();
     try {
       const request = { message: text, history: routeHistory((await recent()) ?? []), agents, piAnswers };
-      const { agents: picked, usage } = await routeAgents(this.env.AI as unknown as ModelRunner, model, request, AbortSignal.timeout(AGENT_ROUTE_MS));
+      const { agents: picked, usage } = await routeAgents(this.env.AI as unknown as ModelRunner, model, request, cap);
       this.metrics.router({ picked, candidates: agents.length, ms: Date.now() - started });
       this.#sideSpend(`${AGENT_ROUTER_LEDGER_PREFIX}${agentRouterId(model)}`, usage, "agent router");
       return picked;
@@ -3169,7 +3476,9 @@ export class ChatAgent extends DurableObject<Env> {
     void this.#restorePiTools();
     const entry = this.roster.get(turn.agentId);
     const session = entry ? sessionOf(entry, turn) : undefined;
-    const used = (session && this.#turnSpend.get(session)) || { tokens: 0, costUsd: 0, toolCalls: 0 };
+    // A seat's turn (a member's agent) ran in its owner's object, which paid for it: the chat's budget counts it here.
+    if (outcome.spent) this.spend.count(outcome.spent);
+    const used = (session && this.#turnSpend.get(session)) || { tokens: 0, costUsd: 0, toolCalls: 0, ...outcome.spent };
     if (session) this.#turnSpend.delete(session);
     this.metrics.turn({
       agent: turn.agentId,
@@ -3253,24 +3562,32 @@ export class ChatAgent extends DurableObject<Env> {
   readonly #piScan = serial(async (): Promise<void> => {
     const scan = this.ctx.storage.kv.get<PiScan>(PI_SCAN_KEY);
     if (!scan) return;
-    let { through, chain } = scan;
+    let { through, chain, by } = scan;
     for await (const page of this.#log({ order: "ascending", minEntryId: (through + 1) as EntryId })) {
       for (const entry of page) {
         through = entry.id as number;
         const seen = piLogEntry(entry);
         if (!seen) continue;
         if ("reply" in seen) {
-          if (seen.reply.stopReason === "stop") this.turns.fromPi(assistantText(seen.reply), through, chain);
+          if (seen.reply.stopReason === "stop") {
+            this.turns.fromPi(assistantText(seen.reply), through, { ...(chain ?? { hop: 0 }), ...(by !== undefined && { by }) });
+          }
         } else if (seen.input === "handOff") {
           const { data } = seen;
           chain = typeof data?.hop === "number" && typeof data.root === "number" ? { hop: data.hop, root: data.root } : undefined;
+          by = typeof data?.by === "string" ? data.by : undefined;
         } else if (seen.input === "message" && seen.drafts) {
           // A Yes's run: the agents its answer names never hand pi a turn (unattended), which would have its full tools again.
           chain = { hop: 0, unattended: true };
-        } else chain = undefined;
+          by = typeof seen.uid === "string" ? seen.uid : undefined;
+        } else {
+          chain = undefined;
+          // A person's message is theirs; pi's own input (a pi.user line) is the owner's.
+          by = seen.input === "message" ? (typeof seen.uid === "string" ? seen.uid : undefined) : this.uid;
+        }
       }
       if (this.#gone) return;
-      this.ctx.storage.kv.put(PI_SCAN_KEY, { through, ...(chain && { chain }) } satisfies PiScan);
+      this.ctx.storage.kv.put(PI_SCAN_KEY, { through, ...(chain && { chain }), ...(by !== undefined && { by }) } satisfies PiScan);
     }
   });
 
@@ -3285,9 +3602,22 @@ export class ChatAgent extends DurableObject<Env> {
     return { text: ask, recent: memoAsync(() => this.#recentEntries()) };
   }
 
-  /** The owner's tools, skills, files and prompt as they are now, before an agent's turn or run, or one handed to pi (`ask`). */
-  async #refreshForTurn(ask: string): Promise<void> {
-    await Promise.all([this.refreshMcpTools(), this.refreshSkills(this.#skillsForTurn(ask)), this.refreshFiles(), this.refreshUserPrompt()]);
+  /**
+   * The owner's tools, skills, files and prompt as they are now, before an agent's turn or run, or one handed to pi (`ask`).
+   * Once per ask: what sets several turns up for one message (or one turn and its sources) refreshes them once.
+   */
+  #refreshForTurn(ask: string): Promise<void> {
+    const now = Date.now();
+    if (this.#refreshed?.ask === ask && now - this.#refreshed.at < REFRESHED_FOR) return this.#refreshed.done;
+    const done = Promise.all([this.refreshMcpTools(), this.refreshSkills(this.#skillsForTurn(ask)), this.refreshFiles(), this.refreshUserPrompt()]).then(
+      () => {},
+    );
+    this.#refreshed = { ask, at: now, done };
+    // A failed refresh is not kept: the next turn's set-up tries again.
+    done.catch(() => {
+      if (this.#refreshed?.done === done) this.#refreshed = undefined;
+    });
+    return done;
   }
 
   /** The entry id of turn `turn`'s input in agent session `session`, from the newest entries back; none while it is not placed. */
@@ -3301,24 +3631,77 @@ export class ChatAgent extends DurableObject<Env> {
     return undefined;
   }
 
+  /** An agent session of this object's, to write into or configure. */
+  async #conversation(session: string): Promise<Conversation> {
+    const found = await this.harness.conversation(session);
+    if (!found) throw new Error(`The agent's session ${session} is gone.`);
+    return found;
+  }
+
+  /** A session's entries from turn `turn`'s input on, oldest first: where the turn's outputs are found. */
+  async #turnEntries(session: string, turn: number): Promise<EntryRecord[]> {
+    // The input itself is the first of #entriesFrom's.
+    return (await this.#entriesFrom(await this.#conversation(session), (entry) => isTurnEntry(entry, turn))).slice(1);
+  }
+
+  /** A passive write into one of this object's agent sessions: context, no run. */
+  async #writeTo(session: string, text: string, requestId: string): Promise<void> {
+    await this.#writeAside(await this.#conversation(session), text, requestId);
+  }
+
+  /**
+   * A new session that sees `session`'s history so far (an agent's private turn runs in one); a new one when it has none
+   * yet. `from`: the newest entry it inherited (or one before it), after which only its own entries come.
+   */
+  async #newestEntry(session: string): Promise<number | undefined> {
+    const { items } = await (await this.#conversation(session)).entries({ order: "descending" }, 1, undefined, BACKGROUND_CONTEXT);
+    return items[0]?.id as number | undefined;
+  }
+
+  async #fork(session: string): Promise<{ session: string; from?: number }> {
+    const newest = await this.#newestEntry(session);
+    if (newest === undefined) return { session: (await this.harness.sessions.create()).id };
+    return { session: (await this.harness.sessions.fork(session)).id, from: newest };
+  }
+
+  async #submitTo(session: string, input: string, operationId: string, data: ChatTurnData): Promise<void> {
+    await this.harness.submit(input, { session, operationId, whenBusy: "followUp", entry: { kind: CHAT_TURN_KIND, data } });
+  }
+
+  async #abortSession(session: string): Promise<void> {
+    await this.harness.abort({ session });
+  }
+
+  /** Whether a server signs in each user: an agent reads it as its owner. */
+  readonly #signsIn = (server: string): boolean => this.hub.server(server)?.auth === "oauth";
+
+  /** The tools this object has installed now. */
+  /**
+   * What a forked turn's reply shows of its sources (turnSources), by the servers this object's tools are of, and
+   * whether its owner reviews it before it is posted.
+   */
+  async #sources(agent: AgentDefinition, entries: readonly EntryRecord[]): Promise<Pick<Outputs, "items" | "sources" | "review">> {
+    // After a restart the tools may not be listed yet: the map says which server each came from.
+    if (!this.#mcpTools.size) await this.refreshMcpTools().catch(() => {});
+    return { ...turnSources(entries, this.#mcpTools, sharedServer(agent, this.#signsIn)), ...(agent.reviewBeforePosting && { review: true }) };
+  }
+
   /** What the turn controller needs of this chat (worker/agents/controller.ts). */
   #turnHost(): TurnHost {
-    // The entries after the turn's input: the input itself is the first of #entriesFrom's.
-    const turnEntries = async (session: string, turn: number) => (await this.#entriesFrom(await this.#conversation(session), (entry) => isTurnEntry(entry, turn))).slice(1);
+    const uid = () => this.uid;
     return {
       roster: this.roster,
+      get chatOwner() {
+        return uid();
+      },
       definition: async (entry) => this.#inThisChat(await this.#index(entry.ownerUid).getAgent(entry.agentId)),
-      configure: (entry, agent, turn) => this.#configureAgent(entry, agent, turn),
+      configure: (entry, agent, turn) => this.#configureAgent(sessionOf(entry, turn), agent, turn, this.#nameOf(entry.ownerUid)),
       logSince: (after) => this.#log({ order: "descending", minEntryId: (after + 1) as EntryId }),
-      write: async (session, text, requestId) => this.#writeAside(await this.#conversation(session), text, requestId),
-      submit: async (session, input, operationId, data) => {
-        await this.harness.submit(input, { session, operationId, whenBusy: "followUp", entry: { kind: CHAT_TURN_KIND, data } });
-      },
+      write: (session, text, requestId) => this.#writeTo(session, text, requestId),
+      submit: (session, input, operationId, data) => this.#submitTo(session, input, operationId, data),
       wait: (session, operationId) => this.harness.wait(operationId, { session }),
-      abort: async (session) => {
-        await this.harness.abort({ session });
-      },
-      turnEntries,
+      abort: (session) => this.#abortSession(session),
+      turnEntries: (session, turn) => this.#turnEntries(session, turn),
       // Request ids, so a reply posted again after a restart is placed once.
       post: async (reply) => {
         await this.#postAgentReply(reply, `agent-reply:${reply.agentId}:${reply.turn}`);
@@ -3352,16 +3735,131 @@ export class ChatAgent extends DurableObject<Env> {
       },
       changed: () => this.#broadcastAgents(),
       waitUntil: (promise) => this.ctx.waitUntil(promise),
+      fork: (session) => this.#fork(session),
+      newest: (session) => this.#newestEntry(session),
+      sources: async (entry, entries) => {
+        const agent = await this.#index(entry.ownerUid).getAgent(entry.agentId);
+        return agent ? this.#sources(agent, entries) : { items: [], sources: [] };
+      },
+      seat: (entry) => this.#seatLink(entry),
+      mayCall: async (entry, uid) => {
+        const limiter = this.env.AGENT_TURNS;
+        return !limiter || (await limiter.limit({ key: `${uid}:${entry.ownerUid}:${entry.agentId}` })).success;
+      },
+      drafted: (uid) => this.#tellDrafts(uid),
       refusal: () => this.spend.refusal(),
+      posted: (pages) => this.ctx.waitUntil(this.#announceVersions(pages)),
       ended: (turn, outcome) => this.#turnEnded(turn, outcome),
     };
   }
 
-  /** A session of this chat's pi; throws when it is gone. */
-  async #conversation(session: string): Promise<Conversation> {
-    const found = await this.harness.conversation(session);
-    if (!found) throw new Error(`The session ${session} is gone.`);
-    return found;
+  /** This chat, as the room its seats know it by. */
+  get #room(): RoomRef {
+    return { ownerUid: this.uid, chatId: this.chatId };
+  }
+
+  /** The seat of a member's agent: its owner's object for it (seatChatId), reached by RPC. */
+  #seatLink(entry: RosterEntry): SeatLink & { drop(): Promise<void> } {
+    const seat = exports.ChatAgent.getByName(chatAgentName(entry.ownerUid, entry.seat ?? seatChatId(entry.agentId)));
+    const room = this.#room;
+    return {
+      give: (batch, turn) => seat.seatGive(room, entry.agentId, { ...turn, ownerName: this.#nameOf(entry.ownerUid), kind: this.kinds.kind() }, batch),
+      abort: (turn) => seat.seatAbort(room, turn),
+      wake: () => seat.seatWake(room),
+      drop: () => seat.seatDrop(room, entry.agentId),
+    };
+  }
+
+  /**
+   * The roster entry of one of the chat owner's own agents, run here; null for anyone else's, a member's seat with the
+   * same id among them (agent ids are unique per user only). What the owner's runs and home agent go by.
+   */
+  #ownersEntry(agentId: string): RosterEntry | null {
+    const entry = this.roster.get(agentId);
+    return entry?.ownerUid === this.uid && entry.seat === undefined ? entry : null;
+  }
+
+  /** The chat as the agents' rules read it (worker/agents/seats/rules.ts). */
+  get #rules(): ChatRules {
+    return { ownerUid: this.uid, isInChat: (uid) => this.isInChat(uid), hasAccount: (uid) => this.#hasSidebar(uid) };
+  }
+
+  /** The room's side of a seat's call: the roster entry of a member's agent that `uid` owns and brought in; null for anything else. */
+  #seated(uid: string, agentId: string): RosterEntry | null {
+    return seatedEntry(this.#rules, this.roster.get(agentId), uid);
+  }
+
+  /** (RPC, from a seat) The lines of the log after `after` for a member's agent's next turn: what fills its gap. */
+  async seatLog(uid: string, agentId: string, after: number, turn: number): Promise<SeatBatch> {
+    const entry = this.#seated(uid, agentId);
+    if (!entry) throw new Error("This agent is not in the chat.");
+    return this.turns.batchFor(entry, after, turn);
+  }
+
+  /** (RPC, from a seat) A member's agent's turn ended there. True once taken: the seat lets it go. */
+  async seatEnded(uid: string, agentId: string, turn: number, result: SeatResult): Promise<boolean> {
+    // Not (any more) a member's agent here: nothing to take, and the seat lets it go.
+    if (!this.#seated(uid, agentId)) return true;
+    return this.turns.seatEnded(agentId, turn, result);
+  }
+
+  /** This object as the host of its user's agents' seats in other people's chats (worker/agents/seats/). */
+  #seatHost(): SeatHost {
+    const room = (ref: RoomRef, agentId: string): RoomLink => {
+      const chat = exports.ChatAgent.getByName(chatAgentName(ref.ownerUid, ref.chatId));
+      return {
+        log: (after, turn) => chat.seatLog(this.uid, agentId, after, turn),
+        ended: (turn, result) => chat.seatEnded(this.uid, agentId, turn, result),
+      };
+    };
+    const uid = () => this.uid;
+    return {
+      get uid() {
+        return uid();
+      },
+      definition: (agentId) => this.#directory.getAgent(agentId),
+      room,
+      create: async () => (await this.harness.sessions.create()).id,
+      fork: async (session) => (await this.#fork(session)).session,
+      write: (session, text, requestId) => this.#writeTo(session, text, requestId),
+      configure: (session, agent, turn) => this.#configureAgent(session, agent, { ask: turn.input, byOwner: turn.byOwner, calledBy: turn.calledBy, alone: false }, turn.ownerName),
+      submit: (session, input, operationId, data) => this.#submitTo(session, input, operationId, data),
+      // With what the turn's model calls came to here: its room's budget counts them too (this object pays for them).
+      wait: async (session, operationId) => {
+        const result = await this.harness.wait(operationId, { session });
+        const spent = this.#turnSpend.get(session);
+        return spent ? { ...result, spent: { tokens: spent.tokens, costUsd: spent.costUsd } } : result;
+      },
+      abort: (session) => this.#abortSession(session),
+      turnEntries: (session, turn) => this.#turnEntries(session, turn),
+      sources: (agent, entries) => this.#sources(agent, entries),
+      waitUntil: (promise) => this.ctx.waitUntil(promise),
+      later: (ms) => {
+        const set = this.scheduler.set(new Date(Date.now() + ms), "seats", {});
+        this.ctx.waitUntil(set.catch((error: unknown) => console.error("agent seat, alarm:", errorMessage(error))));
+      },
+    };
+  }
+
+  /** (RPC, from a room) A turn for one of this user's agents seated there, after the lines of the log said before it. */
+  async seatGive(room: RoomRef, agentId: string, turn: SeatTurn, batch: SeatBatch | null): Promise<number> {
+    if (this.#gone) throw new Error(DELETED);
+    return this.seats.give(room, agentId, turn, batch);
+  }
+
+  /** (RPC, from a room) Stop a turn a seat here runs for it. */
+  async seatAbort(room: RoomRef, turn: number): Promise<void> {
+    await this.seats.abort(room, turn);
+  }
+
+  /** (RPC, from a room) Post again what the room has not taken of its seats here. */
+  seatWake(room: RoomRef): void {
+    this.seats.wake(room);
+  }
+
+  /** (RPC, from a room) An agent of this user's left the room: its seat there goes. */
+  async seatDrop(room: RoomRef, agentId: string): Promise<void> {
+    await this.seats.drop(room, agentId);
   }
 
   /** A passive write into a session: context its next turn reads, with no model call. Placed once per `requestId`. */
@@ -3432,28 +3930,36 @@ export class ChatAgent extends DurableObject<Env> {
   }
 
   /**
-   * Set an agent's session up for a turn: the owner's tools and skills as they are now, its model and effort (the
+   * Set an agent session up for a turn: the owner's tools and skills as they are now, its model and effort (the
    * chat's model when it names none), its own instructions, and only the tools this turn may use (allowedTools): the
-   * harness offers and runs no other.
+   * harness offers and runs no other. `turn.ask` is what the skill classifier reads.
    */
-  async #configureAgent(entry: RosterEntry, agent: AgentDefinition, turn: AgentTurn): Promise<void> {
-    const session = sessionOf(entry, turn);
+  async #configureAgent(
+    session: string,
+    agent: AgentDefinition,
+    turn: { ask: string; byOwner: boolean; calledBy?: AgentTurn["calledBy"]; alone?: boolean },
+    ownerName: string,
+  ): Promise<void> {
     // The memory notes of the session the turn runs in: its agent's, or its own (a reply to a run's report).
     await Promise.all([this.#refreshForTurn(turn.ask), this.memory.refresh(session)]);
-    this.spend.tag(session, { agent: entry.agentId });
+    this.spend.tag(session, { agent: agent.id });
     this.#turnSpend.delete(session);
+    // Only a turn that runs (turnLevel: its owner's own message that named it) gets tools that change data: one the
+    // router picked it for, or took on its own, only reads, as any turn its owner did not ask of it. With nobody but
+    // the owner in the chat, it reads every server of the agent's (those that sign in each user too), as a run does.
     const allowed = (installed: readonly string[]) =>
-      turn.calledBy.drafts
+      turn.calledBy?.drafts
         ? draftTools(installed, this.#mcpTools, agent)
         : allowedTools(
             installed,
             this.#mcpTools,
             agent,
-            turn.byOwner,
-            (server) => this.hub.server(server)?.auth === "oauth",
-            !!turn.calledBy.unprompted,
+            turn.calledBy ? turnLevel({ byOwner: turn.byOwner, calledBy: turn.calledBy }).level === 4 : turn.byOwner,
+            this.#signsIn,
+            // A seat's turn is never alone: its reply goes to a room with other people in it.
+            { unprompted: !!turn.calledBy?.unprompted, alone: turn.alone ?? !this.members.hasAny() },
           );
-    await this.#configureSession(session, this.#agentChoice(agent), agentInstructions(agent, this.#nameOf(entry.ownerUid)), allowed);
+    await this.#configureSession(session, this.#agentChoice(agent), agentInstructions(agent, ownerName), allowed);
   }
 
   /**
@@ -3498,7 +4004,7 @@ export class ChatAgent extends DurableObject<Env> {
   /** The agent whose home this chat is, when it is on the roster and on: who answers a message that calls nobody. */
   #homeSpeaker(): string | undefined {
     const id = this.ctx.storage.kv.get<string>(HOME_AGENT_KEY);
-    const entry = id === undefined ? null : this.roster.get(id);
+    const entry = id === undefined ? null : this.#ownersEntry(id);
     return entry && !entry.off ? entry.agentId : undefined;
   }
 
@@ -3566,13 +4072,13 @@ export class ChatAgent extends DurableObject<Env> {
     if (agent) {
       this.ctx.storage.kv.put(HOME_AGENT_KEY, agentId);
       this.ctx.storage.kv.put(HOME_RUNS_KEY, Boolean(agent.enabled && agent.trigger));
-      if (this.roster.get(agentId)) {
+      if (this.#ownersEntry(agentId)) {
         // Turned on or off, renamed: the roster follows now, so a message that calls nobody goes to it (or to pi) at once.
         const view = { name: agent.name, avatar: agent.avatar, color: agent.color, job: agent.job, off: !agent.enabled };
         if (this.roster.refresh(agentId, view)?.changed) this.#broadcastAgents();
       } else if (agent.enabled) {
-        const refused = await this.#addToRoster(agent);
-        if (refused) console.error("agent home:", refused.error);
+        const added = await this.#addToRoster(agent);
+        if ("error" in added) console.error("agent home:", added.error);
       }
     }
     if (!agent && this.ctx.storage.kv.get(HOME_AGENT_KEY) === agentId) {
@@ -3594,30 +4100,43 @@ export class ChatAgent extends DurableObject<Env> {
     if (agent?.enabled && agent.trigger && !agent.workflow?.length) this.ctx.waitUntil(this.#compile(agent).catch(() => {}));
   }
 
-  /** Bring one of the owner's agents onto the roster, in a pi session made for it. */
-  async #addToRoster(agent: AgentDefinition): Promise<{ error: string } | null> {
+  /**
+   * Bring an agent onto the roster: one of the owner's (no `by`, or `by` the owner) in a pi session made for it here; a
+   * member's (`by`) as a seat in their own object, under a name free here (memberAgentName). The name it got.
+   */
+  async #addToRoster(agent: AgentDefinition, by?: Person): Promise<{ error: string } | { name: string }> {
+    const member = by && by.uid !== this.uid ? by : undefined;
+    const ownerUid = member?.uid ?? this.uid;
+    const name = member ? memberAgentName(agent.name, member.name, (taken) => this.roster.byName(taken) !== null) : agent.name;
+    if (!name) return { error: `This chat already has an agent named "${agent.name}".` };
     // Before its session is made: a session made for an agent the roster refuses would stay, read by every traces read.
-    const early = this.roster.refusal(agent.name);
+    const early = this.roster.refusal(name);
     if (early) return early;
     const [session, newest] = await Promise.all([
-      this.harness.sessions.create(),
-      this.roster.hasAny() ? undefined : this.#root().then((root) => root.entries({ order: "descending" }, 1, undefined, BACKGROUND_CONTEXT)),
+      // A member's runs in their own object: no session here.
+      member ? "" : this.harness.sessions.create().then((made) => made.id as string),
+      // Read for every add (one entry): whether it is the first is known only after the awaits, as agents added at once
+      // must not both start pi's scan over.
+      this.#root().then((root) => root.entries({ order: "descending" }, 1, undefined, BACKGROUND_CONTEXT)),
     ]);
     const first = !this.roster.hasAny();
+    const newestId = (newest?.items[0]?.id as number | undefined) ?? -1;
     const refused = this.roster.add({
       agentId: agent.id,
-      ownerUid: this.uid,
-      name: agent.name,
-      session: session.id,
+      ownerUid,
+      name,
+      session,
       avatar: agent.avatar,
       color: agent.color,
       job: agent.job,
+      // A member's agent reads its owner's messages as theirs only from here on (OwnerMarks in turns.ts).
+      ...(member && { seat: seatChatId(agent.id), ownerFrom: newestId + 1, ...(name !== agent.name && { aliasOf: agent.name }) }),
     });
     if (refused) return refused;
     // The first agent: pi's answers from now on are read for the agents they name, none before.
-    if (first) this.ctx.storage.kv.put(PI_SCAN_KEY, { through: (newest?.items[0]?.id as number | undefined) ?? -1 } satisfies PiScan);
+    if (first) this.ctx.storage.kv.put(PI_SCAN_KEY, { through: newestId } satisfies PiScan);
     this.#broadcastAgents();
-    return null;
+    return { name };
   }
 
   /** The owner's agents whose runs this chat keeps: its home agent's. Refused for anyone else. */
@@ -3737,7 +4256,7 @@ export class ChatAgent extends DurableObject<Env> {
    */
   async postRun(reply: ChatAgentReplyData, context: string, requestId: string): Promise<ChatRefusal | { sentAt: number; chat: ChatRef }> {
     if (this.#gone) return refuse(404, DELETED);
-    const entry = this.roster.get(reply.agentId);
+    const entry = this.#ownersEntry(reply.agentId);
     if (reply.ownerUid !== this.uid || !entry) return refuse(403, `@${reply.name} is not in this chat.`);
     return { sentAt: await this.#placeRun(reply, context, requestId, entry), chat: this.#chatRef() };
   }
@@ -3767,7 +4286,7 @@ export class ChatAgent extends DurableObject<Env> {
     if (!from?.session) return undefined;
     const fork = await this.harness.sessions.fork(from.session);
     // A run of several items: the fork has one item's reads; the whole report says what the others came to.
-    if (items.length > 1) await this.#writeAside(await this.#conversation(fork.id), reportContext(record.detail.when ?? "", reportOf(items)), `run-reply:${record.dueAt}`);
+    if (items.length > 1) await this.#writeTo(fork.id, reportContext(record.detail.when ?? "", reportOf(items)), `run-reply:${record.dueAt}`);
     this.runs.setReplySession(data.agentId, record.dueAt, fork.id);
     return { agentId: data.agentId, session: this.runs.get(data.agentId, record.dueAt)!.replySession ?? fork.id, run: ref };
   }
@@ -3791,6 +4310,10 @@ export class ChatAgent extends DurableObject<Env> {
           throw signInOr(error);
         }
       },
+      act: (call, context) =>
+        this.#runCall(call, context).catch((error: unknown) => {
+          throw signInOr(error);
+        }),
       signInServers: async () => {
         const servers = oauthServerNames(this.env);
         if (!servers.length) return [];
@@ -3814,7 +4337,7 @@ export class ChatAgent extends DurableObject<Env> {
       },
       newSession: async () => (await this.harness.sessions.create()).id,
       configure: (session, agent, model, dueAt) => this.#configureRun(session, agent, model, undefined, dueAt),
-      write: async (session, text, requestId) => this.#writeAside(await this.#conversation(session), text, requestId),
+      write: (session, text, requestId) => this.#writeTo(session, text, requestId),
       work: async (session, prompt, operationId) => {
         const { result, entries } = await this.#runStep(session, prompt, operationId);
         return { status: result.status, ...(result.text !== undefined && { text: result.text }), ...(result.reason && { reason: result.reason }), ...workSpend(entries) };
@@ -3900,8 +4423,7 @@ export class ChatAgent extends DurableObject<Env> {
    * A run ended: its owner's feed hears how, with the report it posted here or as a notification (what the agent's
    * followers may read, the directory decides: postsReachFollowers). Off the caller's path.
    */
-  #runEnded(run: RunRecord): void {
-    if (run.status === "running") return;
+  #runEnded(run: EndedRun): void {
     // Of its reports, one the feed may show (not only off the record) before one it may not.
     const isReport = (delivery: RunDelivery) =>
       (delivery.kind === "chat" || delivery.kind === "notify") && delivery.status === "sent" && Boolean(delivery.text);
@@ -3958,14 +4480,7 @@ export class ChatAgent extends DurableObject<Env> {
     const { step, agent } = request;
     if (step.kind === "page") return this.#pageStep(request, step);
     if (step.kind === "handOver") return this.#handOver(request, step.agent);
-    if (typeof step.via === "object") {
-      return {
-        kind: "tool",
-        to: `${step.via.server}.${step.via.tool}`,
-        status: "refused",
-        detail: `at ${AUTONOMY_LABELS[agent.autonomy]}, outside tools wait for approvals, which come later`,
-      };
-    }
+    if (typeof step.via === "object") return this.#tellThrough(request, step.via, step.to);
     const context = reportContext(whenOf(agent), request.text);
     // "owner", "me", "you", the agent itself or this chat: the owner, in the agent's home conversation.
     const isOwner = (to: string) => OWNER_TARGETS.has(to.toLowerCase()) || to.replace(/^@/, "") === agent.name || to === this.chatId;
@@ -3975,7 +4490,7 @@ export class ChatAgent extends DurableObject<Env> {
         return { kind: "notify", to: step.to.join(", "), status: "refused", detail: "at Inform, an agent notifies only its owner" };
       // Posted here, tagging the owner: their sidebar's notice, and a browser notification when they allow one.
       const requestId = `run-post:${agent.id}:${request.run.dueAt}:${request.key}`;
-      const sentAt = await this.#placeRun(this.#runReply(request), context, requestId, this.roster.get(agent.id), [this.uid]);
+      const sentAt = await this.#placeRun(this.#runReply(request), context, requestId, this.#ownersEntry(agent.id), [this.uid]);
       return {
         kind: "notify",
         to: "you",
@@ -3994,7 +4509,7 @@ export class ChatAgent extends DurableObject<Env> {
       targets.map(async (target): Promise<{ sent: string; at: number; chat: ChatRef } | { refused: string }> => {
         const requestId = `run-post:${agent.id}:${request.run.dueAt}:${request.key}:${target}`;
         if (isOwner(target)) {
-          const at = await this.#placeRun(this.#runReply(request), context, requestId, this.roster.get(agent.id));
+          const at = await this.#placeRun(this.#runReply(request), context, requestId, this.#ownersEntry(agent.id));
           return { sent: "its chat", at, chat: this.#chatRef() };
         }
         const chat = chats.find((one) => one.id === target) ?? chats.find((one) => one.title.toLowerCase() === target.toLowerCase());
@@ -4022,14 +4537,20 @@ export class ChatAgent extends DurableObject<Env> {
 
   /** Hand a run's report to another agent of the owner's, as a turn in this chat (on the roster, brought in when not). */
   async #handOver(request: DeliveryRequest, name: string): Promise<RunDelivery> {
-    const to = `@${name.replace(/^@/, "")}`;
-    let entry = this.roster.byName(name.replace(/^@/, ""));
+    const handle = name.replace(/^@/, "");
+    const to = `@${handle}`;
+    let entry = this.roster.byName(handle);
+    // A member's agent here may have the name: the report, read with the owner's sign-ins, goes to no one else's.
+    if (entry && entry.ownerUid !== this.uid) {
+      return { kind: "handOver", to, status: "refused", detail: `${to} in this chat is someone else's agent` };
+    }
     if (!entry) {
-      const agent = (await this.#directory.listAgents()).find((one) => one.name === name.replace(/^@/, "").toLowerCase());
+      const agent = (await this.#directory.listAgents()).find((one) => one.name === handle.toLowerCase());
       if (!agent?.enabled) return { kind: "handOver", to, status: "refused", detail: agent ? `${to} is off` : `you have no agent ${to}` };
-      const refused = await this.#addToRoster(agent);
-      if (refused) return { kind: "handOver", to, status: "failed", detail: refused.error };
-      entry = this.roster.get(agent.id)!;
+      const added = await this.#addToRoster(agent);
+      if ("error" in added) return { kind: "handOver", to, status: "failed", detail: added.error };
+      entry = this.#ownersEntry(agent.id);
+      if (!entry) return { kind: "handOver", to, status: "failed", detail: `${to} could not join this chat` };
     }
     const { agent } = request;
     this.turns.call([entry.agentId], {
@@ -4060,8 +4581,12 @@ export class ChatAgent extends DurableObject<Env> {
     // A run that goes on after a restart publishes once: a version with its mark is the one it sent.
     const already = publishedAlready(meta, mark);
     if (already) return already;
-    if (step.edit === "rebuild") return this.#rebuildPage(request, meta, scope, mark);
-    return publishFindings(scope, meta, request.text, `Findings, ${whenOf(request.agent)}`, mark);
+    // Built on the newest version that is the chat's: not one a turn apart from it published with its reply not posted,
+    // which the new version would carry to everyone.
+    const base = shownOf(meta, await this.#heldIn(meta.chatId, meta.id));
+    if (!base) return { kind: "page", to, status: "failed", detail: "page not updated: it is not the chat's yet" };
+    if (step.edit === "rebuild") return this.#rebuildPage(request, base, scope, mark);
+    return publishFindings(scope, base, request.text, `Findings, ${whenOf(request.agent)}`, mark);
   }
 
   /**
@@ -4123,6 +4648,248 @@ export class ChatAgent extends DurableObject<Env> {
     if ((running || agents) && this.members.hasAny()) this.#notePeople(by, "stopped");
   }
 
+  /** A run's call that changes data (a do step, a tell through a tool): through the write gate, at its agent's level. */
+  async #runCall({ server, tool, input }: { server: string; tool: string; input: StepInput }, context: ActContext): Promise<ActResult> {
+    try {
+      const result = await this.hub.call(server, tool, input, { kind: "run", ...context });
+      return { status: "ran", value: (result.payload ?? null) as Value };
+    } catch (error) {
+      if (error instanceof CallHeld) return { status: error.verdict.outcome, message: error.message };
+      throw error;
+    }
+  }
+
+  /** A run's report told through an outside tool, as the run's call. */
+  async #tellThrough(request: DeliveryRequest, via: { server: string; tool: string }, to: readonly string[]): Promise<RunDelivery> {
+    const { agent, run } = request;
+    const where = { kind: "tool" as const, to: `${to.join(", ")} through ${via.server}.${via.tool}` };
+    const info = await this.hub.tool(via.server, via.tool).catch(() => undefined);
+    if (!info) return { ...where, status: "failed", detail: `${via.server} has no tool "${via.tool}" for you now` };
+    const input = toolInput(info.inputSchema, { to, text: request.text, subject: `@${agent.name}, ${whenOf(agent)}` });
+    if ("error" in input) return { ...where, status: "failed", detail: `not sent: ${input.error}` };
+    try {
+      const done = await this.#runCall({ ...via, input }, { agentId: agent.id, dueAt: run.dueAt, item: "", step: request.key });
+      if (done.status === "ran") return { ...where, text: request.text, status: "sent" };
+      return { ...where, text: request.text, status: done.status === "held" ? "waiting" : "refused", detail: done.message };
+    } catch (error) {
+      return { ...where, status: "failed", detail: errorMessage(error) };
+    }
+  }
+
+  // ---- Limits: the write gate, and the actions that wait for the owner (worker/agents/limits/) ----
+
+  /** What the write gate needs of this chat (worker/agents/limits/gate.ts). */
+  #gateHost(): GateHost {
+    return {
+      now: () => Date.now(),
+      caller: (context, call) => this.#callerOf(context, call),
+      userRules: () => this.#directory.guardrails(),
+      agent: (agentId) => this.#directory.getAgent(agentId),
+      readValue: async (server, tool, input, path) => {
+        // The hub reads only a tool its server lists as read-only.
+        const { result } = await this.hub.read(server, tool, input, { staleMs: 0, viewer: this.uid });
+        return valueAt(result.payload ?? null, path);
+      },
+      callsSince: (server, tool, since) => this.#directory.callsSince(server, tool, since),
+      dayStart: (at, tz) => instantOf({ ...wallClock(at, tz), hour: 0, minute: 0 }, tz),
+      log: (entry) => {
+        const kept = this.#directory.logCall({ ...entry, chatId: this.chatId }).catch((error: unknown) => console.error("call log:", errorMessage(error)));
+        this.ctx.waitUntil(kept);
+        return kept;
+      },
+      hold: (action) => this.#holdAction(action),
+    };
+  }
+
+  /**
+   * Who a call is from, and how far it may go (shared/limits.ts): pi and an agent on the owner's own message run within
+   * the rules (an agent only when that message named it); on anyone else's turn, one nobody asked for, or the owner's
+   * Yes to an offer they only propose (levels.ts); a run goes as far as its agent's autonomy; a page runs as its
+   * author's. A session with no turn going (a run's work step, a page rebuild) may change nothing.
+   */
+  async #callerOf(context: GateContext, call: Pick<GateCall, "server">): Promise<Caller> {
+    if (context.kind === "page") {
+      const meta = await this.storage.artifacts.readMeta(context.artifactId);
+      return { actor: { name: `the page “${meta?.title ?? context.artifactId}”` }, level: 4, because: "as your own page", origin: {}, noHold: true };
+    }
+    if (context.kind === "run") {
+      const agent = await this.#directory.getAgent(context.agentId);
+      if (!agent) throw new Error("its agent is gone.");
+      const record = this.runs.get(context.agentId, context.dueAt);
+      if (!record) throw new Error("no such run.");
+      if (!mayUseServer(agent, call.server)) throw new Error(`${call.server} is not one of the servers @${agent.name} may use.`);
+      const { agentId, item, step } = context;
+      return { actor: actorOf(agent), agent, level: agent.autonomy, because: "on its own, in a run", origin: { run: { ...runRef(record), agentId, item, step } } };
+    }
+    if (context.kind !== "session") throw new Error("not a call anyone made.");
+    const { session } = context;
+    if (session === ROOT_SESSION) return this.#piCaller();
+    const running = this.roster.runningSessions().find((one) => one.session === session);
+    const turn = running && this.roster.turn(running.turn);
+    if (!turn) throw new Error("this session has no turn that may change anything.");
+    const entry = this.roster.get(turn.agentId);
+    const agent = entry?.ownerUid === this.uid ? await this.#directory.getAgent(turn.agentId) : null;
+    if (!agent) throw new Error(`@${entry?.name ?? "this agent"} is not one of the owner's agents.`);
+    return { actor: actorOf(agent), agent, ...turnLevel(turn), origin: { session } };
+  }
+
+  /**
+   * pi's level: the lowest of the inputs its run answers. The owner's own message runs (not their Yes to an offer);
+   * anyone else's only proposes; a hand-off goes no further than the turn that handed it (turnLevel: a turn of an
+   * agent's the owner's message named, or else a proposal).
+   */
+  async #piCaller(): Promise<Caller> {
+    const pi = await this.harness.pi();
+    const placed = (await pi.inspect(BACKGROUND_CONTEXT)).submissions.flatMap((one) =>
+      one.type === "input" && one.status === "placed" && String(one.conversationId) === ROOT_SESSION ? [one.entry] : [],
+    );
+    if (!placed.length) throw new Error(`${AGENT_NAME} is answering no message now.`);
+    const levels = await Promise.all(placed.map(async (id) => inputLevel(await this.#entryAt(id), this.uid, (turn) => this.roster.turn(turn))));
+    const lowest = lowestLevel(levels)!;
+    return { actor: { name: AGENT_NAME }, level: lowest.level, because: lowest.because, origin: { session: ROOT_SESSION } };
+  }
+
+  /** Hold a call for the owner: kept with its expiry alarm, its card in the chat's log, and in their feed's Needs you. */
+  async #holdAction(action: NewAction): Promise<PendingActionView> {
+    const view = this.actions.add(action);
+    // A run's item waits at its step from now (in the same turn of the object as the action is kept): a restart before
+    // the run hears it was held finds it waiting there, never going on past an action still pending.
+    const run = action.origin.run;
+    if (run) this.runs.setActed(run.agentId, run.dueAt, actedMark(run.item, run.step), { ok: false, end: "waiting", detail: "held for your approval" });
+    try {
+      this.actions.setAlarm(view.id, (await this.scheduler.set(new Date(view.expiresAt), "expire", { id: view.id })).id);
+    } catch (error) {
+      // The feed's Needs you drops it once its time is past; the card says it waits until someone decides.
+      console.error("action expiry:", errorMessage(error));
+    }
+    // Its card, in the log everyone in the chat sees (placed at once, even mid-run: a write with no model message).
+    // A card that cannot be written leaves the action held all the same: the owner decides it from Needs you.
+    const data: ChatActionData = { action: view };
+    try {
+      await (await this.#root()).submit(
+        { type: "write", requestId: `action:${view.id}`, entry: { kind: CHAT_ACTION_KIND, data: data as unknown as JsonObject } },
+        BACKGROUND_CONTEXT,
+      );
+    } catch (error) {
+      console.error("action card:", errorMessage(error));
+    }
+    this.#actionsChanged();
+    this.ctx.waitUntil(this.#directory.addNeedsYou(view, this.kinds.kind()).catch((error: unknown) => console.error("needs you:", errorMessage(error))));
+    return view;
+  }
+
+  #actionsChanged(): void {
+    this.sockets.broadcast({ type: "actions", actions: this.actions.list() });
+  }
+
+  /**
+   * The owner approves or declines an action of this chat's. Approved, the chat runs the stored call itself, exactly as
+   * it was held (the gate checks only that no rule blocks it now). Pressed twice, or after it expired, it ends once:
+   * the action as it is then.
+   */
+  async decideAction(uid: string, id: string, decision: unknown): Promise<PendingActionView | ChatRefusal> {
+    if (this.#gone) return refuse(404, DELETED);
+    if (uid !== this.uid) return refuse(403, "Only the chat's owner decides what its agents change.");
+    if (decision !== "approve" && decision !== "decline") return refuse(400, 'Expected {decision: "approve" | "decline"}.');
+    const found = this.actions.get(id);
+    if (!found) return refuse(404, "No such action.");
+    // Its time is past, though its expiry alarm has not ended it (late, or never set): expired now, never run.
+    if (found.status === "pending" && found.expiresAt <= Date.now()) {
+      await this.#cancelExpiry(id);
+      await this.#expireAction(id);
+      return this.actions.get(id) ?? found;
+    }
+    if (decision === "decline") {
+      const declined = this.actions.move(id, "pending", "declined");
+      if (!declined) return found;
+      await this.#cancelExpiry(id);
+      await this.#actionEnded(declined);
+      return declined;
+    }
+    const moved = this.actions.move(id, "pending", "running");
+    if (!moved) return found;
+    await this.#cancelExpiry(id);
+    this.#actionsChanged();
+    let ended: PendingActionView | null;
+    // The call's whole result, for a run that waited at it (the action keeps its start).
+    let value: unknown;
+    try {
+      const level = this.actions.origin(id)?.level ?? 2;
+      const result = await this.hub.call(moved.server, moved.tool, moved.input, { kind: "approved", action: moved, level });
+      value = result.payload ?? result.content;
+      ended = this.actions.move(id, "running", "done", jsonOf(value));
+    } catch (error) {
+      ended = this.actions.move(id, "running", "failed", errorMessage(error));
+    }
+    const view = ended ?? this.actions.get(id)!;
+    await this.#actionEnded(view, value);
+    return view;
+  }
+
+  /** An action's wait is over: expired, unless someone decided first. */
+  async #expireAction(id: string): Promise<void> {
+    const expired = this.actions.move(id, "pending", "expired");
+    if (expired) await this.#actionEnded(expired);
+  }
+
+  async #cancelExpiry(id: string): Promise<void> {
+    const alarm = this.actions.alarmOf(id);
+    if (alarm) await this.scheduler.cancel(alarm).catch((error: unknown) => console.error("action expiry:", errorMessage(error)));
+  }
+
+  /**
+   * Actions that ended while a run's item waited at their step, though the run never heard (a restart came between the
+   * end and AgentRunner.decided): it hears now, so the run does not wait for good. An approved call's result is then
+   * only its start (actedOf), so a later step that reads it stops, saying why.
+   */
+  #tellRunsDecided(skip: ReadonlySet<string>): void {
+    // Cheap on a wake with no item waiting.
+    if (!this.runs.anyItemWaiting()) return;
+    // Only an action that ended can have been missed: its origin read for those alone.
+    const ended = this.actions.list().filter((view) => view.status !== "pending" && view.status !== "running" && !skip.has(view.id));
+    const actions = ended.map((view) => ({ view, run: this.actions.origin(view.id)?.run }));
+    for (const { ref, acted } of missedDecisions(this.runs, actions)) {
+      this.ctx.waitUntil(this.runner.decided(ref, acted).catch((error: unknown) => console.error("run:", errorMessage(error))));
+    }
+  }
+
+  /** Approved calls a restart cut off: failed, with a word to check, as they may have reached their server. Their ids. */
+  #endInterruptedActions(): Set<string> {
+    const ids = new Set<string>();
+    for (const action of this.actions.interrupted()) {
+      const ended = this.actions.move(action.id, "running", "failed", "The app restarted while it ran: it may or may not have been done. Check before asking again.");
+      if (!ended) continue;
+      ids.add(ended.id);
+      this.ctx.waitUntil(this.#actionEnded(ended).catch((error: unknown) => console.error("action:", errorMessage(error))));
+    }
+    return ids;
+  }
+
+  /**
+   * An action ended: out of the owner's feed's Needs you, its card updated, and the session that asked for it told how it
+   * went (a passive write it reads at its next step or turn; a run's item session, where a reply to its report reads it).
+   */
+  async #actionEnded(view: PendingActionView, value?: unknown): Promise<void> {
+    this.#actionsChanged();
+    this.ctx.waitUntil(
+      this.#directory.removeNeedsYou(this.chatId, view.id, approvalEnd(view)).catch((error: unknown) => console.error("needs you:", errorMessage(error))),
+    );
+    const origin = this.actions.origin(view.id);
+    const session = origin?.session ?? (origin?.run && this.runs.item(origin.run.agentId, origin.run.dueAt, origin.run.item)?.session);
+    try {
+      const conversation = session ? await this.harness.conversation(session) : undefined;
+      const message: UserMessage = { role: "user", content: approvalNote(view), timestamp: Date.now() };
+      await conversation?.submit({ type: "write", requestId: `approval:${view.id}`, entry: { kind: APP_APPROVAL_KIND, model: [message] } }, BACKGROUND_CONTEXT);
+    } catch (error) {
+      // A note that cannot be written never keeps a run's item waiting: nothing would decide it again.
+      console.error("approval note:", errorMessage(error));
+    }
+    // A run's item waited at this step: it goes on from there (after the note above, which its later steps read).
+    const run = origin?.run;
+    const acted = run ? actedOf(view, value) : null;
+    if (run && acted) this.ctx.waitUntil(this.runner.decided(run, acted).catch((error: unknown) => console.error("run:", errorMessage(error))));
+  }
+
   /**
    * The tools an artifact version declared, with their schemas: what the page's describeTool reads. Null for a version
    * this chat does not have. A viewer who may not call a server (see #mayLoad) does not get its tools either.
@@ -4130,8 +4897,12 @@ export class ChatAgent extends DurableObject<Env> {
   async artifactTools(artifactId: string, version: number, viewer: string): Promise<DeclaredTool[] | null> {
     const manifest = await this.#manifest(artifactId, version);
     if (!manifest) return null;
+    const servers = manifest.mcp?.servers ?? [];
+    const withheld = viewer !== this.uid && servers.some((entry) => this.#membersOnly(entry.server)) && (await this.#withheldVersion(artifactId, version));
     const perServer = await Promise.all(
-      (manifest.mcp?.servers ?? []).filter((entry) => this.#mayLoad(entry.server, viewer)).map(async (entry) =>
+      servers
+        .filter((entry) => this.#mayLoad(entry.server, viewer) && !(withheld && this.#membersOnly(entry.server)))
+        .map(async (entry) =>
         (await this.hub.tools(entry.server).catch(() => [])).filter((tool) => entry.tools.includes(tool.name)).map((tool) => ({ ...tool, server: entry.server })),
       ),
     );
@@ -4152,6 +4923,13 @@ export class ChatAgent extends DurableObject<Env> {
     if (!this.#mayLoad(server, viewer)) {
       return fail({ code: "not_granted", server, message: `${server} signs in each user, and this page calls as its author, so only people in its chat can load it.` });
     }
+    if (viewer !== this.uid && this.#membersOnly(server) && (await this.#withheldVersion(artifactId, request.version))) {
+      return fail({
+        code: "not_granted",
+        server,
+        message: `${server} signs in each user, and this page is not the chat's yet, so only its author can load it.`,
+      });
+    }
 
     try {
       const info = await this.#declaredTool(manifest, server, tool, mode);
@@ -4171,7 +4949,8 @@ export class ChatAgent extends DurableObject<Env> {
       if (!isReadOnly(info) && viewer !== this.uid) {
         return fail({ code: "not_granted", server, message: `${tool} can change data, so only the page's author can call it.` });
       }
-      const result = await this.hub.call(server, tool, input);
+      // The author's own page: it runs within their rules for all agents, and cannot wait for an approval.
+      const result = await this.hub.call(server, tool, input, { kind: "page", artifactId });
       return { response: { ok: true, result, storedAt: Date.now() } };
     } catch (error) {
       return fail(callFailure(error, server));
@@ -4241,10 +5020,37 @@ export class ChatAgent extends DurableObject<Env> {
    * server only the chat's people may load (#mayLoad) shares its author's values only with them.
    */
   async mayReadPageDefaults(artifactId: string, viewer: string): Promise<boolean> {
-    if (this.isInChat(viewer)) return true;
+    if (viewer === this.uid) return true;
+    // Not while the page, or a version of it, is not the chat's yet: what it saved may come from its author's sign-ins,
+    // which its calls refuse members too (artifactCall).
+    if (this.isInChat(viewer)) return !this.roster.withheldVersion(artifactId) && !(await this.#withheldPage(artifactId));
     const meta = await this.storage.artifacts.readMeta(artifactId);
     if (!meta || !isOwnedBy(meta, this.uid, this.chatId)) return false;
     return meta.versions.every((version) => (version.manifest.mcp?.servers ?? []).every((entry) => this.#mayLoad(entry.server, viewer)));
+  }
+
+  /**
+   * What of a page `viewer` may not see yet: all of it (one only a turn apart from the chat made: #withheldPage), or the
+   * versions such turns published with their replies not posted. Nothing for the owner. What the artifact's view and its
+   * pages leave out (worker/index.ts).
+   */
+  async withheldFrom(artifactId: string, viewer: string): Promise<HeldPage> {
+    return viewer === this.uid ? NOTHING_HELD : this.held(artifactId);
+  }
+
+  /**
+   * What of a page is not the chat's yet: all of it (#withheldPage), or the versions turns apart from the chat published
+   * with their replies not posted (ChatRoster.withheldVersions). What a run's page step builds on leaves it out too.
+   */
+  async held(artifactId: string): Promise<HeldPage> {
+    if (!this.roster.anyWithheld()) return NOTHING_HELD;
+    if (await this.#withheldPage(artifactId)) return { page: true, versions: [] };
+    return { page: false, versions: [...this.roster.withheldVersions(artifactId)] };
+  }
+
+  /** What of a page of the owner's chat `chatId` (this one or another) is not that chat's yet (held). */
+  #heldIn(chatId: string, artifactId: string): Promise<HeldPage> {
+    return chatId === this.chatId ? this.held(artifactId) : exports.ChatAgent.getByName(chatAgentName(this.uid, chatId)).held(artifactId);
   }
 
   /** Versions never change once published, so their manifests cache for the object's lifetime. */
@@ -4262,12 +5068,36 @@ export class ChatAgent extends DurableObject<Env> {
   }
 }
 
+/** pi's own session: the chat's log. */
+const ROOT_SESSION = String(ROOT_CONVERSATION_ID);
+
+/** An agent as a held action names who asked for it. */
+function actorOf(agent: Pick<AgentDefinition, "id" | "name" | "avatar" | "color">): ActionActor {
+  return { name: agent.name, agentId: agent.id, avatar: agent.avatar, color: agent.color };
+}
+
+/** What a session that asked for an action reads of how it went. */
+function approvalNote(view: PendingActionView): string {
+  const how: Record<PendingActionView["status"], string> = {
+    pending: "still waits for your owner",
+    running: "is running",
+    done: `was approved by your owner and ran. Its result: ${view.result ?? "(none)"}`,
+    failed: `was approved by your owner, but failed: ${view.result ?? "no reason given"}`,
+    declined: "was declined by your owner: it did not run. Do not ask for it again unless they do.",
+    expired: "expired before your owner decided: it did not run.",
+  };
+  return `[the app]: The call you asked for, ${callLine(view, 1_000)}, ${how[view.status]}`;
+}
+
 /** Whether a reply is running, and the agent as it stands (see ChatAgent's #now). */
 interface ChatNow {
   root: Conversation;
   busy: boolean;
   agent: Agent;
 }
+
+/** What of a page is not the chat's yet (ChatAgent.held): the page itself, or these versions. */
+const NOTHING_HELD: HeldPage = { page: false, versions: [] };
 
 /** What #route found: a router's pick and the model choice it names, or why the chat keeps its model, and how long that took. */
 type Routing = { pick: AutoPick; choice: ModelChoice } | { kept: Pick<AutoPick, "running" | "missed" | "ms"> & { failed: string } };
@@ -4289,10 +5119,12 @@ interface ChatSession {
   abort(by: Person, agent?: string): Promise<void>;
   /** The chat's agents besides pi, as everyone sees them. */
   agents(): ChatAgentView[];
+  /** The replies of `uid`'s agents held for them to review. */
+  drafts(uid: string): AgentDraftView[];
   /** The chat's agent settings, as everyone in it sees them. */
   agentSettings(): ChatAgentSettingsView;
   /** The agents' turns running now, each with its session: what the sockets follow live. */
-  runningAgents(): { agentId: string; session: string; turn: number }[];
+  runningAgents(): RunningTurn[];
   /** An agent's session's events: a snapshot, then one batch per commit. */
   agentEvents(session: string): Promise<AgentEventStream>;
   /** The entry id of turn `turn`'s input in an agent's session, once it is placed (a compaction may have cut it from the snapshot). */
@@ -4301,6 +5133,8 @@ interface ChatSession {
   /** Whether the chat is on Auto. */
   auto(): boolean;
   reactions(): Reactions;
+  /** The chat's actions that wait, or waited, for its owner, newest first (shared/limits.ts). */
+  actions(): PendingActionView[];
   react(by: Person, entry: unknown, emoji: unknown, on: boolean): Promise<void>;
 }
 
@@ -4318,7 +5152,7 @@ const REATTACH_MS = 10_000;
 class AttachStalled extends Error {}
 
 /** One agent's turn a socket follows live: which turn, and the stream of its session. */
-type AgentFollow = { turn: number; stream: Promise<AgentEventStream> };
+type AgentFollow = { turn: number; session: string; stream: Promise<AgentEventStream> };
 
 /**
  * A chat socket's hibernation attachment: whose socket it is, and a digest of the last snapshot it was sent (see
@@ -4515,6 +5349,9 @@ class ChatSockets extends LifecycleCapability implements DurableObjectCapability
       send(ws, { type: "auto", on: this.#chat.auto() });
       send(ws, { type: "incoming", incoming: this.#chat.incoming() });
       send(ws, { type: "agents", agents: this.#chat.agents() });
+      // Also when none: a reconnecting app may still show drafts posted or discarded from another window meanwhile.
+      send(ws, { type: "agentDrafts", drafts: this.#chat.drafts(attachment.person.uid) });
+      send(ws, { type: "actions", actions: this.#chat.actions() });
       send(ws, { type: "agentSettings", settings: this.#chat.agentSettings() });
       this.#followAgents(ws);
       // Timed only once it is to be sent: a wake attaches every socket again, and most find their snapshot already sent.
@@ -4615,15 +5452,19 @@ class ChatSockets extends LifecycleCapability implements DurableObjectCapability
     if (!this.#streams.has(ws)) return;
     const following = this.#agentStreams.get(ws) ?? new Map<string, AgentFollow>();
     this.#agentStreams.set(ws, following);
-    const running = new Map(runs.map((run) => [run.agentId, run]));
+    // A turn in a fork may read its owner's private servers: only they follow it; the others see that it works.
+    const uid = this.#person(ws)?.uid;
+    const running = new Map(runs.filter((run) => run.only === undefined || run.only === uid).map((run) => [run.agentId, run]));
     for (const [agent, follow] of following) {
-      if (running.get(agent)?.turn === follow.turn) continue;
+      // The same turn in another session (it forked since the socket followed it) is followed again, there.
+      const run = running.get(agent);
+      if (run?.turn === follow.turn && run.session === follow.session) continue;
       following.delete(agent);
       void follow.stream.then((events) => events.stop()).catch(() => {});
     }
     for (const run of running.values()) {
       if (following.has(run.agentId)) continue;
-      const follow = { turn: run.turn } as AgentFollow;
+      const follow = { turn: run.turn, session: run.session } as AgentFollow;
       following.set(run.agentId, follow);
       const current = () => following.get(run.agentId) === follow;
       const letGo = () => current() && following.delete(run.agentId);
@@ -4639,7 +5480,7 @@ class ChatSockets extends LifecycleCapability implements DurableObjectCapability
    * Send `ws` one agent's turn as it goes: a snapshot of it, then each batch, while `current` says the socket still
    * follows it. `letGo` when the stream ends by itself.
    */
-  async #streamTurn(ws: WebSocket, run: { agentId: string; session: string; turn: number }, current: () => boolean, letGo: () => void) {
+  async #streamTurn(ws: WebSocket, run: RunningTurn, current: () => boolean, letGo: () => void) {
     const member = this.#person(ws)?.uid !== this.#chat.ownerUid;
     const message = (events: readonly AgentEvent[]) => ({
       type: "agentEvents" as const,

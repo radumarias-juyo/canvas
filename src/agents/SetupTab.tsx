@@ -13,7 +13,7 @@ import {
   type AgentTurnView,
 } from "../../shared/agents.ts";
 import { AUTO_MODEL } from "../../shared/models.ts";
-import { errorMessage, plural, singleFlight } from "../../shared/util.ts";
+import { errorMessage, plural } from "../../shared/util.ts";
 import { api } from "../api.ts";
 import { ModelPicker, useCatalog } from "../chat/ModelPicker.tsx";
 import { AgentAvatar } from "../chat/people.tsx";
@@ -23,7 +23,7 @@ import type { AgentSubject, AgentTabProps } from "./AgentPage.tsx";
 import { AssumedBadge } from "./AssumedBadge.tsx";
 import { ASSUMED_FIELDS, CONFLICT_NOTICE, isAssumed, isConflict, withoutAssumed } from "./glance.ts";
 import { goTo } from "./nav.ts";
-import { reloadAgents } from "./store.ts";
+import { readServers, reloadAgents } from "./store.ts";
 
 /** What Auto means for an agent: the model of the chat it answers in. Stable, so the memoized picker keeps it. */
 const CHAT_MODEL = { name: "Chat's model", hint: "Answers with the model of the chat it is in" };
@@ -39,6 +39,8 @@ interface Form {
   effort?: ModelThinkingLevel;
   servers: Set<string> | null;
   sharedServers: Set<string> | null;
+  /** A reply built on a server it does not share with the chat shows first as a draft only its owner sees. */
+  review: boolean;
   /** It may post unprompted in chats that allow it (AgentDefinition.speaksUp). */
   speaksUp: boolean;
   assumed: string[];
@@ -57,15 +59,25 @@ const SETUP_ASSUMED: Record<string, readonly string[]> = {
 /** The version of the definition a form shows; none for a new one. */
 const versionOf = (subject: AgentSubject) => (subject.kind === "new" ? undefined : subject.agent.version);
 
-/** The deployment's MCP servers, one read for the forms open at once: read again as a form opens, so a sign-in shows. */
-const readServers = singleFlight(api.agentServers);
 
 /** Fields shown together with another one: a Change for them opens that one. */
 const SHOWN_WITH: Record<string, string> = { effort: "model", sharedServers: "servers" };
 
 function formOf(subject: AgentSubject): Form {
   if (subject.kind === "new")
-    return { name: "", job: "", instructions: "", avatar: "", color: "", model: AUTO_MODEL, servers: null, sharedServers: null, speaksUp: false, assumed: [] };
+    return {
+      name: "",
+      job: "",
+      instructions: "",
+      avatar: "",
+      color: "",
+      model: AUTO_MODEL,
+      servers: null,
+      sharedServers: null,
+      review: false,
+      speaksUp: false,
+      assumed: [],
+    };
   const { agent } = subject;
   return {
     name: agent.name,
@@ -77,6 +89,7 @@ function formOf(subject: AgentSubject): Form {
     effort: agent.effort,
     servers: agent.servers ? new Set(agent.servers) : null,
     sharedServers: agent.sharedServers ? new Set(agent.sharedServers) : null,
+    review: "reviewBeforePosting" in agent && agent.reviewBeforePosting === true,
     speaksUp: agent.speaksUp === true,
     assumed: subject.kind === "own" ? (subject.agent.assumed ?? []) : [],
   };
@@ -103,6 +116,7 @@ function inputOf(form: Form): AgentInput {
     ...(form.servers && { servers: sorted(form.servers) }),
     // A shared list names only servers the agent may use itself (any, when it lists none).
     ...(form.sharedServers && { sharedServers: sorted(form.sharedServers).filter((name) => !form.servers || form.servers.has(name)) }),
+    ...(form.review && { reviewBeforePosting: true }),
     ...(form.speaksUp && { speaksUp: true }),
     ...(form.assumed.length && { assumed: form.assumed }),
   };
@@ -111,7 +125,7 @@ function inputOf(form: Form): AgentInput {
 const sameSet = (a: Set<string> | null, b: Set<string> | null) =>
   a === null || b === null ? a === b : a.size === b.size && [...a].every((x) => b.has(x));
 function changed(a: Form, b: Form): boolean {
-  const plain = (["name", "job", "instructions", "avatar", "color", "model", "effort", "speaksUp"] as const).some((key) => a[key] !== b[key]);
+  const plain = (["name", "job", "instructions", "avatar", "color", "model", "effort", "review", "speaksUp"] as const).some((key) => a[key] !== b[key]);
   return plain || !sameSet(a.servers, b.servers) || !sameSet(a.sharedServers, b.sharedServers) || a.assumed.join() !== b.assumed.join();
 }
 
@@ -349,6 +363,18 @@ export function SetupTab({ subject, field, save, notice, onDirty }: AgentTabProp
           <small>"This agent" is what it may use when you ask; "Shared chats" is what anyone else in a shared chat can make it read.</small>
         </span>
         <ServersTable servers={servers} error={serversError} own={own} shared={inShared} name={name} onToggle={toggle} />
+      </div>
+      <div className="agent-field" data-field="reviewBeforePosting">
+        <label className="skill-toggle agent-review">
+          <input type="checkbox" checked={form.review} onChange={(e) => setForm({ ...form, review: e.target.checked })} />
+          <span>
+            Review before posting
+            <small>
+              In a shared chat, a reply built on a server it does not share with the chat shows first as a draft only you see: post it, edit it or
+              discard it.
+            </small>
+          </span>
+        </label>
       </div>
       <div className="agent-field" data-field="speaksUp">
         <span className="agent-label">
