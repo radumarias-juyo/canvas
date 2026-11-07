@@ -11,15 +11,17 @@ import { freshPrompt } from "../worker/memory/fresh.ts";
  * pi over a faux model with one `memory` section whose text the test sets and a memory_recall that finds the owner's
  * note, the messages each request carried, and the replies to give (`replies`, else "ok").
  */
-async function piWithMemory(replies: AssistantMessage[] = []) {
+async function piWithMemory(replies: AssistantMessage[] = [], summary = "Summary: nothing to note.") {
   const faux = fauxProvider({ models: [{ id: "m" }] });
   const models = createModels();
   models.setProvider(faux.provider);
   const requests: Message[][] = [];
   faux.setResponses(
-    Array.from({ length: 6 }, (_, n) => (context: { messages: Message[] }) => {
+    Array.from({ length: 8 }, () => (context: { messages: Message[]; systemPrompt?: string }) => {
+      // A compaction's request asks for a summary, in its own instructions.
+      if (JSON.stringify(context).includes("context summarization assistant")) return fauxAssistantMessage(summary);
       requests.push(structuredClone(context.messages));
-      return replies[n] ?? fauxAssistantMessage("ok");
+      return replies.shift() ?? fauxAssistantMessage("ok");
     }),
   );
   const notes = { text: "" };
@@ -72,6 +74,23 @@ describe("a prompt that held the owner's own notes", () => {
       expect(next).not.toContain("bonus");
       expect(next).toContain("left out");
       expect(next).toContain("c1");
+    } finally {
+      await pi.close(BACKGROUND_CONTEXT);
+    }
+  });
+
+  it("leaves out a summary of the conversation, which may have kept the notes", async () => {
+    const { pi, root, notes, ask, requests } = await piWithMemory([], "Summary: the owner's bonus is private.");
+    try {
+      notes.text = "No notes yet.";
+      await ask(`first ${"words ".repeat(30_000)}`);
+      await ask(`second ${"words ".repeat(30_000)}`);
+      await pi.waitForTask(await root.compact(undefined, BACKGROUND_CONTEXT), BACKGROUND_CONTEXT);
+      await ask("third");
+      expect(JSON.stringify(requests.at(-1))).toContain("bonus");
+      await freshPrompt(root);
+      await ask("and now?");
+      expect(JSON.stringify(requests.at(-1))).not.toContain("bonus");
     } finally {
       await pi.close(BACKGROUND_CONTEXT);
     }
