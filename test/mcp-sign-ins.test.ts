@@ -283,23 +283,60 @@ describe("sign-ins with nobody present", () => {
     expect(s.checks).toEqual(["Portal"]);
   });
 
-  it("a refresh that finishes after Disconnect does not sign the user back in", async () => {
+  it("a refresh saves only into the grant it refreshed: not after Disconnect, nor over a new sign-in", async () => {
     const s = setup();
-    await signIn(s, T0);
-    const client = new McpOAuthClient(s.signIns.store("Portal"), "Portal", { redirectUrl: CLIENT.redirect_uris[0]!, interactive: false });
-    await client.tokens();
+    const redirectUrl = CLIENT.redirect_uris[0]!;
+    const client = (interactive = false) => new McpOAuthClient(s.signIns.store("Portal"), "Portal", { redirectUrl, interactive });
+    /** A sign-in's code exchange: a new grant. */
+    const signInFresh = async (accessToken: string) => {
+      await s.signIns.update("Portal", { set: { client: CLIENT } });
+      await client(true).saveTokens({ ...TOKENS, access_token: accessToken });
+    };
+
+    await signInFresh("at-1");
+    const chat = client();
+    await chat.tokens();
     await s.signIns.disconnect("Portal");
-    await client.saveTokens({ ...TOKENS, access_token: "at-late" });
+    // A parallel request on the same connection reads nothing; the refresh in flight then lands.
+    expect(await chat.tokens()).toBeUndefined();
+    await chat.saveTokens({ ...TOKENS, access_token: "at-late" });
     expect(s.row()).toBeUndefined();
     expect(s.signIns.list()[0]).toMatchObject({ signedIn: false });
 
-    // Nor overwrite a new sign-in made meanwhile.
-    const late = new McpOAuthClient(s.signIns.store("Portal"), "Portal", { redirectUrl: CLIENT.redirect_uris[0]!, interactive: false });
-    await signIn(s, T0 + DAY);
-    await late.tokens();
-    await s.signIns.update("Portal", { set: { tokens: { ...TOKENS, access_token: "at-new" } } });
-    await late.saveTokens({ ...TOKENS, access_token: "at-late" });
-    expect((await s.signIns.record("Portal")).tokens?.access_token).toBe("at-new");
+    await signInFresh("at-2");
+    const old = client();
+    await old.tokens();
+    await signInFresh("at-3");
+    // The old grant's refresh lands after the new sign-in, and its connection's next read fails, to be opened afresh.
+    await old.saveTokens({ ...TOKENS, access_token: "at-late" });
+    expect((await s.signIns.record("Portal")).tokens?.access_token).toBe("at-3");
+    await expect(old.tokens()).rejects.toThrow(/again/);
+
+    // A connection opened now refreshes into the new grant.
+    const fresh = client();
+    await fresh.tokens();
+    await fresh.saveTokens({ ...TOKENS, access_token: "at-4" });
+    expect((await s.signIns.record("Portal")).tokens?.access_token).toBe("at-4");
+    // A client that never read tokens has nothing to save into.
+    await client().saveTokens({ ...TOKENS, access_token: "at-stray" });
+    expect((await s.signIns.record("Portal")).tokens?.access_token).toBe("at-4");
+  });
+
+  it("counts the grant from when it reopens a plain record that code from before wrote", async () => {
+    const sql = memorySql();
+    const s = setup({ sql });
+    await signIn(s, T0);
+    // A rollback: old code wrote the record plain, as a new sign-in.
+    sql.exec("UPDATE mcp_auth SET data = ? WHERE server = 'Portal'", JSON.stringify({ client: CLIENT, tokens: TOKENS }));
+    s.at(T0 + 10 * DAY);
+    const reopened = setup({ sql });
+    reopened.at(T0 + 10 * DAY);
+    await reopened.signIns.record("Portal");
+    expect(reopened.row()).toMatchObject({ signed_in_at: T0 + 10 * DAY });
+    sql.exec("UPDATE mcp_auth SET data = ? WHERE server = 'Portal'", JSON.stringify({ client: CLIENT, state: "s" }));
+    const signedOut = setup({ sql });
+    await signedOut.signIns.record("Portal");
+    expect(signedOut.signIns.list()[0]).toMatchObject({ signedIn: false });
   });
 
   it("keeps a chat waiting until it could be told", async () => {

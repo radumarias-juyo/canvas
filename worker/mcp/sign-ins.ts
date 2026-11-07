@@ -341,8 +341,15 @@ export class McpSignIns {
       this.#schedule();
       return {};
     }
-    if (opened.plain) await this.#write(server, opened.record, opened.record);
-    else this.#opened.set(server, opened.record);
+    if (opened.plain) {
+      await this.#write(server, opened.record, opened.record);
+      // Code from before encryption wrote it (a rollback, or never sealed): its grant counts from now if it has tokens
+      // (a new sign-in then, as far as anyone can tell), and it is not signed in without.
+      const signedIn = opened.record.tokens ? this.#now() : null;
+      this.#host.sql.exec("UPDATE mcp_auth SET signed_in_at = ?, warned_at = 0 WHERE server = ?", signedIn, server);
+      this.#host.changed();
+      this.#schedule();
+    } else this.#opened.set(server, opened.record);
     return opened.record;
   }
 

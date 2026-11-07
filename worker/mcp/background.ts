@@ -26,8 +26,11 @@ export const WARN_AHEAD_MS = 3 * 24 * 60 * 60 * 1000;
 export const KEEP_ALIVE_MS = 20 * 60 * 60 * 1000;
 /** After a keep-alive the server did not answer, how soon it is tried again. */
 export const KEEP_ALIVE_RETRY_MS = 60 * 60 * 1000;
-/** How long each request of a check may take: a token endpoint that stalls is `unavailable`, and the alarm moves on. */
-export const CHECK_REQUEST_MS = 15_000;
+/**
+ * How long each request of a check may take: a token endpoint that stalls is `unavailable`, and the alarm moves on. As
+ * long as a chat's MCP requests may take: a slow refresh that succeeds must not lose its rotated refresh token.
+ */
+export const CHECK_REQUEST_MS = 90_000;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
