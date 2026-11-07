@@ -132,11 +132,12 @@ export class ChatActions {
     return row ? (JSON.parse(row.origin) as ActionOrigin) : null;
   }
 
-  /** The newest actions, newest first: what the chat's cards show. */
-  list(limit = 50): PendingActionView[] {
-    return (this.#sql.exec("SELECT * FROM pending_actions ORDER BY created_at DESC LIMIT ?", limit).toArray() as ActionRow[]).map((row) =>
-      this.#view(row),
-    );
+  /**
+   * Every action kept (the waiting and running ones, and the KEPT_ENDED newest that ended), newest first: what the
+   * chat's cards show. All of them, so no card of one that ended falls back to how it was made (waiting, with buttons).
+   */
+  list(): PendingActionView[] {
+    return (this.#sql.exec("SELECT * FROM pending_actions ORDER BY created_at DESC").toArray() as ActionRow[]).map((row) => this.#view(row));
   }
 
   setAlarm(id: string, alarm: string): void {

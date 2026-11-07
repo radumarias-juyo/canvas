@@ -125,15 +125,15 @@ const clockNow = () => Math.floor(Date.now() / TICK_MS) * TICK_MS;
 
 const unsubscribed = () => () => {};
 
-/**
- * When a message was sent, under it on hover, how long ago; compact (on a phone), beside it where a drag uncovers it,
- * the time of day, which needs no clock. The full date and time in its tooltip.
- */
 /** The time now, to the clock's 30-second tick, again on each tick while `on`: for an expiry counting down. */
 export function useClock(on = true): number {
   return useSyncExternalStore(on ? subscribe : unsubscribed, clockNow, clockNow);
 }
 
+/**
+ * When a message was sent, under it on hover, how long ago; compact (on a phone), beside it where a drag uncovers it,
+ * the time of day, which needs no clock. The full date and time in its tooltip.
+ */
 export function SentTime({ at }: { at: number }) {
   const compact = useContext(Compact);
   const f = formatsFor(undefined, undefined);

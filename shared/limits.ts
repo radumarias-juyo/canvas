@@ -304,7 +304,9 @@ export function violation(rule: GuardrailRule, call: GuardedCall, facts: RuleFac
     }
     case "callsPerDay": {
       const made = facts.callsToday ?? 0;
-      return made >= (rule.value as number) ? `${call.server}.${call.tool} was called ${made} times today, the most a day` : null;
+      // What it counts: the tool called, or every tool the rule is on ("*").
+      const counted = rule.tool !== "*" ? `${call.server}.${call.tool}` : rule.server === "*" ? "Tools that change data" : `${call.server}'s tools`;
+      return made >= (rule.value as number) ? `${counted} ${rule.tool === "*" ? "were" : "was"} called ${made} times today, the most a day` : null;
     }
   }
 }

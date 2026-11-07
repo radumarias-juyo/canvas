@@ -3301,8 +3301,7 @@ export class ChatAgent extends DurableObject<Env> {
       userRules: () => this.#directory.guardrails(),
       agent: (agentId) => this.#directory.getAgent(agentId),
       readValue: async (server, tool, input, path) => {
-        const info = await this.hub.tool(server, tool);
-        if (!info || !isReadOnly(info)) throw new Error(`${server}.${tool} is not a read-only tool.`);
+        // The hub reads only a tool its server lists as read-only.
         const { result } = await this.hub.read(server, tool, input, { staleMs: 0, viewer: this.uid });
         return valueAt(result.payload ?? null, path);
       },
@@ -3335,7 +3334,8 @@ export class ChatAgent extends DurableObject<Env> {
     if (context.kind !== "session") throw new Error("not a call anyone made.");
     const { session } = context;
     if (session === ROOT_SESSION) return this.#piCaller();
-    const turn = this.roster.allRunning().find((one) => (one.session ?? this.roster.get(one.agentId)?.session) === session);
+    const running = this.roster.runningSessions().find((one) => one.session === session);
+    const turn = running && this.roster.turn(running.turn);
     if (!turn) throw new Error("this session has no turn that may change anything.");
     const entry = this.roster.get(turn.agentId);
     const agent = entry?.ownerUid === this.uid ? await this.#directory.getAgent(turn.agentId) : null;
@@ -3368,11 +3368,16 @@ export class ChatAgent extends DurableObject<Env> {
       console.error("action expiry:", errorMessage(error));
     }
     // Its card, in the log everyone in the chat sees (placed at once, even mid-run: a write with no model message).
+    // A card that cannot be written leaves the action held all the same: the owner decides it from Needs you.
     const data: ChatActionData = { action: view };
-    await (await this.#root()).submit(
-      { type: "write", requestId: `action:${view.id}`, entry: { kind: CHAT_ACTION_KIND, data: data as unknown as JsonObject } },
-      BACKGROUND_CONTEXT,
-    );
+    try {
+      await (await this.#root()).submit(
+        { type: "write", requestId: `action:${view.id}`, entry: { kind: CHAT_ACTION_KIND, data: data as unknown as JsonObject } },
+        BACKGROUND_CONTEXT,
+      );
+    } catch (error) {
+      console.error("action card:", errorMessage(error));
+    }
     this.#actionsChanged();
     this.ctx.waitUntil(this.#directory.addNeedsYou(view).catch((error: unknown) => console.error("needs you:", errorMessage(error))));
     return view;
@@ -3393,6 +3398,12 @@ export class ChatAgent extends DurableObject<Env> {
     if (decision !== "approve" && decision !== "decline") return refuse(400, 'Expected {decision: "approve" | "decline"}.');
     const found = this.actions.get(id);
     if (!found) return refuse(404, "No such action.");
+    // Its time is past, though its expiry alarm has not ended it (late, or never set): expired now, never run.
+    if (found.status === "pending" && found.expiresAt <= Date.now()) {
+      await this.#cancelExpiry(id);
+      await this.#expireAction(id);
+      return this.actions.get(id) ?? found;
+    }
     if (decision === "decline") {
       const declined = this.actions.move(id, "pending", "declined");
       if (!declined) return found;

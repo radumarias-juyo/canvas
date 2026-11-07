@@ -548,6 +548,17 @@ export class RunExecutor {
       else {
         try {
           if (step.kind === "page" && step.edit === "rebuild") request.session = await this.#deliverySession(run, key);
+          // A tell through an outside tool changes data there: kept as sent before the call, as a do step is, so a
+          // restart while it runs never makes it again (it may have reached the server).
+          if (kindOf(step) === "tool") {
+            const cutOff: RunDelivery = {
+              kind: "tool",
+              to: targetOf(step),
+              status: "failed",
+              detail: "cut off by a restart while it ran: it may or may not have been sent; check before sending it again",
+            };
+            runs.update(agent.id, run.dueAt, { detail: { deliveries: [...deliveries, cutOff], sent: [...sent, key] } });
+          }
           delivery = await this.#host.deliver(request);
         } catch (error) {
           delivery = { kind: kindOf(step), to: targetOf(step), status: "failed", detail: errorMessage(error) };

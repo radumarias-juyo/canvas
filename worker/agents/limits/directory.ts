@@ -97,12 +97,17 @@ export class LimitsDirectory {
     if (cut > 0) this.#sql.exec("DELETE FROM tool_calls WHERE id <= ?", cut);
   }
 
-  /** How many calls of server.tool ran since `since`, in all the user's chats: what a callsPerDay rule counts. */
+  /**
+   * How many calls of server.tool ran since `since`, in all the user's chats: what a callsPerDay rule counts. "*" for
+   * the server or the tool counts every one, as such a rule is on all of them.
+   */
   callsSince(server: string, tool: string, since: number): number {
     return this.#sql
       .exec(
-        "SELECT COUNT(*) AS n FROM tool_calls WHERE server = ? AND tool = ? AND at >= ? AND outcome IN ('ran', 'warned', 'failed')",
+        "SELECT COUNT(*) AS n FROM tool_calls WHERE (? = '*' OR server = ?) AND (? = '*' OR tool = ?) AND at >= ? AND outcome IN ('ran', 'warned', 'failed')",
         server,
+        server,
+        tool,
         tool,
         since,
       )

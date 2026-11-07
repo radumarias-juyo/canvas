@@ -72,7 +72,7 @@ export interface GateHost {
   userRules(): Promise<GuardrailRule[]>;
   /** A read-only tool's result's value at `path`, for a maxChange rule; undefined when it cannot be read. */
   readValue(server: string, tool: string, input: StepInput, path: string): Promise<unknown>;
-  /** How many calls of server.tool ran since `since` (epoch ms), the owner's in all their chats. */
+  /** How many calls of server.tool ("*" for either: any) ran since `since` (epoch ms), the owner's in all their chats. */
   callsSince(server: string, tool: string, since: number): Promise<number>;
   /** Midnight of the day `at` falls on, in `tz`. */
   dayStart(at: number, tz: string): number;
@@ -86,7 +86,8 @@ export interface GateHost {
 
 /** The values a rule needs that the call does not carry: the current value (maxChange), today's calls (callsPerDay). */
 async function factsFor(host: GateHost, rule: GuardrailRule, call: GateCall, at: number) {
-  if (rule.kind === "callsPerDay") return { callsToday: await host.callsSince(call.server, call.tool, host.dayStart(at, rule.tz ?? "UTC")) };
+  // The calls the rule is on: of every tool it covers ("*": any), not only the one called now.
+  if (rule.kind === "callsPerDay") return { callsToday: await host.callsSince(rule.server, rule.tool, host.dayStart(at, rule.tz ?? "UTC")) };
   // Read only when the call sets the argument: a rule on it says nothing otherwise.
   if (rule.kind !== "maxChange" || !rule.current || !argValues(call.input, rule.arg!).length) return {};
   try {
