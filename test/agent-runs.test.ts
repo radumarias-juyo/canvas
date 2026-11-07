@@ -803,6 +803,33 @@ describe("scheduled runs", () => {
       expect(host.runs.list(definition.id)[0].status).toBe("sent");
     });
 
+    it("ends its open items with it when the run fails going on after a decision", async () => {
+      const { host, runner, definition } = await held();
+      host.spendCap = async () => {
+        throw new Error("the directory is down");
+      };
+      await runner.decided(ref(definition), actedOf({ status: "done", result: "ok" }, "ok")!);
+      await host.settled();
+      expect(host.runs.list(definition.id)[0]).toMatchObject({ status: "failed", summary: "Failed: the directory is down" });
+      // Reopened by the decision, the item ends with the run: not left running for good.
+      expect(host.runs.items(definition.id, T0)).toEqual([expect.objectContaining({ status: "not_today", reason: "Failed: the directory is down" })]);
+      expect(host.works).toHaveLength(0);
+    });
+
+    it("ends its open items with it when its agent is found turned off as the run going on would wait for a sign-in", async () => {
+      const { host, runner, definition } = await held();
+      // Its sign-in lapsed, and its owner turns it off while the run checks for it: it skips, and waits for nothing.
+      host.needsSignIn = async (servers) => {
+        host.definitions.set(definition.id, { ...definition, enabled: false });
+        return [...servers];
+      };
+      await runner.decided(ref(definition), actedOf({ status: "done", result: "ok" }, "ok")!);
+      await host.settled();
+      expect(host.runs.list(definition.id)[0]).toMatchObject({ status: "not_today", summary: expect.stringMatching(/turned off/) });
+      expect(host.runs.items(definition.id, T0).map((item) => item.status)).toEqual(["not_today"]);
+      expect(host.asked).toEqual([]);
+    });
+
     it("leaves an item waiting when its run ended meanwhile, keeping nothing of the decision", async () => {
       const { host, runner, definition } = await held();
       host.runs.update(definition.id, T0, { status: "not_today", summary: "Skipped once you signed in: a newer run went instead." });
@@ -1161,9 +1188,52 @@ describe("scheduled runs", () => {
       expect(host.runs.list(definition.id)[0]).toMatchObject({ status: "not_today", summary: expect.stringMatching(/was turned off/) });
     });
 
+    it("does not take an item reopened during a pass, before a worker reached it, on once its agent was turned off", async () => {
+      const names = ["a", "b", "c", "d", "e"];
+      const scoped = agent({
+        workflow: [
+          { kind: "do", server: "crm", tool: "update", input: { region: "{{item.name}}" } },
+          { kind: "work", prompt: "Report on {{item.name}}." },
+          { kind: "tell", to: ["owner"], via: "chat" },
+        ],
+        scope: { list: { kind: "look", server: "crm", tool: "regions", input: {} }, each: true },
+        autonomy: 3,
+      });
+      const { host, runner, definition } = home(scoped);
+      host.values.set("crm.regions", names.map((name) => ({ name })));
+      host.actAnswer = () => HELD;
+      await runner.now(definition.id, false);
+      await host.settled();
+      expect(host.runs.items(definition.id, T0).map((item) => item.status)).toEqual(names.map(() => "waiting"));
+      // a to d approved at once: one pass takes them, as many as it runs at a time, and their work steps wait.
+      let release!: () => void;
+      const later = new Promise<void>((resolve) => (release = resolve));
+      host.answer = async () => {
+        await later;
+        return { status: "done", text: "Done.", cost: 0 };
+      };
+      const step = (item: string) => ({ agentId: definition.id, dueAt: T0, item, step: "0" });
+      const ok = () => actedOf({ status: "done", result: "ok" }, "ok")!;
+      const decisions = names.slice(0, 4).map((name) => runner.decided(step(name), ok()));
+      for (let i = 0; i < 10; i++) await tick();
+      expect(host.works).toHaveLength(4);
+      // Turned off, then e approved: reopened while the pass still goes, before a worker reaches it.
+      host.definitions.set(definition.id, { ...definition, enabled: false });
+      decisions.push(runner.decided(step("e"), ok()));
+      for (let i = 0; i < 5; i++) await tick();
+      release();
+      await Promise.all(decisions);
+      await host.settled();
+      expect(host.works.some((work) => work.prompt.includes("Report on e"))).toBe(false);
+      expect(host.runs.item(definition.id, T0, "e")).toMatchObject({ status: "not_today", reason: expect.stringMatching(/was turned off/) });
+      expect(host.delivered).toHaveLength(0);
+    });
+
     it("finds the decisions a run missed when a restart came between an action's end and the run", async () => {
       const { host, runner, definition } = await held();
       // Looked for while any item waits, its run waiting or still going (another item's pass), or waiting for a sign-in.
+      expect(host.runs.anyItemWaiting()).toBe(true);
+      host.runs.update(definition.id, T0, { status: "needs_sign_in" });
       expect(host.runs.anyItemWaiting()).toBe(true);
       host.runs.update(definition.id, T0, { status: "running" });
       expect(host.runs.anyItemWaiting()).toBe(true);

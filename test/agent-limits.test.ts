@@ -109,6 +109,7 @@ describe("guardrail rules", () => {
     const email = rule({ kind: "never", arg: "to.email", value: ["*@rival.example"] });
     expect(violation(email, call({ to: "ceo@rival.example" }))).toMatch(/never allowed/);
     expect(violation(email, call({ to: ["ok@fine.com", { email: "ceo@rival.example" }] }))).toMatch(/never allowed/);
+    expect(violation(email, call({ to: [{ email: "ok@fine.com" }, "ceo@rival.example"] }))).toMatch(/never allowed/);
     expect(violation(email, call({ to: { email: "ok@fine.com" } }))).toBeNull();
     expect(violation(rule({ kind: "max", arg: "items.amount", value: 100 }), call({ items: 500 }))).toMatch(/500/);
     // Recipients kept as an object's keys.
