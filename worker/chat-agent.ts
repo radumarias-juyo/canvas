@@ -152,7 +152,7 @@ import {
   copiedFields,
   mayUseServer,
   runServers,
-  serversNamed,
+  stepServers,
   type AgentDefinition,
   type AgentStep,
   type AgentTurnView,
@@ -3234,8 +3234,12 @@ export class ChatAgent extends DurableObject<Env> {
       signInNeeded: (agent, servers, quiet) => {
         const directory = this.#directory;
         const context = { chatId: this.chatId, what: `@${agent.name}`, ...(quiet && { quiet }) };
+        // A server it reads in a step it cannot go without: its notice offers no Disconnect.
+        const steps = stepServers(agent);
         const asking = servers.map((server) =>
-          directory.notifySignInNeeded(server, context).catch((error: unknown) => console.error(`agent sign-in (${server}):`, errorMessage(error))),
+          directory
+            .notifySignInNeeded(server, { ...context, ...(steps.has(server) && { stepReads: true }) })
+            .catch((error: unknown) => console.error(`agent sign-in (${server}):`, errorMessage(error))),
         );
         this.ctx.waitUntil(Promise.all(asking));
       },
@@ -3320,7 +3324,11 @@ export class ChatAgent extends DurableObject<Env> {
    * followers may read, the directory decides: postsReachFollowers). Off the caller's path.
    */
   #runEnded(run: EndedRun): void {
-    const posted = run.status === "sent" ? run.detail.deliveries.find((delivery) => (delivery.kind === "chat" || delivery.kind === "notify") && delivery.status === "sent" && delivery.text) : undefined;
+    // Of its reports, one the feed may show (not only off the record) before one it may not.
+    const isReport = (delivery: RunDelivery) =>
+      (delivery.kind === "chat" || delivery.kind === "notify") && delivery.status === "sent" && Boolean(delivery.text);
+    const reports = run.status === "sent" ? run.detail.deliveries.filter(isReport) : [];
+    const posted = reports.find((delivery) => delivery.chat?.kind !== "off_record") ?? reports[0];
     const ended = this.#directory.runEnded({
       agentId: run.agentId,
       dueAt: run.dueAt,
