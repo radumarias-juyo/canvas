@@ -109,17 +109,25 @@ export class UserDirectory extends DurableObject<Env> {
     if (this.#addColumn("artifacts", "seen", "INTEGER NOT NULL DEFAULT 0")) ctx.storage.sql.exec("UPDATE artifacts SET seen = latest");
     // A sidebar's socket stays open for hours: answer its keep-alive pings without waking this object.
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair(SOCKET_PING.request, SOCKET_PING.response));
-    const uid = ctx.id.name!;
+    // The uid names the key that opens this user's sign-ins. An object woken only by its alarm may not know its name,
+    // so it is kept: a wrong key would make every record look unreadable, and be forgotten.
+    if (ctx.id.name) ctx.storage.kv.put("uid", ctx.id.name);
+    const uid = ctx.id.name ?? ctx.storage.kv.get<string>("uid");
     this.#signIns = new McpSignIns({
       sql: ctx.storage.sql,
       env,
-      key: memoAsync(() => mcpTokensKey(env, uid)),
+      key: memoAsync(async () => {
+        if (!uid) throw new Error("This directory does not know its user.");
+        return mcpTokensKey(env, uid);
+      }),
       changed: () => this.#changed("sign-ins"),
       notify: async (notice, message) => {
         this.#changed(notice);
         await this.push(message);
       },
-      signedIn: (chatId, server) => exports.ChatAgent.getByName(chatAgentName(uid, chatId)).signedIn(server),
+      signedIn: async (chatId, server) => {
+        if (uid) await exports.ChatAgent.getByName(chatAgentName(uid, chatId)).signedIn(server);
+      },
       setAlarm: (at) => void (at === null ? ctx.storage.deleteAlarm() : ctx.storage.setAlarm(at)),
     });
   }
