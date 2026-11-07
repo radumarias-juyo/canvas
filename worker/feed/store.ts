@@ -391,6 +391,23 @@ export class FollowStore {
     return { ok: true };
   }
 
+  /**
+   * The followers of this person's target who follow it through `chatOwner`'s chat `chatId` (an agent shared there),
+   * taken off the list: the target left that chat. Their uids.
+   */
+  dropFollowersThrough(kind: FollowKind, id: string, chatOwner: string, chatId: string): string[] {
+    return this.#sql
+      .exec(
+        "DELETE FROM followers WHERE kind = ? AND target_id = ? AND chat_owner = ? AND chat_id = ? RETURNING follower_uid",
+        kind,
+        id,
+        chatOwner,
+        chatId,
+      )
+      .toArray()
+      .map((row) => row.follower_uid as string);
+  }
+
   removeFollower(kind: FollowKind, id: string, uid: string): void {
     this.#sql.exec("DELETE FROM followers WHERE kind = ? AND target_id = ? AND follower_uid = ?", kind, id, uid);
   }
