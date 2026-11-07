@@ -1,11 +1,12 @@
-import { createContext, useContext, useEffect, useState } from "react";
+import { createContext, useContext, useState } from "react";
 import { defaultAvatar } from "../../shared/agents.ts";
-import type { ActionActor, PendingActionView } from "../../shared/limits.ts";
+import { actorName, type ActionActor, type ActionKind, type PendingActionView } from "../../shared/limits.ts";
 import { AGENT_NAME } from "../../shared/mentions.ts";
 import { errorMessage } from "../../shared/util.ts";
 import { decisionLabels, endedText, expiresText } from "../agents/limits/rules.ts";
 import { api } from "../api.ts";
 import { AgentAvatar } from "./people.tsx";
+import { useClock } from "./SentTime.tsx";
 
 /** What the chat's action cards read: each action's live state (the `actions` socket message), and who may decide. */
 export interface ChatActionsView {
@@ -21,32 +22,20 @@ export const ChatActions = createContext<ChatActionsView>({ actions: new Map(), 
 /** The input's JSON over this many lines is folded, with a button to show it all. */
 const FOLD_LINES = 12;
 
-/** The time now, again every `everyMs` while `on`: for an expiry counting down. */
-export function useNow(on: boolean, everyMs = 30_000): number {
-  const [now, setNow] = useState(Date.now);
-  useEffect(() => {
-    if (!on) return;
-    setNow(Date.now());
-    const timer = setInterval(() => setNow(Date.now()), everyMs);
-    return () => clearInterval(timer);
-  }, [on, everyMs]);
-  return now;
-}
-
 /** Who made a call: pi's badge, an agent's own, or a page's letters on the quiet colour. */
 export function ActorBadge({ actor }: { actor: ActionActor }) {
   if (!actor.agentId && actor.name === AGENT_NAME) return <AgentAvatar />;
   return <AgentAvatar badge={{ avatar: actor.avatar || defaultAvatar(actor.name), color: actor.color ?? "slate" }} />;
 }
 
-/** An actor's name as the chat writes it: "@name" for an agent, else as it is ("pi", a page's title). */
-export const actorName = (actor: ActionActor) => (actor.agentId ? `@${actor.name}` : actor.name);
+/** What an actor does with a call, in words: proposes it (Recommend) or asks to make it (an approval). */
+export const verbOf = (kind: ActionKind) => (kind === "proposal" ? "proposes" : "asks to");
 
 /**
- * Run or approve an action, or decline it, as its owner: what it came to, until the chat's own state of it says more,
- * and the error when the request failed. `onDecided` hears of each decision that went through.
+ * Run or approve an action, or decline it, as its owner: what it came to, until the chat's own state of it says more
+ * (the sidebar's list follows from its socket's notice), and the error when the request failed.
  */
-export function useDecision(action: PendingActionView, onDecided?: () => void) {
+export function useDecision(action: PendingActionView) {
   const [after, setAfter] = useState<PendingActionView | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -55,7 +44,6 @@ export function useDecision(action: PendingActionView, onDecided?: () => void) {
     setError(null);
     try {
       setAfter(await api.decideAction(action.chatId, action.id, decision));
-      onDecided?.();
     } catch (e) {
       setError(errorMessage(e));
     } finally {
@@ -67,6 +55,33 @@ export function useDecision(action: PendingActionView, onDecided?: () => void) {
   return { view, busy, error, decide };
 }
 
+/** Approve and Decline (Run and Dismiss for a proposal), as the card and the Needs you list show them. */
+export function DecisionButtons({
+  kind,
+  busy,
+  decide,
+  className,
+}: {
+  kind: ActionKind;
+  busy: boolean;
+  decide: (decision: "approve" | "decline") => void;
+  className: string;
+}) {
+  const labels = decisionLabels(kind);
+  return (
+    <div className={className}>
+      <button type="button" className="primary" disabled={busy} onClick={() => decide("approve")}>
+        {labels.approve}
+      </button>
+      <button type="button" disabled={busy} onClick={() => decide("decline")}>
+        {labels.decline}
+      </button>
+    </div>
+  );
+}
+
+const TONES: Partial<Record<PendingActionView["status"], string>> = { done: "done", failed: "failed", running: "running" };
+
 /**
  * A held call's card in the chat (a `chat.action` entry): who made it and that it proposes it (level 2) or asks to make
  * it (an approval), the exact call with its input, why it waits, the rules that warned, when it expires, and how it
@@ -77,30 +92,17 @@ export function ActionCard({ action: made }: { action: PendingActionView }) {
   const live = actions.get(made.id) ?? made;
   const { view, busy, error, decide } = useDecision(live);
   const waiting = view.status === "pending";
-  const now = useNow(waiting);
+  const now = useClock(waiting);
   const ended = endedText(view, now);
   const open = waiting && view.expiresAt > now;
-  const labels = decisionLabels(view.kind);
-  const tone =
-    ended === null
-      ? "pending"
-      : view.status === "done"
-        ? "done"
-        : view.status === "failed"
-          ? "failed"
-          : view.status === "running"
-            ? "running"
-            : "closed";
+  const tone = ended === null ? "pending" : (TONES[view.status] ?? "closed");
   return (
-    <article
-      className={`action-card ${tone}`}
-      aria-label={`${actorName(view.actor)} ${view.kind === "proposal" ? "proposes" : "asks to"} ${view.server}.${view.tool}`}
-    >
+    <article className={`action-card ${tone}`} aria-label={`${actorName(view.actor)} ${verbOf(view.kind)} ${view.server}.${view.tool}`}>
       <header className="action-card-head">
         <ActorBadge actor={view.actor} />
         <div className="action-card-title">
           <span>
-            <strong>{actorName(view.actor)}</strong> {view.kind === "proposal" ? "proposes" : "asks to"}{" "}
+            <strong>{actorName(view.actor)}</strong> {verbOf(view.kind)}{" "}
             <code>
               {view.server}.{view.tool}
             </code>
@@ -120,14 +122,7 @@ export function ActionCard({ action: made }: { action: PendingActionView }) {
       {ended !== null ? (
         <p className="action-ended">{ended}</p>
       ) : isOwner ? (
-        <div className="action-buttons">
-          <button type="button" className="primary" disabled={busy} onClick={() => void decide("approve")}>
-            {labels.approve}
-          </button>
-          <button type="button" disabled={busy} onClick={() => void decide("decline")}>
-            {labels.decline}
-          </button>
-        </div>
+        <DecisionButtons className="action-buttons" kind={view.kind} busy={busy} decide={(decision) => void decide(decision)} />
       ) : (
         <p className="action-ended">
           Waits for {ownerName ?? "the chat’s owner"} to {view.kind === "proposal" ? "run it" : "approve it"}.

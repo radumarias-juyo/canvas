@@ -7,6 +7,7 @@ import {
   type AgentInput,
   type SharedAgentView,
 } from "../../shared/agents.ts";
+import { LIMIT_FIELDS } from "../../shared/limits.ts";
 import type { ChatSummary } from "../../shared/protocol.ts";
 import { errorMessage } from "../../shared/util.ts";
 import { api } from "../api.ts";
@@ -54,7 +55,7 @@ export interface PageNotice {
  * What a tab saves without editing: the rest of the definition (its trigger, scope, workflow, limits) stays as it is.
  * Every field some tab edits is here, or saving another tab would drop it.
  */
-const KEPT = [...COPIED_FIELDS, "autonomy", "guardrails", "approvalHours", "assumed"] as const satisfies readonly (keyof AgentInput)[];
+const KEPT = [...COPIED_FIELDS, ...LIMIT_FIELDS, "assumed"] as const satisfies readonly (keyof AgentInput)[];
 
 /** A tab of the agent page. Later tabs (workflow and runs, what it knows) add themselves here. */
 export interface AgentTab {
@@ -73,7 +74,7 @@ export const TABS: AgentTab[] = [
     fields: ["name", "job", "instructions", "avatar", "color", "model", "effort", "servers", "sharedServers", "assumed"],
     Component: SetupTab,
   },
-  { id: "limits", label: "Limits", fields: ["autonomy", "guardrails", "approvalHours"], Component: LimitsTab },
+  { id: "limits", label: "Limits", fields: LIMIT_FIELDS, Component: LimitsTab },
 ];
 
 /** The tab a place opens: the one asked for, else the one that edits its field, else the first. */

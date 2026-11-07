@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { AUTONOMY_LABELS, type AgentDefinition, type AgentInput, type AgentServerInfo, type AutonomyLevel } from "../../shared/agents.ts";
 import { DEFAULT_APPROVAL_HOURS, MAX_APPROVAL_HOURS, type CallLogView, type CallOutcome, type GuardrailRule } from "../../shared/limits.ts";
-import { errorMessage, singleFlight } from "../../shared/util.ts";
+import { errorMessage } from "../../shared/util.ts";
 import { api } from "../api.ts";
 import { Icon } from "../Icon.tsx";
 import { sentLabel } from "../chat/SentTime.tsx";
 import type { AgentSubject, AgentTabProps } from "./AgentPage.tsx";
 import { RuleList } from "./limits/RuleList.tsx";
-import { reloadAgents } from "./store.ts";
+import { readServers, reloadAgents } from "./store.ts";
 
 /** What each level lets the agent do on its own, a line each. */
 const LEVEL_MEANINGS: Record<AutonomyLevel, string> = {
@@ -17,9 +17,6 @@ const LEVEL_MEANINGS: Record<AutonomyLevel, string> = {
   4: "Carry out changes itself, within the rules below; every call is logged.",
 };
 const LEVELS = [1, 2, 3, 4] as const satisfies readonly AutonomyLevel[];
-
-/** The deployment's MCP servers, one read for the editors open at once. */
-const readServers = singleFlight(api.agentServers);
 
 /** The tab's fields, as typed: the hours as text, so a field being typed into can be empty. */
 interface Form {
@@ -108,7 +105,6 @@ function OwnLimits({ subject, field, save, notice, onDirty }: AgentTabProps & { 
   const dirty = changed(form, start.form);
   useEffect(() => onDirty?.(dirty), [dirty, onDirty]);
   useEffect(() => () => onDirty?.(false), [onDirty]);
-  const onEditing = useCallback((on: boolean) => setEditing(on), []);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -189,7 +185,7 @@ function OwnLimits({ subject, field, save, notice, onDirty }: AgentTabProps & { 
             servers={allowed}
             serversError={serversError}
             empty={`No rules of its own: @${agent.name} goes as far as its level lets it.`}
-            onEditing={onEditing}
+            onEditing={setEditing}
           />
         </div>
         <div className="agent-field" data-field="approvalHours">
@@ -266,7 +262,6 @@ function AllRules({ servers, serversError }: { servers: AgentServerInfo[] | null
   const [note, setNote] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [editing, setEditing] = useState(false);
-  const onEditing = useCallback((on: boolean) => setEditing(on), []);
   useEffect(() => {
     let live = true;
     api.guardrails().then(
@@ -310,7 +305,7 @@ function AllRules({ servers, serversError }: { servers: AgentServerInfo[] | null
         servers={servers}
         serversError={serversError}
         empty="No rules for all your agents yet."
-        onEditing={onEditing}
+        onEditing={setEditing}
       />
       {error && <p className="form-error">{error}</p>}
       {note && (

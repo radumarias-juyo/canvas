@@ -8,8 +8,20 @@ import type { Sql } from "../../members.ts";
 /** How long the log keeps a call: longer than any day a callsPerDay rule counts, and enough to look back on a week. */
 const LOG_DAYS = 30;
 const MAX_LOG_ROWS = 5_000;
+/** The log is pruned once every so many calls, not on each. */
+const PRUNE_EVERY = 50;
 
-type CallRow = { id: number; at: number; chat_id: string; actor: string; server: string; tool: string; outcome: CallOutcome; detail: string | null };
+type CallRow = {
+  id: number;
+  at: number;
+  chat_id: string;
+  actor: string;
+  agent_id: string | null;
+  server: string;
+  tool: string;
+  outcome: CallOutcome;
+  detail: string | null;
+};
 
 /** The key-value storage the rules are kept in: a Durable Object's `ctx.storage.kv`, or a test's map. */
 export interface Kv {
@@ -18,13 +30,14 @@ export interface Kv {
   delete(key: string): unknown;
 }
 
-/** A call to log, as the chat that made it tells it. */
-export type CallEntry = Omit<CallLogView, "id" | "at">;
+/** A call to log, as the chat that made it tells it; `agentId` when an agent made it (its name may change). */
+export type CallEntry = Omit<CallLogView, "id" | "at"> & { agentId?: string };
 
 export class LimitsDirectory {
   readonly #sql: Sql;
   readonly #kv: Kv;
   readonly #now: () => number;
+  #logged = 0;
 
   constructor(sql: Sql, kv: Kv, now: () => number = Date.now) {
     this.#sql = sql;
@@ -32,10 +45,11 @@ export class LimitsDirectory {
     this.#now = now;
     sql.exec(`
       CREATE TABLE IF NOT EXISTS tool_calls (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, chat_id TEXT NOT NULL, actor TEXT NOT NULL, server TEXT NOT NULL,
-        tool TEXT NOT NULL, outcome TEXT NOT NULL, detail TEXT
+        id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, chat_id TEXT NOT NULL, actor TEXT NOT NULL, agent_id TEXT,
+        server TEXT NOT NULL, tool TEXT NOT NULL, outcome TEXT NOT NULL, detail TEXT
       );
       CREATE INDEX IF NOT EXISTS tool_calls_tool ON tool_calls (server, tool, at);
+      CREATE INDEX IF NOT EXISTS tool_calls_agent ON tool_calls (agent_id, id);
       CREATE TABLE IF NOT EXISTS needs_you (
         chat_id TEXT NOT NULL, id TEXT NOT NULL, item TEXT NOT NULL, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL,
         PRIMARY KEY (chat_id, id)
@@ -62,17 +76,25 @@ export class LimitsDirectory {
   log(entry: CallEntry): void {
     const now = this.#now();
     this.#sql.exec(
-      "INSERT INTO tool_calls (at, chat_id, actor, server, tool, outcome, detail) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO tool_calls (at, chat_id, actor, agent_id, server, tool, outcome, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
       now,
       entry.chatId,
       entry.actor.slice(0, 64),
+      entry.agentId ?? null,
       entry.server,
       entry.tool,
       entry.outcome,
       entry.detail?.slice(0, 500) ?? null,
     );
-    this.#sql.exec("DELETE FROM tool_calls WHERE at < ?", now - LOG_DAYS * 86_400_000);
-    this.#sql.exec("DELETE FROM tool_calls WHERE id <= (SELECT id FROM tool_calls ORDER BY id DESC LIMIT 1 OFFSET ?)", MAX_LOG_ROWS);
+    if (++this.#logged % PRUNE_EVERY === 1) this.#prune(now);
+  }
+
+  /** Calls older than LOG_DAYS, and past the newest MAX_LOG_ROWS, go (ids grow with time). */
+  #prune(now: number): void {
+    const old = this.#sql.exec("SELECT MAX(id) AS id FROM tool_calls WHERE at < ?", now - LOG_DAYS * 86_400_000).toArray()[0]?.id as number | null;
+    const newest = this.#sql.exec("SELECT MAX(id) AS id FROM tool_calls").toArray()[0]?.id as number | null;
+    const cut = Math.max(old ?? 0, (newest ?? 0) - MAX_LOG_ROWS);
+    if (cut > 0) this.#sql.exec("DELETE FROM tool_calls WHERE id <= ?", cut);
   }
 
   /** How many calls of server.tool ran since `since`, in all the user's chats: what a callsPerDay rule counts. */
@@ -87,12 +109,12 @@ export class LimitsDirectory {
       .toArray()[0].n as number;
   }
 
-  /** The newest calls, of one actor ("@name", "pi") when given. */
-  calls(actor?: string, limit = 50): CallLogView[] {
+  /** The newest calls, of one agent (by id) when given. */
+  calls(agentId?: string, limit = 50): CallLogView[] {
     const rows = (
-      actor === undefined
+      agentId === undefined
         ? this.#sql.exec("SELECT * FROM tool_calls ORDER BY id DESC LIMIT ?", limit)
-        : this.#sql.exec("SELECT * FROM tool_calls WHERE actor = ? ORDER BY id DESC LIMIT ?", actor, limit)
+        : this.#sql.exec("SELECT * FROM tool_calls WHERE agent_id = ? ORDER BY id DESC LIMIT ?", agentId, limit)
     ).toArray() as CallRow[];
     return rows.map((row) => ({
       id: row.id,
@@ -107,6 +129,8 @@ export class LimitsDirectory {
   }
 
   addNeedsYou(item: NeedsYouItem): void {
+    // Ones whose chat never said they expired go once their time is past.
+    this.#sql.exec("DELETE FROM needs_you WHERE expires_at < ?", this.#now());
     this.#sql.exec(
       "INSERT OR REPLACE INTO needs_you (chat_id, id, item, expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
       item.chatId,
@@ -122,10 +146,9 @@ export class LimitsDirectory {
     return this.#sql.exec("DELETE FROM needs_you WHERE chat_id = ? AND id = ?", chatId, id).rowsWritten > 0;
   }
 
-  /** The actions waiting, oldest first; one whose chat never said it expired goes once its time is past. */
+  /** The actions waiting, oldest first; not one whose time is past (its chat may not have said it expired). */
   needsYou(): NeedsYouItem[] {
-    this.#sql.exec("DELETE FROM needs_you WHERE expires_at < ?", this.#now());
-    return (this.#sql.exec("SELECT item FROM needs_you ORDER BY created_at").toArray() as { item: string }[]).map(
+    return (this.#sql.exec("SELECT item FROM needs_you WHERE expires_at >= ? ORDER BY created_at", this.#now()).toArray() as { item: string }[]).map(
       (row) => JSON.parse(row.item) as NeedsYouItem,
     );
   }

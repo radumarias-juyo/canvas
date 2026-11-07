@@ -2,8 +2,8 @@ import { exports } from "cloudflare:workers";
 import { AGENT_ID_PATTERN } from "../shared/agents.ts";
 import { ID_PATTERN } from "../shared/protocol.ts";
 import { errorMessage } from "../shared/util.ts";
-import { chatAgentName, type ChatRefusal } from "./chat-agent.ts";
-import { json, readJson } from "./http.ts";
+import { chatAgentName } from "./chat-agent.ts";
+import { answerJson, json, readJson } from "./http.ts";
 import { connectAs } from "./mcp-connect.ts";
 import { McpFailure, McpHub } from "./mcp/hub.ts";
 import type { McpServerConfig } from "./mcp/servers.ts";
@@ -37,7 +37,7 @@ export async function limitsRoute(
     if (!body) return json({ error: 'Expected {decision: "approve" | "decline"} as JSON.' }, 400);
     // The chat object is named after this user: only their own chats' actions can be reached, and it checks again.
     const answer = await exports.ChatAgent.getByName(chatAgentName(uid, chatId)).decideAction(uid, id, body.decision);
-    return "status" in answer && "error" in answer ? json({ error: answer.error }, (answer as ChatRefusal).status) : json(answer);
+    return answerJson(answer);
   }
   if (path === "/api/limits/rules" && method === "GET") return json(await directory.guardrails());
   if (path === "/api/limits/rules" && method === "PUT") {
@@ -51,9 +51,7 @@ export async function limitsRoute(
     const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 50, 1), 200);
     if (agentId === null) return json(await directory.calls(undefined, limit));
     if (!AGENT_ID_PATTERN.test(agentId)) return json({ error: "agent is an agent's id." }, 400);
-    // The log names agents as they call ("@name"): by the name it has now.
-    const agent = await directory.getAgent(agentId);
-    return agent ? json(await directory.calls(`@${agent.name}`, limit)) : json({ error: "No such agent." }, 404);
+    return json(await directory.calls(agentId, limit));
   }
   if (path === "/api/limits/tools" && method === "GET") {
     const name = url.searchParams.get("server") ?? "";

@@ -423,7 +423,7 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, agentP
             )}
           </div>
           <SignInNotices list={signIns} onChange={(list) => setSignIns(() => list)} />
-          <NeedsYou items={needsYou} reload={loadNeedsYou} navigate={navigate} />
+          <NeedsYou items={needsYou} navigate={navigate} />
           {/* Chats scroll here; artifacts, skills and the files panel stay below them. */}
           <div className="sidebar-scroll">
             <ChatsHeading order={chatOrder} />

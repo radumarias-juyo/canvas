@@ -11,7 +11,7 @@ import { checkRules, GuardrailError, MAX_APPROVAL_HOURS, type GuardrailRule } fr
 import { AGENT_NAME } from "./mentions.ts";
 import { EFFORT_LABELS } from "./models.ts";
 import type { RunRef } from "./runs.ts";
-import { isObject } from "./util.ts";
+import { isObject, isTimeZone } from "./util.ts";
 
 /** An agent's handle, as "@name" calls it: a lowercase letter, then letters, digits or hyphens. */
 export const AGENT_NAME_PATTERN = /^[a-z][a-z0-9-]{1,23}$/;
@@ -199,17 +199,6 @@ function names(value: unknown, field: string): string[] | undefined {
 function checkTime(value: unknown): string {
   if (typeof value !== "string" || !/^([01]\d|2[0-3]):[0-5]\d$/.test(value)) fail('A schedule\'s time is "HH:MM", 24-hour, such as "07:00".');
   return value;
-}
-
-/** Whether the runtime knows `tz` as an IANA time zone. */
-export function isTimeZone(tz: unknown): tz is string {
-  if (typeof tz !== "string" || !tz || tz.length > 64) return false;
-  try {
-    new Intl.DateTimeFormat("en", { timeZone: tz });
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function checkLook(value: unknown, what: string): LookStep {

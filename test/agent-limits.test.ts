@@ -7,7 +7,6 @@ import {
   inQuietRange,
   kindsFor,
   matchesValue,
-  strictest,
   toolArgs,
   violation,
   type GuardrailRule,
@@ -16,9 +15,10 @@ import {
 import { CHAT_MESSAGE_KIND } from "../shared/protocol.ts";
 import { ChatActions, type NewAction } from "../worker/agents/limits/actions.ts";
 import { LimitsDirectory } from "../worker/agents/limits/directory.ts";
-import { fillFromCall, WriteGate, type Caller, type GateContext, type GateHost } from "../worker/agents/limits/gate.ts";
+import { WriteGate, type Caller, type GateContext, type GateHost } from "../worker/agents/limits/gate.ts";
 import { inputLevel, lowestLevel, turnLevel } from "../worker/agents/limits/levels.ts";
 import { toolInput } from "../worker/agents/limits/tell.ts";
+import { fillInput } from "../worker/agents/runs/executor.ts";
 import { CallHeld, McpHub, type McpConnection, type RawToolResult } from "../worker/mcp/hub.ts";
 import type { ToolInfo } from "../shared/protocol.ts";
 import { memorySql } from "./fakes.ts";
@@ -107,13 +107,6 @@ describe("guardrail rules", () => {
     expect(violation({ ...quiet, tz: "Europe/Bucharest" }, call({}, late))).toMatch(/quiet date/);
   });
 
-  it("the strictest rule wins: block, then approve, then warn", () => {
-    const hit = (effect: GuardrailRule["effect"]) => ({ rule: rule({ kind: "max", effect }), reason: "" });
-    expect(strictest([hit("warn"), hit("approve")])).toBe("approve");
-    expect(strictest([hit("warn"), hit("block"), hit("approve")])).toBe("block");
-    expect(strictest([])).toBeNull();
-  });
-
   it("the editor's choices come from the tool's input schema", () => {
     const schema = {
       type: "object",
@@ -135,7 +128,7 @@ describe("guardrail rules", () => {
   });
 
   it("fills a current value's read from the call's input", () => {
-    expect(fillFromCall({ id: "{{input.deal.id}}", note: "for {{input.deal.id}}" }, { deal: { id: 7 } })).toEqual({ id: 7, note: "for 7" });
+    expect(fillInput({ id: "{{input.deal.id}}", note: "for {{input.deal.id}}" }, { input: { deal: { id: 7 } } })).toEqual({ id: 7, note: "for 7" });
   });
 });
 
@@ -222,18 +215,13 @@ function guarded(callers: Record<string, Partial<Caller>>, userRules: GuardrailR
       held.push(view);
       return view;
     },
-    approved: (id) => {
-      const action = actions.get(id);
-      const origin = actions.origin(id);
-      return action?.status === "running" && origin ? { action, origin } : null;
-    },
   };
   const gate = new WriteGate(host);
   hub.guard(gate);
   const write = (session: string, input: StepInput) => hub.call("crm", "update_deal", input, { kind: "session", session });
   const approve = async (id: string, input?: StepInput) => {
     const action = actions.move(id, "pending", "running")!;
-    return hub.call("crm", action.tool, input ?? action.input, { kind: "approved", actionId: id });
+    return hub.call("crm", action.tool, input ?? action.input, { kind: "approved", action, level: 2 });
   };
   return { clock, server, hub, actions, logged, held, write, approve };
 }
@@ -262,7 +250,11 @@ describe("the write gate", () => {
   it("refuses a call from no session it knows, before it reaches the server", async () => {
     const chat = guarded({});
     expect(await heldBy(chat.write("stray", { discount: 1 }))).toMatchObject({ outcome: "refused" });
-    expect(await heldBy(chat.hub.call("crm", "update_deal", {}))).toMatchObject({ outcome: "refused" });
+    // With no one named at all, nothing that changes data runs; nor through a read, nor on a hub with no gate.
+    await expect(chat.hub.call("crm", "update_deal", {})).rejects.toMatchObject({ error: { code: "not_granted" } });
+    await expect(chat.hub.read("crm", "update_deal", {}, { staleMs: 0, viewer: "owner" })).rejects.toMatchObject({ error: { code: "not_granted" } });
+    const open = new McpHub([{ name: "crm", url: "https://example.invalid/mcp" }], chat.server.connector);
+    await expect(open.call("crm", "update_deal", {})).rejects.toMatchObject({ error: { code: "not_granted" } });
     expect(chat.server.calls).toEqual([]);
   });
 
@@ -305,8 +297,12 @@ describe("the write gate", () => {
     const chat = guarded({ two: { level: 2 } });
     const held = await heldBy(chat.write("two", { discount: 8 }));
     if (held.outcome !== "held") throw new Error("not held");
-    // A call that is not the stored one is not run under its approval, nor one that was never approved.
-    expect(await heldBy(chat.hub.call("crm", "update_deal", { discount: 80 }, { kind: "approved", actionId: held.action.id }))).toMatchObject({
+    // A call that is not the stored one is not run under its approval, nor one that is not running (approved).
+    const running = { ...held.action, status: "running" as const };
+    expect(await heldBy(chat.hub.call("crm", "update_deal", { discount: 80 }, { kind: "approved", action: running, level: 2 }))).toMatchObject({
+      outcome: "refused",
+    });
+    expect(await heldBy(chat.hub.call("crm", "update_deal", { discount: 8 }, { kind: "approved", action: held.action, level: 2 }))).toMatchObject({
       outcome: "refused",
     });
     await chat.approve(held.action.id);
@@ -351,13 +347,6 @@ describe("the write gate", () => {
     expect(chat.server.calls).toHaveLength(2);
   });
 
-  it("a test run changes nothing", async () => {
-    const chat = guarded({ run: { level: 4 } });
-    const verdict = await heldBy(chat.hub.call("crm", "update_deal", {}, { kind: "run", agentId: "a", dueAt: 1, item: "", step: "0", test: true }));
-    expect(verdict).toMatchObject({ outcome: "refused", message: expect.stringMatching(/test/) });
-    expect(chat.server.calls).toEqual([]);
-  });
-
   it("a page cannot wait for an approval: what would be held is refused", async () => {
     const chat = guarded({ page: { level: 4, noHold: true } }, [discountRule("approve")]);
     expect(await heldBy(chat.write("page", { discount: 50 }))).toMatchObject({ outcome: "refused", message: expect.stringMatching(/cannot wait/) });
@@ -385,7 +374,7 @@ describe("pending actions", () => {
       () => T0,
     );
     const one = actions.add(action());
-    expect(actions.pending().map((view) => view.id)).toEqual([one.id]);
+    expect(actions.get(one.id)?.status).toBe("pending");
     expect(actions.move(one.id, "pending", "declined")).toMatchObject({ status: "declined", decidedAt: T0 });
     expect(actions.move(one.id, "pending", "expired")).toBeNull();
     expect(actions.get(one.id)?.status).toBe("declined");
@@ -398,10 +387,26 @@ describe("pending actions", () => {
       () => "chat-1",
       () => T0,
     );
-    const one = actions.add(action());
-    actions.move(one.id, "pending", "running");
-    expect(actions.interrupted().map((view) => view.id)).toEqual([one.id]);
-    expect(actions.move(one.id, "running", "done", "x".repeat(5_000))?.result).toHaveLength(2_000);
+    const sql = memorySql();
+    const before = new ChatActions(
+      sql,
+      () => "chat-1",
+      () => T0,
+    );
+    const one = before.add(action());
+    before.move(one.id, "pending", "running");
+    // Running under the instance that runs it is not cut off; after a restart (a new instance) it is.
+    expect(before.interrupted()).toEqual([]);
+    expect(actions.interrupted()).toEqual([]);
+    const after = new ChatActions(
+      sql,
+      () => "chat-1",
+      () => T0,
+    );
+    expect(after.interrupted().map((view) => view.id)).toEqual([one.id]);
+    const two = after.add(action());
+    after.move(two.id, "pending", "running");
+    expect(after.move(two.id, "running", "done", "x".repeat(5_000))?.result).toHaveLength(2_000);
   });
 });
 
@@ -425,13 +430,14 @@ describe("the owner's directory of limits", () => {
   it("counts the calls that ran since a time, in every chat", () => {
     let now = T0;
     const limits = new LimitsDirectory(memorySql(), kv(), () => now);
-    limits.log({ chatId: "c1", actor: "@deals", server: "crm", tool: "update_deal", outcome: "ran" });
+    limits.log({ chatId: "c1", actor: "@deals", agentId: "a1", server: "crm", tool: "update_deal", outcome: "ran" });
     limits.log({ chatId: "c2", actor: "pi", server: "crm", tool: "update_deal", outcome: "warned" });
     limits.log({ chatId: "c2", actor: "pi", server: "crm", tool: "update_deal", outcome: "refused" });
     now += 1_000;
     expect(limits.callsSince("crm", "update_deal", T0)).toBe(2);
     expect(limits.callsSince("crm", "update_deal", T0 + 1)).toBe(0);
-    expect(limits.calls("@deals")).toMatchObject([{ actor: "@deals", outcome: "ran" }]);
+    // By the agent's id: a renamed agent keeps its calls.
+    expect(limits.calls("a1")).toMatchObject([{ actor: "@deals", outcome: "ran" }]);
   });
 
   it("lists what waits, and drops what its chat never said expired", () => {

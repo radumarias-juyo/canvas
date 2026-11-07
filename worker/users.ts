@@ -18,7 +18,7 @@ import { mcpTokensKey } from "./storage/index.ts";
 import type { McpSignInView, SignInNotice } from "../shared/sign-ins.ts";
 import { AgentStore, type AgentSave } from "./agents/store.ts";
 import { LimitsDirectory, type CallEntry } from "./agents/limits/directory.ts";
-import { type CallLogView, type GuardrailRule, type NeedsYouItem } from "../shared/limits.ts";
+import { actorName, LIMIT_FIELDS, type CallLogView, type GuardrailRule, type NeedsYouItem, type PendingActionView } from "../shared/limits.ts";
 import { ChatRows } from "./chat-rows.ts";
 import { addColumns } from "./members.ts";
 import type { ChatKind } from "../shared/chat-kinds.ts";
@@ -32,7 +32,7 @@ import {
   type AgentResult,
 } from "../shared/agents.ts";
 import { excerpt } from "../shared/replies.ts";
-import { errorMessage, memoAsync, randomHex } from "../shared/util.ts";
+import { errorMessage, isObject, memoAsync, randomHex } from "../shared/util.ts";
 
 /** One user's OAuth state for one MCP server. `uid` must come from a verified identity. */
 export function mcpAuthStore(uid: string, server: string): McpAuthStore {
@@ -586,21 +586,23 @@ export class UserDirectory extends DurableObject<Env> {
     return this.#limits.callsSince(server, tool, since);
   }
 
-  calls(actor?: string, limit?: number): CallLogView[] {
-    return this.#limits.calls(actor, limit);
+  /** The newest calls, of one agent (by id) when given. */
+  calls(agentId?: string, limit?: number): CallLogView[] {
+    return this.#limits.calls(agentId, limit);
   }
 
   /** An action of one of the user's chats waits for them: listed, the sidebars told, and a push when no app is open. */
-  async addNeedsYou(item: NeedsYouItem): Promise<void> {
-    this.#limits.addNeedsYou(item);
+  async addNeedsYou(view: PendingActionView): Promise<void> {
+    const chatTitle = this.chatTitle(view.chatId) ?? "a chat";
+    this.#limits.addNeedsYou({ ...view, chatTitle });
     this.#changed("needs-you");
-    const who = item.actor.agentId ? `@${item.actor.name}` : item.actor.name;
+    const who = actorName(view.actor);
     // Only that something waits: the call itself stays in the app.
     await this.push({
-      title: item.kind === "proposal" ? `${who} proposes a change` : `${who} needs your approval`,
-      body: excerpt(`In “${item.chatTitle}”`, 120),
-      url: `/c/${item.chatId}`,
-      tag: `action:${item.chatId}:${item.id}`,
+      title: view.kind === "proposal" ? `${who} proposes a change` : `${who} needs your approval`,
+      body: excerpt(`In “${chatTitle}”`, 120),
+      url: `/c/${view.chatId}`,
+      tag: `action:${view.chatId}:${view.id}`,
     }).catch((error: unknown) => console.error("push:", errorMessage(error)));
   }
 
@@ -785,12 +787,12 @@ export class UserDirectory extends DurableObject<Env> {
     if (origin === "agent") {
       const signIn = new Set(oauthServers(this.env).map((server) => server.name));
       input = withoutSignInShares(input, (server) => signIn.has(server));
-      // How far an agent may go on its own is its owner's to set, on its Limits tab: the model's draft keeps the one it
-      // has (Inform for a new one), whatever it asks for.
-      if (input && typeof input === "object") {
-        const { autonomy: _asked, ...rest } = input as Record<string, unknown>;
-        const kept = save?.id === undefined ? undefined : this.#agents.get(save.id)?.autonomy;
-        input = { ...rest, ...(kept !== undefined && { autonomy: kept }) };
+      // An agent's limits (how far it goes on its own, its rules, its wait) are its owner's to set, on its Limits tab:
+      // the model's draft keeps the ones it has (the defaults for a new one), whatever it asks for.
+      if (isObject(input)) {
+        const existing = save?.id === undefined ? undefined : this.#agents.get(save.id);
+        const kept = Object.fromEntries(LIMIT_FIELDS.flatMap((field) => (existing?.[field] === undefined ? [] : [[field, existing[field]]])));
+        input = { ...Object.fromEntries(Object.entries(input).filter(([key]) => !(LIMIT_FIELDS as readonly string[]).includes(key))), ...kept };
       }
     }
     const saved = this.#agents.save(input, origin, enabled, save);

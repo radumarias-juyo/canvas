@@ -2,7 +2,7 @@
 // runs when approved. They live in the chat object that made the call, which holds the hub that runs it (and its
 // owner's sign-ins); the owner's directory keeps an index of the pending ones for the "Needs you" list.
 
-import type { StepInput } from "../../../shared/agents.ts";
+import type { AutonomyLevel, StepInput } from "../../../shared/agents.ts";
 import type { ActionActor, ActionKind, ActionStatus, PendingActionView } from "../../../shared/limits.ts";
 import type { RunRef } from "../../../shared/runs.ts";
 import { randomHex } from "../../../shared/util.ts";
@@ -15,7 +15,7 @@ import type { Sql } from "../../members.ts";
 export interface ActionOrigin {
   session?: string;
   run?: RunRef & { agentId: string; item: string; step: string };
-  level: number;
+  level: AutonomyLevel;
 }
 
 /** A new action, as the gate holds a call. */
@@ -47,17 +47,20 @@ type ActionRow = {
   result: string | null;
   origin: string;
   alarm: string | null;
+  runner: string | null;
 };
 
 /** How many ended actions a chat keeps for its cards; older ones go (their cards then say only how they were made). */
 const KEPT_ENDED = 200;
 /** How much of a result an action keeps. */
-export const RESULT_CHARS = 2_000;
+const RESULT_CHARS = 2_000;
 
 export class ChatActions {
   readonly #sql: Sql;
   readonly #chatId: () => string;
   readonly #now: () => number;
+  /** This instance's mark on the actions it runs: one running under another's was cut off by a restart. */
+  readonly #runner = randomHex(8);
 
   /** `chatId`: read when a view is made (an object woken by its alarm knows its name only once it is asked). */
   constructor(sql: Sql, chatId: () => string, now: () => number = Date.now) {
@@ -68,7 +71,7 @@ export class ChatActions {
       CREATE TABLE IF NOT EXISTS pending_actions (
         id TEXT PRIMARY KEY, kind TEXT NOT NULL, status TEXT NOT NULL, actor TEXT NOT NULL, server TEXT NOT NULL, tool TEXT NOT NULL,
         input TEXT NOT NULL, why TEXT NOT NULL, warnings TEXT, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
-        decided_at INTEGER, result TEXT, origin TEXT NOT NULL, alarm TEXT
+        decided_at INTEGER, result TEXT, origin TEXT NOT NULL, alarm TEXT, runner TEXT
       );
       CREATE INDEX IF NOT EXISTS pending_actions_status ON pending_actions (status, expires_at);
     `);
@@ -136,13 +139,6 @@ export class ChatActions {
     );
   }
 
-  /** The ones still waiting. */
-  pending(): PendingActionView[] {
-    return (this.#sql.exec("SELECT * FROM pending_actions WHERE status = 'pending' ORDER BY created_at").toArray() as ActionRow[]).map((row) =>
-      this.#view(row),
-    );
-  }
-
   setAlarm(id: string, alarm: string): void {
     this.#sql.exec("UPDATE pending_actions SET alarm = ? WHERE id = ?", alarm, id);
   }
@@ -153,24 +149,27 @@ export class ChatActions {
 
   /**
    * Move an action from `from` to `to`, only when it is in `from` (so two presses, or a press and its expiry, end it
-   * once): the action as it is after, or null when it was not in `from`.
+   * once): the action as it is after, or null when it was not in `from`. One moved to running is this instance's.
    */
   move(id: string, from: ActionStatus, to: ActionStatus, result?: string): PendingActionView | null {
     const decided = from === "pending" ? this.#now() : null;
     const changed = this.#sql.exec(
-      "UPDATE pending_actions SET status = ?, decided_at = COALESCE(?, decided_at), result = COALESCE(?, result) WHERE id = ? AND status = ?",
+      "UPDATE pending_actions SET status = ?, decided_at = COALESCE(?, decided_at), result = COALESCE(?, result), runner = COALESCE(?, runner) WHERE id = ? AND status = ?",
       to,
       decided,
       result === undefined ? null : result.slice(0, RESULT_CHARS),
+      to === "running" ? this.#runner : null,
       id,
       from,
     ).rowsWritten;
     return changed ? this.get(id) : null;
   }
 
-  /** Running when the object stopped: what restarts find. Never run again (the call may have reached the server). */
+  /** Running under an instance that stopped: what restarts find. Never run again (the call may have reached the server). */
   interrupted(): PendingActionView[] {
-    return (this.#sql.exec("SELECT * FROM pending_actions WHERE status = 'running'").toArray() as ActionRow[]).map((row) => this.#view(row));
+    return (this.#sql.exec("SELECT * FROM pending_actions WHERE status = 'running' AND runner IS NOT ?", this.#runner).toArray() as ActionRow[]).map(
+      (row) => this.#view(row),
+    );
   }
 
   #prune(): void {

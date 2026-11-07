@@ -4,10 +4,14 @@
 // which runs it exactly as stored, after checking the rules that block once more (a quiet date may have begun).
 
 import { AUTONOMY_LABELS, type AgentDefinition, type AutonomyLevel, type StepInput } from "../../../shared/agents.ts";
+import { canonicalJson } from "../../../shared/canonical.ts";
 import {
+  actorName,
+  argValues,
+  asNumber,
   DEFAULT_APPROVAL_HOURS,
   hitText,
-  strictest,
+  ruleApplies,
   violation,
   type ActionActor,
   type CallOutcome,
@@ -16,18 +20,21 @@ import {
   type RuleHit,
 } from "../../../shared/limits.ts";
 import type { ToolInfo } from "../../../shared/protocol.ts";
+import { errorMessage } from "../../../shared/util.ts";
+import type { Value } from "../../../shared/conditions.ts";
+import { fillInput } from "../runs/executor.ts";
 import type { ActionOrigin, NewAction } from "./actions.ts";
 
 /** Who makes a call, as the caller of McpHub.call says it. */
 export type GateContext =
   /** A model's tool call in one of the chat's pi sessions (pi's own, an agent's, a run's). */
   | { kind: "session"; session: string }
-  /** A run's do step, or its tell through an outside tool. `test`: a Test it run, which changes nothing. */
-  | { kind: "run"; agentId: string; dueAt: number; item: string; step: string; test?: boolean }
+  /** A run's do step, or its tell through an outside tool (a Test it run calls neither). */
+  | { kind: "run"; agentId: string; dueAt: number; item: string; step: string }
   /** A published page's call, by its author (pages call write tools only for their author). */
   | { kind: "page"; artifactId: string }
-  /** An action its owner approved: run as stored. */
-  | { kind: "approved"; actionId: string };
+  /** An action its owner approved, now running: its stored call, at the level it was held at. Only the chat builds it. */
+  | { kind: "approved"; action: PendingActionView; level: AutonomyLevel };
 
 /** Who a context comes to: whose call it is, how far it may go, and where a held action's outcome goes back. */
 export interface Caller {
@@ -60,7 +67,7 @@ export type GateVerdict =
 export interface GateHost {
   now(): number;
   /** Who a context is; throws when it names nobody that may call (an unknown session). */
-  caller(context: GateContext): Promise<Caller>;
+  caller(context: GateContext, call: GateCall): Promise<Caller>;
   /** The owner's rules for all their agents (and pi, and pages). */
   userRules(): Promise<GuardrailRule[]>;
   /** A read-only tool's result's value at `path`, for a maxChange rule; undefined when it cannot be read. */
@@ -70,55 +77,31 @@ export interface GateHost {
   /** Midnight of the day `at` falls on, in `tz`. */
   dayStart(at: number, tz: string): number;
   /** Keep a call in the owner's log of calls. Never throws. */
-  log(entry: { actor: string; server: string; tool: string; outcome: CallOutcome; detail?: string }): void;
+  log(entry: { actor: string; agentId?: string; server: string; tool: string; outcome: CallOutcome; detail?: string }): void;
   /** Hold a call as an action: kept, its card posted, the owner told; the action as kept. */
   hold(action: NewAction): Promise<PendingActionView>;
   /** One of the owner's agents, for the rules it has now; null when it is gone. */
   agent(agentId: string): Promise<Pick<AgentDefinition, "guardrails"> | null>;
-  /** An approved action about to run, if it is one and is running now (its owner pressed Approve). */
-  approved(actionId: string): { action: PendingActionView; origin: ActionOrigin } | null;
 }
 
 /** The values a rule needs that the call does not carry: the current value (maxChange), today's calls (callsPerDay). */
 async function factsFor(host: GateHost, rule: GuardrailRule, call: GateCall, at: number) {
   if (rule.kind === "callsPerDay") return { callsToday: await host.callsSince(call.server, call.tool, host.dayStart(at, rule.tz ?? "UTC")) };
-  if (rule.kind !== "maxChange" || !rule.current) return {};
-  const input = fillFromCall(rule.current.input, call.input);
+  // Read only when the call sets the argument: a rule on it says nothing otherwise.
+  if (rule.kind !== "maxChange" || !rule.current || !argValues(call.input, rule.arg!).length) return {};
   try {
-    const value = await host.readValue(call.server, rule.current.tool, input, rule.current.path);
-    const number = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : NaN;
-    return { current: Number.isFinite(number) ? number : null };
+    const input = fillInput(rule.current.input, { input: call.input as Value });
+    return { current: asNumber(await host.readValue(call.server, rule.current.tool, input, rule.current.path)) ?? null };
   } catch {
     return { current: null };
   }
-}
-
-/** A read's input with each "{{input.path}}" filled from the call's input (a whole one keeps its type). */
-export function fillFromCall(template: StepInput, input: StepInput): StepInput {
-  const at = (path: string): unknown =>
-    path
-      .split(".")
-      .reduce<unknown>((value, key) => (value && typeof value === "object" ? (value as Record<string, unknown>)[key] : undefined), input);
-  const fill = (value: unknown): unknown => {
-    if (typeof value === "string") {
-      const whole = /^\{\{\s*input\.([A-Za-z0-9_.$-]+)\s*\}\}$/.exec(value.trim());
-      if (whole) return at(whole[1]) ?? null;
-      return value.replace(/\{\{\s*input\.([A-Za-z0-9_.$-]+)\s*\}\}/g, (_, path: string) => {
-        const found = at(path);
-        return typeof found === "string" ? found : JSON.stringify(found ?? null);
-      });
-    }
-    if (Array.isArray(value)) return value.map(fill);
-    if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, fill(item)]));
-    return value;
-  };
-  return fill(template) as StepInput;
 }
 
 /** The rules that fire for a call, of `rules`. */
 export async function hitsFor(host: GateHost, rules: readonly GuardrailRule[], call: GateCall, at: number): Promise<RuleHit[]> {
   const checked = await Promise.all(
     rules.map(async (rule): Promise<RuleHit | null> => {
+      if (!ruleApplies(rule, call)) return null;
       const facts = await factsFor(host, rule, call, at);
       const reason = violation(rule, { server: call.server, tool: call.tool, input: call.input, at }, facts);
       return reason === null ? null : { rule, reason };
@@ -142,38 +125,38 @@ export class WriteGate {
   /** Whether a call that changes data may run now; when not, it is refused or held (see the file's head). */
   async check(call: GateCall, context: GateContext): Promise<GateVerdict> {
     const host = this.#host;
-    if (context.kind === "approved") return this.#approved(call, context.actionId);
+    if (context.kind === "approved") return this.#approved(call, context.action, context.level);
+    const userRules = host.userRules();
     let caller: Caller;
     try {
-      caller = await host.caller(context);
+      caller = await host.caller(context, call);
     } catch (error) {
-      const message = `Not run: ${error instanceof Error ? error.message : String(error)}`;
-      host.log({ actor: "unknown", server: call.server, tool: call.tool, outcome: "refused", detail: message });
-      return { run: false, outcome: "refused", message };
+      userRules.catch(() => {});
+      return this.#refuse(null, call, `Not run: ${errorMessage(error)}`);
     }
-    const who = caller.actor.agentId ? `@${caller.actor.name}` : caller.actor.name;
-    const refuse = (message: string): GateVerdict => {
-      host.log({ actor: who, server: call.server, tool: call.tool, outcome: "refused", detail: message });
-      return { run: false, outcome: "refused", message };
-    };
-    if (context.kind === "run" && context.test) return refuse("Not run: a test changes nothing.");
+    const who = actorName(caller.actor);
     const now = host.now();
-    const rules = [...(caller.agent?.guardrails ?? []), ...(await host.userRules())];
-    const hits = await hitsFor(host, rules, call, now);
-    const effect = strictest(hits);
+    const hits = await hitsFor(host, [...(caller.agent?.guardrails ?? []), ...(await userRules)], call, now);
     const said = (wanted: GuardrailRule["effect"]) => hits.filter((hit) => hit.rule.effect === wanted).map(hitText);
-    if (effect === "block") return refuse(`Not run: a rule blocks it: ${said("block").join("; ")}.`);
+    // The strictest rule wins: block, then approve, then warn.
+    const blocks = said("block");
+    if (blocks.length) return this.#refuse(caller.actor, call, `Not run: a rule blocks it: ${blocks.join("; ")}.`);
     if (caller.level === 1) {
-      return refuse(`Not run: ${who} is ${at(1)} ${caller.because}, so it changes nothing. Say what you would do instead.`);
+      return this.#refuse(caller.actor, call, `Not run: ${who} is ${at(1)} ${caller.because}, so it changes nothing. Say what you would do instead.`);
     }
     const warnings = said("warn");
-    const asks = effect === "approve" ? said("approve") : [];
+    const asks = said("approve");
     if (caller.level === 4 && !asks.length) {
       // Logged as it ends, with what it came to (WriteGate.ran).
       return { run: true, warnings, caller };
     }
-    if (caller.noHold)
-      return refuse(`Not run: it needs your approval (${asks.join("; ")}), which a page cannot wait for. Ask for it in a chat instead.`);
+    if (caller.noHold) {
+      return this.#refuse(
+        caller.actor,
+        call,
+        `Not run: it needs your approval (${asks.join("; ")}), which a page cannot wait for. Ask for it in a chat instead.`,
+      );
+    }
     const kind = caller.level === 2 ? "proposal" : "approval";
     const why =
       caller.level === 4
@@ -191,54 +174,51 @@ export class WriteGate {
       expiresAt: now + hours * 3_600_000,
       origin: { ...caller.origin, level: caller.level },
     });
-    host.log({ actor: who, server: call.server, tool: call.tool, outcome: "held", detail: why });
+    this.#log(caller.actor, call, "held", why);
     // A run's record is read by its owner; a session's answer by the model.
-    const owner = context.kind === "run" ? { to: "you", whose: "your" } : { to: "your owner", whose: "your owner's" };
+    const [owner, presses] = context.kind === "run" ? ["you", "you press"] : ["your owner", "they press"];
     const message =
       kind === "proposal"
-        ? `Not run yet: proposed to ${owner.to} as a card with this exact call; it runs only if ${owner.to === "you" ? "you press" : "they press"} Run (it expires in ${hours} hours). ${why}`
-        : `Not run yet: waiting for ${owner.whose} approval, with this exact call (it expires in ${hours} hours). ${why}`;
+        ? `Not run yet: proposed to ${owner} as a card with this exact call; it runs only if ${presses} Run (it expires in ${hours} hours). ${why}`
+        : `Not run yet: waiting for ${owner === "you" ? "your" : "your owner's"} approval, with this exact call (it expires in ${hours} hours). ${why}`;
     return { run: false, outcome: "held", message, action };
   }
 
+  #log(actor: ActionActor | null, call: Pick<GateCall, "server" | "tool">, outcome: CallOutcome, detail?: string): void {
+    this.#host.log({
+      actor: actor ? actorName(actor) : "unknown",
+      ...(actor?.agentId && { agentId: actor.agentId }),
+      server: call.server,
+      tool: call.tool,
+      outcome,
+      ...(detail && { detail }),
+    });
+  }
+
+  #refuse(actor: ActionActor | null, call: GateCall, message: string): GateVerdict {
+    this.#log(actor, call, "refused", message);
+    return { run: false, outcome: "refused", message };
+  }
+
   /** An action its owner approved: only while it runs, only its stored call, and not when a rule now blocks it. */
-  async #approved(call: GateCall, actionId: string): Promise<GateVerdict> {
+  async #approved(call: GateCall, action: PendingActionView, level: AutonomyLevel): Promise<GateVerdict> {
     const host = this.#host;
-    const found = host.approved(actionId);
-    const same =
-      found &&
-      found.action.server === call.server &&
-      found.action.tool === call.tool &&
-      JSON.stringify(found.action.input) === JSON.stringify(call.input);
-    if (!found || !same) return { run: false, outcome: "refused", message: "Not run: no such approved action, or not its call." };
-    const { action, origin } = found;
-    const agent = action.actor.agentId ? await host.agent(action.actor.agentId).catch(() => null) : null;
-    const rules = [...(agent?.guardrails ?? []), ...(await host.userRules())];
-    const hits = (await hitsFor(host, rules, call, host.now())).filter((hit) => hit.rule.effect === "block");
-    const actor = action.actor.agentId ? `@${action.actor.name}` : action.actor.name;
-    if (hits.length) {
-      const message = `Not run: a rule blocks it now: ${hits.map(hitText).join("; ")}.`;
-      host.log({ actor, server: call.server, tool: call.tool, outcome: "refused", detail: message });
-      return { run: false, outcome: "refused", message };
-    }
-    return {
-      run: true,
-      warnings: [],
-      actionId,
-      caller: { actor: action.actor, level: origin.level as AutonomyLevel, because: "approved by you", origin: {} },
-    };
+    const same = action.server === call.server && action.tool === call.tool && canonicalJson(action.input) === canonicalJson(call.input);
+    if (action.status !== "running" || !same) return this.#refuse(action.actor, call, "Not run: not the call that was approved.");
+    const [agent, userRules] = await Promise.all([
+      action.actor.agentId ? host.agent(action.actor.agentId).catch(() => null) : null,
+      host.userRules(),
+    ]);
+    // Only the rules that block: the owner's approval answered the rest.
+    const blocking = [...(agent?.guardrails ?? []), ...userRules].filter((rule) => rule.effect === "block");
+    const hits = await hitsFor(host, blocking, call, host.now());
+    if (hits.length) return this.#refuse(action.actor, call, `Not run: a rule blocks it now: ${hits.map(hitText).join("; ")}.`);
+    return { run: true, warnings: [], actionId: action.id, caller: { actor: action.actor, level, because: "approved by you", origin: {} } };
   }
 
   /** A call the gate let through ended: logged with what it came to. */
   ran(call: Pick<GateCall, "server" | "tool">, verdict: Extract<GateVerdict, { run: true }>, error?: string): void {
-    const actor = verdict.caller.actor.agentId ? `@${verdict.caller.actor.name}` : verdict.caller.actor.name;
     const notes = [...(verdict.actionId ? ["approved"] : []), ...verdict.warnings, ...(error ? [error] : [])];
-    this.#host.log({
-      actor,
-      server: call.server,
-      tool: call.tool,
-      outcome: error ? "failed" : verdict.warnings.length ? "warned" : "ran",
-      ...(notes.length && { detail: notes.join("; ").slice(0, 500) }),
-    });
+    this.#log(verdict.caller.actor, call, error ? "failed" : verdict.warnings.length ? "warned" : "ran", notes.join("; ").slice(0, 500));
   }
 }

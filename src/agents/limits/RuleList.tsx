@@ -8,6 +8,7 @@ import {
   kindsFor,
   MAX_GUARDRAILS,
   MAX_QUIET_RANGES,
+  PLAIN_KINDS,
   toolArgs,
   type GuardrailEffect,
   type GuardrailKind,
@@ -19,8 +20,8 @@ import { errorMessage } from "../../../shared/util.ts";
 import { api } from "../../api.ts";
 import { blankDraft, blankRange, draftOf, ruleLine, ruleOf, type RangeDraft, type RuleDraft } from "./rules.ts";
 
-/** The kinds that read no argument: when and how often. Any tool and any server may have them. */
-const PLAIN_KINDS: readonly GuardrailKind[] = ["quietDates", "callsPerDay"];
+/** A draft's kind when it is one on the call itself (it stays as the server or tool changes), else none. */
+const plainKind = (draft: RuleDraft) => (draft.kind && PLAIN_KINDS.includes(draft.kind) ? draft.kind : "");
 
 /** Each server's tools, read once for every editor open at once; a failed read is asked again next time. */
 const toolReads = new Map<string, Promise<ToolInfo[]>>();
@@ -60,7 +61,6 @@ export function RuleList({
   onChange,
   servers,
   serversError,
-  readOnly = false,
   empty,
   onEditing,
 }: {
@@ -69,7 +69,6 @@ export function RuleList({
   /** The servers its rules may be on; null while they are read. */
   servers: readonly AgentServerInfo[] | null;
   serversError?: string | null;
-  readOnly?: boolean;
   /** What it says when it has none. */
   empty: string;
   /** Whether a rule is being edited: what it holds is not in the list yet. */
@@ -110,23 +109,21 @@ export function RuleList({
                   <span>{ruleLine(rule)}</span>
                   {rule.note && <small>{rule.note}</small>}
                 </span>
-                {!readOnly && (
-                  <span className="limit-rule-actions">
-                    <button type="button" disabled={editing !== null} onClick={() => setEditing({ index, draft: draftOf(rule) })}>
-                      Edit
-                    </button>
-                    <button type="button" disabled={editing !== null} onClick={() => onChange(rules.filter((_, i) => i !== index))}>
-                      Remove
-                    </button>
-                  </span>
-                )}
+                <span className="limit-rule-actions">
+                  <button type="button" disabled={editing !== null} onClick={() => setEditing({ index, draft: draftOf(rule) })}>
+                    Edit
+                  </button>
+                  <button type="button" disabled={editing !== null} onClick={() => onChange(rules.filter((_, i) => i !== index))}>
+                    Remove
+                  </button>
+                </span>
               </li>
             ),
           )}
         </ul>
       )}
       {editing?.index === null && editor(null, editing.draft)}
-      {!readOnly && !editing && (
+      {!editing && (
         <button
           type="button"
           className="limit-add"
@@ -189,9 +186,9 @@ function RuleEditor({
       tool: server === "*" ? "*" : "",
       arg: "",
       currentTool: "",
-      kind: draft.kind && PLAIN_KINDS.includes(draft.kind) ? draft.kind : "",
+      kind: plainKind(draft),
     });
-  const pickTool = (name: string) => set({ tool: name, arg: "", kind: draft.kind && PLAIN_KINDS.includes(draft.kind) ? draft.kind : "" });
+  const pickTool = (name: string) => set({ tool: name, arg: "", kind: plainKind(draft) });
   const pickArg = (path: string) => {
     const next = path ? argOf(args, path) : undefined;
     const allowed = path ? kindsFor(next?.type) : PLAIN_KINDS;

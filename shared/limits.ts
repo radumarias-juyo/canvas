@@ -9,7 +9,7 @@
 
 import type { AgentColor, AutonomyLevel, StepInput } from "./agents.ts";
 import type { RunRef } from "./runs.ts";
-import { isObject } from "./util.ts";
+import { isObject, isTimeZone } from "./util.ts";
 
 export const GUARDRAIL_KINDS = ["min", "max", "maxChange", "never", "quietDates", "callsPerDay"] as const;
 export type GuardrailKind = (typeof GUARDRAIL_KINDS)[number];
@@ -28,6 +28,8 @@ export const KIND_LABELS: Record<GuardrailKind, string> = {
 export const EFFECT_LABELS: Record<GuardrailEffect, string> = { block: "Blocks it", approve: "Needs approval", warn: "Warns" };
 /** The kinds that read an argument of the call's input; the others look only at when and how often. */
 export const ARG_KINDS: readonly GuardrailKind[] = ["min", "max", "maxChange", "never"];
+/** The kinds of rule on the call itself, not on an argument (their tool may be "*"). */
+export const PLAIN_KINDS: readonly GuardrailKind[] = GUARDRAIL_KINDS.filter((kind) => !ARG_KINDS.includes(kind));
 
 /** A day range, both ends included: "MM-DD" every year (it may wrap the year: "12-30" to "01-02"), or "YYYY-MM-DD" once. */
 export type QuietRange = { from: string; to: string };
@@ -79,15 +81,6 @@ function fail(message: string): never {
 const MONTH_DAY = /^(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
 const DATE = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
 const ARG_PATH = /^[A-Za-z0-9_$-]+(\.[A-Za-z0-9_$-]+){0,5}$/;
-
-function isTimeZone(tz: string): boolean {
-  try {
-    new Intl.DateTimeFormat("en", { timeZone: tz });
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 function name(value: unknown, what: string, { star = true } = {}): string {
   if (typeof value !== "string" || !value.trim() || value.length > 200) fail(`A rule needs ${what}.`);
@@ -218,13 +211,14 @@ export function valueAt(value: unknown, path: string): unknown {
 }
 
 /** An argument's values: each element of a list, else the value itself; none when the call does not set it. */
-function argValues(input: StepInput, path: string): unknown[] {
+export function argValues(input: StepInput, path: string): unknown[] {
   const value = valueAt(input, path);
   if (value === undefined || value === null) return [];
   return Array.isArray(value) ? value : [value];
 }
 
-function asNumber(value: unknown): number | undefined {
+/** A number, or a string that is one; undefined otherwise. */
+export function asNumber(value: unknown): number | undefined {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) return Number(value);
   return undefined;
@@ -321,12 +315,6 @@ export interface RuleHit {
   reason: string;
 }
 
-/** The strictest effect among rules that fired: block, then approve, then warn; null when none fired. */
-export function strictest(hits: readonly Pick<RuleHit, "rule">[]): GuardrailEffect | null {
-  for (const effect of GUARDRAIL_EFFECTS) if (hits.some((hit) => hit.rule.effect === effect)) return effect;
-  return null;
-}
-
 /** A hit in words, for the people and the model: its reason, and the owner's note. */
 export function hitText(hit: RuleHit): string {
   return `${hit.reason}${hit.rule.note ? ` (${hit.rule.note})` : ""}`;
@@ -334,7 +322,7 @@ export function hitText(hit: RuleHit): string {
 
 /** The kinds of rule that fit an argument of this JSON schema type (the rule editor's choices). */
 export function kindsFor(type: string | undefined): GuardrailKind[] {
-  if (type === "number" || type === "integer") return ["min", "max", "maxChange", "never"];
+  if (type === "number" || type === "integer") return [...ARG_KINDS];
   if (type === "string" || type === "array" || type === "boolean" || type === undefined) return ["never"];
   return [];
 }
@@ -348,15 +336,19 @@ export interface ToolArg {
   values?: (string | number)[];
 }
 
+/** A JSON schema property's type, the first that is not "null" when it lists several. */
+export function schemaType(property: Record<string, unknown>): string | undefined {
+  const type = Array.isArray(property.type) ? property.type.find((one) => one !== "null") : property.type;
+  return typeof type === "string" ? type : undefined;
+}
+
 /** The arguments a tool's input schema names, nested objects' too (to 3 levels), for the rule editor. */
 export function toolArgs(schema: unknown, prefix = "", depth = 0): ToolArg[] {
   if (!isObject(schema) || !isObject(schema.properties) || depth > 2) return [];
   return Object.entries(schema.properties).flatMap(([key, property]): ToolArg[] => {
     if (!isObject(property)) return [];
     const path = prefix ? `${prefix}.${key}` : key;
-    const type = Array.isArray(property.type)
-      ? (property.type.find((one) => one !== "null") as string | undefined)
-      : (property.type as string | undefined);
+    const type = schemaType(property);
     if (type === "object") return toolArgs(property, path, depth + 1);
     const items = isObject(property.items) ? property.items : undefined;
     const choices = (Array.isArray(property.enum) ? property.enum : Array.isArray(items?.enum) ? items.enum : undefined)?.filter(
@@ -390,6 +382,11 @@ export interface ActionActor {
   agentId?: string;
   avatar?: string;
   color?: AgentColor;
+}
+
+/** How an actor is named in words and in the log of calls: "@name" for an agent, else its name (pi, a page). */
+export function actorName(actor: Pick<ActionActor, "name" | "agentId">): string {
+  return actor.agentId ? `@${actor.name}` : actor.name;
 }
 
 /**

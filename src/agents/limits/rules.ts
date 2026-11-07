@@ -12,7 +12,7 @@ import {
   type PendingActionView,
   type QuietRange,
 } from "../../../shared/limits.ts";
-import { errorMessage, randomHex } from "../../../shared/util.ts";
+import { errorMessage, listSome, plural, randomHex } from "../../../shared/util.ts";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
@@ -41,14 +41,12 @@ export function limitText(rule: GuardrailRule): string {
     case "maxChange":
       return `${KIND_LABELS.maxChange} ${rule.value as number}${rule.percent ? "%" : ""}`;
     case "never": {
-      const values = (rule.value as (string | number)[]).map(String);
-      const shown = values.slice(0, 4).join(", ");
-      return `Never ${shown}${values.length > 4 ? ` and ${values.length - 4} more` : ""}`;
+      return `Never ${listSome((rule.value as (string | number)[]).map(String), 4)}`;
     }
     case "quietDates":
       return `Quiet dates ${(rule.value as QuietRange[]).map(rangeText).join(", ")}${zone}`;
     case "callsPerDay":
-      return `At most ${rule.value as number} ${rule.value === 1 ? "call" : "calls"} a day${zone}`;
+      return `At most ${plural(rule.value as number, "call")} a day${zone}`;
   }
 }
 

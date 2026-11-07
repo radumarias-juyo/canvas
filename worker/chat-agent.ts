@@ -105,10 +105,10 @@ import { newestFirst, type FileEntry } from "./storage/user-files.ts";
 import { connectAs } from "./mcp-connect.ts";
 import { CallHeld, McpFailure, McpHub } from "./mcp/hub.ts";
 import { ChatActions, type NewAction } from "./agents/limits/actions.ts";
-import { WriteGate, type Caller, type GateContext, type GateHost } from "./agents/limits/gate.ts";
+import { WriteGate, type Caller, type GateCall, type GateContext, type GateHost } from "./agents/limits/gate.ts";
 import { toolInput } from "./agents/limits/tell.ts";
 import { inputLevel, lowestLevel, turnLevel } from "./agents/limits/levels.ts";
-import { APP_APPROVAL_KIND, CHAT_ACTION_KIND, valueAt, type ActionActor, type ChatActionData, type PendingActionView } from "../shared/limits.ts";
+import { APP_APPROVAL_KIND, callLine, CHAT_ACTION_KIND, valueAt, type ActionActor, type ChatActionData, type PendingActionView } from "../shared/limits.ts";
 import { instantOf, wallClock } from "./agents/runs/schedule.ts";
 import { mcpServers, sharesResults, watchableForAll, type McpServerConfig } from "./mcp/servers.ts";
 import { CacheWarmer } from "./cache-warmer.ts";
@@ -147,11 +147,12 @@ import {
   type ChatAgentView,
   type ChatTurnData,
   type SharedAgentView,
+  type StepInput,
 } from "../shared/agents.ts";
 import { AgentTurns, sessionOf, type TurnHost } from "./agents/controller.ts";
 import { isTurnEntry, TurnFilter } from "./agents/live.ts";
 import { ChatRoster, type AgentTurn, type RosterEntry } from "./agents/roster.ts";
-import { reportOf, SignInNeeded, whenOf, type DeliveryRequest } from "./agents/runs/executor.ts";
+import { jsonOf, reportOf, SignInNeeded, whenOf, type ActContext, type ActResult, type DeliveryRequest } from "./agents/runs/executor.ts";
 import { AgentRunner, type RunAlarm, type RunnerHost, type WatchAlarm } from "./agents/runs/runner.ts";
 import { AgentRuns } from "./agents/runs/store.ts";
 import { reportContext, runInstructions, RUN_STEP_KIND, workSpend, type RunStepData } from "./agents/runs/report.ts";
@@ -3014,15 +3015,10 @@ export class ChatAgent extends DurableObject<Env> {
           throw signInOr(error);
         }
       },
-      act: async ({ server, tool, input }, context) => {
-        try {
-          const result = await this.hub.call(server, tool, input, { kind: "run", ...context });
-          return { status: "ran", value: (result.payload ?? null) as Value };
-        } catch (error) {
-          if (error instanceof CallHeld) return { status: error.verdict.outcome, message: error.message };
+      act: (call, context) =>
+        this.#runCall(call, context).catch((error: unknown) => {
           throw signInOr(error);
-        }
-      },
+        }),
       // Each sign-in refreshed now, as nobody is there to sign in (worker/mcp/sign-ins.ts).
       needsSignIn: async (servers) => {
         const checked = await this.#directory.checkSignIns(servers);
@@ -3267,20 +3263,30 @@ export class ChatAgent extends DurableObject<Env> {
     if ((running || agents) && this.members.hasAny()) this.#notePeople(by, "stopped");
   }
 
-  /** A run's report told through an outside tool, as the run's call: through the write gate, at the agent's level. */
+  /** A run's call that changes data (a do step, a tell through a tool): through the write gate, at its agent's level. */
+  async #runCall({ server, tool, input }: { server: string; tool: string; input: StepInput }, context: ActContext): Promise<ActResult> {
+    try {
+      const result = await this.hub.call(server, tool, input, { kind: "run", ...context });
+      return { status: "ran", value: (result.payload ?? null) as Value };
+    } catch (error) {
+      if (error instanceof CallHeld) return { status: error.verdict.outcome, message: error.message };
+      throw error;
+    }
+  }
+
+  /** A run's report told through an outside tool, as the run's call. */
   async #tellThrough(request: DeliveryRequest, via: { server: string; tool: string }, to: readonly string[]): Promise<RunDelivery> {
     const { agent, run } = request;
     const where = { kind: "tool" as const, to: `${to.join(", ")} through ${via.server}.${via.tool}` };
-    if (!mayUseServer(agent, via.server)) return { ...where, status: "refused", detail: `${via.server} is not one of the servers @${agent.name} may use` };
     const info = await this.hub.tool(via.server, via.tool).catch(() => undefined);
     if (!info) return { ...where, status: "failed", detail: `${via.server} has no tool "${via.tool}" for you now` };
     const input = toolInput(info.inputSchema, { to, text: request.text, subject: `@${agent.name}, ${whenOf(agent)}` });
     if ("error" in input) return { ...where, status: "failed", detail: `not sent: ${input.error}` };
     try {
-      await this.hub.call(via.server, via.tool, input, { kind: "run", agentId: agent.id, dueAt: run.dueAt, item: "", step: request.key });
-      return { ...where, text: request.text, status: "sent" };
+      const done = await this.#runCall({ ...via, input }, { agentId: agent.id, dueAt: run.dueAt, item: "", step: request.key });
+      if (done.status === "ran") return { ...where, text: request.text, status: "sent" };
+      return { ...where, text: request.text, status: done.status === "held" ? "waiting" : "refused", detail: done.message };
     } catch (error) {
-      if (error instanceof CallHeld) return { ...where, text: request.text, status: error.verdict.outcome === "held" ? "waiting" : "refused", detail: error.message };
       return { ...where, status: "failed", detail: errorMessage(error) };
     }
   }
@@ -3291,7 +3297,7 @@ export class ChatAgent extends DurableObject<Env> {
   #gateHost(): GateHost {
     return {
       now: () => Date.now(),
-      caller: (context) => this.#callerOf(context),
+      caller: (context, call) => this.#callerOf(context, call),
       userRules: () => this.#directory.guardrails(),
       agent: (agentId) => this.#directory.getAgent(agentId),
       readValue: async (server, tool, input, path) => {
@@ -3304,11 +3310,6 @@ export class ChatAgent extends DurableObject<Env> {
       dayStart: (at, tz) => instantOf({ ...wallClock(at, tz), hour: 0, minute: 0 }, tz),
       log: (entry) => this.ctx.waitUntil(this.#directory.logCall({ ...entry, chatId: this.chatId }).catch((error: unknown) => console.error("call log:", errorMessage(error)))),
       hold: (action) => this.#holdAction(action),
-      approved: (id) => {
-        const action = this.actions.get(id);
-        const origin = this.actions.origin(id);
-        return action?.status === "running" && origin ? { action, origin } : null;
-      },
     };
   }
 
@@ -3317,7 +3318,7 @@ export class ChatAgent extends DurableObject<Env> {
    * the rules; on anyone else's turn they only propose; a run goes as far as its agent's autonomy; a page runs as its
    * author's. A session with no turn going (a run's work step, a page rebuild) may change nothing.
    */
-  async #callerOf(context: GateContext): Promise<Caller> {
+  async #callerOf(context: GateContext, call: Pick<GateCall, "server">): Promise<Caller> {
     if (context.kind === "page") {
       const meta = await this.storage.artifacts.readMeta(context.artifactId);
       return { actor: { name: `the page “${meta?.title ?? context.artifactId}”` }, level: 4, because: "as your own page", origin: {}, noHold: true };
@@ -3327,6 +3328,7 @@ export class ChatAgent extends DurableObject<Env> {
       if (!agent) throw new Error("its agent is gone.");
       const record = this.runs.get(context.agentId, context.dueAt);
       if (!record) throw new Error("no such run.");
+      if (!mayUseServer(agent, call.server)) throw new Error(`${call.server} is not one of the servers @${agent.name} may use.`);
       const { agentId, item, step } = context;
       return { actor: actorOf(agent), agent, level: agent.autonomy, because: "on its own, in a run", origin: { run: { ...runRef(record), agentId, item, step } } };
     }
@@ -3372,12 +3374,7 @@ export class ChatAgent extends DurableObject<Env> {
       BACKGROUND_CONTEXT,
     );
     this.#actionsChanged();
-    const directory = this.#directory;
-    this.ctx.waitUntil(
-      (async () => directory.addNeedsYou({ ...view, chatTitle: (await directory.chatTitle(this.chatId)) ?? "a chat" }))().catch((error: unknown) =>
-        console.error("needs you:", errorMessage(error)),
-      ),
-    );
+    this.ctx.waitUntil(this.#directory.addNeedsYou(view).catch((error: unknown) => console.error("needs you:", errorMessage(error))));
     return view;
   }
 
@@ -3403,22 +3400,17 @@ export class ChatAgent extends DurableObject<Env> {
       await this.#actionEnded(declined);
       return declined;
     }
-    // Known as this instance's before it is running: a wake meanwhile (onStart) must not take it for one cut off.
-    this.#runningActions.add(id);
+    const moved = this.actions.move(id, "pending", "running");
+    if (!moved) return found;
+    await this.#cancelExpiry(id);
+    this.#actionsChanged();
     let ended: PendingActionView | null;
     try {
-      const moved = this.actions.move(id, "pending", "running");
-      if (!moved) return found;
-      await this.#cancelExpiry(id);
-      this.#actionsChanged();
-      try {
-        const result = await this.hub.call(moved.server, moved.tool, moved.input, { kind: "approved", actionId: id });
-        ended = this.actions.move(id, "running", "done", resultText(result.payload ?? result.content));
-      } catch (error) {
-        ended = this.actions.move(id, "running", "failed", errorMessage(error));
-      }
-    } finally {
-      this.#runningActions.delete(id);
+      const level = this.actions.origin(id)?.level ?? 2;
+      const result = await this.hub.call(moved.server, moved.tool, moved.input, { kind: "approved", action: moved, level });
+      ended = this.actions.move(id, "running", "done", jsonOf(result.payload ?? result.content));
+    } catch (error) {
+      ended = this.actions.move(id, "running", "failed", errorMessage(error));
     }
     const view = ended ?? this.actions.get(id)!;
     await this.#actionEnded(view);
@@ -3436,13 +3428,9 @@ export class ChatAgent extends DurableObject<Env> {
     if (alarm) await this.scheduler.cancel(alarm).catch((error: unknown) => console.error("action expiry:", errorMessage(error)));
   }
 
-  /** The approved calls this instance is running: any other found running was cut off by a restart. */
-  readonly #runningActions = new Set<string>();
-
   /** Approved calls a restart cut off: failed, with a word to check, as they may have reached their server. */
   #endInterruptedActions(): void {
     for (const action of this.actions.interrupted()) {
-      if (this.#runningActions.has(action.id)) continue;
       const ended = this.actions.move(action.id, "running", "failed", "The app restarted while it ran: it may or may not have been done. Check before asking again.");
       if (ended) this.ctx.waitUntil(this.#actionEnded(ended).catch((error: unknown) => console.error("action:", errorMessage(error))));
     }
@@ -3611,14 +3599,8 @@ function actorOf(agent: Pick<AgentDefinition, "id" | "name" | "avatar" | "color"
   return { name: agent.name, agentId: agent.id, avatar: agent.avatar, color: agent.color };
 }
 
-/** A call's result as an action keeps it: its text, cut (ChatActions keeps RESULT_CHARS). */
-function resultText(payload: unknown): string {
-  return typeof payload === "string" ? payload : (JSON.stringify(payload) ?? "");
-}
-
 /** What a session that asked for an action reads of how it went. */
 function approvalNote(view: PendingActionView): string {
-  const call = `${view.server}.${view.tool} ${JSON.stringify(view.input)}`;
   const how: Record<PendingActionView["status"], string> = {
     pending: "still waits for your owner",
     running: "is running",
@@ -3627,7 +3609,7 @@ function approvalNote(view: PendingActionView): string {
     declined: "was declined by your owner: it did not run. Do not ask for it again unless they do.",
     expired: "expired before your owner decided: it did not run.",
   };
-  return `[the app]: The call you asked for, ${call.length > 1_000 ? `${call.slice(0, 1_000)}…` : call}, ${how[view.status]}`;
+  return `[the app]: The call you asked for, ${callLine(view, 1_000)}, ${how[view.status]}`;
 }
 
 /** Whether a reply is running, and the agent as it stands (see ChatAgent's #now). */

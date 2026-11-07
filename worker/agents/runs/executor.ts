@@ -140,7 +140,7 @@ function skillsNamed(steps: readonly AgentStep[]): string[] {
 }
 
 /** A value as JSON (a string as itself). */
-function jsonOf(value: unknown): string {
+export function jsonOf(value: unknown): string {
   try {
     return typeof value === "string" ? value : (JSON.stringify(value) ?? "null");
   } catch {
@@ -468,8 +468,8 @@ export class RunExecutor {
 
   /**
    * A do step: its call, with its input filled from the results so far, through the write gate (the agent's level and
-   * rules decide whether it runs, waits for the owner, or is refused). Kept as it ends, so a run that goes on after a
-   * restart makes it once. A test run calls nothing: it says what it would call.
+   * rules decide whether it runs, waits for the owner, or is refused). Kept as it starts and as it ends, so a run that
+   * goes on after a restart makes it at most once. A test run calls nothing: it says what it would call.
    */
   async #act(state: ItemRun, step: Extract<AgentStep, { kind: "do" }>, key: string): Promise<ActedStep> {
     const runs = this.#host.runs;
@@ -480,19 +480,35 @@ export class RunExecutor {
     const input = fillInput(step.input, state.scope);
     if (state.run.test) return { ok: true, detail: `a test: would call it with ${excerpt(jsonOf(input), DETAIL_CHARS)}` };
     const context: ActContext = { agentId: state.agent.id, dueAt: state.run.dueAt, item: state.item, step: key };
+    const keep = (acted: ActedStep) => {
+      const run = runs.get(state.agent.id, state.run.dueAt);
+      runs.update(state.agent.id, state.run.dueAt, { detail: { acted: { ...run?.detail.acted, [mark]: acted } } });
+    };
+    // Kept before the call: a restart while it runs finds it, and never makes it again (it may have reached the server).
+    keep({ ok: false, detail: "cut off by a restart while it ran: it may or may not have been done; check before doing it again" });
     let acted: ActedStep;
     try {
       const result = await this.#host.act({ server: step.server, tool: step.tool, input }, context);
       if (result.status === "ran") {
-        acted = { ok: true, detail: excerpt(jsonOf(result.value), DETAIL_CHARS), value: result.value };
-        await this.#host.write(state.session, `Result of ${step.server}.${step.tool} (done):\n${clip(jsonOf(result.value), MAX_RESULT_CHARS)}`, `${opId(state)}:do:${key}`);
-      } else acted = { ok: result.status === "held", detail: result.message };
+        const json = jsonOf(result.value);
+        acted = { ok: true, detail: excerpt(json, DETAIL_CHARS), value: result.value };
+        await this.#host.write(state.session, `Result of ${step.server}.${step.tool} (done):\n${clip(json, MAX_RESULT_CHARS)}`, `${opId(state)}:do:${key}`);
+        // A large result is not kept with the run: a run going on after a restart has only its excerpt.
+        keep(json.length > MAX_RESULT_CHARS ? { ok: true, detail: acted.detail } : acted);
+        return acted;
+      }
+      acted = { ok: result.status === "held", detail: result.message };
     } catch (error) {
-      if (error instanceof SignInNeeded) throw error;
+      if (error instanceof SignInNeeded) {
+        // Nothing reached the server: asked again once signed in.
+        const run = runs.get(state.agent.id, state.run.dueAt);
+        const { [mark]: _started, ...rest } = run?.detail.acted ?? {};
+        runs.update(state.agent.id, state.run.dueAt, { detail: { acted: rest } });
+        throw error;
+      }
       acted = { ok: false, detail: `failed: ${errorMessage(error)}` };
     }
-    const run = runs.get(state.agent.id, state.run.dueAt);
-    runs.update(state.agent.id, state.run.dueAt, { detail: { acted: { ...run?.detail.acted, [mark]: acted } } });
+    keep(acted);
     return acted;
   }
 

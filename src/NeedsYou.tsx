@@ -1,7 +1,8 @@
 import type { MouseEvent } from "react";
-import { callLine, type NeedsYouItem } from "../shared/limits.ts";
-import { decisionLabels, endedText, expiresText } from "./agents/limits/rules.ts";
-import { ActorBadge, actorName, useDecision, useNow } from "./chat/ActionCard.tsx";
+import { actorName, callLine, type NeedsYouItem } from "../shared/limits.ts";
+import { endedText, expiresText } from "./agents/limits/rules.ts";
+import { ActorBadge, DecisionButtons, useDecision, verbOf } from "./chat/ActionCard.tsx";
+import { useClock } from "./chat/SentTime.tsx";
 import { isBoolean, opensElsewhere, SectionHead, useStoredState } from "./layout.tsx";
 
 /**
@@ -9,7 +10,7 @@ import { isBoolean, opensElsewhere, SectionHead, useStoredState } from "./layout
  * it, its call in one line, the chat it came from and when it expires, and Approve and Decline (Run and Dismiss for a
  * proposal) right there. Hidden while nothing waits; open at first, since what is in it waits on the user.
  */
-export function NeedsYou({ items, reload, navigate }: { items: readonly NeedsYouItem[]; reload: () => void; navigate: (path: string) => void }) {
+export function NeedsYou({ items, navigate }: { items: readonly NeedsYouItem[]; navigate: (path: string) => void }) {
   const [open, setOpen] = useStoredState("layout.needsYouOpen", true, isBoolean);
   if (!items.length) return null;
   return (
@@ -18,7 +19,7 @@ export function NeedsYou({ items, reload, navigate }: { items: readonly NeedsYou
       {open && (
         <ul className="needs-you-list">
           {items.map((item) => (
-            <NeedsYouRow key={`${item.chatId}:${item.id}`} item={item} reload={reload} navigate={navigate} />
+            <NeedsYouRow key={`${item.chatId}:${item.id}`} item={item} navigate={navigate} />
           ))}
         </ul>
       )}
@@ -26,11 +27,10 @@ export function NeedsYou({ items, reload, navigate }: { items: readonly NeedsYou
   );
 }
 
-function NeedsYouRow({ item, reload, navigate }: { item: NeedsYouItem; reload: () => void; navigate: (path: string) => void }) {
-  const { view, busy, error, decide } = useDecision(item, reload);
-  const now = useNow(view.status === "pending");
+function NeedsYouRow({ item, navigate }: { item: NeedsYouItem; navigate: (path: string) => void }) {
+  const { view, busy, error, decide } = useDecision(item);
+  const now = useClock(view.status === "pending");
   const ended = endedText(view, now);
-  const labels = decisionLabels(view.kind);
   const openChat = (event: MouseEvent) => {
     if (opensElsewhere(event)) return;
     event.preventDefault();
@@ -41,7 +41,7 @@ function NeedsYouRow({ item, reload, navigate }: { item: NeedsYouItem; reload: (
       <div className="needs-you-head">
         <ActorBadge actor={view.actor} />
         <span>
-          <strong>{actorName(view.actor)}</strong> {view.kind === "proposal" ? "proposes" : "asks to"}
+          <strong>{actorName(view.actor)}</strong> {verbOf(view.kind)}
         </span>
       </div>
       <code className="needs-you-call" title={callLine(view, 2_000)}>
@@ -56,14 +56,7 @@ function NeedsYouRow({ item, reload, navigate }: { item: NeedsYouItem; reload: (
       {ended !== null ? (
         <small className="needs-you-ended">{ended}</small>
       ) : (
-        <div className="needs-you-buttons">
-          <button type="button" className="primary" disabled={busy} onClick={() => void decide("approve")}>
-            {labels.approve}
-          </button>
-          <button type="button" disabled={busy} onClick={() => void decide("decline")}>
-            {labels.decline}
-          </button>
-        </div>
+        <DecisionButtons className="needs-you-buttons" kind={view.kind} busy={busy} decide={(decision) => void decide(decision)} />
       )}
       {error && <small className="form-error">{error}</small>}
     </li>

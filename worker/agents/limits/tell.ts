@@ -3,6 +3,7 @@
 // the field that names them, the report in the one for the text; anything else the tool requires cannot be guessed.
 
 import type { StepInput } from "../../../shared/agents.ts";
+import { schemaType } from "../../../shared/limits.ts";
 import { isObject } from "../../../shared/util.ts";
 
 const RECIPIENTS = /^(to|recipients?|emails?|address(es)?|channels?|users?|user_?ids?|members?|targets?|chat_?ids?|phones?|numbers?)$/i;
@@ -16,10 +17,7 @@ export interface Telling {
   subject: string;
 }
 
-function typeOf(property: unknown): string | undefined {
-  if (!isObject(property)) return undefined;
-  return Array.isArray(property.type) ? (property.type.find((type) => type !== "null") as string | undefined) : (property.type as string | undefined);
-}
+const typeOf = (property: unknown) => (isObject(property) ? schemaType(property) : undefined);
 
 /** The tool's input for a tell, from its input schema; or what is missing, when its fields cannot be told apart. */
 export function toolInput(schema: unknown, telling: Telling): StepInput | { error: string } {

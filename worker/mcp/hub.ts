@@ -40,6 +40,11 @@ export class CallHeld extends McpFailure {
   }
 }
 
+/** A tool that changes data, called where nothing may change any (a read, or a hub with no write gate). */
+function changesData(server: string, tool: string): McpFailure {
+  return new McpFailure({ code: "not_granted", server, message: `${server}.${tool} changes data, and nothing may change data here.` });
+}
+
 export interface ReadResult {
   result: CallToolResult;
   /** When the result was produced upstream (epoch ms). */
@@ -127,18 +132,17 @@ export class McpHub {
   }
 
   /**
-   * Execute a tool once, uncached. A tool that is not read-only (or that the server does not list) goes through the
-   * write gate first, with `context` saying who calls; a refused or held call rejects with CallHeld, before anything
-   * reaches the server. Rejects with McpFailure.
+   * Execute a tool once, uncached. A read-only tool runs at once. Any other (or one the server does not list) goes
+   * through the write gate first, with `context` saying who calls; a refused or held call rejects with CallHeld, before
+   * anything reaches the server. A hub with no gate (a Source's) changes nothing. Rejects with McpFailure.
    */
   async call(server: string, tool: string, input: unknown, context?: GateContext): Promise<CallToolResult> {
-    const gate = this.#gate;
-    if (!gate) return this.#execute(server, tool, input);
     const info = await this.tool(server, tool);
     if (info && isReadOnly(info)) return this.#execute(server, tool, input);
+    const gate = this.#gate;
+    if (!gate || !context) throw changesData(server, tool);
     const call = { server, tool, input: (input ?? {}) as Parameters<WriteGate["check"]>[0]["input"], ...(info && { info }) };
-    // No context names nobody: refused, as a call from no session of the chat's is no one's to make.
-    const verdict = await gate.check(call, context ?? { kind: "session", session: "" });
+    const verdict = await gate.check(call, context);
     if (!verdict.run) throw new CallHeld(server, verdict);
     try {
       const result = await this.#execute(server, tool, input);
@@ -174,13 +178,17 @@ export class McpHub {
 
     let flight = this.#inflight.get(key);
     if (!flight) {
-      // Read-only by the callers' own checks (a page's declared read, a look step); a tool that changes data still goes
-      // to the gate, which refuses it, as a read names no one who calls.
-      flight = this.call(server, tool, input).then((result) => {
-        const entry = { result, storedAt: this.#now() };
-        this.#cache.set(key, entry);
-        return entry;
-      });
+      // Only a tool the server lists as read-only: a read names no one who calls, so nothing that changes data.
+      flight = this.tool(server, tool)
+        .then((info) => {
+          if (!info || !isReadOnly(info)) throw changesData(server, tool);
+          return this.#execute(server, tool, input);
+        })
+        .then((result) => {
+          const entry = { result, storedAt: this.#now() };
+          this.#cache.set(key, entry);
+          return entry;
+        });
       this.#inflight.set(key, flight);
       const settle = () => this.#inflight.delete(key);
       flight.then(settle, settle);
