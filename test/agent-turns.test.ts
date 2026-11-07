@@ -1,7 +1,7 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { ROOT_CONVERSATION_ID, type EntryRecord } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
-import { CHAT_AGENT_KIND, CHAT_TURN_KIND, MAX_HOPS, speakerLabel, type ChatAgentReplyData } from "../shared/agents.ts";
+import { AGENT_PROPOSE_TOOL, CHAT_AGENT_KIND, CHAT_TURN_KIND, MAX_HOPS, speakerLabel, type ChatAgentReplyData } from "../shared/agents.ts";
 import { AGENT_NAME } from "../shared/mentions.ts";
 import { OFFER_RULE } from "../shared/offers.ts";
 import { CHAT_ASIDE_KIND, CHAT_MESSAGE_KIND, CHAT_PEOPLE_KIND, PUBLISH_TOOL, type ChatMessageData } from "../shared/protocol.ts";
@@ -19,6 +19,7 @@ import {
   handOffs,
   messageAskKey,
   mirrorText,
+  draftedIn,
   publishedIn,
   speakersFor,
   turnInput,
@@ -569,6 +570,20 @@ describe("agentInstructions", () => {
     expect(agentInstructions(research, "Radu")).toBe(agentInstructions({ ...research }, "Radu"));
     expect(agentInstructions({ ...research, instructions: "Search." }, "Radu")).not.toBe(agentInstructions(research, "Radu"));
     expect(agentInstructions(research, "Ana")).not.toBe(agentInstructions(research, "Radu"));
+  });
+});
+
+describe("draftedIn", () => {
+  it("lists the agents a turn drafted, and leaves out failed or malformed proposals", () => {
+    const entries = [
+      piSaid(toolCall(AGENT_PROPOSE_TOOL)),
+      toolResult(AGENT_PROPOSE_TOOL, { agentId: "0123456789abcdef", name: "friday-digest", version: 1, assumed: ["trigger"] }),
+      toolResult(AGENT_PROPOSE_TOOL, { agentId: "fedcba9876543210", name: "weekly", version: 1 }, true),
+      toolResult(AGENT_PROPOSE_TOOL, { agentId: "Not An Id", name: "bad", version: 1 }),
+      toolResult(PUBLISH_TOOL, { artifactId: "sales", version: 1, title: "Sales" }),
+    ];
+    expect(draftedIn(entries)).toEqual([{ agentId: "0123456789abcdef", name: "friday-digest", version: 1, assumed: ["trigger"] }]);
+    expect(draftedIn([])).toEqual([]);
   });
 });
 

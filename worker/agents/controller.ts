@@ -4,11 +4,11 @@ import { AGENT_NAME } from "../../shared/mentions.ts";
 import { errorMessage, serial } from "../../shared/util.ts";
 import type { AgentTurn, ChatRoster, RosterEntry, TurnRequest } from "./roster.ts";
 import { isPass } from "./funnel.ts";
-import { askOf, CatchUp, entryAskKey, handOffs, itemsIn, MAX_ASK_CHARS, publishedIn, turnAskKey, turnInput } from "./turns.ts";
+import { askOf, CatchUp, draftedIn, entryAskKey, handOffs, itemsIn, MAX_ASK_CHARS, publishedIn, turnAskKey, turnInput } from "./turns.ts";
 
 /** What a turn left in its session for its reply to show. */
-type Outputs = Required<Pick<ChatAgentReplyData, "published" | "items">>;
-const NO_OUTPUTS: Outputs = { published: [], items: [] };
+type Outputs = Required<Pick<ChatAgentReplyData, "published" | "drafted" | "items">>;
+const NO_OUTPUTS: Outputs = { published: [], drafted: [], items: [] };
 
 /** How one operation in an agent's session ended, as PiHarness.wait says. */
 export interface TurnResult {
@@ -211,7 +211,7 @@ export class AgentTurns {
         return;
       }
       // Only a turn whose input went in has outputs in its session.
-      const { published, items } = now.submitted ? await this.#outputs(sessionOf(entry, turn), turn.id) : NO_OUTPUTS;
+      const { published, drafted, items } = now.submitted ? await this.#outputs(sessionOf(entry, turn), turn.id) : NO_OUTPUTS;
       const current = roster.get(entry.agentId) ?? entry;
       const reply: ChatAgentReplyData = {
         agentId: entry.agentId,
@@ -227,6 +227,7 @@ export class AgentTurns {
         endedAt: roster.now(),
         ...(!done && { failed: result.reason ?? "it ended without an answer" }),
         ...(published.length && { published }),
+        ...(drafted.length && { drafted }),
         ...(turn.run && { run: turn.run }),
         ...(items.length && { items }),
       };
@@ -250,11 +251,11 @@ export class AgentTurns {
     await delivering;
   }
 
-  /** The artifacts a turn published and the records its tool results held, as its session's entries say; none when they cannot be read. */
+  /** The artifacts a turn published, the agents it drafted and the records its tool results held, as its session's entries say; none when they cannot be read. */
   async #outputs(session: string, turn: number): Promise<Outputs> {
     try {
       const entries = await this.#host.turnEntries(session, turn);
-      return { published: publishedIn(entries), items: itemsIn(entries) };
+      return { published: publishedIn(entries), drafted: draftedIn(entries), items: itemsIn(entries) };
     } catch (error) {
       console.error("agent turn, outputs:", errorMessage(error));
       return NO_OUTPUTS;

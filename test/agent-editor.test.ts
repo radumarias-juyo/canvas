@@ -311,6 +311,7 @@ describe("the draft card's words", () => {
 
   it("says the state an agent is in", () => {
     expect(stateLabel(agent())).toEqual({ text: "Proposed by pi · off", tone: "draft" });
+    expect(stateLabel(agent(), "planner")).toEqual({ text: "Proposed by @planner · off", tone: "draft" });
     expect(stateLabel(agent({ origin: "user" }))).toEqual({ text: "Draft · off", tone: "off" });
     expect(stateLabel(agent({ origin: "user", copiedFrom: { owner: "o", id: "i", version: 1 } }))).toEqual({
       text: "Your copy · off",

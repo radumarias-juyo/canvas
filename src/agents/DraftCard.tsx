@@ -13,17 +13,18 @@ import { putAgent, reloadAgents, useAgents } from "./store.ts";
  * Where the model drafted an agent (agent_propose), in place of a plain step: its badge, name and job, whether it is
  * on, the instructions as numbered steps, and the "at a glance" rows (scope, runs, reads, tells, knows), each with a
  * Change that opens the agent's page at that field and an Assumed badge where the model guessed. Test it runs it on
- * today's data, nothing sent; Turn on turns it on as the owner read it, and brings it into this chat. Only the chat's
- * owner has the draft: anyone else sees that pi drafted it for them.
+ * today's data, nothing sent; Turn on turns it on as the owner read it, and brings it into this chat. Only whose
+ * directory it was saved in has the draft (the chat's owner for pi's, the agent's owner for an agent's, `by`): anyone
+ * else sees who drafted it for them.
  */
-export function DraftCard({ details, chatId, mine }: { details: AgentProposedDetails; chatId: string; mine: boolean }) {
+export function DraftCard({ details, chatId, mine, by }: { details: AgentProposedDetails; chatId: string; mine: boolean; by?: string }) {
   const { agents } = useAgents();
   const agent = mine ? agents?.find((known) => known.id === details.agentId) : undefined;
   if (!mine) {
     return (
       <div className="agent-card compact">
         <p>
-          pi drafted an agent, <strong>@{details.name}</strong>, for the chat's owner to review.
+          {by ? `@${by}` : "pi"} drafted an agent, <strong>@{details.name}</strong>, for {by ? "its" : "the chat's"} owner to review.
         </p>
       </div>
     );
@@ -35,13 +36,13 @@ export function DraftCard({ details, chatId, mine }: { details: AgentProposedDet
       </div>
     );
   }
-  return <Card agent={agent} chatId={chatId} />;
+  return <Card agent={agent} chatId={chatId} by={by} />;
 }
 
-function Card({ agent, chatId }: { agent: AgentDefinition; chatId: string }) {
+function Card({ agent, chatId, by }: { agent: AgentDefinition; chatId: string; by?: string }) {
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<{ text: string; error?: boolean; run?: number } | null>(null);
-  const state = stateLabel(agent);
+  const state = stateLabel(agent, by);
   const steps = instructionSteps(agent.instructions);
   const rows = glanceRows(agent);
   const runs = runsLabel(agent.trigger);

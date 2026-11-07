@@ -595,6 +595,8 @@ export type ChatAgentReplyData = {
   failed?: string;
   /** Artifacts it published in this turn, for the app to show their cards. */
   published?: { artifactId: string; title: string; version: number }[];
+  /** Agents it drafted in this turn (agent_propose, saved off in its owner's directory), for their draft cards. */
+  drafted?: AgentProposedDetails[];
   /** Set on a run's report and on a reply continuing it: which run, so a reply to it continues that run (shared/runs.ts). */
   run?: RunRef;
   /** The records its tool results held (shared/items.ts), as chips under the reply: from the servers, never its text. */

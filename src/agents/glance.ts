@@ -4,10 +4,13 @@
 
 import { WEEKDAYS, type AgentDefinition, type AgentStep, type AgentTrigger, type Weekday } from "../../shared/agents.ts";
 
-/** What the header's pill says of an agent. */
-export function stateLabel(agent: Pick<AgentDefinition, "origin" | "enabled" | "copiedFrom">): { text: string; tone: "on" | "draft" | "off" } {
+/** What the header's pill says of an agent. `by`: the agent that drafted it, where the card knows (else pi). */
+export function stateLabel(
+  agent: Pick<AgentDefinition, "origin" | "enabled" | "copiedFrom">,
+  by?: string,
+): { text: string; tone: "on" | "draft" | "off" } {
   if (agent.enabled) return { text: "On", tone: "on" };
-  if (agent.origin === "agent") return { text: "Proposed by pi · off", tone: "draft" };
+  if (agent.origin === "agent") return { text: `Proposed by ${by ? `@${by}` : "pi"} · off`, tone: "draft" };
   return { text: agent.copiedFrom ? "Your copy · off" : "Draft · off", tone: agent.copiedFrom ? "draft" : "off" };
 }
 

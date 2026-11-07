@@ -191,7 +191,11 @@ test("f. bob follows ada's agent and sees its post in his feed", async () => {
   await call(owner, "PATCH", `/api/chats/${sharedChat}/agents/${scoutId}`, { shared: true });
 
   const member = bob.page;
-  await member.goto(`/agents/${scoutId}?chat=${sharedChat}`);
+  // The agent's menu in the people bar opens its shared page, read-only.
+  await member.goto(`/c/${sharedChat}`);
+  await member.getByRole("button", { name: /^@scout,/ }).click();
+  await member.getByRole("link", { name: "See how it is set up" }).click();
+  await expect(member).toHaveURL(new RegExp(`/agents/${scoutId}\\?chat=${sharedChat}`));
   await expect(member.getByText("is ada’s", { exact: false })).toBeVisible();
   await member.getByRole("button", { name: "Follow" }).click();
   await expect(member.getByRole("button", { name: "Following" })).toBeVisible();
@@ -285,14 +289,15 @@ test("i. a roster agent offers a next step, and the owner's Yes drafts it", asyn
   const reply = agentReply(page, "planner", "The pipeline grew by two deals.");
   await expect(reply.getByRole("group", { name: "Offered next step" })).toContainText("Send this every Friday?");
   await reply.getByRole("button", { name: "Yes" }).click();
-  await expect(agentReply(page, "planner", "Drafted the agent @friday-digest")).toBeVisible();
+  const draftReply = agentReply(page, "planner", "Drafted the agent @friday-digest");
+  await expect(draftReply).toBeVisible();
   const drafted = await call<{ name: string; enabled: boolean; origin: string }[]>(page, "GET", "/api/agents");
   expect(drafted.find((agent) => agent.name === "friday-digest")).toMatchObject({ enabled: false, origin: "agent" });
+  // Its reply says "turns it on from its card": the card shows under the reply, for its owner.
+  const card = draftReply.getByRole("article", { name: "Agent @friday-digest" });
+  await expect(card).toContainText("Proposed by @planner");
+  await card.scrollIntoViewIfNeeded();
   await shot(page, "i-agent-offer");
-  // Known gap: a roster agent's agent_propose result shows no draft card (only pi's results do: ChatView's
-  // pi.tool-result); its reply says "turns it on from its card". Remove test.fail once the card shows.
-  test.fail(true, "a roster agent's drafted routine shows no draft card in the chat");
-  await expect(page.getByRole("article", { name: "Agent @friday-digest" })).toBeVisible({ timeout: 5_000 });
 });
 
 test("j. checklists: pi's and an agent's plans show as cards", async () => {

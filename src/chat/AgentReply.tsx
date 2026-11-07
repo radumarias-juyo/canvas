@@ -4,6 +4,7 @@ import { offerOf } from "../../shared/offers.ts";
 import { everyone, type PublishedDetails } from "../../shared/protocol.ts";
 import { errorMessage } from "../../shared/util.ts";
 import { api } from "../api.ts";
+import { DraftCard } from "../agents/DraftCard.tsx";
 import { agentPath } from "../agents/nav.ts";
 import { AppLink } from "../layout.tsx";
 import { calledByLabel, opensRun, runMarkerText } from "./agentLines.ts";
@@ -18,8 +19,8 @@ import { SentTime } from "./SentTime.tsx";
 
 /**
  * One reply of an agent besides pi (a `chat.agent` entry): its badge and name, whose it is and who asked, its text
- * (folded behind "Show more" when long), the records it is built on as chips, the artifacts it published and why it
- * ended early. Its steps show live while it works (AgentTurnLive), then stay in its own session.
+ * (folded behind "Show more" when long), the records it is built on as chips, the artifacts it published, the agents
+ * it drafted and why it ended early. Its steps show live while it works (AgentTurnLive), then stay in its own session.
  */
 export function AgentReply({
   data,
@@ -66,6 +67,10 @@ export function AgentReply({
       {data.items && <ItemChips items={data.items} />}
       {data.published?.map((artifact) => (
         <ArtifactCard key={`${artifact.artifactId}:${artifact.version}`} artifact={artifact} onOpen={onOpen} />
+      ))}
+      {/* Saved in its owner's directory: only they have the draft to review. */}
+      {data.drafted?.map((draft) => (
+        <DraftCard key={`${draft.agentId}:${draft.version}`} details={draft} chatId={chatId} mine={viewerUid === data.ownerUid} by={data.name} />
       ))}
       {offered && <OfferRow offer={offered.offer} entry={entry} onYes={onOfferYes} />}
       {data.failed && <div className="chat-error">{data.failed}</div>}
