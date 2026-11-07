@@ -22,7 +22,9 @@ project [`radumarias/pi-artifacts`](https://github.com/radumarias/pi-artifacts).
 The **Sync from upstream** GitHub Action (`.github/workflows/upstream-sync.yml`) runs every
 Monday (or on demand from the Actions tab): it copies upstream's new Git LFS files into this
 repo and opens a PR from `upstream-sync` into `main`. Merge it with a **merge commit**, never
-squash or rebase, so later syncs stay clean.
+squash or rebase, so later syncs stay clean. It also mirrors every upstream branch (with its
+LFS files) to `upstream/<branch>` here; those mirrors are overwritten on each run, so never
+commit to them. Branch off them instead.
 
 Upstream stores `docs/media/**` in Git LFS. Claude's cloud workspace can download LFS files
 but cannot upload them (the S3 storage host is blocked), so a manual merge pushed from there
