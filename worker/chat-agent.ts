@@ -278,10 +278,8 @@ async function* entryPages(
   }
 }
 
-/** The name of a user's chat object. The uid must come from a verified identity: it is what keeps users apart. */
-export function chatAgentName(uid: string, chatId: string): string {
-  return `${uid}:${chatId}`;
-}
+import { chatAgentName } from "./chat-name.ts";
+export { chatAgentName };
 
 /** The uid and chat id a chat object's name was built from (see chatAgentName). */
 function parseChatAgentName(name: string): { uid: string; chatId: string } {
@@ -1165,6 +1163,15 @@ export class ChatAgent extends DurableObject<Env> {
     const { tokens, redirectUrl } = await store.get();
     if (!tokens || !redirectUrl) throw signInRequired(server.name);
     return connectStreamableHttp(server, new McpOAuthClient(store, server.name, { redirectUrl, interactive: false }));
+  }
+
+  /**
+   * The owner signed in to `server` again, after a run here asked them to (UserDirectory.notifySignInNeeded with this
+   * chat's id): the runs waiting on it may go. The hub's connection to it, if any, failed with the old sign-in and
+   * reconnects on its next call. Scheduled runs (worker/agents/runs) take it from here.
+   */
+  async signedIn(server: string): Promise<void> {
+    console.info(`signed in to ${server}: runs waiting on it may go`);
   }
 
   /** The owner, or a member: who may open this chat, prompt it and load its pages' per-user data. */

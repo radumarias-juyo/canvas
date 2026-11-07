@@ -114,6 +114,13 @@ export default defineConfig({
       // what a server offers from the server, and you name servers and tools in chat. "oauth": each user signs in, from
       // a link the agent gives. A Cloudflare MCP portal is one entry for every server behind it.
       MCP_SERVERS: bindings.json(mcpServerList()),
+      // How long a sign-in to an "oauth" server lasts, in days: set it to the grant session duration of the server's
+      // authorization (for a Cloudflare MCP portal, its Access application). Neither Access nor OAuth says when a refresh
+      // token runs out, so the app counts from the sign-in, and warns a few days before for servers scheduled runs use.
+      // Optional secrets: MCP_TOKENS_KEY (32+ random bytes, base64) encrypts stored sign-ins, else a key derived from
+      // FILES_MASTER_KEY does; PUSH_VAPID_PUBLIC_KEY, PUSH_VAPID_PRIVATE_KEY (scripts/vapid-keys.ts) and PUSH_SUBJECT
+      // (mailto: or https:) turn on Web Push. Without them nothing is pushed.
+      MCP_GRANT_DAYS: bindings.text("30"),
       // Live calls from published pages: 120 a minute per viewer and chat, counted by Cloudflare across the Worker's
       // isolates; and, counted apart, each viewer's writes of pages' saved values. The namespace is any number unique within the account.
       PAGE_CALLS: bindings.rateLimit({ namespace: "4201", simple: { limit: 120, period: 60 } }),

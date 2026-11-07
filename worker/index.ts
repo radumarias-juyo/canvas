@@ -12,6 +12,7 @@ import { filesRoute } from "./files-routes.ts";
 import { json, readJson } from "./http.ts";
 import { chatRoute, discussRoute } from "./chat-routes.ts";
 import { mcpRoute } from "./mcp-routes.ts";
+import { pushRoute } from "./push-routes.ts";
 import { mcpServers } from "./mcp/servers.ts";
 import { catalogSource, loadCatalog } from "./models.ts";
 import { skillsRoute } from "./skills-routes.ts";
@@ -158,6 +159,8 @@ async function route(request: Request, env: Env): Promise<Response> {
 
   const mcp = await mcpRoute(request, env, uid);
   if (mcp) return mcp;
+  const push = await pushRoute(request, env, uid);
+  if (push) return push;
 
   const directory = exports.UserDirectory.getByName(uid);
   // The sidebar's socket: it hears which of the chat, artifact and skill lists changed (worker/users.ts).

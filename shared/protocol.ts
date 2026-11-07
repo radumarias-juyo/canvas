@@ -329,9 +329,9 @@ export interface ChatRowChange {
 
 /**
  * What the sidebar's socket (GET /api/me/ws) sends: the name of a list that changed, so the app reads it again. A
- * MentionNotice comes as JSON.
+ * MentionNotice, or a SignInNotice (shared/sign-ins.ts), comes as JSON.
  */
-export type SidebarList = "chats" | "artifacts" | "skills" | "agents";
+export type SidebarList = "chats" | "artifacts" | "skills" | "agents" | "sign-ins";
 
 /** Someone tagged this user in a shared chat: the app shows it, and the browser too when it may and the app is not in view. */
 export interface MentionNotice {

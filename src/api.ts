@@ -18,6 +18,7 @@ import { DICTATION_ROUTE, DICTATION_TYPE } from "../shared/dictation.ts";
 import type { MentionOptions } from "../shared/mentions.ts";
 import type { ChatKind } from "../shared/chat-kinds.ts";
 import type { ModelCatalog } from "../shared/models.ts";
+import type { McpSignInView } from "../shared/sign-ins.ts";
 import type { ChatSystemPrompt } from "../shared/system-prompt.ts";
 import { skillPath, type SkillInfo, type SkillInput } from "../shared/skills.ts";
 import { FILE_ROUTE, VIEW_PARAM, ZIP_ROUTE } from "../shared/uploads.ts";
@@ -234,6 +235,21 @@ export const api = {
   /** (owner) Bring one of their agents into the chat. */
   addChatAgent: (chatId: string, agentId: string) => request<ChatAgentView[]>(chatPath(chatId, "/agents"), post({ agentId })),
   removeChatAgent: (chatId: string, agentId: string) => request<ChatAgentView[]>(chatPath(chatId, `/agents/${agentId}`), { method: "DELETE" }),
+  /** The user's sign-ins to servers that sign in each user: which, since when, and any notice about them. */
+  signIns: () => request<McpSignInView[]>("/api/mcp/sign-ins"),
+  /** Forget the stored sign-in to `server`: the next use asks for a new one. */
+  disconnect: (server: string) => request<McpSignInView[]>(`/api/mcp/sign-ins/${encodeURIComponent(server)}`, { method: "DELETE" }),
+  dismissSignInNotice: (server: string) => request<McpSignInView[]>(`/api/mcp/notices/${encodeURIComponent(server)}`, { method: "DELETE" }),
+  /** The key to subscribe to push with, or null when this deployment sends none. */
+  pushKey: async (): Promise<string | null> => {
+    const { response, body } = await fetchJson("/api/push/key");
+    // 404: this deployment sends none. Any other failure throws, so the next call asks again instead of keeping null.
+    if (response.status === 404) return null;
+    if (!response.ok) throw responseError(response, body);
+    return (body as { publicKey?: string } | null)?.publicKey ?? null;
+  },
+  subscribePush: (subscription: PushSubscriptionJSON) => request<object>("/api/push/subscribe", post(subscription)),
+  unsubscribePush: (endpoint: string) => request<object>("/api/push/unsubscribe", post({ endpoint })),
   /** The MCP servers an agent may use, and which this user signed in to. */
   agentServers: () => request<AgentServerInfo[]>("/api/agents/servers"),
   /** The chats one of the user's agents is in, with whether it is shared in each. */

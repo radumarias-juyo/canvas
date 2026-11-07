@@ -31,6 +31,8 @@
     "src/chat/history.ts",
     "src/chat/reveal.ts",
     "scripts/prices.ts",
+    "scripts/vapid-keys.ts",
+    "worker/push",
     "src/api.ts",
     "src/chat/Markdown.tsx",
     "src/chat/Thinking.tsx",
