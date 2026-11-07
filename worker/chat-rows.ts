@@ -132,6 +132,19 @@ export class ChatRows {
     return new Map(rows.map((row) => [row.id as string, row.title as string]));
   }
 
+  /**
+   * A chat's name as this sidebar shows it (the user's own name for it, else its title): one of theirs, or with
+   * `ownerUid` one of that person's they are in. Null when the sidebar has no such chat.
+   */
+  shownTitle(id: string, ownerUid?: string): string | null {
+    const [row] = (
+      ownerUid === undefined
+        ? this.#sql.exec("SELECT COALESCE(own_title, title) AS title FROM chats WHERE id = ?", id)
+        : this.#sql.exec("SELECT COALESCE(own_title, title) AS title FROM shared_chats WHERE id = ? AND owner_uid = ?", id, ownerUid)
+    ).toArray();
+    return row ? (row.title as string) : null;
+  }
+
   /** The kind of chat `id` as this sidebar last heard it, or null for a chat it does not list. */
   kindOf(id: string): ChatKind | null {
     const row = this.#sql

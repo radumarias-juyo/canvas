@@ -2,6 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { AgentDefinition } from "../shared/agents.ts";
 import { AgentTabs } from "../src/agents/AgentTabs.tsx";
+import { ServersTable } from "../src/agents/ServersTable.tsx";
 import { keptBy, SETUP_FIELDS } from "../src/agents/tab-fields.ts";
 
 const tabs = [
@@ -44,5 +45,23 @@ describe("the agent page's tabs", () => {
     for (const field of ["speaksUp", "reviewBeforePosting", "assumed", "name"]) expect(setup).not.toHaveProperty(field);
     const workflow = keptBy(["trigger", "scope", "workflow"], agent);
     expect(workflow).toMatchObject({ speaksUp: true, reviewBeforePosting: true, assumed: ["model"], name: "planner" });
+  });
+
+  it("show the owner's private files as a fixed row of the servers table: their own turns only, never shared chats", () => {
+    const table = (servers: { name: string; signsIn: boolean }[]) =>
+      renderToStaticMarkup(<ServersTable servers={servers} error={null} own={new Set(["crm"])} shared={new Set()} name="research" onToggle={() => {}} />);
+    const html = table([{ name: "crm", signsIn: false }]);
+    const files = html.slice(html.indexOf('class="agent-server-files"'));
+    expect(files).toContain("your private files");
+    // Both switches are fixed: on for its owner's own turns, off for shared chats, as allowedTools decides in code.
+    const switches = [...files.matchAll(/<input [^>]*>/g)].map(([input]) => input);
+    expect(switches).toHaveLength(2);
+    expect(switches.every((input) => input.includes('disabled=""'))).toBe(true);
+    expect(switches[0]).toContain('checked=""');
+    expect(switches[1]).not.toContain("checked");
+    // With no servers, the row still shows, under a line that says so.
+    const none = table([]);
+    expect(none).toContain("no MCP servers");
+    expect(none).toContain("your private files");
   });
 });
