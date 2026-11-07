@@ -69,11 +69,15 @@ with `@cloudflare/vite-plugin`, pnpm; configured and deployed with the `cf` CLI 
   in the member's own object, one per room (`seatChatId`: what a chat object keeps, its pages, drafts, files, sandbox and
   held actions, never passes between rooms) (`worker/agents/seats/`): the member's own turns and anyone's Yes to its offer run in a fork
   of the seat's session, its calls go through the member's write gate (`seatCaller`: only the member's own message
-  changes data), what it holds has its card in the room for the member alone, and it reads as the room's kind. A turn
+  changes data), what it holds has its card in the room for the member alone, and it reads as the room's kind. An
+  agent's owner alone opens its window (`shared/agent-window.ts`, `worker/agents/window.ts`; a seat's is read in the
+  member's own object): its sessions and transcripts, and steering (`AgentTurns.instruct`): into their own turn running
+  apart, else a turn of theirs, apart, whose ask is in no log or shared session. A turn
   ends with its reply in its row (an outbox),
   together with the hand-offs it queues; the reply is then posted as a `chat.agent` entry. The agents one person's message
   names (in order), then their hand-offs, go one after another, each once the reply before it is in the log
-  (`ChatRoster.startNext`); another message's chain may run alongside. `@name` hands off (MAX_HOPS
+  (`ChatRoster.startNext`), pi among them (`PI_TURN`, its place in the chain, which ends once its answer is in the log;
+  pi alone with no agent called goes as ever); another message's chain may run alongside. `@name` hands off (MAX_HOPS
   per person's message, a hand-off to pi counted on the handing turn; the chain stops past the chat's token budget per
   message, `messageTokens`, seats' spend counted); pi's own answers are read from its log for the
   agents they name (`#piScan`, from a cursor).

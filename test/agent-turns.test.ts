@@ -14,6 +14,7 @@ import {
   allowedTools,
   draftTools,
   piBusy,
+  piPlace,
   readsAlone,
   runsApart,
   runTools,
@@ -94,6 +95,21 @@ describe("speakersFor", () => {
     expect(speakersFor("thanks", roster, "a-writer")).toEqual(["a-writer"]);
     expect(speakersFor("@builder can you help?", roster, "a-writer")).toEqual(["a-builder", "a-writer"]);
     expect(speakersFor("@writer @builder", roster, "a-writer")).toEqual(["a-writer", "a-builder"]);
+  });
+
+  it("places pi among the agents a message calls in the order named, or last when the message replies to pi", () => {
+    const place = (text: string, repliesToPi = false, replyTo?: string) => {
+      const speakers = speakersFor(text, roster, replyTo);
+      return { speakers, at: piPlace(text, roster, [], repliesToPi, speakers) };
+    };
+    expect(place("@pi then @builder")).toEqual({ speakers: ["a-builder"], at: 0 });
+    expect(place("@builder, @pi, then @research")).toEqual({ speakers: ["a-builder", "a-research"], at: 1 });
+    expect(place("@builder @research and @pi")).toEqual({ speakers: ["a-builder", "a-research"], at: 2 });
+    // Replied to, pi goes after those named; the agent replied to goes after pi when pi is named.
+    expect(place("@builder look", true)).toEqual({ speakers: ["a-builder"], at: 1 });
+    expect(place("@pi @builder", false, "a-writer")).toEqual({ speakers: ["a-builder", "a-writer"], at: 0 });
+    // Not called: no place.
+    expect(place("@builder only")).toEqual({ speakers: ["a-builder"], at: undefined });
   });
 
   it("calls an agent the roster shows as off too: its turn finds out whether its owner turned it on since", () => {
