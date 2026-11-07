@@ -17,6 +17,7 @@ import { formatCursor, NEXT_PART_HEADER, parseCursor } from "../shared/data-expo
 import { DICTATION_ROUTE, DICTATION_TYPE } from "../shared/dictation.ts";
 import type { MentionOptions } from "../shared/mentions.ts";
 import type { ChatKind } from "../shared/chat-kinds.ts";
+import type { FeedList, FollowKind, FollowView } from "../shared/feed.ts";
 import type { ModelCatalog } from "../shared/models.ts";
 import type { McpSignInView } from "../shared/sign-ins.ts";
 import type { ChatSystemPrompt } from "../shared/system-prompt.ts";
@@ -262,6 +263,16 @@ export const api = {
   copyAgent: (chatId: string, agentId: string, changes: AgentChanges & { version: number }) => request<AgentDefinition>(chatPath(chatId, `/agents/${agentId}/copy`), post(changes)),
   /** A dry run of an agent on today's data, nothing sent or changed. Throws with status 404 where testing is not there yet. */
   testAgent: (id: string) => request<unknown>(`/api/agents/${id}/test`, post({})),
+  /** The feed's newest items: all, only unread ones, only those needing the user; with the counts. */
+  feed: (filter: { unread?: boolean; needsYou?: boolean } = {}) =>
+    request<FeedList>(`/api/feed${filter.unread || filter.needsYou ? `?${[filter.unread && "unread", filter.needsYou && "needs"].filter(Boolean).join("&")}` : ""}`),
+  feedCounts: () => request<Pick<FeedList, "unread" | "needsYou">>("/api/feed/counts"),
+  /** Mark feed items read (or with `read` false, unread again): by id, or all of them. */
+  markFeed: (ids: readonly number[] | "all", read = true) => request<{ unread: number }>("/api/feed/read", post(ids === "all" ? { all: true, read } : { ids, read })),
+  follows: () => request<FollowView[]>("/api/follows"),
+  /** Follow someone else's page, or an agent shared in a chat (`chatId`). */
+  follow: (kind: FollowKind, id: string, chatId?: string) => request<FollowView[]>("/api/follows", post({ kind, id, ...(chatId && { chatId }) })),
+  unfollow: (kind: FollowKind, id: string) => request<FollowView[]>(`/api/follows/${kind}/${id}`, { method: "DELETE" }),
   skills: () => request<SkillInfo[]>("/api/skills"),
   /** Save one of the user's skills, from its fields or from a SKILL.md file's text. */
   saveSkill: (skill: (SkillInput | { markdown: string }) & { enabled?: boolean }) => request<SkillInfo>("/api/skills", post(skill)),

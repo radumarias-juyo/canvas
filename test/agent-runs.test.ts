@@ -8,7 +8,7 @@ import { publishedAlready, publishFindings, publishRebuilt, runMark } from "../w
 import { findingsEdit, FINDINGS_END, FINDINGS_START, reportHtml, workSpend } from "../worker/agents/runs/report.ts";
 import { AgentRunner, type RunAlarm, type RunnerHost, type WatchAlarm } from "../worker/agents/runs/runner.ts";
 import { sourceName, SourceCore, type Subscriber } from "../worker/agents/runs/source.ts";
-import { AgentRuns } from "../worker/agents/runs/store.ts";
+import { AgentRuns, type RunRecord } from "../worker/agents/runs/store.ts";
 import { writeDraft, type PublishScope } from "../worker/agent/publish.ts";
 import type { CheckReport } from "../worker/artifacts/check.ts";
 import type { McpHub } from "../worker/mcp/hub.ts";
@@ -112,6 +112,11 @@ class FakeHome implements RunnerHost {
     return { kind: "chat", to: request.step.kind === "tell" ? request.step.to.join(", ") : "", text: request.text, status: "sent" };
   }
   changed() {}
+  /** How each run ended, as the feed hears it: `<dueAt>:<status>`. */
+  readonly endings: string[] = [];
+  ended(_agent: AgentDefinition, run: RunRecord) {
+    this.endings.push(`${run.dueAt}:${run.status}`);
+  }
   async alarmAt(at: number, payload: RunAlarm) {
     const id = `alarm-${++this.#alarmIds}`;
     this.alarms.set(id, { at, payload });
@@ -409,6 +414,28 @@ describe("scheduled runs", () => {
     host.signIn.delete("crm");
     expect(await runner.signedIn("crm")).toBe(0);
     expect(host.runs.get(definition.id, T0 + 2)).toMatchObject({ status: "not_today", summary: "Skipped once you signed in: @brief was off." });
+  });
+
+  it("tells the feed how each run ended, again when a waiting one goes or is skipped, and never of a test", async () => {
+    const { host, runner, definition } = home();
+    host.signIn.add("crm");
+    for (const at of [T0, T0 + 1]) {
+      host.clock.now = at;
+      await runner.now(definition.id, false);
+      await host.settled();
+    }
+    expect(host.endings).toEqual([`${T0}:needs_sign_in`, `${T0 + 1}:needs_sign_in`]);
+    host.signIn.delete("crm");
+    await runner.signedIn("crm");
+    await host.settled();
+    expect(host.endings.slice(2).sort()).toEqual([`${T0 + 1}:sent`, `${T0}:not_today`].sort());
+    // The same due time again ends at once, and tells nothing new.
+    await runner.executor.start({ agent: definition, dueAt: T0 + 1, why: "manual" });
+    expect(host.endings).toHaveLength(4);
+    host.clock.now = T0 + 5;
+    await runner.now(definition.id, true);
+    await host.settled();
+    expect(host.endings).toHaveLength(4);
   });
 
   it("reads only the agent's own servers", async () => {

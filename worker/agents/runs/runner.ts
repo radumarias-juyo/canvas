@@ -304,8 +304,12 @@ export class AgentRunner {
     const waiting = this.#host.runs.unfinished().filter((run) => run.status === "needs_sign_in" && run.detail.needsSignIn?.includes(server));
     // Oldest first: the last one per agent (and per kind, a test apart from the real ones) is its newest.
     const newest = new Map(waiting.map((run) => [`${run.agentId}:${run.test}`, run]));
-    const skip = (run: RunRecord, why: string) =>
+    const skip = (run: RunRecord, why: string, agent?: AgentDefinition | null) => {
       this.#host.runs.update(run.agentId, run.dueAt, { status: "not_today", summary: `Skipped once you signed in: ${why}.` });
+      // Its feed item no longer waits for the sign-in.
+      const skipped = this.#host.runs.get(run.agentId, run.dueAt);
+      if (agent && skipped && !skipped.test) this.#host.ended?.(agent, skipped);
+    };
     const agentIds = [...new Set(waiting.map((run) => run.agentId))];
     const definitions = new Map(await Promise.all(agentIds.map(async (id) => [id, await this.#host.definition(id)] as const)));
     let restarted = 0;
@@ -313,7 +317,7 @@ export class AgentRunner {
       const agent = definitions.get(run.agentId);
       if (!agent) continue;
       if (!run.test && !agent.enabled) {
-        skip(run, `@${agent.name} was off`);
+        skip(run, `@${agent.name} was off`, agent);
         continue;
       }
       this.#host.runs.restart(run.agentId, run.dueAt);
@@ -325,7 +329,7 @@ export class AgentRunner {
     for (const run of waiting) {
       const agent = definitions.get(run.agentId);
       if (!agent || newest.get(`${run.agentId}:${run.test}`) === run) continue;
-      skip(run, !run.test && !agent.enabled ? `@${agent.name} was off` : "a newer run went instead");
+      skip(run, !run.test && !agent.enabled ? `@${agent.name} was off` : "a newer run went instead", agent);
     }
     for (const agentId of agentIds) this.#host.changed(agentId);
     return restarted;

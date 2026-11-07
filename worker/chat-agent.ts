@@ -74,6 +74,8 @@ import { filesIndex } from "./agent/file-refs.ts";
 import { resolveMentions } from "./agent/mentions.ts";
 import { AGENT_REACTOR, isReactable, isReaction, type Reaction, type Reactions } from "../shared/reactions.ts";
 import { excerpt, replyLine, replyQuote } from "../shared/replies.ts";
+import { MAX_FEED_TEXT } from "../shared/feed.ts";
+import { followersAllowed } from "./feed/store.ts";
 import { peopleExtension, promptExtension, systemPromptExtension, withoutSystemPrompt, type UserPrompts } from "./agent/prompt.ts";
 import { skillClassifier, skillMessage, type SkillChoice, type SkillClassifier } from "./agent/skill-pick.ts";
 import { isActive, type SkillInfo } from "../shared/skills.ts";
@@ -83,7 +85,7 @@ import { autoCandidates, contextTokens, route, routeHistory, routersFrom, router
 import { callHinter, HINT_MS, HINT_THRESHOLD, worthAsking, type CallHinter } from "./agent/call-hint.ts";
 import { recordSpend } from "./agent/ledger.ts";
 import type { ModelRunner } from "./agent/workers-ai.ts";
-import { RunTracker } from "./chat-status.ts";
+import { asksUser, RunTracker } from "./chat-status.ts";
 import { mcpExtension, type McpToolInfo, type ServerCatalog } from "./agent/mcp.ts";
 import { deferredTools, MIN_TOOLS_TO_PICK, pickerId, pickFailure, pickTools, TOOL_PICK_MS, toolPicker, toolsToOffer, type PickableTool } from "./agent/tool-pick.ts";
 import { artifactExtension, filesExtension, filesIndexExtension, reactionsExtension, sandboxExtension, sandboxName, skillsExtension, type ChatScope } from "./agent/tools.ts";
@@ -148,7 +150,7 @@ import { isTurnEntry, TurnFilter } from "./agents/live.ts";
 import { ChatRoster, type AgentTurn, type RosterEntry } from "./agents/roster.ts";
 import { reportOf, SignInNeeded, whenOf, type DeliveryRequest } from "./agents/runs/executor.ts";
 import { AgentRunner, type RunAlarm, type RunnerHost, type WatchAlarm } from "./agents/runs/runner.ts";
-import { AgentRuns } from "./agents/runs/store.ts";
+import { AgentRuns, type RunRecord } from "./agents/runs/store.ts";
 import { reportContext, runInstructions, RUN_STEP_KIND, workSpend, type RunStepData } from "./agents/runs/report.ts";
 import { publishedAlready, publishFindings, publishRebuilt, runMark } from "./agents/runs/page.ts";
 import { compileWorkflow } from "./agents/runs/compile.ts";
@@ -165,6 +167,7 @@ import {
   kindAfterJoin,
   legacyKind,
   losesAccess,
+  mayLeave,
   type BranchedFrom,
   type ChatEventData,
   type ChatKind,
@@ -2678,6 +2681,38 @@ export class ChatAgent extends DurableObject<Env> {
     await (await this.#root()).submit({ type: "write", requestId, entry: { kind: CHAT_AGENT_KIND, data: reply } }, BACKGROUND_CONTEXT);
     const author = { uid: `agent:${reply.agentId}`, name: reply.name };
     void this.#touchIndexes(reply.text || reply.name, author, tags, reply.text).catch((error) => console.error("chat index:", errorMessage(error)));
+    this.#feedQuestion(reply, requestId);
+  }
+
+  /**
+   * An agent's reply that ends on a question to the person who called it: in that person's feed, as one that needs
+   * them, unless the chat is off the record. A run's report is its owner's run item instead (#runEnded).
+   */
+  #feedQuestion(reply: ChatAgentReplyData, requestId: string): void {
+    const asker = reply.calledBy.uid;
+    if (reply.run || reply.failed || !asker || reply.calledBy.agentId || !asksUser(reply.text) || !this.isInChat(asker)) return;
+    const kind = this.kinds.kind();
+    if (!mayLeave({ what: "feed" }, kind)) return;
+    const added = this.#index(asker).addFeed({
+      kind: "question",
+      ref: `question:${this.chatId}:${requestId}`,
+      at: reply.endedAt,
+      title: `@${reply.name} asks you something`,
+      text: excerpt(reply.text, MAX_FEED_TEXT),
+      from: { name: `@${reply.name}`, agent: { id: reply.agentId, name: reply.name, avatar: reply.avatar, color: reply.color } },
+      open: { to: "chat", chatId: this.chatId },
+      chat: { id: this.chatId, kind },
+    });
+    this.ctx.waitUntil(added.catch((error: unknown) => console.error("feed:", errorMessage(error))));
+  }
+
+  /**
+   * Of `uids`, those who still follow `ownerUid`'s agent `agentId` from here: in this chat, with the agent on its roster
+   * and its owner sharing it in this chat, as opening it needs (sharedAgent). The agent's owner asks before a post of
+   * it reaches them.
+   */
+  followersIn(agentId: string, ownerUid: string, uids: readonly string[]): string[] {
+    return followersAllowed(this.roster.get(agentId), ownerUid, uids, (uid) => this.isInChat(uid));
   }
 
   /** A session's entries from the newest one `first` matches on, oldest first; none when no entry matches. */
@@ -3024,6 +3059,7 @@ export class ChatAgent extends DurableObject<Env> {
       },
       deliver: (request) => this.#deliverRun(request),
       changed: (agentId) => this.sockets.broadcast({ type: "runs", agentId }),
+      ended: (agent, run) => this.#runEnded(agent, run),
       alarmAt: async (at, payload) => (await this.scheduler.set(new Date(at), "run", payload)).id,
       alarmEvery: async (seconds, payload) => (await this.scheduler.every(seconds, "watch", payload)).id,
       cancelAlarm: async (id) => {
@@ -3081,6 +3117,25 @@ export class ChatAgent extends DurableObject<Env> {
       if (this.#runRefreshed?.done === done) this.#runRefreshed = undefined;
     });
     return done;
+  }
+
+  /**
+   * A run ended: its owner's feed hears how, with the report it posted here or as a notification (what the agent's
+   * followers may read, the directory decides: postsReachFollowers). Off the caller's path.
+   */
+  #runEnded(agent: AgentDefinition, run: RunRecord): void {
+    if (run.status === "running") return;
+    const posted = run.status === "sent" ? run.detail.deliveries.find((delivery) => (delivery.kind === "chat" || delivery.kind === "notify") && delivery.status === "sent" && delivery.text) : undefined;
+    const ended = this.#directory.runEnded({
+      agentId: agent.id,
+      dueAt: run.dueAt,
+      status: run.status,
+      ...(run.summary && { summary: run.summary }),
+      chatId: this.chatId,
+      chatKind: this.kinds.kind(),
+      ...(posted?.text && { post: posted.text, ...(asksUser(posted.text) && { asks: true }) }),
+    });
+    this.ctx.waitUntil(ended.catch((error: unknown) => console.error("feed:", errorMessage(error))));
   }
 
   /** A run's report as a post of its agent's, carrying the run. */

@@ -6,7 +6,7 @@ import { api, keepAlive } from "./api.ts";
 
 /** One prompt changes a list several times in a row (bumped, working, named, done): read it once for those. */
 const LOAD_DELAY_MS = 150;
-const LISTS: readonly SidebarList[] = ["chats", "artifacts", "skills", "agents", "sign-ins"];
+const LISTS: readonly SidebarList[] = ["chats", "artifacts", "skills", "agents", "sign-ins", "feed", "follows"];
 
 /**
  * A value read by `read`, and a stable `load` that reads it again. Reads can overlap: only the newest one's answer is

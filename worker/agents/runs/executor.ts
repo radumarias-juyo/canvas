@@ -90,6 +90,8 @@ export interface RunHost {
   deliver(request: DeliveryRequest): Promise<RunDelivery>;
   /** The run's list changed, or a run started or ended: tell the people looking. */
   changed(agentId: string): void;
+  /** A run ended (or waits for a sign-in), as its row now says: its owner's feed hears of it. Not for a test. */
+  ended?(agent: AgentDefinition, run: RunRecord): void;
 }
 
 /** A run to start. */
@@ -276,6 +278,8 @@ export class RunExecutor {
       return { status: "failed", started };
     } finally {
       this.#host.changed(agent.id);
+      const ended = runs.get(agent.id, dueAt);
+      if (ended && !ended.test && ended.status !== "running") this.#host.ended?.(agent, ended);
     }
   }
 
