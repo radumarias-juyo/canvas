@@ -232,6 +232,25 @@ export interface DreamRecord {
   tokens: number;
 }
 
+/** The owner's dream settings, as their account keeps them. */
+export interface DreamSettings {
+  /** pi learns overnight from the user's chats: on unless they turned it off. */
+  piLearns: boolean;
+  /** The time zone the nightly dream keeps to (the app sends the browser's); UTC until it says. */
+  timeZone: string;
+}
+
+/** What the owner's agents' and pi's dreams show: the settings, and each subject's latest dreams. */
+export interface DreamsView {
+  settings: DreamSettings;
+  /** When the next nightly dream is due; null when nothing learns overnight. */
+  nextAt: number | null;
+  /** By subject (an agent's id, or "pi"): its latest dreams, newest first. */
+  dreams: Record<string, DreamRecord[]>;
+  /** When each subject may dream now again (Dream now's rate limit), when it may not yet. */
+  nowAfter: Record<string, number>;
+}
+
 /** A note's "why", as a dream writes it: in words, and what it cites (by chat and entry, or signal). */
 export interface NoteWhy {
   text: string;

@@ -5,7 +5,7 @@ import type { UserDirectory } from "./users.ts";
 /**
  * The memory notes of a verified user (`directory` is their UserDirectory), as the Memory view and an agent's Knows tab
  * show and change them (shared/memory.ts):
- *   GET    /api/memory              {notes: [MemoryNoteView], coverage: [ServerCoverage]}, forgotten notes too
+ *   GET    /api/memory              {notes: [MemoryNoteView], coverage: [ServerCoverage], dreams: DreamsView}, forgotten notes too
  *   POST   /api/memory              {text, scope, agentId?, chatId?, pinned?}: a note the user writes, confirmed
  *   PATCH  /api/memory/:id          {text?, pinned?, confirmed?: true, scope?, agentId?, chatId?}: change one
  *   POST   /api/memory/:id/forget   no agent reads it from now on

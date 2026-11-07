@@ -36,6 +36,7 @@ import type { FeedList, FollowKind, FollowView } from "../shared/feed.ts";
 import type { ModelCatalog } from "../shared/models.ts";
 import type { McpSignInView } from "../shared/sign-ins.ts";
 import type { MemoryNote, MemoryNoteView, NoteChange, NoteInput, ServerCoverage } from "../shared/memory.ts";
+import type { DreamRecord, DreamSettings, DreamsView } from "../shared/dream.ts";
 import type { ChatSystemPrompt } from "../shared/system-prompt.ts";
 import { skillPath, type SkillInfo, type SkillInput } from "../shared/skills.ts";
 import { FILE_ROUTE, VIEW_PARAM, ZIP_ROUTE } from "../shared/uploads.ts";
@@ -282,7 +283,11 @@ export const api = {
   subscribePush: (subscription: PushSubscriptionJSON) => request<object>("/api/push/subscribe", post(subscription)),
   unsubscribePush: (endpoint: string) => request<object>("/api/push/unsubscribe", post({ endpoint })),
   /** The user's memory notes, forgotten ones too, and what each MCP server covers. */
-  memory: () => request<{ notes: MemoryNoteView[]; coverage: ServerCoverage[] }>("/api/memory"),
+  memory: () => request<{ notes: MemoryNoteView[]; coverage: ServerCoverage[]; dreams?: DreamsView }>("/api/memory"),
+  /** The nightly dreams' settings: whether pi learns overnight, and the time zone the night keeps to. */
+  setDreamSettings: (settings: Partial<DreamSettings>) => request<DreamSettings>("/api/memory/dreams/settings", send("PUT", settings)),
+  /** pi ("pi") or one of the user's agents dreams over the last day now (once an hour). */
+  dreamNow: (subject: string) => request<DreamRecord>(`/api/memory/dreams/${subject}/now`, post({})),
   addNote: (note: NoteInput) => request<MemoryNote>("/api/memory", post(note)),
   changeNote: (id: string, change: NoteChange) => request<MemoryNote>(`/api/memory/${id}`, send("PATCH", change)),
   forgetNote: (id: string) => request<MemoryNote>(`/api/memory/${id}/forget`, post({})),

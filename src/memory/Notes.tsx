@@ -80,7 +80,7 @@ function TargetPicker({
 }
 
 /** Run a change to the notes, then read them again; the error, if any, for the caller to show. */
-async function act(action: () => Promise<unknown>): Promise<string | null> {
+export async function act(action: () => Promise<unknown>): Promise<string | null> {
   try {
     await action();
     return null;
@@ -136,6 +136,7 @@ export function AddNote({ targets, initial, onDone }: { targets: NoteTargets; in
 function sourceText(note: MemoryNoteView): string {
   if (note.source === "person") return "Added by you";
   const by = note.learnedBy ? (note.learnedBy === "pi" ? "pi" : `@${note.learnedBy}`) : "an agent";
+  if (note.source === "overnight") return `Learned overnight by ${by}`;
   return note.chatTitle && note.scope !== "chat" ? `Learned by ${by} in “${note.chatTitle}”` : `Learned by ${by}`;
 }
 

@@ -1,5 +1,5 @@
 import type { AgentDefinition } from "../../shared/agents.ts";
-import { DREAM_NOW_MS, type DreamRecord, type DreamSubject } from "../../shared/dream.ts";
+import { DREAM_NOW_MS, type DreamRecord, type DreamSettings, type DreamsView, type DreamSubject } from "../../shared/dream.ts";
 import type { FeedInput } from "../../shared/feed.ts";
 import { waitsForConfirm } from "../../shared/memory.ts";
 import { errorMessage, isObject, isTimeZone } from "../../shared/util.ts";
@@ -9,25 +9,6 @@ import { Dreamer, DreamStore, nextDreamAt, nightWindow, type DreamAnswer, type D
 import type { DreamExcerpt } from "./dream-input.ts";
 import type { MemoryStore } from "./store.ts";
 import type { SignalStore } from "./signals.ts";
-
-/** The owner's dream settings, as their account keeps them. */
-export interface DreamSettings {
-  /** pi learns overnight from the user's chats: on unless they turned it off. */
-  piLearns: boolean;
-  /** The time zone the nightly dream keeps to (the app sends the browser's); UTC until it says. */
-  timeZone: string;
-}
-
-/** What the owner's agents' and pi's dreams show: the settings, and each subject's latest dreams. */
-export interface DreamsView {
-  settings: DreamSettings;
-  /** When the next nightly dream is due; null when nothing learns overnight. */
-  nextAt: number | null;
-  /** By subject (an agent's id, or "pi"): its latest dreams, newest first. */
-  dreams: Record<string, DreamRecord[]>;
-  /** When each subject may dream now again (Dream now's rate limit), when it may not yet. */
-  nowAfter: Record<string, number>;
-}
 
 const SETTINGS_KEY = "dream.settings";
 const DUE_KEY = "dream.due";
@@ -238,4 +219,4 @@ export class UserDreams {
   }
 }
 
-export type { DreamExcerpt };
+export type { DreamExcerpt, DreamSettings, DreamsView };

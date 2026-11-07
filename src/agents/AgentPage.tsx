@@ -78,7 +78,7 @@ export const TABS: AgentTab[] = [
   { id: "workflow", label: "Workflow", fields: ["trigger", "scope", "workflow"], Component: WorkflowTab },
   { id: "runs", label: "Runs", fields: [], Component: RunsTab },
   { id: "limits", label: "Limits", fields: LIMIT_FIELDS, Component: LimitsTab },
-  { id: "knows", label: "Knows", fields: [], Component: KnowsTab },
+  { id: "knows", label: "Knows", fields: ["learns"], Component: KnowsTab },
 ];
 
 /** The tab a place opens: the one asked for, else the one that edits its field, else the first. */

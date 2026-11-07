@@ -1460,8 +1460,8 @@ export class UserDirectory extends DurableObject<Env> {
   }
 
   /** What the Memory view shows: every note, and what the servers cover. */
-  memoryView(): { notes: MemoryNoteView[]; coverage: ServerCoverage[] } {
-    return { notes: this.#memory.list(), coverage: this.serverCoverage() };
+  memoryView(): { notes: MemoryNoteView[]; coverage: ServerCoverage[]; dreams: DreamsView } {
+    return { notes: this.#memory.list(), coverage: this.serverCoverage(), dreams: this.#dreams.view() };
   }
 
   /** What the MCP servers cover, as one of the user's chats last listed them: what Memory shows of the data agents reach. */
