@@ -56,6 +56,8 @@ import { Dictation } from "./Dictation.tsx";
 import { ownMessages, useHistory } from "./history.ts";
 import { AgentDraft } from "./AgentDraft.tsx";
 import { AgentReply } from "./AgentReply.tsx";
+import { ActionCard, ChatActions } from "./ActionCard.tsx";
+import { CHAT_ACTION_KIND, type ChatActionData } from "../../shared/limits.ts";
 import { ChecklistCard } from "./ChecklistCard.tsx";
 import { CHAT_CHECKLIST_KIND, checklistAt, foldChecklists, type ChatChecklistData } from "../../shared/checklist.ts";
 import { ArtifactCard } from "./ArtifactCard.tsx";
@@ -106,7 +108,7 @@ const GROWS_ITSELF = CSS.supports("field-sizing", "content");
 const atBottom = (el: HTMLElement) => el.scrollHeight - el.scrollTop - el.clientHeight < 80;
 
 export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity, onLeft, onMenu, onOpenChat }: Props) {
-  const { state, connected, people, online, prompt, takeOffer: sendYes, abort, setModel, auto, reactions, react, hints, dropHint, agents, agentSettings, live, drafts, setDrafts } =
+  const { state, connected, people, online, prompt, takeOffer: sendYes, abort, setModel, auto, reactions, react, hints, dropHint, agents, agentSettings, live, drafts, setDrafts, actions } =
     useChat(chatId);
   // pi, or an agent of the chat, is working or has turns waiting: Stop stops them all.
   const working = state.busy || agents.some((agent) => agent.busy || agent.queued);
@@ -343,7 +345,10 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
   // The agents working now, each with its live steps, its time and its own Stop; then who waits for a turn.
   const liveTurns = useMemo(() => shownLive(live, agents, state.entries), [live, agents, state.entries]);
   const waiting = useMemo(() => queueLines(agents), [agents]);
+  // The held calls' cards: their live state, and whether the viewer decides them.
+  const chatActions = useMemo(() => ({ actions, isOwner, ownerName: people?.owner.name }), [actions, isOwner, people]);
   return (
+    <ChatActions.Provider value={chatActions}>
     <SharedChat.Provider value={group}>
       <ChatAgents.Provider value={agents}>
         <FoldScope.Provider value={chatId}>
@@ -599,6 +604,7 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
         </FoldScope.Provider>
       </ChatAgents.Provider>
     </SharedChat.Provider>
+    </ChatActions.Provider>
   );
 }
 
@@ -707,6 +713,7 @@ const Entry = memo(function Entry({
       />
     );
   }
+  if (entry.kind === CHAT_ACTION_KIND) return <ActionCard action={(entry.data as unknown as ChatActionData).action} />;
   if (entry.kind === "pi.assistant" && message?.role === "assistant") {
     return (
       <Assistant

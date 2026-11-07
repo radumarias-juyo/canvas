@@ -564,7 +564,8 @@ export function artifactExtension(scope: ChatScope): Extension {
         }),
         execute: async (args, api, context): Promise<ToolExecutionResult<PublishedDetails>> => {
           const target = { title: args.title, artifactId: args.artifact_id, newArtifact: args.new_artifact, message: args.message };
-          const { meta, byTitle, unchecked } = await publishDraft(scope, { ...target, draftId: args.draft_id }, context.abortSignal, String(api.conversationId));
+          const input = { ...target, draftId: args.draft_id, session: String(api.conversationId) };
+          const { meta, byTitle, unchecked } = await publishDraft(scope, input, context.abortSignal, String(api.conversationId));
           const done =
             `Published artifact ${meta.id} version ${meta.latest} ("${meta.title}"). The user now sees it in the preview panel.` +
             (byTitle
