@@ -89,7 +89,7 @@ export interface GateHost {
  * How many calls a callsPerDay rule covers that were let through and are not in the log yet (made before the one
  * checked): the checks before it settle first, so one held or refused never counts, and two in parallel never both pass.
  */
-export type InFlight = (rule: Pick<GuardrailRule, "server" | "tool">) => number | Promise<number>;
+export type InFlight = (rule: Pick<GuardrailRule, "server" | "tool">) => Promise<number>;
 
 /** The values a rule needs that the call does not carry: the current value (maxChange), today's calls (callsPerDay). */
 async function factsFor(host: GateHost, rule: GuardrailRule, call: GateCall, at: number, inFlight: InFlight) {
@@ -118,7 +118,7 @@ export async function hitsFor(
   rules: readonly GuardrailRule[],
   call: GateCall,
   at: number,
-  inFlight: InFlight = () => 0,
+  inFlight: InFlight = async () => 0,
 ): Promise<RuleHit[]> {
   const checked = await Promise.all(
     rules.map(async (rule): Promise<RuleHit | null> => {
@@ -159,8 +159,13 @@ export class WriteGate {
    */
   async check(call: GateCall, context: GateContext): Promise<GateVerdict> {
     const reservation = ++this.#order;
-    let settle = () => {};
-    const checked = new Promise<void>((resolve) => (settle = resolve));
+    let settled = () => {};
+    const checked = new Promise<void>((resolve) => (settled = resolve));
+    // Once it is known whether it runs (before a held one is kept, which takes a while): the checks after it go on.
+    const settle = (runs: boolean) => {
+      if (!runs) this.#inFlight.delete(reservation);
+      settled();
+    };
     this.#inFlight.set(reservation, { server: call.server, tool: call.tool, checked });
     const inFlight: InFlight = async (rule) => {
       const before = [...this.#inFlight].filter(([order, one]) => order < reservation && ruleApplies(rule, one));
@@ -172,16 +177,15 @@ export class WriteGate {
       verdict =
         context.kind === "approved"
           ? await this.#approved(call, context.action, context.level, inFlight)
-          : await this.#check(call, context, inFlight);
+          : await this.#check(call, context, inFlight, () => settle(false));
     } finally {
-      // Held, refused or failed: not counted, before the checks after it go on.
-      if (!verdict?.run) this.#inFlight.delete(reservation);
-      settle();
+      // Held, refused or failed: not counted (settling twice changes nothing).
+      settle(verdict?.run === true);
     }
     return verdict.run ? { ...verdict, reservation } : verdict;
   }
 
-  async #check(call: GateCall, context: Exclude<GateContext, { kind: "approved" }>, inFlight: InFlight): Promise<GateVerdict> {
+  async #check(call: GateCall, context: Exclude<GateContext, { kind: "approved" }>, inFlight: InFlight, holding: () => void): Promise<GateVerdict> {
     const host = this.#host;
     const userRules = host.userRules();
     let caller: Caller;
@@ -220,6 +224,7 @@ export class WriteGate {
         ? `A rule asks for your approval: ${asks.join("; ")}.`
         : `${who} is ${at(caller.level)} ${caller.because}${asks.length ? `, and a rule asks for your approval: ${asks.join("; ")}` : ""}.`;
     const hours = caller.agent?.approvalHours ?? DEFAULT_APPROVAL_HOURS;
+    holding();
     const action = await host.hold({
       kind,
       actor: caller.actor,

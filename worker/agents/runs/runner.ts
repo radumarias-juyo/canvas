@@ -420,8 +420,8 @@ export class AgentRunner {
       return null;
     }
     if (!run.test && !agent.enabled) {
-      this.#host.runs.stopItems(run.agentId, run.dueAt, `@${agent.name} was turned off: it stopped there.`);
-      this.#host.runs.update(run.agentId, run.dueAt, { status: "not_today", summary: `Stopped: @${agent.name} was turned off, so it did nothing more and sent nothing.` });
+      const summary = `Stopped: @${agent.name} was turned off, so it did nothing more and sent nothing.`;
+      this.#host.runs.stop(run.agentId, run.dueAt, { item: `@${agent.name} was turned off: it stopped there.`, status: "not_today", summary });
       this.#host.changed(run.agentId);
       return null;
     }

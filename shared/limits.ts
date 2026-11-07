@@ -253,8 +253,14 @@ function hasPath(schema: unknown, parts: readonly string[]): boolean | undefined
     if (Object.hasOwn(node.properties, part)) own = hasPath(node.properties[part], rest);
     else own = node.additionalProperties === true || isObject(node.additionalProperties) ? undefined : false;
   } else own = choices.length ? false : undefined;
-  const found = [own, ...choices.map((choice) => hasPath(choice, parts))];
-  return found.includes(true) ? true : found.includes(undefined) ? undefined : false;
+  if (own === true) return true;
+  let unknown = own === undefined;
+  for (const choice of choices) {
+    const found = hasPath(choice, parts);
+    if (found === true) return true;
+    if (found === undefined) unknown = true;
+  }
+  return unknown ? undefined : false;
 }
 
 /** A number, or a string that is one; undefined otherwise. */
@@ -274,17 +280,16 @@ export function matchesValue(pattern: string | number, value: unknown): boolean 
   if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") return false;
   const text = String(value).trim().toLowerCase();
   const wanted = pattern.trim().toLowerCase();
-  const matches = (one: string) => {
-    if (!wanted.includes("*")) return one === wanted;
-    const regex = new RegExp(
-      `^${wanted
-        .split("*")
-        .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
-        .join(".*")}$`,
-      "s",
-    );
-    return regex.test(one);
-  };
+  const regex = wanted.includes("*")
+    ? new RegExp(
+        `^${wanted
+          .split("*")
+          .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
+          .join(".*")}$`,
+        "s",
+      )
+    : null;
+  const matches = (one: string) => (regex ? regex.test(one) : one === wanted);
   if (matches(text)) return true;
   if (typeof value !== "string") return false;
   return text
@@ -297,10 +302,10 @@ export function matchesValue(pattern: string | number, value: unknown): boolean 
 function namesOf(entry: string): string[] {
   const trimmed = entry.trim();
   if (!trimmed) return [];
-  const address = /<([^<>]*)>/.exec(trimmed)?.[1]?.trim();
-  const name = address === undefined ? undefined : trimmed.replace(/<[^<>]*>/, "").trim().replace(/^"(.*)"$/, "$1").trim();
+  // A word in <…> is the address, stripped as each word is; the name is what is left before it.
+  const name = /<[^<>]*>/.test(trimmed) ? trimmed.replace(/<[^<>]*>/, "").trim().replace(/^"(.*)"$/, "$1").trim() : "";
   const words = trimmed.split(/\s+/).map((word) => word.replace(/^[<"'(]+|[>"'),]+$/g, ""));
-  return [trimmed, ...(address ? [address] : []), ...(name ? [name] : []), ...words].filter(Boolean);
+  return [trimmed, name, ...words].filter(Boolean);
 }
 
 /** The day `at` falls on in `tz`, as "YYYY-MM-DD". */

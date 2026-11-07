@@ -469,8 +469,9 @@ function NeverValues({ draft, set, arg }: { draft: RuleDraft; set: (change: Part
   const choices = yesNo ? ["true", "false"] : arg?.values;
   return (
     <div className="rule-field">
-      {yesNo && <span>Never these values</span>}
-      {!yesNo && (
+      {yesNo ? (
+        <span>Never these values</span>
+      ) : (
         <label className="rule-field">
           <span>Never these values</span>
           <textarea

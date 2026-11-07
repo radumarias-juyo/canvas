@@ -38,7 +38,7 @@ import { describeSchedule } from "./schedule.ts";
 import { actedMark, type ActedStep, type AgentRuns, type ItemKept, type RunRecord } from "./store.ts";
 
 /** How much of a read's result goes into the run's session (the rest is cut, with a note); a do result is kept up to it. */
-export const MAX_RESULT_CHARS = 12_000;
+const MAX_RESULT_CHARS = 12_000;
 /** The largest look result an item keeps for going through again (its scope's list may be four times that). */
 const MAX_KEPT_CHARS = 64_000;
 /** How much of a result a step's trace row shows. */
@@ -361,13 +361,16 @@ export class RunExecutor {
 
   /** A run whose agent changed while it waited: its open items stop, nothing more is sent, and it says so. */
   #stopChanged(agent: AgentDefinition, run: RunRecord): RunStatus {
-    const runs = this.#host.runs;
-    runs.stopItems(agent.id, run.dueAt, "Its workflow changed while it waited: it stopped there.");
     // A restart may have cut it off while it sent: what went out went.
     const sent = run.detail.deliveries.some((delivery) => delivery.status === "sent");
-    const why = "@" + agent.name + "'s workflow changed while this run waited, so it did nothing more and sent nothing";
-    runs.update(agent.id, run.dueAt, { status: sent ? "sent" : "failed", summary: sent ? `Stopped part way: ${why} more.` : `Stopped: ${why}.` });
-    return sent ? "sent" : "failed";
+    const why = `@${agent.name}'s workflow changed while this run waited, so it did nothing more and sent nothing`;
+    const status = sent ? "sent" : "failed";
+    this.#host.runs.stop(agent.id, run.dueAt, {
+      item: "Its workflow changed while it waited: it stopped there.",
+      status,
+      summary: sent ? `Stopped part way: ${why} more.` : `Stopped: ${why}.`,
+    });
+    return status;
   }
 
   #waitForSignIn(agent: AgentDefinition, run: RunRecord, servers: string[]): RunEnd {
@@ -421,7 +424,7 @@ export class RunExecutor {
       reached: [],
       texts: [],
       textAt: {},
-      kept: runs.kept(agent.id, run.dueAt, element.key) as ItemKept & { looked: Record<string, Value> },
+      kept: runs.kept(agent.id, run.dueAt, element.key),
       cost: 0,
       when,
       ...(agent.scope && { element: { label: element.label, value: element.value ?? null } }),
@@ -570,6 +573,7 @@ export class RunExecutor {
     if (before) {
       // An approved call's result (it ran in the chat) goes into the item's session as a result that ran here does
       // (placed once: one that ran here is there already).
+      // (A restart may have come between the decision and its own write of it.)
       if (before.value !== undefined) await this.#wroteResult(state, step, key, jsonOf(before.value));
       return before;
     }
@@ -606,7 +610,7 @@ export class RunExecutor {
 
   /** A do step's result, into the item's session: what its later work steps read. */
   #wroteResult(state: ItemRun, step: Extract<AgentStep, { kind: "do" }>, key: string, json: string): Promise<void> {
-    return this.#host.write(state.session, `Result of ${step.server}.${step.tool} (done):\n${clip(json, MAX_RESULT_CHARS)}`, `${opId(state)}:do:${key}`);
+    return this.#host.write(state.session, doResult(`${step.server}.${step.tool}`, json), `${opId(state)}:do:${key}`);
   }
 
   /**
@@ -624,7 +628,7 @@ export class RunExecutor {
     // The whole result goes into the item's session, kept or not: its later work steps read it there.
     const session = runs.item(agentId, dueAt, item)?.session;
     if (json !== null && session) {
-      await this.#host.write(session, `Result of the call you approved (done):\n${clip(json, MAX_RESULT_CHARS)}`, `${itemOpId(agentId, dueAt, item)}:do:${step}`);
+      await this.#host.write(session, doResult("the call you approved", json), `${itemOpId(agentId, dueAt, item)}:do:${step}`);
     }
     return true;
   }
@@ -646,7 +650,6 @@ export class RunExecutor {
     const before = state.kept.conditions[key];
     if (before !== undefined) return before;
     const yes = this.#holds(condition, state, record, label);
-    state.kept.conditions[key] = yes;
     this.#host.runs.keep(state.agent.id, state.run.dueAt, state.item, "conditions", key, yes);
     return yes;
   }
@@ -735,6 +738,11 @@ export class RunExecutor {
     this.#host.runs.update(run.agentId, run.dueAt, { detail: { sessions: { ...sessions, [key]: session } } });
     return session;
   }
+}
+
+/** A do step's result as its item's session reads it (the same op id for a call made here or approved: placed once). */
+function doResult(call: string, json: string): string {
+  return `Result of ${call} (done):\n${clip(json, MAX_RESULT_CHARS)}`;
 }
 
 /** A do step's outcome as its run keeps it: a result too large to keep only as its excerpt, marked cut. */

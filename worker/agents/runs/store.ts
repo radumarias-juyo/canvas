@@ -388,6 +388,12 @@ export class AgentRuns {
     this.#sql.exec("UPDATE agent_runs SET detail = ? WHERE agent_id = ? AND due_at = ? AND item = ?", JSON.stringify(detail), agentId, dueAt, rowKey(item));
   }
 
+  /** A run stops where it is: its items that did not end end as not today (`item`: why), and the run as `status`. */
+  stop(agentId: string, dueAt: number, end: { item: string; status: EndedRunStatus; summary: string }): void {
+    this.stopItems(agentId, dueAt, end.item);
+    this.update(agentId, dueAt, { status: end.status, summary: end.summary });
+  }
+
   /** A run's items that did not end (running, or waiting for a decision) end as not today, with why. */
   stopItems(agentId: string, dueAt: number, reason: string): void {
     this.#sql.exec(
@@ -403,8 +409,9 @@ export class AgentRuns {
   /** An item ended: its status, steps, part of the report and cost (what it kept for going through again stays). */
   endItem(agentId: string, dueAt: number, item: string, end: { status: RunItemStatus; cost: number } & ItemDetail): void {
     const { status, cost, ...rest } = end;
+    // Undefined ones are left out of the JSON.
     const { looked, conditions } = this.#itemDetail(agentId, dueAt, item);
-    const detail: ItemDetail = { ...rest, ...(looked && { looked }), ...(conditions && { conditions }) };
+    const detail: ItemDetail = { ...rest, looked, conditions };
     this.#sql.exec(
       "UPDATE agent_runs SET status = ?, ended_at = ?, cost = ?, detail = ? WHERE agent_id = ? AND due_at = ? AND item = ?",
       status,
