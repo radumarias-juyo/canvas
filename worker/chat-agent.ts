@@ -641,11 +641,13 @@ export class ChatAgent extends DurableObject<Env> {
   onStart(): void {
     if (this.#gone) return;
     // An approved call cut off by a restart may or may not have reached its server: never run again on its own.
-    this.#endInterruptedActions();
-    this.#tellRunsDecided();
+    const interrupted = this.#endInterruptedActions();
     // The agents' turns that were running, or waiting, go on: cheap when there are none. So do runs cut off.
     this.turns.resume();
     this.runner.resume();
+    // After the resume, which goes on only with runs that were running: a run a missed decision reopens goes on once,
+    // through AgentRunner.decided. Those just ended above hear through #actionEnded, after its note.
+    this.#tellRunsDecided(interrupted);
     this.#keepResuming();
     this.#reconcileHome();
     // An answer pi gave before the restart may not have been read for the agents it names, even once its run ended.
@@ -3732,23 +3734,27 @@ export class ChatAgent extends DurableObject<Env> {
    * end and AgentRunner.decided): it hears now, so the run does not wait for good. An approved call's result is then
    * only its start (actedOf), so a later step that reads it stops, saying why.
    */
-  #tellRunsDecided(): void {
+  #tellRunsDecided(skip: ReadonlySet<string>): void {
     // Cheap on a wake with no run waiting.
     if (!this.runs.anyWaiting()) return;
     // Only an action that ended can have been missed: its origin read for those alone.
-    const ended = this.actions.list().filter((view) => view.status !== "pending" && view.status !== "running");
+    const ended = this.actions.list().filter((view) => view.status !== "pending" && view.status !== "running" && !skip.has(view.id));
     const actions = ended.map((view) => ({ view, run: this.actions.origin(view.id)?.run }));
     for (const { ref, acted } of missedDecisions(this.runs, actions)) {
       this.ctx.waitUntil(this.runner.decided(ref, acted).catch((error: unknown) => console.error("run:", errorMessage(error))));
     }
   }
 
-  /** Approved calls a restart cut off: failed, with a word to check, as they may have reached their server. */
-  #endInterruptedActions(): void {
+  /** Approved calls a restart cut off: failed, with a word to check, as they may have reached their server. Their ids. */
+  #endInterruptedActions(): Set<string> {
+    const ids = new Set<string>();
     for (const action of this.actions.interrupted()) {
       const ended = this.actions.move(action.id, "running", "failed", "The app restarted while it ran: it may or may not have been done. Check before asking again.");
-      if (ended) this.ctx.waitUntil(this.#actionEnded(ended).catch((error: unknown) => console.error("action:", errorMessage(error))));
+      if (!ended) continue;
+      ids.add(ended.id);
+      this.ctx.waitUntil(this.#actionEnded(ended).catch((error: unknown) => console.error("action:", errorMessage(error))));
     }
+    return ids;
   }
 
   /**

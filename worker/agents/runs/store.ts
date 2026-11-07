@@ -269,12 +269,14 @@ export class AgentRuns {
         agentId,
       )
       .toArray() as RunRow[];
-    if (gone.length)
-      this.#sql.exec(
-        "DELETE FROM agent_run_elements WHERE agent_id = ? AND due_at NOT IN (SELECT due_at FROM agent_runs WHERE agent_id = ? AND item = '')",
-        agentId,
-        agentId,
-      );
+    // Kept elements serve only a run that may go on (keptElements): those of runs gone, or ended for good, go too.
+    this.#sql.exec(
+      `DELETE FROM agent_run_elements WHERE agent_id = ? AND due_at NOT IN (
+         SELECT due_at FROM agent_runs WHERE agent_id = ? AND item = '' AND status IN ('running', 'waiting', 'needs_sign_in')
+       )`,
+      agentId,
+      agentId,
+    );
     for (const row of gone) {
       if (row.item !== RUN || row.test || row.status !== "needs_sign_in") continue;
       this.#onEnded?.({ ...recordOf(row), status: "not_today", summary: "Skipped: too old to go on." });

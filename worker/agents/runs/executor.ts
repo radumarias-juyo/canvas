@@ -362,15 +362,17 @@ export class RunExecutor {
       // An item decided while the others ran is running again: it goes through again before the run ends. The read
       // and the update after it have no await between them, so a decision is never lost between them.
       let pass = 0;
+      let current = agent;
       do {
         // An item decided during the pass before goes through with the agent as it is now: not once it was turned
         // off or its workflow changed meanwhile.
         if (pass++ > 0) {
-          const now = await this.#host.definition(agent.id).catch(() => agent);
-          const changed = this.#stopIfChanged(now ?? { ...agent, enabled: false }, run);
+          const now = await this.#host.definition(agent.id).catch(() => current);
+          const changed = this.#stopIfChanged(now ?? { ...current, enabled: false }, run);
           if (changed) return { status: changed, started };
+          if (now) current = now;
         }
-        await mapLimit(elements, RUN_CONCURRENCY, (element) => this.#item(agent, run, element, when));
+        await mapLimit(elements, RUN_CONCURRENCY, (element) => this.#item(current, run, element, when));
         outcomes = this.#outcomes(agent.id, dueAt, elements);
       } while (outcomes.some((item) => item.status === "running"));
       const held = outcomes.filter((item) => item.status === "waiting");
@@ -379,7 +381,7 @@ export class RunExecutor {
         runs.update(agent.id, dueAt, { status: "waiting", summary: `Waiting for you to approve a call${which}.` });
         return { status: "waiting", started };
       }
-      const status = await this.#finish(agent, runs.get(agent.id, dueAt)!, outcomes);
+      const status = await this.#finish(current, runs.get(agent.id, dueAt)!, outcomes);
       return { status, started };
     } catch (error) {
       if (error instanceof SignInNeeded) return (await this.#turnedOffNow(agent, run)) ?? this.#waitForSignIn(agent, run, [error.server]);
@@ -492,8 +494,9 @@ export class RunExecutor {
     const { view, started } = await runs.beginItem(agent.id, run.dueAt, element.key, element.label, () => this.#host.newSession());
     if (!started && view.status !== "running") return;
     if (element.missing) {
-      // Its element was too large to keep: going on, it cannot read it, so it stops (as at a do result too large).
-      const reason = "Its element of the list was too large to keep, so it cannot go on after the decision: stopped here.";
+      // Its element was too large to keep: going on (after a decision, or a restart), it cannot read it, so it stops
+      // (as at a do result too large).
+      const reason = "Its element of the list was too large to keep, so the run going on again could not read it: stopped here.";
       runs.endItem(agent.id, run.dueAt, element.key, { status: "failed", steps: view.steps, reason, cost: 0 });
       this.#host.changed(agent.id);
       return;
