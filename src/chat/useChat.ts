@@ -16,6 +16,7 @@ import {
   type ChatPeopleView,
   type ChatServerMessage,
   type IncomingMessage,
+  type PiHeld,
   type Presence,
   type QueuedMessage,
 } from "../../shared/protocol.ts";
@@ -390,6 +391,8 @@ export function useChat(chatId: string) {
   const [agents, setAgents] = useState<ChatAgentView[]>(NO_AGENTS);
   // The replies of the viewer's agents held for them to review (only their socket hears them).
   const [drafts, setDrafts] = useState<AgentDraftView[]>(NO_DRAFTS);
+  // pi's replies held for the owner (only their socket hears them): they show them to the chat, or keep them.
+  const [piHeld, setPiHeld] = useState<PiHeld[]>(NO_HELD);
   // How the chat's agents behave here, as its owner set it (router, speaking up, servers, daily budget).
   const [agentSettings, setAgentSettings] = useState<ChatAgentSettingsView | null>(null);
   // What the agents working now do, each in its own session.
@@ -420,6 +423,7 @@ export function useChat(chatId: string) {
     setHints(NO_HINTS);
     setAgents(NO_AGENTS);
     setDrafts(NO_DRAFTS);
+    setPiHeld(NO_HELD);
     setActions(NO_ACTIONS);
     setAgentSettings(null);
     dispatchAgents({ type: "reset" });
@@ -459,6 +463,7 @@ export function useChat(chatId: string) {
           setAgents(message.agents);
           dispatchAgents({ type: "agents", agents: message.agents, at: Date.now() });
         } else if (message.type === "agentDrafts") setDrafts(message.drafts);
+        else if (message.type === "piHeld") setPiHeld(message.held);
         else if (message.type === "agentSettings") setAgentSettings(message.settings);
         else if (message.type === "agentEvents") dispatchAgents({ ...message, events: message.events as AgentEvent[], at: Date.now() });
         else if (message.type === "actions") setActions(new Map(message.actions.map((action) => [action.id, action])));
@@ -507,6 +512,7 @@ export function useChat(chatId: string) {
   const setModel = useCallback((model: string, thinkingLevel?: ModelThinkingLevel) => send({ type: "model", model, thinkingLevel }), [send]);
   const react = useCallback((entry: number, emoji: Reaction, on: boolean) => send({ type: "react", entry, emoji, on }), [send]);
   const takeOffer = useCallback((entry: number) => send({ type: "offer_yes", entry }), [send]);
+  const showPiHeld = useCallback((from: number) => send({ type: "pi_show", from }), [send]);
   const dropHint = useCallback(
     (entry: number) =>
       setHints((known) => {
@@ -538,6 +544,10 @@ export function useChat(chatId: string) {
     drafts,
     /** Take drafts out of the list as the chat answered a review (the socket says so too). */
     setDrafts,
+    /** pi's replies held for the viewer, the chat's owner (none for anyone else). */
+    piHeld,
+    /** Show everyone pi's held reply that started at `from`. */
+    showPiHeld,
     /** The chat's actions that wait, or waited, for its owner, by id, as the chat last said. */
     actions,
     setModel,
@@ -556,6 +566,7 @@ export function useChat(chatId: string) {
 const NO_HINTS: ReadonlySet<number> = new Set();
 const NO_AGENTS: ChatAgentView[] = [];
 const NO_DRAFTS: AgentDraftView[] = [];
+const NO_HELD: PiHeld[] = [];
 const NO_ACTIONS: ReadonlyMap<string, PendingActionView> = new Map();
 
 /**

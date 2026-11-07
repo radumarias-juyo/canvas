@@ -2,7 +2,16 @@ import type { UserMessage } from "@earendil-works/pi-ai";
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { CHAT_AGENT_KIND, CHAT_TURN_KIND, proposedBy, type ChatAgentReplyData } from "../../shared/agents.ts";
 import { entryItems, mergeItems, type ItemRef } from "../../shared/items.ts";
-import { CHAT_MESSAGE_KIND, CHAT_PEOPLE_KIND, publishedBy, type ChatMessageData, type ChatPeopleData } from "../../shared/protocol.ts";
+import {
+  CHAT_MESSAGE_KIND,
+  CHAT_PEOPLE_KIND,
+  heldIn,
+  publishedBy,
+  type ChatMessageData,
+  type ChatPeopleData,
+  type PiHeld,
+  type PrivateMark,
+} from "../../shared/protocol.ts";
 import { CHAT_BUDGET_KIND, CHAT_COPY_KIND, CHAT_EVENT_KIND, type ChatCopyData } from "../../shared/chat-kinds.ts";
 import { CHAT_ACTION_KIND, type ChatActionData } from "../../shared/limits.ts";
 import { CHAT_CHECKLIST_KIND, checklistOf, type ChatChecklistData } from "../../shared/checklist.ts";
@@ -158,6 +167,58 @@ export function replyItems(entries: readonly EntryRecord[], previous?: ReadonlyM
   }
   flush();
   return byEntry;
+}
+
+/** The source chip's name for a result from the owner's private files: no server says where it came from. */
+export const PRIVATE_FILES = "private files";
+
+/**
+ * What each of pi's replies in a chat others are in is built on of what only the chat's owner sees, by the entry it
+ * shows under (its last message with text, as replyItems): the servers its results came from, as the chat marked them
+ * (PrivateMark, never from its text), PRIVATE_FILES for the owner's files. Each reply's array stays the same while its
+ * sources do (`previous`).
+ */
+export function replySources(entries: readonly EntryRecord[], previous?: ReadonlyMap<number, string[]>): ReadonlyMap<number, string[]> {
+  const byEntry = new Map<number, string[]>();
+  let found = new Set<string>();
+  let lastText: number | undefined;
+  const flush = () => {
+    if (lastText !== undefined && found.size) {
+      const sources = [...found];
+      const known = previous?.get(lastText);
+      byEntry.set(lastText, known && known.join("\n") === sources.join("\n") ? known : sources);
+    }
+    found = new Set();
+    lastText = undefined;
+  };
+  for (const entry of entries) {
+    const message = entry.model?.[0];
+    if (startsRun(entry)) flush();
+    else if (entry.kind === "pi.tool-result" && message?.role === "toolResult") {
+      const mark = message.details as Partial<PrivateMark> | undefined;
+      if (mark?.private === true) found.add(typeof mark.server === "string" ? mark.server : PRIVATE_FILES);
+    } else if (entry.kind === "pi.assistant" && message?.role === "assistant" && blocks(message.content).some((block) => block.type === "text" && block.text.trim()))
+      lastText = entry.id as number;
+  }
+  flush();
+  return byEntry;
+}
+
+/**
+ * The entry each of pi's held replies (PiHeld) shows its "Show to the chat" under, for the owner: its last message with
+ * text, once its run has ended; by the time its run started (PiHeld.from).
+ */
+export function heldReplies(entries: readonly EntryRecord[], held: readonly PiHeld[]): ReadonlyMap<number, number> {
+  const at = new Map<number, number>();
+  for (const range of held) {
+    if (range.through === undefined) continue;
+    const last = entries.findLast((entry) => {
+      const message = entry.model?.[0];
+      return entry.kind === "pi.assistant" && message?.role === "assistant" && heldIn([range], message.timestamp) && blocks(message.content).some((block) => block.type === "text");
+    });
+    if (last) at.set(last.id as number, range.from);
+  }
+  return at;
 }
 
 function sameItems(a: readonly ItemRef[], b: readonly ItemRef[]): boolean {

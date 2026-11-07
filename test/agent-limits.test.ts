@@ -607,9 +607,12 @@ describe("pending actions", () => {
   it("tell an agent's own session what an approved call came to only from a server it shares", () => {
     const view = { server: "crm", result: '{"deal":"Private terms"}' };
     const shares = (server: string) => server === "db";
-    // pi's own session, and a session apart from the chat: the result.
-    expect(noteResult(view, { session: "0" }, "0", null)).toBe(view.result);
+    // A session apart from the chat: the result.
     expect(noteResult(view, { session: "agent-fork", apart: true }, "0", null)).toBe(view.result);
+    // pi's own session, which members' questions reach too: only from a server pi shares, also for a call held apart.
+    expect(noteResult({ ...view, server: "db" }, { session: "0" }, "0", shares)).toBe(view.result);
+    expect(noteResult(view, { session: "0" }, "0", shares)).toBe("(not told here: crm is not shared in this chat)");
+    expect(noteResult(view, { session: "0", apart: true }, "0", shares)).toBe("(not told here: crm is not shared in this chat)");
     // An agent's own session, which members' turns read: only from a server it shares.
     expect(noteResult({ ...view, server: "db" }, { session: "agent-own" }, "0", shares)).toBe(view.result);
     expect(noteResult(view, { session: "agent-own" }, "0", shares)).toBe("(not told here: crm is not shared in this chat)");

@@ -33,10 +33,11 @@ export function apartOrigin(origin: Pick<ActionOrigin, "session" | "run">, share
 }
 
 /**
- * What the note telling a session how its action ended says came of it: the call's result for pi's own session (`root`)
- * and one apart from the chat (a fork, a run's: only the owner reads those); for an agent's own session, which members'
- * turns read, only from a server the agent shares (`shares`; null when its agent cannot be read), as a turn there reads
- * only those: a server that signs in each user returned the owner's data.
+ * What the note telling a session how its action ended says came of it: the call's result for one apart from the chat (a
+ * fork, a run's: only the owner reads those); for pi's own session (`root`) and an agent's own, which members' turns
+ * read, only from a server it shares (`shares`; null when its agent cannot be read), as a turn there reads only those
+ * for anyone else: a server that signs in each user returned the owner's data. pi's call on a server it does not share
+ * is held apart, but its note still goes to pi's own session.
  */
 export function noteResult(
   view: Pick<PendingActionView, "server" | "result">,
@@ -44,7 +45,7 @@ export function noteResult(
   root: string,
   shares: ((server: string) => boolean) | null,
 ): string | undefined {
-  if (view.result === undefined || origin.apart || origin.session === root || shares?.(view.server)) return view.result;
+  if (view.result === undefined || (origin.apart && origin.session !== root) || shares?.(view.server)) return view.result;
   return `(not told here: ${view.server} is not shared in this chat)`;
 }
 

@@ -55,7 +55,11 @@ with `@cloudflare/vite-plugin`, pnpm; configured and deployed with the `cf` CLI 
   has members, the agent (named `pi`) runs only for a message with `@pi` or a reply to it (`summonsAgent`); other
   messages are asides the model reads as context (`chat.aside` writes). `@name` tags a person in the chat: they get a
   notice over their sidebar socket (a `Tag` on `UserDirectory.touchChat`/`touchSharedChat`), and a browser notification when allowed. Members see and name only the chat's files
-  and artifacts of the owner's (`ChatAgent.chatFiles`, `contents`), plus their own files.
+  and artifacts of the owner's (`ChatAgent.chatFiles`, `contents`), plus their own files. The person who asks decides
+  pi's reach too (`worker/agent/reach.ts`): a run that answers anyone but the owner reads only the servers that do not sign
+  in each user and the chat's files, and what pi read for the owner alone is left out of its requests and, with its
+  calls' output, of others' screens; a run alone with the owner that read such a result and ends after someone joined
+  has its replies held for the owner (Show to the chat). Keep it that way.
 - Agents (`shared/agents.ts`, `worker/agents/`): definitions per user in `UserDirectory` (`AgentStore`); a chat's roster
   and durable turn queue (`ChatRoster`) and the turn controller (`AgentTurns`) run each roster agent in its own pi
   session of the chat object, configured per turn (`#configureAgent`: the session's tools are an allow-list,
