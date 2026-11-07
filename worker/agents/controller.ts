@@ -74,8 +74,8 @@ export interface TurnHost {
   /** The roster's view changed (an agent started or ended a turn, or was dropped): tell everyone. */
   changed(): void;
   /**
-   * A new session that sees `session`'s history so far: a turn its owner asked for runs in one. `from`: the newest entry
-   * it inherited, after which only its own come.
+   * A new session that sees `session`'s history so far: a turn that runs apart (runsApart) runs in one. `from`: the
+   * newest entry it inherited, after which only its own come.
    */
   fork(session: string): Promise<{ session: string; from?: number }>;
   /** The newest entry of a session; undefined for one with none. */

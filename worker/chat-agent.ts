@@ -4759,7 +4759,8 @@ export class ChatAgent extends DurableObject<Env> {
     // Made apart from the chat (a turn's fork, a run), it may carry what the owner's private servers returned: anyone
     // else sees only who asks for which tool, in its card and in the list (shownToMembers). Pi's and an agent's own
     // sessions are the chat's.
-    const shared = (session: string) => session === ROOT_SESSION || this.roster.list().some((entry) => entry.session === session);
+    const shared = (session: string) =>
+      session === ROOT_SESSION || this.roster.list().some((entry) => entry.seat === undefined && entry.session === session);
     const apart = apartOrigin(held.origin, shared);
     const action: NewAction = apart ? { ...held, origin: { ...held.origin, apart: true } } : held;
     const view = this.actions.add(action);
@@ -4891,8 +4892,8 @@ export class ChatAgent extends DurableObject<Env> {
       const conversation = session ? await this.harness.conversation(session) : undefined;
       // An agent's own session hears what came of the call only from a server the agent shares (noteResult).
       const shares = origin && !origin.apart && origin.session !== ROOT_SESSION ? await this.#sharesIn(origin.session) : null;
-      const result = origin ? noteResult(view, origin, ROOT_SESSION, shares) : undefined;
-      const message: UserMessage = { role: "user", content: approvalNote({ ...view, ...(result === undefined ? {} : { result }) }), timestamp: Date.now() };
+      const told = origin ? { ...view, result: noteResult(view, origin, ROOT_SESSION, shares) } : view;
+      const message: UserMessage = { role: "user", content: approvalNote(told), timestamp: Date.now() };
       await conversation?.submit({ type: "write", requestId: `approval:${view.id}`, entry: { kind: APP_APPROVAL_KIND, model: [message] } }, BACKGROUND_CONTEXT);
     } catch (error) {
       // A note that cannot be written never keeps a run's item waiting: nothing would decide it again.
