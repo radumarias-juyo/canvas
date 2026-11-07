@@ -54,7 +54,8 @@ export async function importData(zip: Blob, onProgress: (progress: Progress) => 
 
   const report: ImportReport = { imported: counts(), skipped: counts(), failed: [], settings: [] };
   const fileItems = [...items.values()].filter((item) => item.name.startsWith(FILES));
-  const agents = manifest.account.agents ?? [];
+  // A damaged entry is left out, as checkManifest checks only that there is a list.
+  const agents = (manifest.account.agents ?? []).filter((agent) => typeof agent === "object" && agent !== null);
   const steps = {
     done: 0,
     total: 2 + manifest.account.skills.length + agents.length + fileItems.length + manifest.chats.length + manifest.artifacts.length,

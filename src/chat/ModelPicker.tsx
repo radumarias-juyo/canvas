@@ -311,8 +311,9 @@ function ModelMenu({
       }),
     );
     const autoSection: Section = { key: "auto", models: [autoOption], foldable: false, open: true };
-    const autoWords = autoOption.name.toLowerCase();
-    if (words.length) return [...(words.every((word) => autoWords.includes(word)) ? [autoSection] : []), ...groups.filter((group) => group.models.length)];
+    // Each word starts a word of its name, as "au" finds Auto.
+    const autoWords = autoOption.name.toLowerCase().split(/\s+/);
+    if (words.length) return [...(words.every((word) => autoWords.some((each) => each.startsWith(word))) ? [autoSection] : []), ...groups.filter((group) => group.models.length)];
     const pinned = favorites.flatMap((key) => byId.get(key) ?? []);
     const lately = recent.filter((key) => !favorites.includes(key)).flatMap((key) => byId.get(key) ?? []);
     return [

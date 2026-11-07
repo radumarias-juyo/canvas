@@ -155,6 +155,10 @@ export class ChatRoster {
       CREATE INDEX IF NOT EXISTS chat_agent_turns_by_status ON chat_agent_turns (status);
       CREATE INDEX IF NOT EXISTS chat_agent_turns_by_root ON chat_agent_turns (root);
     `);
+    // A roster made before agents could be shared lacks the column.
+    if (!sql.exec("SELECT 1 FROM pragma_table_info('chat_agents') WHERE name = 'shared'").toArray().length) {
+      sql.exec("ALTER TABLE chat_agents ADD COLUMN shared INTEGER NOT NULL DEFAULT 0");
+    }
   }
 
   /** The roster's clock: what its turns' times are taken from. */

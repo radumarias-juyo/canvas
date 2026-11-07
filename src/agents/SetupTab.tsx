@@ -13,7 +13,7 @@ import {
   type AgentTurnView,
 } from "../../shared/agents.ts";
 import { AUTO_MODEL } from "../../shared/models.ts";
-import { errorMessage, memoAsync, plural } from "../../shared/util.ts";
+import { errorMessage, plural, singleFlight } from "../../shared/util.ts";
 import { api } from "../api.ts";
 import { ModelPicker, useCatalog } from "../chat/ModelPicker.tsx";
 import { AgentAvatar } from "../chat/people.tsx";
@@ -51,8 +51,8 @@ const SETUP_ASSUMED: Record<string, readonly string[]> = {
   servers: ASSUMED_FIELDS.reads,
 };
 
-/** The deployment's MCP servers, read once for every form on the page. */
-const readServers = memoAsync(api.agentServers);
+/** The deployment's MCP servers, one read for the forms open at once: read again as a form opens, so a sign-in shows. */
+const readServers = singleFlight(api.agentServers);
 
 /** Fields shown together with another one: a Change for them opens that one. */
 const SHOWN_WITH: Record<string, string> = { effort: "model", sharedServers: "servers" };
@@ -84,7 +84,7 @@ const sharable = (form: Form, servers: readonly AgentServerInfo[]) => {
 };
 
 /** The definition's fields from the form: the server lists only once the user changed them, so a default stays one. */
-function inputOf(form: Form, servers: readonly AgentServerInfo[]): AgentInput {
+function inputOf(form: Form): AgentInput {
   const sorted = (set: Set<string>) => [...set].sort();
   return {
     name: form.name.trim().toLowerCase(),
@@ -94,8 +94,8 @@ function inputOf(form: Form, servers: readonly AgentServerInfo[]): AgentInput {
     ...(form.color && { color: form.color }),
     ...(form.model !== AUTO_MODEL && { model: form.model, ...(form.effort && { effort: form.effort }) }),
     ...(form.servers && { servers: sorted(form.servers) }),
-    // A shared list names only servers the agent may use itself.
-    ...(form.sharedServers && { sharedServers: sorted(form.sharedServers).filter((name) => usable(form, servers).has(name)) }),
+    // A shared list names only servers the agent may use itself (any, when it lists none).
+    ...(form.sharedServers && { sharedServers: sorted(form.sharedServers).filter((name) => !form.servers || form.servers.has(name)) }),
     ...(form.assumed.length && { assumed: form.assumed }),
   };
 }
@@ -115,7 +115,7 @@ function changed(a: Form, b: Form): boolean {
  * it read, so two editors never undo each other. For someone else's agent the form is theirs to change, and saving
  * makes their own copy.
  */
-export function SetupTab({ subject, field, save, notice }: AgentTabProps) {
+export function SetupTab({ subject, field, save, notice, onDirty }: AgentTabProps) {
   const initial = useRef(formOf(subject)).current;
   const [form, setForm] = useState(initial);
   const [servers, setServers] = useState<AgentServerInfo[] | null>(null);
@@ -148,6 +148,9 @@ export function SetupTab({ subject, field, save, notice }: AgentTabProps) {
   }, [field]);
 
   const dirty = changed(form, initial);
+  // The page's header holds Turn on and off while there are changes: a new version would start the form again.
+  useEffect(() => onDirty?.(dirty), [dirty, onDirty]);
+  useEffect(() => () => onDirty?.(false), [onDirty]);
   const set = <K extends keyof Form>(key: K, value: Form[K], confirms = key) =>
     setForm((current) => ({ ...current, [key]: value, assumed: confirmed(current.assumed, confirms) }));
   const confirmed = (assumed: string[], key: string) => assumed.filter((name) => !isAssumed([name], SETUP_ASSUMED[key] ?? [key]));
@@ -167,11 +170,12 @@ export function SetupTab({ subject, field, save, notice }: AgentTabProps) {
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (saving || !servers) return;
+    // Without the server list (it could not be read), the form saves what it has: only the table needs it.
+    if (saving || (!servers && !serversError)) return;
     setSaving(true);
     setError(null);
     try {
-      const saved = await save(inputOf(form, servers));
+      const saved = await save(inputOf(form));
       notice({
         agentId: saved.id,
         text:
@@ -336,7 +340,7 @@ export function SetupTab({ subject, field, save, notice }: AgentTabProps) {
       </div>
       {error && <p className="form-error">{error}</p>}
       <div className="agent-form-actions">
-        <button type="submit" className="primary" disabled={saving || !servers || (subject.kind !== "new" && !dirty)}>
+        <button type="submit" className="primary" disabled={saving || (!servers && !serversError) || (subject.kind !== "new" && !dirty)}>
           {saving ? "Saving…" : subject.kind === "new" ? "Make the agent" : subject.kind === "shared" ? "Save as my copy" : "Save"}
         </button>
         {dirty && subject.kind !== "new" && (

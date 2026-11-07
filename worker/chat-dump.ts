@@ -197,10 +197,7 @@ function fromCell(cell: SqlCell | undefined, remap: (text: string) => string): s
 export function importedRoster(sql: DumpSql, uid: string, kept: readonly string[]): { agents: string[]; through: number } {
   const has = (table: string) => sql.exec("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", table).toArray().length > 0;
   if (!has("chat_agents")) return { agents: [], through: -1 };
-  const keep = new Set(kept);
-  for (const row of sql.exec("SELECT agent_id FROM chat_agents").toArray()) {
-    if (!keep.has(String(row.agent_id))) sql.exec("DELETE FROM chat_agents WHERE agent_id = ?", String(row.agent_id));
-  }
+  sql.exec("DELETE FROM chat_agents WHERE agent_id NOT IN (SELECT value FROM json_each(?))", JSON.stringify(kept));
   sql.exec("UPDATE chat_agents SET owner_uid = ?, shared = 0", uid);
   const agents = sql
     .exec("SELECT agent_id FROM chat_agents ORDER BY agent_id")

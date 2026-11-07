@@ -38,6 +38,8 @@ export interface AgentTabProps {
   save: (fields: AgentInput) => Promise<AgentDefinition>;
   /** Say something under the header that outlasts the tab (which starts again with each version): a save, a conflict. */
   notice: (notice: PageNotice | null) => void;
+  /** Whether the tab has changes not saved yet: the header holds what would make a new version meanwhile. */
+  onDirty?: (dirty: boolean) => void;
 }
 
 /** A line under the page's header, about one agent: the page of another says nothing of it. */
@@ -91,6 +93,7 @@ export function AgentPage({
 }) {
   const { agents, error: listError } = useAgents();
   const [notice, setNotice] = useState<PageNotice | null>(null);
+  const [dirty, setDirty] = useState(false);
   const own = agents?.find((agent) => agent.id === place.id);
   // Someone else's agent, as the chat it was opened from shares it.
   const [shared, setShared] = useState<SharedAgentView | null>(null);
@@ -173,7 +176,7 @@ export function AgentPage({
   return (
     <div className="agent-page">
       {back}
-      <AgentHeader subject={subject} navigate={navigate} onMenu={onMenu} />
+      <AgentHeader subject={subject} navigate={navigate} onMenu={onMenu} dirty={dirty} />
       {notice?.agentId === place.id && (
         <p className={notice.error ? "form-error agent-notice" : "skills-note agent-notice"} role="status">
           {notice.text}
@@ -203,6 +206,7 @@ export function AgentPage({
           field={place.field}
           save={save}
           notice={setNotice}
+          onDirty={setDirty}
         />
       </div>
     </div>
@@ -210,7 +214,18 @@ export function AgentPage({
 }
 
 /** The page's top: badge, name, job line, the state pill, and for the user's own agent Turn on or off and Delete. */
-function AgentHeader({ subject, navigate, onMenu }: { subject: AgentSubject; navigate: (path: string) => void; onMenu?: () => void }) {
+function AgentHeader({
+  subject,
+  navigate,
+  onMenu,
+  dirty,
+}: {
+  subject: AgentSubject;
+  navigate: (path: string) => void;
+  onMenu?: () => void;
+  /** The tab has changes not saved: turning it on or off makes a new version, which would start the tab again. */
+  dirty: boolean;
+}) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [deleting, setDeleting] = useState<AgentChatUse[] | null>(null);
@@ -262,7 +277,8 @@ function AgentHeader({ subject, navigate, onMenu }: { subject: AgentSubject; nav
             <button
               type="button"
               className={subject.agent.enabled ? undefined : "primary"}
-              disabled={busy}
+              disabled={busy || dirty}
+              title={dirty ? "Save or undo your changes first" : undefined}
               onClick={() => void turn(subject.agent, !subject.agent.enabled)}
             >
               {subject.agent.enabled ? "Turn off" : "Turn on"}
