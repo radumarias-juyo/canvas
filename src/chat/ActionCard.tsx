@@ -23,19 +23,19 @@ export const ChatActions = createContext<ChatActionsView>({ actions: new Map(), 
 const FOLD_LINES = 12;
 
 /** Who made a call: pi's badge, an agent's own, or a page's letters on the quiet colour. */
-export function ActorBadge({ actor }: { actor: ActionActor }) {
+function ActorBadge({ actor }: { actor: ActionActor }) {
   if (!actor.agentId && actor.name === AGENT_NAME) return <AgentAvatar />;
   return <AgentAvatar badge={{ avatar: actor.avatar || defaultAvatar(actor.name), color: actor.color ?? "slate" }} />;
 }
 
 /** What an actor does with a call, in words: proposes it (Recommend) or asks to make it (an approval). */
-export const verbOf = (kind: ActionKind) => (kind === "proposal" ? "proposes" : "asks to");
+const verbOf = (kind: ActionKind) => (kind === "proposal" ? "proposes" : "asks to");
 
 /**
  * Run or approve an action, or decline it, as its owner: what it came to, until the chat's own state of it says more
- * (the sidebar's list follows from its socket's notice), and the error when the request failed.
+ * (the feed's item follows once it is resolved), and the error when the request failed.
  */
-export function useDecision(action: PendingActionView) {
+function useDecision(action: PendingActionView) {
   const [after, setAfter] = useState<PendingActionView | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -56,7 +56,7 @@ export function useDecision(action: PendingActionView) {
 }
 
 /** Approve and Decline (Run and Dismiss for a proposal), as the card and the feed show them. */
-export function DecisionButtons({
+function DecisionButtons({
   kind,
   busy,
   decide,
@@ -159,8 +159,9 @@ export function CallInput({ input }: { input: unknown }) {
  */
 export function ActionDecision({ action, waiting }: { action: PendingActionView; waiting: boolean }) {
   const { view, busy, error, decide } = useDecision(action);
-  const now = useClock(view.status === "pending");
-  if (!waiting && view === action) return null;
+  const decidedHere = view !== action;
+  const now = useClock(view.status === "pending" && (waiting || decidedHere));
+  if (!waiting && !decidedHere) return null;
   const ended = endedText(view, now);
   return (
     <div className="feed-decision">

@@ -75,7 +75,7 @@ import { filesIndex } from "./agent/file-refs.ts";
 import { resolveMentions } from "./agent/mentions.ts";
 import { AGENT_REACTOR, isReactable, isReaction, type Reaction, type Reactions } from "../shared/reactions.ts";
 import { excerpt, replyLine, replyQuote } from "../shared/replies.ts";
-import { agentFrom, MAX_FEED_TEXT, runFeedRef } from "../shared/feed.ts";
+import { agentFrom, MAX_FEED_TEXT } from "../shared/feed.ts";
 import { followersAllowed } from "./feed/store.ts";
 import { peopleExtension, promptExtension, systemPromptExtension, withoutSystemPrompt, type UserPrompts } from "./agent/prompt.ts";
 import { skillClassifier, skillMessage, type SkillChoice, type SkillClassifier } from "./agent/skill-pick.ts";
@@ -448,7 +448,7 @@ export class ChatAgent extends DurableObject<Env> {
     this.ctx.storage.sql,
     Date.now,
     (run) => this.#runEnded(run),
-    (agentId, dueAt) => this.ctx.waitUntil(this.#directory.resolveFeed(runFeedRef(agentId, dueAt)).catch((error: unknown) => console.error("feed:", errorMessage(error)))),
+    (agentId, dueAt) => this.ctx.waitUntil(this.#directory.runResumed(agentId, dueAt).catch((error: unknown) => console.error("feed:", errorMessage(error)))),
   );
   readonly runner = new AgentRunner(this.#runnerHost(), this.ctx.storage.sql);
   /** Shares the object's alarm with pi: runs at local times, watches on intervals. */
@@ -3605,13 +3605,13 @@ export class ChatAgent extends DurableObject<Env> {
     return { actor: { name: AGENT_NAME }, level: lowest.level, because: lowest.because, origin: { session: ROOT_SESSION } };
   }
 
-  /** Hold a call for the owner: kept with its expiry alarm, its card in the chat's log, and in their Needs you list. */
+  /** Hold a call for the owner: kept with its expiry alarm, its card in the chat's log, and in their feed's Needs you. */
   async #holdAction(action: NewAction): Promise<PendingActionView> {
     const view = this.actions.add(action);
     try {
       this.actions.setAlarm(view.id, (await this.scheduler.set(new Date(view.expiresAt), "expire", { id: view.id })).id);
     } catch (error) {
-      // The Needs you list drops it once its time is past; the card says it waits until someone decides.
+      // The feed's Needs you drops it once its time is past; the card says it waits until someone decides.
       console.error("action expiry:", errorMessage(error));
     }
     // Its card, in the log everyone in the chat sees (placed at once, even mid-run: a write with no model message).
@@ -3695,7 +3695,7 @@ export class ChatAgent extends DurableObject<Env> {
   }
 
   /**
-   * An action ended: off the owner's Needs you list, its card updated, and the session that asked for it told how it
+   * An action ended: out of the owner's feed's Needs you, its card updated, and the session that asked for it told how it
    * went (a passive write it reads at its next step or turn; a run's item session, where a reply to its report reads it).
    */
   async #actionEnded(view: PendingActionView): Promise<void> {

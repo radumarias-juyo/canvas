@@ -50,7 +50,7 @@ export interface RunDelivery {
   text?: string;
   /**
    * `recorded`: a test run's, nothing was sent; `refused`: not at this autonomy level, or not allowed; `waiting`: held
-   * for its owner (a proposal or an approval, in its home chat and their Needs you list).
+   * for its owner (a proposal or an approval, in its home chat and their feed's Needs you).
    */
   status: "sent" | "recorded" | "refused" | "waiting" | "failed";
   /** Why it was refused or failed, or what came of it ("Signups brief v38 published"). */

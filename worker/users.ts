@@ -27,7 +27,7 @@ import { addColumns } from "./members.ts";
 import { mayLeave, type ChatKind } from "../shared/chat-kinds.ts";
 import { agentFrom, NEEDS_YOU, RUN_FEED_TEXT, runFeedRef, type FeedInput, type FeedList, type FeedOpen, type FollowKind, type FollowView } from "../shared/feed.ts";
 import type { EndedRunStatus, RunStatus } from "../shared/runs.ts";
-import { aboutOf, FAN_OUT, fanOut, FeedStore, FollowStore, postsReachFollowers, type Follower, type FollowRecord } from "./feed/store.ts";
+import { aboutOf, FAN_OUT, fanOut, FeedStore, FollowStore, postsReachFollowers, type FeedAdded, type Follower, type FollowRecord } from "./feed/store.ts";
 import { mcpServers } from "./mcp/servers.ts";
 import {
   withoutSignInShares,
@@ -294,8 +294,13 @@ export class UserDirectory extends DurableObject<Env> {
    * owner forgets them. An item from an off-the-record chat is refused here, whoever sends it.
    */
   addFeed(input: FeedInput, follow?: { kind: FollowKind; id: string; ownerUid: string; title?: string }): boolean {
+    return this.#addFeed(input, follow) !== null;
+  }
+
+  /** What `addFeed` did with it, or null when they no longer follow what it is from. */
+  #addFeed(input: FeedInput, follow?: { kind: FollowKind; id: string; ownerUid: string; title?: string }): FeedAdded | null {
     const followed = follow ? this.#follows.get(follow.kind, follow.id, follow.ownerUid) : null;
-    if (follow && !followed) return false;
+    if (follow && !followed) return null;
     if (follow?.title && this.#follows.retitle(follow.kind, follow.id, follow.ownerUid, follow.title)) this.#changed("follows");
     // An agent opens for a follower only from the chat that shares it with them: the one they followed it from.
     if (follow?.kind === "agent" && input.open.to === "agent" && !input.open.chatId) {
@@ -305,14 +310,14 @@ export class UserDirectory extends DurableObject<Env> {
     // What it is about goes with it: a page or agent unfollowed or gone, or one of this user's agents deleted.
     const about = follow ? aboutOf(follow.kind, follow.id, follow.ownerUid) : input.aboutAgent && aboutOf("agent", input.aboutAgent, this.ctx.id.name!);
     const added = this.#feed.add(input, known, about);
-    if (added === "same" || added === "refused") return true;
+    if (added === "same" || added === "refused") return added;
     this.#changed("feed");
     // A tag pushes on its own (#touch), a run waiting for a sign-in did already (McpSignIns.needed), and so does an
     // approval (addNeedsYou, naming who asks).
     if (!input.quiet && input.kind !== "approval" && (follow || NEEDS_YOU[input.kind])) {
       this.ctx.waitUntil(this.push({ title: "New in your feed", body: "Something new arrived in your feed.", url: "/feed", tag: `feed:${input.kind}` }));
     }
-    return true;
+    return added;
   }
 
   /** This user's feed: the newest items, the unread ones or those needing them when asked, and the counts. */
@@ -460,6 +465,11 @@ export class UserDirectory extends DurableObject<Env> {
     );
   }
 
+  /** A run of one of this user's agents that waited for a sign-in went on: its feed item waits for them no more. */
+  runResumed(agentId: string, dueAt: number): void {
+    this.resolveFeed(runFeedRef(agentId, dueAt));
+  }
+
   /**
    * A run of one of this user's agents ended (its home chat tells it, not for a test): an item in their feed, a quiet
    * one when it had nothing to report; and when it posted a report, the agent's followers get the post, if nothing it
@@ -482,7 +492,7 @@ export class UserDirectory extends DurableObject<Env> {
       open: run.post ? { to: "chat", chatId: run.chatId } : open,
       chat: { id: run.chatId, kind: run.chatKind },
       status: run.status,
-      // A run waiting for a sign-in waits until it goes on (the same ref, replaced); one that asks, until they answer in its chat.
+      // A run waiting for a sign-in waits until it goes on (runResumed); one that asks, until they answer in its chat.
       ...(run.status === "needs_sign_in" ? { needsYou: true } : run.asks && { needsYou: "reply" as const }),
       ...(run.status === "not_today" && { quiet: true }),
       aboutAgent: agent.id,
@@ -947,15 +957,16 @@ export class UserDirectory extends DurableObject<Env> {
   async addNeedsYou(view: PendingActionView, chatKind: ChatKind): Promise<void> {
     const chatTitle = this.chatTitle(view.chatId) ?? "a chat";
     this.#dropExpiredNeedsYou();
-    this.#limits.addNeedsYou(view);
-    this.addFeed(approvalFeed(view, chatTitle, chatKind));
-    // Only that something waits: the call itself stays in the app. From a chat off the record, not even whose or where.
-    const offRecord = !mayLeave({ what: "feed" }, chatKind, this.#rows.kindOf(view.chatId));
-    await this.push(
-      offRecord
-        ? { title: "Something needs your approval", body: "Open the app to see it.", url: `/c/${view.chatId}`, tag: approvalRef(view.chatId, view.id) }
-        : { title: approvalAsk(view), body: excerpt(`In “${chatTitle}”`, 120), url: `/c/${view.chatId}`, tag: approvalRef(view.chatId, view.id) },
-    ).catch((error: unknown) => console.error("push:", errorMessage(error)));
+    // The feed refuses it from a chat off the record: then only its card there asks, and the push says not even whose or where.
+    const offRecord = this.#addFeed(approvalFeed(view, chatTitle, chatKind)) === "refused";
+    if (!offRecord) this.#limits.addNeedsYou(view);
+    // Only that something waits: the call itself stays in the app.
+    const said = offRecord
+      ? { title: "Something needs your approval", body: "Open the app to see it." }
+      : { title: approvalAsk(view), body: excerpt(`In “${chatTitle}”`, 120) };
+    await this.push({ ...said, url: `/c/${view.chatId}`, tag: approvalRef(view.chatId, view.id) }).catch((error: unknown) =>
+      console.error("push:", errorMessage(error)),
+    );
   }
 
   /** An action ended (approved, declined, expired): its feed item waits no more. */

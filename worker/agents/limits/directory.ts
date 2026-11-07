@@ -50,9 +50,8 @@ export class LimitsDirectory {
       );
       CREATE INDEX IF NOT EXISTS tool_calls_tool ON tool_calls (server, tool, at);
       CREATE INDEX IF NOT EXISTS tool_calls_agent ON tool_calls (agent_id, id);
-      CREATE TABLE IF NOT EXISTS needs_you (
-        chat_id TEXT NOT NULL, id TEXT NOT NULL, item TEXT NOT NULL, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL,
-        PRIMARY KEY (chat_id, id)
+      CREATE TABLE IF NOT EXISTS waiting_actions (
+        chat_id TEXT NOT NULL, id TEXT NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY (chat_id, id)
       );
     `);
   }
@@ -133,33 +132,28 @@ export class LimitsDirectory {
     }));
   }
 
-  /** An action waits for the user (shown in their feed): kept until its chat says it ended, or its time is past. */
-  addNeedsYou(item: PendingActionView): void {
-    this.dropExpired();
-    this.#sql.exec(
-      "INSERT OR REPLACE INTO needs_you (chat_id, id, item, expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
-      item.chatId,
-      item.id,
-      JSON.stringify(item),
-      item.expiresAt,
-      item.createdAt,
-    );
+  /**
+   * An action waits for the user in their feed: kept until its chat says it ended, or its time is past (only which and
+   * until when: the action itself is in the feed's item).
+   */
+  addNeedsYou(item: Pick<PendingActionView, "chatId" | "id" | "expiresAt">): void {
+    this.#sql.exec("INSERT OR REPLACE INTO waiting_actions (chat_id, id, expires_at) VALUES (?, ?, ?)", item.chatId, item.id, item.expiresAt);
   }
 
   /** Ones whose chat never said they expired (its alarm or its word lost) go once their time is past: which went. */
   dropExpired(): { chatId: string; id: string }[] {
-    return (this.#sql.exec("DELETE FROM needs_you WHERE expires_at < ? RETURNING chat_id, id", this.#now()).toArray() as { chat_id: string; id: string }[]).map(
+    return (this.#sql.exec("DELETE FROM waiting_actions WHERE expires_at < ? RETURNING chat_id, id", this.#now()).toArray() as { chat_id: string; id: string }[]).map(
       (row) => ({ chatId: row.chat_id, id: row.id }),
     );
   }
 
   /** Whether it was there. */
   removeNeedsYou(chatId: string, id: string): boolean {
-    return this.#sql.exec("DELETE FROM needs_you WHERE chat_id = ? AND id = ?", chatId, id).rowsWritten > 0;
+    return this.#sql.exec("DELETE FROM waiting_actions WHERE chat_id = ? AND id = ?", chatId, id).rowsWritten > 0;
   }
 
   /** A chat that is deleted takes its waiting actions with it. */
   forgetChat(chatId: string): boolean {
-    return this.#sql.exec("DELETE FROM needs_you WHERE chat_id = ?", chatId).rowsWritten > 0;
+    return this.#sql.exec("DELETE FROM waiting_actions WHERE chat_id = ?", chatId).rowsWritten > 0;
   }
 }

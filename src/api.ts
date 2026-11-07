@@ -273,7 +273,6 @@ export const api = {
   shareChatAgent: (chatId: string, agentId: string, shared: boolean) => request<ChatAgentView[]>(chatPath(chatId, `/agents/${agentId}`), send("PATCH", { shared })),
   /** The user's own copy of an agent shared in a chat, with their changes: saved off, with where it came from. */
   copyAgent: (chatId: string, agentId: string, changes: AgentChanges & { version: number }) => request<AgentDefinition>(chatPath(chatId, `/agents/${agentId}/copy`), post(changes)),
-  /** The actions that wait for this user across their chats, oldest first. */
   /** (the chat's owner) Run or approve an action, or decline it: the action after, as it ended (or as it already had). */
   decideAction: (chatId: string, id: string, decision: "approve" | "decline") =>
     request<PendingActionView>(`/api/needs-you/${chatId}/${encodeURIComponent(id)}`, post({ decision })),
