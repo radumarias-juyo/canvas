@@ -1378,11 +1378,14 @@ export class ChatAgent extends DurableObject<Env> {
         void this.#hintCall(hinter, aside, author, asked).catch((error) => console.error("call hint:", errorMessage(error)));
       }
     }
-    // The agents it calls take their turns, each in its own session; the turn's input carries the message. A reply to a
-    // run's report continues that run, in a fork of its session, for the agent that posted it.
+    // The agents it calls take their turns, each in its own session; the turn's input carries the message. The owner's
+    // reply to a run's report continues that run, in a fork of its session, for the agent that posted it.
     if (speakers.length) {
       const files = attachedNote(attached?.attachments.map((attachment) => attachment.path) ?? []);
-      const continued = repliesTo && speakers.includes(repliesTo) ? await this.#continuedRun(replied).catch(() => undefined) : undefined;
+      // Only the owner's: the run's session holds what it read with the owner's sign-ins. Anyone else's reply goes to
+      // the agent's session here, which has the report only.
+      const continued =
+        byOwner && repliesTo && speakers.includes(repliesTo) ? await this.#continuedRun(replied).catch(() => undefined) : undefined;
       const caller = {
         calledBy: { name: author.name, uid: author.uid },
         // The catch-up leaves the message out (askKey), so the input carries all of it a hand-off would.
