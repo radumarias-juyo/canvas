@@ -33,8 +33,11 @@ export interface RosterEntry {
    * as a seat (worker/agents/seats/). Its turns are given there by RPC, and `session` is unused. Absent: it runs here.
    */
   seat?: string;
-  /** A member's agent whose own name was taken here when it joined: its name is an alias (memberAgentName), kept on a rename. */
-  alias?: true;
+  /**
+   * A member's agent whose own name was taken here when it joined: that name, which its handle here is an alias of
+   * (memberAgentName). The alias is kept while the agent's name is still this one; a rename ends it.
+   */
+  aliasOf?: string;
   /**
    * The first log entry whose messages by its owner it reads as theirs: where a member's agent joined. What the log
    * held before, such as an import's entries, no one checked the authors of for it (OwnerMarks in turns.ts).
@@ -107,7 +110,7 @@ type RosterRow = {
   off: number;
   shared: number;
   seat: string | null;
-  alias: number;
+  alias_of: string | null;
   owner_from: number;
 };
 
@@ -165,7 +168,7 @@ function entryOf(row: RosterRow): RosterEntry {
     off: row.off === 1,
     shared: row.shared === 1,
     ...(row.seat !== null && { seat: row.seat }),
-    ...(row.alias === 1 && { alias: true }),
+    ...(row.alias_of !== null && { aliasOf: row.alias_of }),
     ...(row.owner_from >= 0 && { ownerFrom: row.owner_from }),
   };
 }
@@ -245,7 +248,7 @@ export class ChatRoster {
     addColumns(sql, "chat_agents", {
       shared: "INTEGER NOT NULL DEFAULT 0",
       seat: "TEXT",
-      alias: "INTEGER NOT NULL DEFAULT 0",
+      alias_of: "TEXT",
       owner_from: "INTEGER NOT NULL DEFAULT -1",
     });
     addColumns(sql, "chat_agent_turns", {
@@ -292,7 +295,7 @@ export class ChatRoster {
    * name here. Adding one already in the roster changes nothing.
    */
   add(
-    entry: Pick<RosterEntry, "agentId" | "ownerUid" | "name" | "session" | "avatar" | "color" | "job" | "seat" | "alias" | "ownerFrom">,
+    entry: Pick<RosterEntry, "agentId" | "ownerUid" | "name" | "session" | "avatar" | "color" | "job" | "seat" | "aliasOf" | "ownerFrom">,
   ): { error: string } | null {
     const here = this.get(entry.agentId);
     // Agent ids are unique per user only: another person's agent with this id keeps it.
@@ -300,7 +303,7 @@ export class ChatRoster {
     const refused = this.refusal(entry.name);
     if (refused) return refused;
     this.#sql.exec(
-      "INSERT INTO chat_agents (agent_id, owner_uid, name, session, added_at, avatar, color, job, seat, alias, owner_from) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO chat_agents (agent_id, owner_uid, name, session, added_at, avatar, color, job, seat, alias_of, owner_from) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       entry.agentId,
       entry.ownerUid,
       entry.name.toLowerCase(),
@@ -310,7 +313,7 @@ export class ChatRoster {
       entry.color,
       entry.job,
       entry.seat ?? null,
-      entry.alias ? 1 : 0,
+      entry.aliasOf?.toLowerCase() ?? null,
       entry.ownerFrom ?? -1,
     );
     return null;
@@ -352,20 +355,23 @@ export class ChatRoster {
   refresh(agentId: string, view: RosterView): { entry: RosterEntry; changed: boolean } | null {
     const before = this.get(agentId);
     if (!before) return null;
-    // A name taken here when it joined, kept as the one it got then ("planner-ana" for "planner"), as long as that is
-    // still its name.
-    const alias = before.alias === true && before.name.startsWith(`${view.name.toLowerCase()}-`);
-    const taken = view.name !== before.name && (alias || this.byName(view.name) !== null);
-    const entry = { ...before, ...view, name: taken ? before.name : view.name.toLowerCase() };
+    const name = view.name.toLowerCase();
+    // A name taken here when it joined keeps the handle it got then ("planner-ana" for "planner") while that is still
+    // its name; any rename ends the alias, and the new name is taken when free.
+    const alias = before.aliasOf === name;
+    const holder = alias || name === before.name ? null : this.byName(name);
+    const { aliasOf: _, ...rest } = before;
+    const entry: RosterEntry = { ...rest, ...view, name: alias || holder ? before.name : name, ...(alias && { aliasOf: name }) };
     const changed = (["name", "avatar", "color", "job", "off"] as const).some((field) => entry[field] !== before[field]);
-    if (changed) {
+    if (changed || entry.aliasOf !== before.aliasOf) {
       this.#sql.exec(
-        "UPDATE chat_agents SET name = ?, avatar = ?, color = ?, job = ?, off = ? WHERE agent_id = ?",
+        "UPDATE chat_agents SET name = ?, avatar = ?, color = ?, job = ?, off = ?, alias_of = ? WHERE agent_id = ?",
         entry.name,
         entry.avatar,
         entry.color,
         entry.job,
         entry.off ? 1 : 0,
+        entry.aliasOf ?? null,
         agentId,
       );
     }

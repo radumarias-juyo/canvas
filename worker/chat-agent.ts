@@ -3390,7 +3390,7 @@ export class ChatAgent extends DurableObject<Env> {
       color: agent.color,
       job: agent.job,
       // A member's agent reads its owner's messages as theirs only from here on (OwnerMarks in turns.ts).
-      ...(member && { seat: seatChatId(agent.id), ownerFrom: newestId + 1, ...(name !== agent.name && { alias: true as const }) }),
+      ...(member && { seat: seatChatId(agent.id), ownerFrom: newestId + 1, ...(name !== agent.name && { aliasOf: agent.name }) }),
     });
     if (refused) return refused;
     // The first agent: pi's answers from now on are read for the agents they name, none before.

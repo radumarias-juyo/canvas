@@ -1169,7 +1169,7 @@ describe("Member agents: what the review of private turns found", () => {
 
   it("keeps an alias only for a seat that got one: a real name with a hyphen follows its owner's rename", () => {
     const chat = room();
-    const add = (agentId: string, name: string, alias: boolean) =>
+    const add = (agentId: string, name: string, aliasOf?: string) =>
       chat.roster.add({
         agentId,
         ownerUid: ANA.uid,
@@ -1179,13 +1179,38 @@ describe("Member agents: what the review of private turns found", () => {
         color: "teal",
         job: "j",
         seat: seatChatId(agentId),
-        ...(alias && { alias: true }),
+        ...(aliasOf && { aliasOf }),
       });
     const view = (name: string) => ({ name, avatar: "a", color: "teal" as const, job: "j", off: false });
-    expect(add("a1", "data-bot", false)).toBeNull();
+    expect(add("a1", "data-bot")).toBeNull();
     expect(chat.roster.refresh("a1", view("data"))?.entry.name).toBe("data");
-    expect(add("a2", "planner-ana", true)).toBeNull();
+    expect(add("a2", "planner-ana", "planner")).toBeNull();
     expect(chat.roster.refresh("a2", view("planner"))?.entry.name).toBe("planner-ana");
+  });
+
+  it("ends an alias on a rename: the new name is taken when free, also a prefix of the old one, and after two renames", () => {
+    const chat = room();
+    const add = (agentId: string, ownerUid: string, name: string, aliasOf?: string) =>
+      chat.roster.add({ agentId, ownerUid, name, session: "", avatar: "a", color: "teal", job: "j", ...(aliasOf && { aliasOf }) });
+    const view = (name: string) => ({ name, avatar: "a", color: "teal" as const, job: "j", off: false });
+    // Radu's "data-bot" took the name: Ana's joined as "data-bot-ana", then she renames hers "data", which is free.
+    expect(add("r1", RADU.uid, "data-bot")).toBeNull();
+    const name = memberAgentName("data-bot", "Ana", (n) => chat.roster.byName(n) !== null);
+    expect(name).toBe("data-bot-ana");
+    expect(add("a1", ANA.uid, name!, "data-bot")).toBeNull();
+    expect(chat.roster.refresh("a1", view("data"))?.entry).toMatchObject({ name: "data" });
+    expect(chat.roster.get("a1")?.aliasOf).toBeUndefined();
+    // "planner-ana" (Radu's "planner" took the name) renamed "writer-bot" (free) and then "writer" (free): each is taken.
+    expect(add("r2", RADU.uid, "planner")).toBeNull();
+    expect(add("a2", ANA.uid, "planner-ana", "planner")).toBeNull();
+    expect(chat.roster.refresh("a2", view("writer-bot"))?.entry.name).toBe("writer-bot");
+    expect(chat.roster.get("a2")?.aliasOf).toBeUndefined();
+    expect(chat.roster.refresh("a2", view("writer"))?.entry.name).toBe("writer");
+    // Renamed back to the name another agent here has: it keeps the one it has, as any rename to a taken name does.
+    expect(chat.roster.refresh("a2", view("planner"))?.entry.name).toBe("writer");
+    // A refresh that keeps the alias changes nothing.
+    expect(add("a3", ANA.uid, "planner-ana", "planner")).toBeNull();
+    expect(chat.roster.refresh("a3", view("planner"))).toMatchObject({ entry: { name: "planner-ana", aliasOf: "planner" }, changed: false });
   });
 });
 
