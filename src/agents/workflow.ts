@@ -1,7 +1,9 @@
 // The Workflow tab's steps as it edits them, in plain functions the tests read without a browser: each step with a key
 // of its own (a card keeps its state as the list is reordered), an if's branches as lists of their own.
 
-import type { AgentStep } from "../../shared/agents.ts";
+import { walkSteps, type AgentInput, type AgentStep } from "../../shared/agents.ts";
+import { canonicalJson } from "../../shared/canonical.ts";
+import { ASSUMED_FIELDS, withoutAssumed } from "./glance.ts";
 
 /** A step as the tab edits it. An if's `then` and `else` are here, not in `step`, so each edits as a list. */
 export interface Keyed {
@@ -59,4 +61,20 @@ export function newStep(kind: AgentStep["kind"]): AgentStep {
     case "handOver":
       return { kind, agent: "" };
   }
+}
+
+/** The Workflow tab's parts the model may have guessed, as the "at a glance" rows name them (ASSUMED_FIELDS). */
+export type WorkflowPart = "runs" | "scope" | "tells";
+
+type WorkflowParts = Pick<AgentInput, "trigger" | "scope" | "workflow">;
+const tellsOf = (workflow: WorkflowParts["workflow"]) => [...walkSteps(workflow ?? [])].filter(({ step }) => step.kind === "tell").map(({ step }) => step);
+
+/** What is still assumed after a save from `before` to `after`: a part the user changed is theirs now. */
+export function assumedAfter(assumed: readonly string[], before: WorkflowParts, after: WorkflowParts): string[] {
+  const differs = (a: unknown, b: unknown) => canonicalJson(a ?? null) !== canonicalJson(b ?? null);
+  let left = [...assumed];
+  if (differs(before.trigger, after.trigger)) left = withoutAssumed(left, ASSUMED_FIELDS.runs);
+  if (differs(before.scope, after.scope)) left = withoutAssumed(left, ASSUMED_FIELDS.scope);
+  if (differs(tellsOf(before.workflow), tellsOf(after.workflow))) left = withoutAssumed(left, ASSUMED_FIELDS.tells);
+  return left;
 }

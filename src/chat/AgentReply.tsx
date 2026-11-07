@@ -5,9 +5,8 @@ import { everyone, type PublishedDetails } from "../../shared/protocol.ts";
 import { errorMessage } from "../../shared/util.ts";
 import { api } from "../api.ts";
 import { agentPath } from "../agents/nav.ts";
-import { whyLabel } from "../agents/runs.ts";
 import { AppLink } from "../layout.tsx";
-import { callerName } from "./agentLines.ts";
+import { calledByLabel, opensRun, runMarkerText } from "./agentLines.ts";
 import { ArtifactCard } from "./ArtifactCard.tsx";
 import { Markdown } from "./Markdown.tsx";
 import { MessageActions } from "./MessageActions.tsx";
@@ -17,15 +16,6 @@ import { AgentByline, useSharedChat } from "./people.tsx";
 import { ReactionChips, type MessageReactions } from "./Reactions.tsx";
 import { SentTime } from "./SentTime.tsx";
 
-/** Who gave an agent the turn it answers, as its byline says it. */
-function calledByLabel(calledBy: ChatAgentReplyData["calledBy"], run: ChatAgentReplyData["run"]): string {
-  if (run) return whyLabel(run.test ? "test" : run.why).toLowerCase();
-  if (calledBy.schedule) return "on its schedule";
-  if (calledBy.unprompted === "speak-up") return "unprompted";
-  if (calledBy.unprompted === "follow-up") return `following up for ${calledBy.name}`;
-  return calledBy.routed ? `for ${callerName(calledBy)} · picked, as nobody was named` : `for ${callerName(calledBy)}`;
-}
-
 /**
  * One reply of an agent besides pi (a `chat.agent` entry): its badge and name, whose it is and who asked, its text
  * (folded behind "Show more" when long), the records it is built on as chips, the artifacts it published and why it
@@ -34,6 +24,7 @@ function calledByLabel(calledBy: ChatAgentReplyData["calledBy"], run: ChatAgentR
 export function AgentReply({
   data,
   chatId,
+  viewerUid,
   reactions,
   onReply,
   onOpen,
@@ -43,6 +34,8 @@ export function AgentReply({
   data: ChatAgentReplyData;
   /** The chat it is in: the run's page leads back to it, and a reply nobody asked for offers to mute its agent there. */
   chatId: string;
+  /** Who is looking: only the agent's owner gets the link to the run's page, which only they can open. */
+  viewerUid: string;
   reactions: MessageReactions | null;
   onReply?: () => void;
   onOpen: (artifact: PublishedDetails) => void;
@@ -58,10 +51,11 @@ export function AgentReply({
   // The next step it offers, shown under the reply without its line in the text.
   const offered = useMemo(() => offerOf(data.text), [data.text]);
   const said = offered ? offered.body : data.text;
+  const marker = runMarkerText(data);
   const runPath = data.run && agentPath({ id: data.agentId, tab: "runs", run: data.run.dueAt, chat: chatId });
   return (
     <div className="agent-reply" ref={content}>
-      <AgentByline name={data.name} badge={data} note={["agent", owner && `${owner}'s`, calledByLabel(data.calledBy, data.run)].filter(Boolean).join(" · ")} />
+      <AgentByline name={data.name} badge={data} note={["agent", owner && `${owner}'s`, calledByLabel(data)].filter(Boolean).join(" · ")} />
       {said && (
         <Fold foldKey={`agent:${data.agentId}:${data.turn}`}>
           <div className="bubble markdown">
@@ -75,12 +69,15 @@ export function AgentReply({
       ))}
       {offered && <OfferRow offer={offered.offer} entry={entry} onYes={onOfferYes} />}
       {data.failed && <div className="chat-error">{data.failed}</div>}
-      {runPath && (
-        // A run's post: where it came from, opening on how the run got there. A reply to it continues the run.
-        <AppLink path={runPath} className="run-marker">
-          {data.run?.test ? "Test run: nothing was sent or changed" : "From a run"} · See how it got there
-        </AppLink>
-      )}
+      {runPath &&
+        (opensRun(data, viewerUid) ? (
+          // A run's post, or a reply continuing it: where it came from, opening on how the run got there.
+          <AppLink path={runPath} className="run-marker">
+            {marker} · See how it got there
+          </AppLink>
+        ) : (
+          <span className="run-marker">{marker}</span>
+        ))}
       {data.calledBy.unprompted && <MuteRow chatId={chatId} agentId={data.agentId} name={data.name} />}
       {data.text && (
         <>

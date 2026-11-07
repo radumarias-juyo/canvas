@@ -693,12 +693,13 @@ const Entry = memo(function Entry({
     return (
       <AgentReply
         data={entry.data as unknown as ChatAgentReplyData}
+        chatId={chatId}
+        viewerUid={uid}
         reactions={reactions}
         onReply={answer}
         onOpen={onOpen}
         entry={entry.id as number}
         onOfferYes={offerYes}
-        chatId={chatId}
       />
     );
   }
