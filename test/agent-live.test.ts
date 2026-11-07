@@ -1,7 +1,7 @@
 import type { AgentEvent, EntryRecord } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
 import type { ChatAgentView } from "../shared/agents.ts";
-import { TurnFilter, turnEntries } from "../worker/agents/live.ts";
+import { TurnFilter } from "../worker/agents/live.ts";
 import { ARRIVING_MS, reduceAgents, shownLive, type AgentsLive } from "../src/chat/useChat.ts";
 
 const entry = (id: number, kind: string, data?: object, model?: object[]) => ({ id, conversationId: 2, kind, data, model }) as unknown as EntryRecord;
@@ -54,8 +54,30 @@ describe("an agent's turn, as the chat's sockets follow it", () => {
   });
 
   it("finds no entries for a turn whose input is not in the session", () => {
-    expect(turnEntries([said(1, "a"), turnInput(2, 3)], 4)).toEqual([]);
-    expect(turnEntries([turnInput(2, 4), said(3, "b"), turnInput(4, 4), said(5, "c")], 4)).toEqual([turnInput(4, 4), said(5, "c")]);
+    const [event] = new TurnFilter(4).pass([snapshot([said(1, "a"), turnInput(2, 3)])]);
+    expect(event).toMatchObject({ entries: [] });
+  });
+
+  it("keeps the turn when a compaction cut its input out of the context, and never shows the summary", () => {
+    const summary = entry(9, "pi.compaction", { summary: "Earlier: the owner's private turn…" });
+    // A socket that attaches after the compaction: the caller looked the input's id up.
+    const late = new TurnFilter(7, 5);
+    const [event] = late.pass([snapshot([summary, said(4, "the catch-up's answer"), said(6, "Looking…"), said(8, "Found it.")])]);
+    expect(event).toMatchObject({ entries: [said(6, "Looking…"), said(8, "Found it.")], run: { inputs: [1] } });
+    expect(late.pass([{ type: "entry_appended", entry: summary } as AgentEvent])).toEqual([]);
+    // One that followed from the start keeps its steps through an overflow snapshot taken after the compaction.
+    const follower = new TurnFilter(7);
+    follower.pass([snapshot([catchUp(4), turnInput(5, 7)])]);
+    const [again] = follower.pass([snapshot([summary, said(6, "Looking…")])]);
+    expect(again).toMatchObject({ entries: [said(6, "Looking…")] });
+    // Without the input's id, nothing in a compacted snapshot is known to be the turn's.
+    expect(new TurnFilter(7).pass([snapshot([summary, said(6, "Looking…")])])[0]).toMatchObject({ entries: [], run: undefined });
+  });
+
+  it("drops what lands before the input once it is known, such as a catch-up written meanwhile", () => {
+    const filter = new TurnFilter(7, 5);
+    expect(filter.pass([{ type: "entry_appended", entry: catchUp(4) } as AgentEvent])).toEqual([]);
+    expect(filter.pass([{ type: "message_end", entry: said(6, "Hi") } as AgentEvent])).toHaveLength(1);
   });
 });
 
@@ -91,6 +113,17 @@ describe("the app's view of the agents' live turns", () => {
     expect(live.r.endedAt).toBe(20_000);
     expect(reduceAgents(live, { type: "expire", at: 20_000 + ARRIVING_MS - 1 })).toBe(live);
     expect(reduceAgents(live, { type: "expire", at: 20_000 + ARRIVING_MS })).toEqual({});
+  });
+
+  it("says how a turn ended once the roster does: a stopped one posts no reply", () => {
+    let live = reduceAgents({}, { type: "agents", agents: [running(research, 1)], at: 0 });
+    live = reduceAgents(live, { type: "agents", agents: [{ ...research, ended: { turn: 1, status: "stopped" } }], at: 5_000 });
+    expect(live.r).toMatchObject({ endedAt: 5_000, ended: "stopped" });
+    // An earlier turn's end says nothing of this one.
+    live = reduceAgents(live, { type: "agents", agents: [running(research, 2)], at: 6_000 });
+    live = reduceAgents(live, { type: "agents", agents: [{ ...research, ended: { turn: 1, status: "stopped" } }], at: 7_000 });
+    expect(live.r).toMatchObject({ turn: 2, endedAt: 7_000 });
+    expect(live.r.ended).toBeUndefined();
   });
 
   it("shows the live turns in the roster's order, but not one whose reply is in the transcript", () => {

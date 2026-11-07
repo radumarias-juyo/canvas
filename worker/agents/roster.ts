@@ -432,9 +432,13 @@ export class ChatRoster {
       if (mine) mine.push(turn);
       else open.set(turn.agentId, [turn]);
     }
+    const ended = new Map(
+      this.#turns(`id IN (SELECT MAX(id) FROM chat_agent_turns WHERE NOT (${OPEN}) GROUP BY agent_id)`).map((turn) => [turn.agentId, turn]),
+    );
     const now = this.#now();
     return this.list().map((entry) => {
       const mine = open.get(entry.agentId) ?? [];
+      const last = ended.get(entry.agentId);
       const running = mine.find((turn) => turn.status === "running");
       const queued = mine.filter((turn) => turn.status === "queued");
       return {
@@ -450,6 +454,7 @@ export class ChatRoster {
           running: { turn: running.id, calledBy: running.calledBy, hop: running.hop, elapsedMs: Math.max(0, now - (running.startedAt ?? now)) },
         }),
         ...(queued.length && { queued: queued.length, next: { calledBy: queued[0].calledBy, hop: queued[0].hop } }),
+        ...(last && { ended: { turn: last.id, status: last.status as NonNullable<ChatAgentView["ended"]>["status"] } }),
         ...(entry.off && { off: true as const }),
       };
     });

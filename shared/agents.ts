@@ -358,6 +358,8 @@ export interface ChatAgentView {
   running?: { turn: number; calledBy: ChatAgentReplyData["calledBy"]; hop: number; elapsedMs: number };
   /** The oldest turn waiting for it (with `queued`): who gave it, and how many hand-offs led to it. */
   next?: { calledBy: ChatAgentReplyData["calledBy"]; hop: number };
+  /** Its latest turn that ended, and how: a stopped one posts no reply, so the chat says it stopped. */
+  ended?: { turn: number; status: Exclude<AgentTurnStatus, "queued" | "running"> };
 }
 
 /**

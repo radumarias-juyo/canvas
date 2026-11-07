@@ -6,8 +6,7 @@ import {
   AGENT_NAME,
   splitCalls,
   keptMentions,
-  matchAgents,
-  matchMentions,
+  matchPicks,
   mentionLabel,
   mentionToken,
   sameMention,
@@ -26,10 +25,10 @@ import { AgentAvatar, Avatar, tintOf, tintStyle, toneStyle, useChatAgents, useSh
  * An agent as the picker offers it: pi, or another agent of the chat's roster (`view`), with its job line. Picking one
  * calls it: the text itself does, so nothing is sent with the message.
  */
-type AgentPick = { agent: true; name: string; job: string; view?: ChatAgentView };
+type AgentPick = { agent: true; name: string; job: string; handleOnly?: boolean; view?: ChatAgentView };
 type Choice = MentionChoice | AgentPick;
 
-const PI_CHOICE: AgentPick = { agent: true, name: AGENT_NAME, job: "the chat's assistant" };
+const PI_CHOICE: AgentPick = { agent: true, name: AGENT_NAME, job: "the chat's assistant", handleOnly: true };
 
 /**
  * "@" in the composer: as the user types "@" (or presses the @ button), a list of the chat owner's files and
@@ -118,7 +117,7 @@ export function useMentions(
   );
   const choices = useMemo<Choice[]>(() => {
     if (!query) return [];
-    return [...matchAgents(callable, query.query), ...matchMentions([...others, ...all], query.query)];
+    return matchPicks(callable, [...others, ...all], query.query);
   }, [all, others, query?.query, callable]);
   // An "@" in running text ("@ the team") matches nothing once a space follows: then it was not a mention.
   const open = query !== null && !(options && choices.length === 0 && /\s/.test(query.query));

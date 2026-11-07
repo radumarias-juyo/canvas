@@ -739,10 +739,15 @@ describe("ChatRoster: what everyone sees", () => {
     const [view] = roster.views(() => "Olga");
     expect(view.running).toEqual({ turn: first.id, calledBy: ann, hop: 0, elapsedMs: 6_500 });
     expect(view).toMatchObject({ busy: true, queued: 2, next: { calledBy: { name: "research", agentId: "id-research" }, hop: 2 } });
+    expect(view).not.toHaveProperty("ended");
     roster.end(first.id, "done");
     const [after] = roster.views(() => "Olga");
     expect(after).not.toHaveProperty("running");
     expect(after.next?.hop).toBe(2);
+    // Its latest ended turn, and how it ended: the chat says a stopped turn stopped, as it posts no reply.
+    expect(after.ended).toEqual({ turn: first.id, status: "done" });
+    const stopped = roster.stopAll("id-bob");
+    expect(roster.views(() => "Olga")[0].ended).toEqual({ turn: Math.max(...stopped.map((turn) => turn.id)), status: "stopped" });
   });
 
   it("names each running turn's session, for the sockets to follow", () => {

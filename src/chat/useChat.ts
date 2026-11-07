@@ -292,6 +292,8 @@ export interface AgentLive {
   startedAt?: number;
   /** When the roster said the turn ended, by this clock: kept until its reply lands, or for ARRIVING_MS. */
   endedAt?: number;
+  /** How it ended, once the roster says (a stopped turn posts no reply). */
+  ended?: NonNullable<ChatAgentView["ended"]>["status"];
 }
 
 /** The agents' turns followed live, by agent id. */
@@ -326,12 +328,17 @@ export function reduceAgents(live: AgentsLive, action: AgentAction): AgentsLive 
   let changed = false;
   const next: Record<string, AgentLive> = {};
   const running = new Map(action.agents.flatMap((agent) => (agent.running ? [[agent.id, agent.running] as const] : [])));
+  const views = new Map(action.agents.map((agent) => [agent.id, agent]));
   for (const [id, agent] of Object.entries(live)) {
     const run = running.get(id);
     if (run?.turn === agent.turn) {
       const startedAt = agent.startedAt ?? action.at - run.elapsedMs;
       next[id] = agent.startedAt === startedAt && agent.endedAt === undefined ? agent : { ...agent, startedAt, endedAt: undefined };
-    } else next[id] = agent.endedAt === undefined ? { ...agent, endedAt: action.at } : agent;
+    } else {
+      const last = views.get(id)?.ended;
+      const ended = last?.turn === agent.turn ? last.status : agent.ended;
+      next[id] = agent.endedAt !== undefined && agent.ended === ended ? agent : { ...agent, endedAt: agent.endedAt ?? action.at, ended };
+    }
     changed ||= next[id] !== agent;
   }
   // A turn the socket has not heard of yet: its start time, for when its events come.

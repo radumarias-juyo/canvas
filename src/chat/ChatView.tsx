@@ -288,7 +288,7 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
               </h1>
               {!group && <span className="chat-people">{mine > 1 && `Open in ${mine} of your windows`}</span>}
               {people && (group || isOwner) && (
-                <PeopleBar chatId={chatId} people={people} online={online} uid={uid} piWorking={state.busy} agents={agents} bar={group !== null} />
+                <PeopleBar chatId={chatId} people={people} online={online} uid={uid} piWorking={state.busy} agents={agents} live={live} bar={group !== null} />
               )}
               <ChatCost usage={state.usage} entries={state.entries} time={time} />
               {shared && <NotifyButton />}
@@ -341,7 +341,12 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
                     {thinking && <Thinking since={state.runStartedAt!} phrase={phrase} />}
                     {state.error && <div className="chat-error">{state.error}</div>}
                     {liveTurns.map((turn) => (
-                      <AgentTurnLive key={`${turn.agent.id}:${turn.turn}`} live={turn} onStop={connected ? () => abort(turn.agent.id) : undefined} />
+                      <AgentTurnLive
+                        key={`${turn.agent.id}:${turn.turn}`}
+                        live={turn}
+                        onStop={connected ? () => abort(turn.agent.id) : undefined}
+                        onGrow={follow}
+                      />
                     ))}
                     {waiting.map((line) => (
                       <div key={line.agentId} className="agent-queue-line">
@@ -933,18 +938,19 @@ function Assistant({
   const parts = message.content.map((block, i) => {
     if (!block) return null;
     if (block.type === "text")
+      // The fold goes round the bubble, so a copy (the bubbles' HTML) holds neither "Show more" nor the fold's height.
       return block.text ? (
-        <div key={i} className="bubble markdown">
-          {streaming ? (
-            <RevealedMarkdown text={block.text} onGrow={onGrow} />
-          ) : foldKey ? (
-            <Fold foldKey={`${foldKey}:${i}`}>
+        !streaming && foldKey ? (
+          <Fold key={i} foldKey={`${foldKey}:${i}`}>
+            <div className="bubble markdown">
               <Markdown text={block.text} />
-            </Fold>
-          ) : (
-            <Markdown text={block.text} />
-          )}
-        </div>
+            </div>
+          </Fold>
+        ) : (
+          <div key={i} className="bubble markdown">
+            {streaming ? <RevealedMarkdown text={block.text} onGrow={onGrow} /> : <Markdown text={block.text} />}
+          </div>
+        )
       ) : null;
     // A step shows in its run, at the run's first step.
     const run = steps?.get(i);
@@ -980,8 +986,8 @@ const NO_BREAKS: ReadonlySet<number> = new Set();
  * worked and its step's short phrase, and its own Stop (`onStop`, absent while not connected); then its steps and text
  * as they come, from its own session. Once its reply is posted the reply shows instead (shownLive).
  */
-function AgentTurnLive({ live, onStop }: { live: AgentLive & { agent: ChatAgentView }; onStop?: () => void }) {
-  const { agent, state, startedAt, endedAt } = live;
+function AgentTurnLive({ live, onStop, onGrow }: { live: AgentLive & { agent: ChatAgentView }; onStop?: () => void; onGrow?: () => void }) {
+  const { agent, state, startedAt, endedAt, ended } = live;
   const running = endedAt === undefined;
   const runs = useMemo(() => stepRuns(state.entries, NO_BREAKS), [state.entries]);
   const streamed = useMemo(() => state.partial && streamingSteps(runs, state.partial), [runs, state.partial]);
@@ -992,7 +998,7 @@ function AgentTurnLive({ live, onStop }: { live: AgentLive & { agent: ChatAgentV
         <AgentAvatar badge={agent} working={running} />
         <strong>@{agent.name}</strong>
         <small className="working-what">
-          {running ? "working" : "posting its reply"}
+          {running ? "working" : ended === "stopped" ? "stopped" : "posting its reply"}
           {startedAt !== undefined && running && (
             <>
               {" · "}
@@ -1017,7 +1023,7 @@ function AgentTurnLive({ live, onStop }: { live: AgentLive & { agent: ChatAgentV
           if (entry.kind === "pi.tool-result" && message?.role === "toolResult" && !published(entry)) return <OrphanResult key={entry.id} message={message} />;
           return null;
         })}
-        {state.partial && <Assistant message={state.partial} steps={streamed?.steps} streaming bare />}
+        {state.partial && <Assistant message={state.partial} steps={streamed?.steps} streaming onGrow={onGrow} bare />}
       </StepsProvider>
     </div>
   );

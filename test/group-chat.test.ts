@@ -1,7 +1,7 @@
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
 import type { AgentTurnView, ChatAgentView } from "../shared/agents.ts";
-import { matchAgents, splitCalls } from "../shared/mentions.ts";
+import { matchAgents, matchPicks, splitCalls, type MentionChoice } from "../shared/mentions.ts";
 import { queueLines, turnLine } from "../src/chat/agentLines.ts";
 import { FOLD_PX, folds } from "../src/chat/Fold.tsx";
 import { phraseOf, workingPhrase } from "../src/chat/phrase.ts";
@@ -46,6 +46,7 @@ describe("folding long replies", () => {
   });
 });
 
+const mentionLabelOf = (choice: MentionChoice) => (choice.mention.kind === "file" ? choice.mention.path : choice.mention.kind === "person" ? choice.mention.name : choice.mention.title);
 const agent = (name: string, job: string, over: Partial<ChatAgentView> = {}): ChatAgentView => ({
   id: `id-${name}`,
   name,
@@ -58,7 +59,12 @@ const agent = (name: string, job: string, over: Partial<ChatAgentView> = {}): Ch
 });
 
 describe("the @ picker's agents", () => {
-  const roster = [{ name: "pi", job: "the chat's assistant" }, agent("research", "Finds sources and numbers"), agent("builder", "Makes live pages"), agent("planner", "Plans campaigns")];
+  const roster = [
+    { name: "pi", job: "the chat's assistant", handleOnly: true },
+    agent("research", "Finds sources and numbers"),
+    agent("builder", "Makes live pages"),
+    agent("planner", "Plans campaigns"),
+  ];
 
   it("offers every agent in the roster's order for a bare @, pi first", () => {
     expect(matchAgents(roster, "").map((a) => a.name)).toEqual(["pi", "research", "builder", "planner"]);
@@ -69,6 +75,22 @@ describe("the @ picker's agents", () => {
     expect(matchAgents(roster, "pages").map((a) => a.name)).toEqual(["builder"]);
     expect(matchAgents(roster, "ILD").map((a) => a.name)).toEqual(["builder"]);
     expect(matchAgents(roster, "zzz")).toEqual([]);
+    // pi matches only by its handle, never on "the chat's assistant".
+    expect(matchAgents(roster, "th")).toEqual([]);
+    // A full roster shows whole on a bare "@".
+    const full = [roster[0], ...Array.from({ length: 6 }, (_, i) => agent(`a${i}`, "Helps"))];
+    expect(matchAgents(full, "")).toHaveLength(7);
+  });
+
+  it("lists a person whose name starts with the query before agents that match it only by their job", () => {
+    const thomas: MentionChoice = { mention: { kind: "person", uid: "t", name: "Thomas" }, detail: "" };
+    const notes: MentionChoice = { mention: { kind: "file", path: "the-notes.md" }, detail: "" };
+    const withThe = [...roster, agent("writer", "Drafts the copy")];
+    const names = (query: string) => matchPicks(withThe, [notes, thomas], query).map((pick) => ("mention" in pick ? mentionLabelOf(pick) : pick.name));
+    expect(names("th")).toEqual(["Thomas", "writer", "the-notes.md"]);
+    // A handle that starts with the query keeps the agents first.
+    expect(names("pl")).toEqual(["planner"]);
+    expect(names("")[0]).toBe("pi");
   });
 
   it("shows each agent's call in a message as a chip, by its handle, outside words and addresses", () => {

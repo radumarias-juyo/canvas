@@ -11,6 +11,7 @@ import { formatElapsed, useElapsed } from "./elapsed.ts";
 import { ownerLabel } from "./Mentions.tsx";
 import { AgentAvatar, Avatar, tintOf } from "./people.tsx";
 import { SentTime } from "./SentTime.tsx";
+import type { AgentsLive } from "./useChat.ts";
 
 /** What an agent is doing, as its badge's hover and its menu say it. */
 function agentState(agent: ChatAgentView): string {
@@ -33,6 +34,7 @@ export function PeopleBar({
   uid,
   piWorking,
   agents,
+  live,
   bar = true,
 }: {
   chatId: string;
@@ -41,6 +43,8 @@ export function PeopleBar({
   uid: string;
   piWorking: boolean;
   agents: readonly ChatAgentView[];
+  /** The agents' live turns, for when each started as this socket heard it (useChat). */
+  live: AgentsLive;
   bar?: boolean;
 }) {
   // Each open window is a socket; someone no longer in the chat may still show for a moment, so only people in it count.
@@ -111,7 +115,17 @@ export function PeopleBar({
           </Icon>
         </button>
       )}
-      {agent && <AgentMenu chatId={chatId} agent={agent} uid={uid} isOwner={isOwner} onClose={close} />}
+      {agent && (
+        <AgentMenu
+          key={agent.id}
+          chatId={chatId}
+          agent={agent}
+          startedAt={live[agent.id]?.turn === agent.running?.turn ? live[agent.id]?.startedAt : undefined}
+          uid={uid}
+          isOwner={isOwner}
+          onClose={close}
+        />
+      )}
       {open === ADDING && <AddAgents chatId={chatId} roster={agents} onClose={close} />}
     </div>
   );
@@ -127,7 +141,21 @@ const RUNS_SHOWN = 8;
  * An agent's menu, from its badge in the people bar: its job line and owner, what it is doing, its latest turns (who
  * asked, when, how long, how it ended), read when the menu opens, and for the chat's owner, Remove.
  */
-function AgentMenu({ chatId, agent, uid, isOwner, onClose }: { chatId: string; agent: ChatAgentView; uid: string; isOwner: boolean; onClose: () => void }) {
+function AgentMenu({
+  chatId,
+  agent,
+  startedAt,
+  uid,
+  isOwner,
+  onClose,
+}: {
+  chatId: string;
+  agent: ChatAgentView;
+  startedAt?: number;
+  uid: string;
+  isOwner: boolean;
+  onClose: () => void;
+}) {
   const [turns, setTurns] = useState<AgentTurnView[] | null>(null);
   const [error, setError] = useState<string>();
   const [removing, setRemoving] = useState(false);
@@ -164,7 +192,7 @@ function AgentMenu({ chatId, agent, uid, isOwner, onClose }: { chatId: string; a
       <p className="agent-menu-job">{agent.job}</p>
       <p className="agent-menu-state">
         {/* Keyed by its turn: a new turn counts from its own start, not the one before's. */}
-        {agent.running ? <Working key={agent.running.turn} running={agent.running} /> : agentState(agent)}
+        {agent.running ? <Working key={agent.running.turn} running={agent.running} startedAt={startedAt} /> : agentState(agent)}
       </p>
       <div className="section-head">Runs</div>
       {turns === null && !error && <p className="agent-menu-empty">Loading…</p>}
@@ -194,9 +222,13 @@ export function Since({ at }: { at: number }) {
   return <>{formatElapsed(useElapsed(at))}</>;
 }
 
-/** "Working for 12s, Ana asked", counting on from when the roster said it started. */
-function Working({ running }: { running: NonNullable<ChatAgentView["running"]> }) {
-  const [startedAt] = useState(() => Date.now() - running.elapsedMs);
+/**
+ * "Working for 12s, Ana asked", counting on from when the turn started: as the socket heard it (`startedAt`, set when
+ * the roster's view arrived), else from the view's own elapsed time.
+ */
+function Working({ running, startedAt: heard }: { running: NonNullable<ChatAgentView["running"]>; startedAt?: number }) {
+  const [fallback] = useState(() => Date.now() - running.elapsedMs);
+  const startedAt = heard ?? fallback;
   return (
     <>
       Working for <Since at={startedAt} />, {running.calledBy.schedule ? "on its schedule" : `${callerName(running.calledBy)} asked`}

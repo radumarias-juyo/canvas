@@ -39,11 +39,11 @@ export function AgentReply({
     <div className="agent-reply" ref={content}>
       <AgentByline name={data.name} badge={data} note={["agent", owner && `${owner}'s`, calledByLabel(data.calledBy)].filter(Boolean).join(" · ")} />
       {data.text && (
-        <div className="bubble markdown">
-          <Fold foldKey={`agent:${data.agentId}:${data.turn}`}>
+        <Fold foldKey={`agent:${data.agentId}:${data.turn}`}>
+          <div className="bubble markdown">
             <Markdown text={data.text} />
-          </Fold>
-        </div>
+          </div>
+        </Fold>
       )}
       {data.items && <ItemChips items={data.items} />}
       {data.published?.map((artifact) => (
