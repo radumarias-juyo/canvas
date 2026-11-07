@@ -303,7 +303,8 @@ describe("A seat reads as its room's kind", () => {
     const fork = ana.sessionOf(1);
     const writer = () => {
       const agent = ana.seats.memoryAgent(fork)!;
-      return { chatId: agent.room!.chatId, kinds: [agent.room!.kind], alone: false, agentId: agent.agentId, byOwner: agent.byOwner, learnedBy: agent.name };
+      const { room, agentId, byOwner, name } = agent;
+      return { chatId: room!.chatId, kinds: [room!.kind], alone: false, agentId, byOwner, learnedBy: name };
     };
     expect(placeNote(writer(), "chat", "preference")).not.toHaveProperty("error");
     // Radu makes his chat off the record while the turn runs (SeatLink.kind).

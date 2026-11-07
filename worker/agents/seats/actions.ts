@@ -11,7 +11,7 @@ import { seatedEntry, type ChatRules } from "./rules.ts";
 /** An action's id, as the member's object makes it (ChatActions: randomHex(8)). */
 const ACTION_ID = /^[a-f0-9]{16}$/;
 
-type SeatActionRow = { id: string; owner_uid: string; agent_id: string; view: string };
+type SeatActionRow = { owner_uid: string; agent_id: string };
 
 export class SeatActions {
   readonly #sql: Sql;
@@ -53,13 +53,13 @@ export class SeatActions {
 
   /** The cards of `uid`'s agents' seats here, oldest first: only theirs. */
   of(uid: string): PendingActionView[] {
-    const rows = this.#sql.exec("SELECT view FROM seat_actions WHERE owner_uid = ? ORDER BY created_at, id", uid).toArray() as Pick<SeatActionRow, "view">[];
-    return rows.map((row) => JSON.parse(row.view) as PendingActionView);
+    const rows = this.#sql.exec("SELECT view FROM seat_actions WHERE owner_uid = ? ORDER BY created_at, id", uid).toArray();
+    return rows.map((row) => JSON.parse(row.view as string) as PendingActionView);
   }
 
   /** Whose seat holds an action: its agent's owner and the agent; null for one this chat has no card of. */
   owner(id: string): { ownerUid: string; agentId: string } | null {
-    const [row] = this.#sql.exec("SELECT owner_uid, agent_id FROM seat_actions WHERE id = ?", id).toArray() as Pick<SeatActionRow, "owner_uid" | "agent_id">[];
+    const [row] = this.#sql.exec("SELECT owner_uid, agent_id FROM seat_actions WHERE id = ?", id).toArray() as SeatActionRow[];
     return row ? { ownerUid: row.owner_uid, agentId: row.agent_id } : null;
   }
 
@@ -72,7 +72,12 @@ export class SeatActions {
    * The roster entry whose seat `uid` decides action `id` for: only the agent's owner, still in the chat with it
    * seated. A refusal for anyone else, the chat's owner included: it is not their call, nor their sign-ins.
    */
-  decider(chat: ChatRules, entry: (agentId: string) => RosterEntry | null, uid: string, id: string): RosterEntry | { error: string; status: 403 | 404 } {
+  decider(
+    chat: ChatRules,
+    entry: (agentId: string) => RosterEntry | null,
+    uid: string,
+    id: string,
+  ): RosterEntry | { error: string; status: 403 | 404 } {
     const held = this.owner(id);
     if (!held) return { error: "No such action.", status: 404 };
     if (held.ownerUid !== uid) return { error: "Only the agent's owner decides what it changes.", status: 403 };

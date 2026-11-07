@@ -65,7 +65,11 @@ with `@cloudflare/vite-plugin`, pnpm; configured and deployed with the `cf` CLI 
   harness offers and runs no tool off that list); keep it that way. A turn its owner asked for, their Yes, and any turn that
   starts with nobody but the owner in the chat run apart, in a fork of the agent's session (`runsApart`): only the posted
   reply goes back, and one built on a private server is held for the owner when someone joined meanwhile. A call such a
-  fork or a run holds shows anyone else only who asks for which tool (`shownToMembers`). A turn ends with its reply in its row (an outbox),
+  fork or a run holds shows anyone else only who asks for which tool (`shownToMembers`). A member's agent runs as a seat
+  in the member's own object (`worker/agents/seats/`): the member's own turns and anyone's Yes to its offer run in a fork
+  of the seat's session, its calls go through the member's write gate (`seatCaller`: only the member's own message
+  changes data), what it holds has its card in the room for the member alone, and it reads as the room's kind. A turn
+  ends with its reply in its row (an outbox),
   together with the hand-offs it queues; the reply is then posted as a `chat.agent` entry. `@name` hands off (MAX_HOPS
   per person's message, a hand-off to pi counted on the handing turn); pi's own answers are read from its log for the
   agents they name (`#piScan`, from a cursor).
