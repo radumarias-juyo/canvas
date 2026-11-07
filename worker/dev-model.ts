@@ -2,16 +2,25 @@
 // cloudflare.config.ts leaves DEV_MODEL empty unless it is set), it is the picker's only model and every chat's, agent's
 // and run's, so turns, hand-offs, offers and runs work with no model at all, and the e2e suite (e2e/) can drive them.
 // It follows a tiny script written in the conversation:
-//   /say <text>          reply with exactly <text>: the rest of the message, up to the next script line
-//   /tool <name> <json>  call one tool with that input (`server.tool` names an MCP tool, as crm.list_deals; any other
-//                        name is the tool's own, as checklist), then go on with the next line; after the last one, reply
-//                        with the tool's name and the start of its result
-// The script is the one in the newest user message of the turn (a person's message, an agent's "Your turn", a run's
-// work step), where it may follow other text ("@helper /say hi"); with none there, lines that start with /say or /tool
+//   /say <text>          reply with exactly <text>, which may take several lines: up to the next script line or a blank line
+//   /tool <name> <json>  call one tool with the input on the rest of the line (`server.tool` names an MCP tool, as
+//                        crm.list_deals; any other name is the tool's own, as checklist), then go on with the next step;
+//                        after the last one, reply with the tool's name and the start of its result
+// The script is the one in the turn's message, the last user message (a person's, an agent's "Your turn", a run's work
+// step), where it may follow other text ("@helper /say hi"); with none there, lines that start with /say or /tool
 // in the instructions (an agent's own, the owner's system prompt, a work step's); with none at all, "ok: <the message,
 // cut to 80 characters>". Each model call of a turn takes the next step: those done are its assistant messages so far.
 
-import { fauxAssistantMessage, fauxProvider, fauxToolCall, type AssistantMessage, type JsonObject, type Message, type Model, type Provider } from "@earendil-works/pi-ai";
+import {
+  fauxAssistantMessage,
+  fauxProvider,
+  fauxToolCall,
+  type AssistantMessage,
+  type JsonObject,
+  type Message,
+  type Model,
+  type Provider,
+} from "@earendil-works/pi-ai";
 import { textOf } from "../shared/canonical.ts";
 import { excerpt } from "../shared/replies.ts";
 import { mcpToolName } from "./agent/mcp.ts";
@@ -34,8 +43,10 @@ const marker = (lineStart: boolean) => new RegExp(`${lineStart ? "(?:^|\\n)[ \\t
 export function scriptSteps(text: string, lineStart = false): Step[] {
   const found = [...text.matchAll(marker(lineStart))];
   return found.map((match, i) => {
-    const body = text.slice(match.index + match[0].length, found[i + 1]?.index ?? text.length).trim();
-    if (match[1] === "say") return { say: body.replace(/\n[ \t]+/g, "\n") };
+    const rest = text.slice(match.index + match[0].length, found[i + 1]?.index ?? text.length);
+    // A turn's ask indents a message's further lines: the reply has them as written.
+    if (match[1] === "say") return { say: rest.split(/\n[ \t]*\n/)[0]!.trim().replace(/\n[ \t]+/g, "\n") };
+    const body = rest.split("\n")[0]!.trim();
     const space = body.search(/\s/);
     const name = space < 0 ? body : body.slice(0, space);
     const dot = name.indexOf(".");
@@ -61,19 +72,16 @@ const messageText = (message: Message): string =>
 
 /** The scripted model's answer to a conversation, as a model message. */
 export function scriptReply(messages: readonly Message[]): AssistantMessage {
-  // The turn: what came after the last answer that ended a turn (one not stopped for a tool call).
-  let start = messages.length;
-  while (start > 0 && !(messages[start - 1]!.role === "assistant" && (messages[start - 1] as AssistantMessage).stopReason !== "toolUse")) start--;
-  const turn = messages.slice(start);
-  const asked = turn.findLastIndex((message) => message.role === "user" && scriptSteps(messageText(message)).length > 0);
-  const lastUser = turn.findLastIndex((message) => message.role === "user");
-  const from = asked >= 0 ? asked : lastUser;
-  let steps = asked >= 0 ? scriptSteps(messageText(turn[asked]!)) : [];
+  // The turn's message is the last user message: an agent's catch-up on the chat, before it, is only context.
+  const from = messages.findLastIndex((message) => message.role === "user");
+  const text = from >= 0 ? messageText(messages[from]!) : "";
+  let steps = scriptSteps(text);
   if (!steps.length) {
     const instructions = messages.filter((message) => message.role === "system").reverse();
     for (const message of instructions) if ((steps = scriptSteps(messageText(message), true)).length) break;
   }
-  const done = turn.slice(from + 1).filter((message) => message.role === "assistant").length;
+  const turn = messages.slice(from + 1);
+  const done = turn.filter((message) => message.role === "assistant").length;
   const step = steps[done];
   if (step && "say" in step) return fauxAssistantMessage(step.say);
   if (step && "bad" in step) return fauxAssistantMessage(step.bad);
@@ -82,7 +90,6 @@ export function scriptReply(messages: readonly Message[]): AssistantMessage {
   if (steps.length && result?.role === "toolResult") {
     return fauxAssistantMessage(`${result.toolName}${result.isError ? " failed" : ""}: ${excerpt(textOf(result.content), 160)}`);
   }
-  const text = from >= 0 ? messageText(turn[from]!) : "";
   // A turn's message after its label ("[Ana · person]: hi"), else the whole of it.
   const label = text.lastIndexOf("]: ");
   return fauxAssistantMessage(`ok: ${excerpt(label < 0 ? text : text.slice(label + 3), 80)}`);

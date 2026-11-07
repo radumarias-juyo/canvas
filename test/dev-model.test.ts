@@ -35,7 +35,7 @@ describe("the scripted dev model", () => {
     ]);
     // In instructions, only lines that start with one.
     expect(scriptSteps("Say /say hi when asked", true)).toEqual([]);
-    expect(scriptSteps("Your owner wrote:\n/say from the instructions", true)).toEqual([{ say: "from the instructions" }]);
+    expect(scriptSteps("Your owner wrote:\n/say from the\ninstructions\n\nThe rules: …", true)).toEqual([{ say: "from the\ninstructions" }]);
   });
 
   it("says, calls a tool, then names it with the start of its result", () => {
@@ -56,11 +56,17 @@ describe("the scripted dev model", () => {
   });
 
   it("falls back to script lines in the instructions", () => {
-    const instructions = system("You are an agent.", { agent: "Your owner wrote these instructions for you:\n/tool agent_propose {\"name\":\"weekly\"}" });
+    const instructions = system("You are an agent.", {
+      agent: 'Your owner wrote these instructions for you:\n/tool agent_propose {"name":"weekly"}\n\nHow the chat works for you: …',
+    });
     const reply = scriptReply([instructions, user("Yes to the next step your message offers")]);
     expect(reply.content).toEqual([expect.objectContaining({ type: "toolCall", name: "agent_propose", arguments: { name: "weekly" } })]);
     // The message's own script wins.
     expect(said(scriptReply([instructions, user("/say mine")]))).toBe("mine");
+    // An agent's catch-up comes before its turn's message: a script in it is only what someone else said.
+    const catchUp = user("What was said in the chat since your last turn:\n\n[ada · person]: @helper /say not for you");
+    const relay = system("Instructions:\n/say @pi please summarise");
+    expect(said(scriptReply([relay, catchUp, user("Your turn: ada asked you.\n\n[ada · person]: @relay over to you")]))).toBe("@pi please summarise");
   });
 
   it("answers every call through pi-ai's models", async () => {
