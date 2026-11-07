@@ -4,7 +4,18 @@
 // them. Deliveries (tell, page, hand over) wait until every item is done and go out once, each with the parts of the
 // items that reached it. A test run records them instead.
 
-import { AUTONOMY_LABELS, mayUseServer, type AgentDefinition, type AgentStep, type LookStep, type StepInput, type StepValue } from "../../../shared/agents.ts";
+import {
+  AUTONOMY_LABELS,
+  mayUseServer,
+  serversNamed,
+  stepKey,
+  walkSteps,
+  type AgentDefinition,
+  type AgentStep,
+  type LookStep,
+  type StepInput,
+  type StepValue,
+} from "../../../shared/agents.ts";
 import { ConditionError, evaluate, holds, type Value } from "../../../shared/conditions.ts";
 import { excerpt } from "../../../shared/replies.ts";
 import {
@@ -105,35 +116,9 @@ export function resultName(step: LookStep): string {
   return step.as ?? (step.tool.replace(/[^A-Za-z0-9_]/g, "_").replace(/^(\d)/, "_$1") || "result");
 }
 
-/** Every look step's server in a definition, its scope's and its watch's included: what a run reads. */
-function serversRead(agent: Pick<AgentDefinition, "workflow" | "scope" | "trigger">): string[] {
-  const servers = new Set<string>();
-  for (const { step } of walkSteps(agent.workflow ?? [])) if (step.kind === "look") servers.add(step.server);
-  if (agent.scope) servers.add(agent.scope.list.server);
-  if (agent.trigger?.kind === "watch") servers.add(agent.trigger.step.server);
-  return [...servers];
-}
-
 /** The skills a workflow's work steps name. */
 function skillsNamed(steps: readonly AgentStep[]): string[] {
   return [...walkSteps(steps)].flatMap(({ step }) => (step.kind === "work" && step.skill ? [step.skill] : []));
-}
-
-/** The key of step `index` of the steps at `path`: what its trace, deliveries and operation ids go by. */
-function stepKey(path: string, index: number): string {
-  return path ? `${path}.${index}` : String(index);
-}
-
-/** Every step of a workflow with its key, in order, those inside ifs (at `<key>.then.<i>`, `<key>.else.<i>`) too. */
-function* walkSteps(steps: readonly AgentStep[], path = ""): Generator<{ key: string; step: AgentStep }> {
-  for (const [index, step] of steps.entries()) {
-    const key = stepKey(path, index);
-    yield { key, step };
-    if (step.kind === "if") {
-      yield* walkSteps(step.then, `${key}.then`);
-      yield* walkSteps(step.else ?? [], `${key}.else`);
-    }
-  }
 }
 
 /** A value as JSON (a string as itself). */
@@ -270,13 +255,13 @@ export class RunExecutor {
       when,
       ...(watch !== undefined && { watch }),
       ...(previous !== undefined && { previous }),
-      used: { skills: skillsNamed(workflowOf(agent)), servers: serversRead(agent), models: [] },
+      used: { skills: skillsNamed(workflowOf(agent)), servers: serversNamed(agent, { reads: true }), models: [] },
     });
     // Ended, or waiting for a sign-in that has not come: an alarm that fires twice sends once.
     if (!started && run.status !== "running") return { status: run.status, started: false };
     this.#host.changed(agent.id);
     try {
-      const missing = await this.#host.needsSignIn(serversRead(agent));
+      const missing = await this.#host.needsSignIn(serversNamed(agent, { reads: true }));
       if (missing.length) return this.#waitForSignIn(run, missing);
       const elements = await this.#elements(agent);
       const outcomes = await mapLimit(elements, RUN_CONCURRENCY, (element) => this.#item(agent, run, element, when));
@@ -322,14 +307,9 @@ export class RunExecutor {
     const runs = this.#host.runs;
     const { view, started } = await runs.beginItem(agent.id, run.dueAt, element.key, element.label, () => this.#host.newSession());
     if (!started && view.status !== "running") return view;
-    // With no prototype: a result named "__proto__" or "constructor" is a name like any other.
-    const scope = Object.create(null) as Record<string, Value>;
     const watched = run.detail.watch as Value | undefined;
-    if (watched !== undefined) {
-      scope.watch = watched;
-      scope.previous = (run.detail.previous as Value | undefined) ?? null;
-      if (agent.trigger?.kind === "watch") scope[resultName(agent.trigger.step)] = watched;
-    }
+    const trigger = agent.trigger?.kind === "watch" ? agent.trigger : undefined;
+    const scope = trigger && watched !== undefined ? watchScope(resultName(trigger.step), watched, run.detail.previous as Value | undefined) : bareScope();
     if (agent.scope) scope.item = element.value ?? null;
     const state: ItemRun = {
       agent,
@@ -349,9 +329,9 @@ export class RunExecutor {
     let reason: string | undefined;
     try {
       // The value that started a watch's run goes into its session first, so its work steps see what fired it.
-      if (watched !== undefined && agent.trigger?.kind === "watch") {
-        const { server, tool } = agent.trigger.step;
-        const read = `${server}.${tool}, as ${resultName(agent.trigger.step)} and watch`;
+      if (trigger && watched !== undefined && hasWork(workflowOf(agent))) {
+        const { server, tool } = trigger.step;
+        const read = `${server}.${tool}, as ${resultName(trigger.step)} and watch`;
         const text = `The watch that started this run (${read}) read:\n${clip(jsonOf(watched), MAX_RESULT_CHARS)}`;
         await this.#host.write(state.session, text, `${opId(state)}:watch`);
       }
@@ -371,7 +351,8 @@ export class RunExecutor {
       ...(state.texts.length && { text: state.texts.join("\n\n") }),
       ...(reason !== undefined && { reason }),
       ...(state.reached.length && { reached: state.reached }),
-      ...(Object.keys(state.textAt).length && { textAt: state.textAt }),
+      // Only where it differs from the item's text: a delivery after the last work step goes out with that.
+      ...textsBefore(state),
       cost: state.cost,
     });
     this.#host.changed(agent.id);
@@ -586,12 +567,33 @@ function firstLine(text: string, max = 140): string {
   return excerpt(text.split("\n").find((part) => part.trim()) ?? "", max);
 }
 
-/** Whether a watch's value says it fires: its condition holds over the new value (and the one before, as `previous`). */
-export function watchFires(when: string, name: string, value: Value, previous: Value | undefined): boolean {
-  // No prototype: a step named __proto__ is a name like any other.
-  const scope: Record<string, Value> = Object.create(null);
+
+/** A condition scope with no prototype: a result named "__proto__" or "constructor" is a name like any other. */
+function bareScope(): Record<string, Value> {
+  return Object.create(null) as Record<string, Value>;
+}
+
+/** What a watch's condition and its run's steps read: its value by the step's name and as `watch`, and `previous`. */
+function watchScope(name: string, value: Value, previous: Value | undefined): Record<string, Value> {
+  const scope = bareScope();
   scope[name] = value;
   scope.watch = value;
   scope.previous = previous ?? null;
-  return holds(when, scope);
+  return scope;
+}
+
+/** Whether a workflow calls the model at all: only then does an item's session have a reader. */
+function hasWork(steps: readonly AgentStep[]): boolean {
+  return [...walkSteps(steps)].some(({ step }) => step.kind === "work");
+}
+
+/** An item's text at each delivery it reached, where that differs from its final text. */
+function textsBefore(state: Pick<ItemRun, "textAt" | "texts">): { textAt?: Record<string, string> } {
+  const final = state.texts.join("\n\n");
+  const differs = Object.entries(state.textAt).filter(([, text]) => text !== final);
+  return differs.length ? { textAt: Object.fromEntries(differs) } : {};
+}
+/** Whether a watch's value says it fires: its condition holds over the new value (and the one before, as `previous`). */
+export function watchFires(when: string, name: string, value: Value, previous: Value | undefined): boolean {
+  return holds(when, watchScope(name, value, previous));
 }

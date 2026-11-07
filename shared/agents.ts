@@ -256,28 +256,42 @@ function checkTrigger(value: unknown): AgentTrigger | undefined {
   fail('An agent\'s trigger is a "schedule" or a "watch".');
 }
 
-
 /** Whether an agent may use a server: every one when it has no `servers` list, else those on it. */
 export function mayUseServer(agent: Pick<AgentDefinition, "servers">, server: string): boolean {
   return !agent.servers || agent.servers.includes(server);
 }
 
-/** The servers a definition's trigger, scope and steps read or call (a tell through a tool too), nested steps included. */
-export function serversNamed(agent: Pick<AgentDefinition, "trigger" | "scope" | "workflow">): string[] {
-  const found = new Set<string>();
-  const walk = (steps: readonly AgentStep[]) => {
-    for (const step of steps) {
-      if (step.kind === "look" || step.kind === "do") found.add(step.server);
-      else if (step.kind === "tell" && typeof step.via === "object") found.add(step.via.server);
-      else if (step.kind === "if") {
-        walk(step.then);
-        walk(step.else ?? []);
-      }
+/** The key of step `index` of the steps at `path`: what a run's trace, deliveries and operation ids go by. */
+export function stepKey(path: string, index: number): string {
+  return path ? `${path}.${index}` : String(index);
+}
+
+/** Every step of a workflow with its key, in order, those inside ifs (at `<key>.then.<i>`, `<key>.else.<i>`) too. */
+export function* walkSteps(steps: readonly AgentStep[], path = ""): Generator<{ key: string; step: AgentStep }> {
+  for (const [index, step] of steps.entries()) {
+    const key = stepKey(path, index);
+    yield { key, step };
+    if (step.kind === "if") {
+      yield* walkSteps(step.then, `${key}.then`);
+      yield* walkSteps(step.else ?? [], `${key}.else`);
     }
-  };
+  }
+}
+
+/**
+ * The servers a definition's trigger, scope and steps name, nested steps included: those it reads (`reads`: look
+ * steps, its scope's and its watch's), else those it calls too (do steps, a tell through a tool).
+ */
+export function serversNamed(agent: Pick<AgentDefinition, "trigger" | "scope" | "workflow">, { reads = false } = {}): string[] {
+  const found = new Set<string>();
   if (agent.trigger?.kind === "watch") found.add(agent.trigger.step.server);
   if (agent.scope) found.add(agent.scope.list.server);
-  walk(agent.workflow ?? []);
+  for (const { step } of walkSteps(agent.workflow ?? [])) {
+    if (step.kind === "look") found.add(step.server);
+    else if (reads) continue;
+    else if (step.kind === "do") found.add(step.server);
+    else if (step.kind === "tell" && typeof step.via === "object") found.add(step.via.server);
+  }
   return [...found];
 }
 /** A workflow's steps, counting those inside an if's branches toward MAX_WORKFLOW_STEPS. */

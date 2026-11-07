@@ -236,6 +236,8 @@ type PiScan = { through: number; chain?: { hop: number; root: number } };
  * it too). There the agent is on the roster and answers every message that calls nobody else; its runs run here.
  */
 const HOME_AGENT_KEY = "homeAgent";
+/** Set while the home agent is on with a trigger: only then can its alarms have gone missing (#reconcileHome). */
+const HOME_RUNS_KEY = "homeRuns";
 /** A run's reads reuse results this young: a run wants today's numbers, and its items often read the same. */
 const RUN_STALE_MS = 60_000;
 /** Who a run's tell step names for its owner's own conversation. */
@@ -2356,7 +2358,7 @@ export class ChatAgent extends DurableObject<Env> {
 
   #reconcileHome(): void {
     const id = this.ctx.storage.kv.get<string>(HOME_AGENT_KEY);
-    if (this.#reconciled || id === undefined) return;
+    if (this.#reconciled || id === undefined || !this.ctx.storage.kv.get<boolean>(HOME_RUNS_KEY)) return;
     this.#reconciled = true;
     this.ctx.waitUntil(this.runner.reconcile(id).catch((error: unknown) => console.error("agent alarm:", errorMessage(error))));
   }
@@ -2381,6 +2383,7 @@ export class ChatAgent extends DurableObject<Env> {
     if (this.#gone) return;
     if (agent) {
       this.ctx.storage.kv.put(HOME_AGENT_KEY, agentId);
+      this.ctx.storage.kv.put(HOME_RUNS_KEY, Boolean(agent.enabled && agent.trigger));
       if (this.roster.get(agentId)) {
         // Turned on or off, renamed: the roster follows now, so a message that calls nobody goes to it (or to pi) at once.
         const view = { name: agent.name, avatar: agent.avatar, color: agent.color, job: agent.job, off: !agent.enabled };
@@ -2392,6 +2395,7 @@ export class ChatAgent extends DurableObject<Env> {
     }
     if (!agent && this.ctx.storage.kv.get(HOME_AGENT_KEY) === agentId) {
       this.ctx.storage.kv.delete(HOME_AGENT_KEY);
+      this.ctx.storage.kv.delete(HOME_RUNS_KEY);
       await this.turns.stop(agentId);
       this.roster.remove(agentId);
       this.runs.forget(agentId);
@@ -2789,7 +2793,10 @@ export class ChatAgent extends DurableObject<Env> {
       onPublished: (artifact) => this.#directory.recordArtifact({ ...artifact, chatId: meta.chatId }),
     };
     const mark = runMark(request.run.dueAt, request.key);
-    if (step.edit === "rebuild") return publishedAlready(meta, mark) ?? this.#rebuildPage(request, meta, scope, mark);
+    // A run that goes on after a restart publishes once: a version with its mark is the one it sent.
+    const already = publishedAlready(meta, mark);
+    if (already) return already;
+    if (step.edit === "rebuild") return this.#rebuildPage(request, meta, scope, mark);
     return publishFindings(scope, meta, request.text, `Findings, ${whenOf(request.agent)}`, mark);
   }
 

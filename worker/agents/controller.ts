@@ -212,7 +212,7 @@ export class AgentTurns {
         // A hand-off can only read, whoever started the chain: agents cannot give each other permission.
         const ask = askOf({ name: current.name, kind: "agent" }, text, MAX_ASK_CHARS);
         const calledBy = { name: current.name, agentId: entry.agentId };
-        const hop = { calledBy, ask, askKey: turnAskKey(turn.id), byOwner: false, hop: turn.hop + 1, root: turn.root, ...(turn.unattended && { unattended: true as const }) };
+        const hop = { calledBy, ask, askKey: turnAskKey(turn.id), byOwner: false, hop: turn.hop + 1, root: turn.root, unattended: turn.unattended };
         if (agents.length) this.call(agents, hop);
         delivering = this.#deliver(turn.id);
       }

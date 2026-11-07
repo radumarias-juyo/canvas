@@ -28,12 +28,6 @@ type Node =
 
 type Token = { kind: "number" | "string" | "name" | "key" | "op" | "end"; text: string; value?: Value; at: number };
 
-/** The condition language in one paragraph, as the models that write conditions read it (the compiler, agent_propose). */
-export const CONDITIONS_HELP =
-  'Conditions are small expressions over the results by their names: numbers, "text", comparisons (< <= > >= == !=), and/or/not, + - * /, ' +
-  "paths (sales.total, rows[0].value), a vs b (the change of a against b as a fraction), percentages (5% is 0.05), and len, sum, avg, min, " +
-  "max, abs, round, count, first, last, exists, contains, lower, upper, number, change. Never free text: a condition the language does not parse is refused.";
-
 /** The longest a condition may be, as checkAgent allows it. */
 export const MAX_CONDITION = 500;
 const MAX_DEPTH = 40;
@@ -334,6 +328,12 @@ const FUNCTIONS: Record<string, (args: Value[], nodes: Node[]) => Value> = {
   number: ([x]) => numeric(x ?? null) ?? null,
   change: ([a, b], [left, right]) => change(needNumber(a ?? null, left), needNumber(b ?? null, right ?? left)),
 };
+
+/** The condition language in one paragraph, as the models that write conditions read it (the compiler, agent_propose). */
+export const CONDITIONS_HELP =
+  'Conditions are small expressions over the results by their names: numbers, "text", comparisons (< <= > >= == !=), and/or/not, + - * /, ' +
+  "paths (sales.total, rows[0].value), a vs b (the change of a against b as a fraction), percentages (5% is 0.05), and the functions " +
+  `${Object.keys(FUNCTIONS).join(", ")}. Never free text: a condition the language does not parse is refused.`;
 
 function change(now: number, before: number): number {
   if (before === 0) throw new ConditionError("A change against 0 is not a number.");

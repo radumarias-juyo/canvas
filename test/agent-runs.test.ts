@@ -4,7 +4,7 @@ import type { Value } from "../shared/conditions.ts";
 import type { ArtifactMeta } from "../shared/protocol.ts";
 import type { RunDelivery } from "../shared/runs.ts";
 import { fillInput, itemKey, itemsOf, reportOf, SignInNeeded, type DeliveryRequest, type WorkResult } from "../worker/agents/runs/executor.ts";
-import { publishFindings, publishRebuilt, runMark } from "../worker/agents/runs/page.ts";
+import { publishedAlready, publishFindings, publishRebuilt, runMark } from "../worker/agents/runs/page.ts";
 import { findingsEdit, FINDINGS_END, FINDINGS_START, reportHtml, workSpend } from "../worker/agents/runs/report.ts";
 import { AgentRunner, type RunAlarm, type RunnerHost, type WatchAlarm } from "../worker/agents/runs/runner.ts";
 import { sourceName, SourceCore, type Subscriber } from "../worker/agents/runs/source.ts";
@@ -709,7 +709,8 @@ describe("a run's page step", () => {
     expect(await publishFindings(publishScope, meta, "Sales are up.", "Findings", mark)).toMatchObject({ status: "sent", version: 4 });
     expect(messages).toEqual([`Findings ${mark}`]);
     const after = { ...meta, latest: 4, versions: [...meta.versions, { version: 4, message: messages[0] }] } as unknown as ArtifactMeta;
-    expect(await publishFindings(publishScope, after, "Sales are up.", "Findings", mark)).toMatchObject({ status: "sent", version: 4 });
+    expect(publishedAlready(after, mark)).toMatchObject({ status: "sent", version: 4 });
+    expect(publishedAlready(after, runMark(T0, "3"))).toBeNull();
     expect(published).toHaveLength(1);
   });
 

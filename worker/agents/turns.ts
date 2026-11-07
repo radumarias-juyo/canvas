@@ -4,7 +4,7 @@
 import type { AssistantMessage, UserMessage } from "@earendil-works/pi-ai";
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { TOOL_SEARCH_TOOL_NAME } from "@earendil-works/pi-durable/tool-search";
-import { CHAT_AGENT_KIND, MAX_HOPS, speakerLabel, type AgentDefinition, type ChatAgentReplyData } from "../../shared/agents.ts";
+import { CHAT_AGENT_KIND, MAX_HOPS, mayUseServer, speakerLabel, type AgentDefinition, type ChatAgentReplyData } from "../../shared/agents.ts";
 import { textOf } from "../../shared/canonical.ts";
 import { entryItems, mergeItems, type ItemRef } from "../../shared/items.ts";
 import { AGENT_NAME, calledNames, type Mention } from "../../shared/mentions.ts";
@@ -229,7 +229,7 @@ export function allowedTools(
   byOwner: boolean,
   signsIn: (server: string) => boolean,
 ): string[] {
-  const own = (server: string) => !agent.servers || agent.servers.includes(server);
+  const own = (server: string) => mayUseServer(agent, server);
   const shared = (server: string) => own(server) && (agent.sharedServers ? agent.sharedServers.includes(server) : !signsIn(server));
   return tools.filter((name) => {
     if (NEVER_FOR_AGENTS.includes(name)) return false;
@@ -248,7 +248,7 @@ export function runTools(tools: readonly string[], mcp: ReadonlyMap<string, McpT
   return tools.filter((name) => {
     if (NEVER_FOR_AGENTS.includes(name)) return false;
     const info = mcp.get(name);
-    return info ? info.readOnly && (!agent.servers || agent.servers.includes(info.server)) : READ_TOOLS.includes(name);
+    return info ? info.readOnly && mayUseServer(agent, info.server) : READ_TOOLS.includes(name);
   });
 }
 

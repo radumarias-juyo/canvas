@@ -6,7 +6,8 @@ import { canonicalJson } from "../../../shared/canonical.ts";
 import type { Value } from "../../../shared/conditions.ts";
 import { mayUseServer, type AgentDefinition, type AgentTrigger, type LookStep } from "../../../shared/agents.ts";
 import { errorMessage, sha256Hex } from "../../../shared/util.ts";
-import { readFor, resultName, RunExecutor, watchFires, type RunEnd, type RunHost } from "./executor.ts";
+import { readFor, resultName, RunExecutor, watchFires, type RunEnd, type RunHost, type RunStart } from "./executor.ts";
+import type { RunRecord } from "./store.ts";
 import { nextRunAt } from "./schedule.ts";
 import { sourceName } from "./source.ts";
 import type { Sql } from "../../members.ts";
@@ -52,6 +53,12 @@ function triggerKey(agent: AgentDefinition): string {
 }
 
 const HASHED = "sha256:";
+
+/** A run to start again from its row: the same due time, and the watch values it started with. */
+function startOf(agent: AgentDefinition, run: RunRecord): RunStart {
+  const { watch, previous } = run.detail as { watch?: Value; previous?: Value };
+  return { agent, dueAt: run.dueAt, why: run.why, test: run.test, watch, previous };
+}
 
 /** A value as it is compared with the last one: its canonical JSON, or a hash of a large one. */
 async function fingerprint(value: Value): Promise<string> {
@@ -126,25 +133,24 @@ export class AgentRunner {
       const dueAt = nextRunAt(trigger, after);
       if (dueAt === null) return;
       const id = await this.#host.alarmAt(dueAt, { agentId, dueAt });
-      this.#sql.exec(
-        "INSERT OR REPLACE INTO agent_schedules (agent_id, kind, key, schedule_id, due_at, version) VALUES (?, 'schedule', ?, ?, ?, ?)",
-        agentId,
-        key,
-        id,
-        dueAt,
-        wanted.version,
-      );
+      this.#setRow({ agent_id: agentId, kind: "schedule", key, schedule_id: id, due_at: dueAt, version: wanted.version });
       return;
     }
     let id: string | null = null;
     if (this.#host.sharedWatch(trigger.step)) await this.#host.subscribe(agentId, trigger.step, trigger.everyMinutes);
     else id = await this.#host.alarmEvery(trigger.everyMinutes * 60, { agentId });
+    this.#setRow({ agent_id: agentId, kind: "watch", key, schedule_id: id, due_at: null, version: wanted.version });
+  }
+
+  #setRow(row: ScheduleRow): void {
     this.#sql.exec(
-      "INSERT OR REPLACE INTO agent_schedules (agent_id, kind, key, schedule_id, due_at, version) VALUES (?, 'watch', ?, ?, NULL, ?)",
-      agentId,
-      key,
-      id,
-      wanted.version,
+      "INSERT OR REPLACE INTO agent_schedules (agent_id, kind, key, schedule_id, due_at, version) VALUES (?, ?, ?, ?, ?, ?)",
+      row.agent_id,
+      row.kind,
+      row.key,
+      row.schedule_id,
+      row.due_at,
+      row.version,
     );
   }
 
@@ -286,31 +292,24 @@ export class AgentRunner {
     const waiting = this.#host.runs.unfinished().filter((run) => run.status === "needs_sign_in" && run.detail.needsSignIn?.includes(server));
     // Oldest first: the last one per agent (and per kind, a test apart from the real ones) is its newest.
     const newest = new Map(waiting.map((run) => [`${run.agentId}:${run.test}`, run]));
+    const skip = (run: RunRecord, why: string) =>
+      this.#host.runs.update(run.agentId, run.dueAt, { status: "not_today", summary: `Skipped once you signed in: ${why}.` });
+    for (const run of waiting) if (newest.get(`${run.agentId}:${run.test}`) !== run) skip(run, "a newer run went instead");
+    const agentIds = [...new Set(waiting.map((run) => run.agentId))];
+    const definitions = new Map(await Promise.all(agentIds.map(async (id) => [id, await this.#host.definition(id)] as const)));
     let restarted = 0;
-    for (const run of waiting) {
-      const agent = await this.#host.definition(run.agentId);
+    for (const run of newest.values()) {
+      const agent = definitions.get(run.agentId);
       if (!agent) continue;
-      const superseded = newest.get(`${run.agentId}:${run.test}`) !== run;
-      const skip = superseded ? "a newer run went instead" : !run.test && !agent.enabled ? `@${agent.name} was off` : null;
-      if (skip) {
-        this.#host.runs.update(run.agentId, run.dueAt, { status: "not_today", summary: `Skipped once you signed in: ${skip}.` });
+      if (!run.test && !agent.enabled) {
+        skip(run, `@${agent.name} was off`);
         continue;
       }
       this.#host.runs.restart(run.agentId, run.dueAt);
       restarted++;
-      const previous = run.detail.previous as Value | undefined;
-      this.#host.waitUntil(
-        this.executor.start({
-          agent,
-          dueAt: run.dueAt,
-          why: run.why,
-          test: run.test,
-          ...(run.detail.watch !== undefined && { watch: run.detail.watch as Value }),
-          ...(previous !== undefined && { previous }),
-        }),
-      );
+      this.#host.waitUntil(this.executor.start(startOf(agent, run)));
     }
-    if (waiting.length) for (const agentId of new Set(waiting.map((run) => run.agentId))) this.#host.changed(agentId);
+    for (const agentId of agentIds) this.#host.changed(agentId);
     return restarted;
   }
 
@@ -324,8 +323,7 @@ export class AgentRunner {
             this.#host.runs.update(run.agentId, run.dueAt, { status: "failed", summary: "Failed: the agent was deleted." });
             return null;
           }
-          const { watch, previous } = run.detail as { watch?: Value; previous?: Value };
-          return this.executor.start({ agent, dueAt: run.dueAt, why: run.why, test: run.test, watch, previous });
+          return this.executor.start(startOf(agent, run));
         }),
       );
     }

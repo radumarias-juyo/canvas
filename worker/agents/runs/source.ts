@@ -38,6 +38,8 @@ type SubscriberRow = { uid: string; chat_id: string; agent_id: string; every_min
 export class SourceCore {
   readonly #sql: Sql;
   readonly #host: SourceHost;
+  /** Its name (sourceName of its call), worked out once. */
+  #name: Promise<string> | undefined;
 
   constructor(sql: Sql, host: SourceHost) {
     this.#sql = sql;
@@ -99,7 +101,7 @@ export class SourceCore {
     const moved = last?.value !== json;
     if (moved) this.#sql.exec("INSERT OR REPLACE INTO source_last (id, value, at) VALUES (1, ?, ?)", json, this.#host.now());
     const telling = moved ? subscribers : subscribers.filter((row) => row.fresh === 1);
-    const source = await sourceName(JSON.parse(call.step) as LookStep);
+    const source = await (this.#name ??= sourceName(JSON.parse(call.step) as LookStep));
     const told = await Promise.allSettled(
       telling.map((row) => this.#host.notify({ uid: row.uid, chatId: row.chat_id, agentId: row.agent_id }, value, source)),
     );

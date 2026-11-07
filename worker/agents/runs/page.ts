@@ -23,7 +23,7 @@ const published = (meta: ArtifactMeta, version: number): RunDelivery => ({
   version,
 });
 
-/** The version of `meta` this delivery published already (its message ends with `mark`), when one did. */
+/** The version of `meta` this delivery published already (its message ends with `mark`), when one did: check it first. */
 export function publishedAlready(meta: ArtifactMeta, mark: string): RunDelivery | null {
   const version = meta.versions.find((one) => one.message?.endsWith(mark));
   return version ? published(meta, version.version) : null;
@@ -38,8 +38,6 @@ export async function publishFindings(
   mark: string,
   at = new Date(),
 ): Promise<RunDelivery> {
-  const already = publishedAlready(meta, mark);
-  if (already) return already;
   try {
     const html = await readPageSource(scope, meta.id, meta.latest);
     if (html === null) return notUpdated(meta, "its latest version cannot be read");
