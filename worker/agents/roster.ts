@@ -434,24 +434,56 @@ export class ChatRoster {
     return this.#turns("agent_id = ? ORDER BY id DESC LIMIT ?", agentId, limit);
   }
 
-  /** What everyone sees of the roster, with who is working and how many turns wait. `ownerName` names an owner. */
+  /**
+   * What everyone sees of the roster: who is working, on which turn and for how long, and how many turns wait, with the
+   * oldest of them. `ownerName` names an owner.
+   */
   views(ownerName: (uid: string) => string): ChatAgentView[] {
-    const counts = this.#sql.exec(`SELECT agent_id, status, COUNT(*) AS n FROM chat_agent_turns WHERE ${OPEN} GROUP BY agent_id, status`).toArray();
-    const count = (agentId: string, status: AgentTurnStatus) =>
-      (counts.find((row) => row.agent_id === agentId && row.status === status)?.n as number | undefined) ?? 0;
-    return this.list().map((entry) => ({
-      id: entry.agentId,
-      name: entry.name,
-      avatar: entry.avatar,
-      color: entry.color,
-      job: entry.job,
-      ownerUid: entry.ownerUid,
-      ownerName: ownerName(entry.ownerUid),
-      ...(count(entry.agentId, "running") && { busy: true as const }),
-      ...(count(entry.agentId, "queued") && { queued: count(entry.agentId, "queued") }),
-      ...(entry.off && { off: true as const }),
-      ...(entry.shared && { shared: true as const }),
-    }));
+    // The turns not ended, oldest first: few, so one read serves every agent.
+    const open = new Map<string, AgentTurn[]>();
+    for (const turn of this.#turns(`${OPEN} ORDER BY id`)) {
+      const mine = open.get(turn.agentId);
+      if (mine) mine.push(turn);
+      else open.set(turn.agentId, [turn]);
+    }
+    const ended = new Map(
+      this.#turns(`id IN (SELECT MAX(id) FROM chat_agent_turns WHERE NOT (${OPEN}) GROUP BY agent_id)`).map((turn) => [turn.agentId, turn]),
+    );
+    const now = this.#now();
+    return this.list().map((entry) => {
+      const mine = open.get(entry.agentId) ?? [];
+      const last = ended.get(entry.agentId);
+      const running = mine.find((turn) => turn.status === "running");
+      const queued = mine.filter((turn) => turn.status === "queued");
+      return {
+        id: entry.agentId,
+        name: entry.name,
+        avatar: entry.avatar,
+        color: entry.color,
+        job: entry.job,
+        ownerUid: entry.ownerUid,
+        ownerName: ownerName(entry.ownerUid),
+        ...(running && {
+          busy: true as const,
+          running: { turn: running.id, calledBy: running.calledBy, hop: running.hop, elapsedMs: Math.max(0, now - (running.startedAt ?? now)) },
+        }),
+        ...(queued.length && { queued: queued.length, next: { calledBy: queued[0].calledBy, hop: queued[0].hop } }),
+        ...(last && { ended: { turn: last.id, status: last.status as NonNullable<ChatAgentView["ended"]>["status"] } }),
+        ...(entry.off && { off: true as const }),
+        ...(entry.shared && { shared: true as const }),
+      };
+    });
+  }
+
+  /** The turns running now, each with its agent's session: what the chat's sockets follow live. */
+  runningSessions(): { agentId: string; session: string; turn: number }[] {
+    const running = this.allRunning();
+    if (!running.length) return [];
+    const sessions = new Map(this.list().map((entry) => [entry.agentId, entry.session]));
+    return running.flatMap((turn) => {
+      const session = sessions.get(turn.agentId);
+      return session ? [{ agentId: turn.agentId, session, turn: turn.id }] : [];
+    });
   }
 
   #prune(agentId: string): void {
