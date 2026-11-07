@@ -1,0 +1,33 @@
+import { describe, expect, it } from "vitest";
+import { ChatRoster } from "/tmp/claude-0/-home-user-pi-artifacts/094e2573-30c9-52fb-b759-6fb0e0fcace9/scratchpad/wt110/worker/agents/roster.ts";
+import { memberAgentName, seatChatId } from "/tmp/claude-0/-home-user-pi-artifacts/094e2573-30c9-52fb-b759-6fb0e0fcace9/scratchpad/wt110/worker/agents/seats/names.ts";
+import { memorySql } from "/tmp/claude-0/-home-user-pi-artifacts/094e2573-30c9-52fb-b759-6fb0e0fcace9/scratchpad/wt110/test/fakes.ts";
+
+const view = (name: string) => ({ name, avatar: "a", color: "teal" as const, job: "j", off: false });
+const add = (roster: ChatRoster, agentId: string, ownerUid: string, name: string, extra: object = {}) =>
+  roster.add({ agentId, ownerUid, name, session: "", avatar: "a", color: "teal", job: "j", ...extra });
+
+describe("alias residuals", () => {
+  it("an aliased seat with a hyphenated name renamed to its hyphen prefix keeps the alias though the name is free", () => {
+    const roster = new ChatRoster(memorySql(), () => 0);
+    expect(add(roster, "r1", "radu", "data-bot")).toBeNull();
+    const name = memberAgentName("data-bot", "Ana", (n) => roster.byName(n) !== null)!;
+    expect(name).toBe("data-bot-ana");
+    expect(add(roster, "a1", "ana", name, { seat: seatChatId("a1"), alias: true })).toBeNull();
+    expect(roster.byName("data")).toBeNull();
+    // Ana renames her agent "data-bot" -> "data": "data" is free here.
+    expect(roster.refresh("a1", view("data"))?.entry.name).toBe("data-bot-ana");
+  });
+
+  it("the alias flag outlives a rename to a real name, and a later rename back to a hyphen prefix is refused", () => {
+    const roster = new ChatRoster(memorySql(), () => 0);
+    expect(add(roster, "r1", "radu", "planner")).toBeNull();
+    expect(add(roster, "a1", "ana", "planner-ana", { seat: seatChatId("a1"), alias: true })).toBeNull();
+    // Ana renames to a free real name with a hyphen: she gets it.
+    expect(roster.refresh("a1", view("data-bot"))?.entry.name).toBe("data-bot");
+    expect(roster.get("a1")?.alias).toBe(true);
+    // Then to "data", free: kept as "data-bot", as in item 13.
+    expect(roster.byName("data")).toBeNull();
+    expect(roster.refresh("a1", view("data"))?.entry.name).toBe("data-bot");
+  });
+});

@@ -1,0 +1,167 @@
+Routine Agents
+Proposal · companion to Multi-agent group chats
+Agents that run on their own
+Agents that run every morning or when something changes, send a report, or publish a new version of a dashboard. People make them by describing them in a chat. They run inside limits the owner sets, and every run can be traced. This page maps eight reference flows onto the objects we already have.
+1 · The flows
+Eight flows, and what each one becomes here
+|  | Flow | What the person does | How we build it
+| Make from a chat | Picks what to make (an answer, a page, an agent, a tool) or lets Auto decide, then describes it in words. | The chat's agent drafts a definition with agent_propose, saved as a draft, switched off.
+| Instructions | Reads numbered plain-language steps, plus an "at a glance" list: scope, runs, reads, tells, knows. Anything guessed is marked Assumed. | The instructions are the source of truth. The summary rows are fields the model fills in, with a list of the ones it guessed.
+| Workflow | Sees and reorders steps: When, Look at, Work out, Only if, If, Do, Tell, Hand over. | A typed step list compiled from the instructions. Steps that don't need a model run in code.
+| Test it | Runs it on today's data. Nothing is sent or changed. | A dry run in a forked session. Tell and Do steps are recorded instead of carried out.
+| Runs | Sees a list of runs, then one run's detail: what it sent, the result for each item, how it got there, what it used. | A run record per run, written from the run's Pi session. Today's step panels and cost lines show the trace.
+| Shared agents | Opens an agent someone else set up. Their first change saves their own draft copy, and the original keeps running. | "Make it mine" copies the definition into their own user directory, with copiedFrom. The copy runs with their sign-ins.
+| Guardrails | Sets hard limits, and picks how far each agent may go on its own: Inform, Recommend, Approve, Run. | Rules checked in code on every write call's input, plus an autonomy level per agent and the approval queue.
+| What it knows | Sees remembered notes with their scope, source and use count, and can edit, pin or forget them. Also sees connected data, documents and skills. | Memory notes per agent and per user, on top of the existing skills and MCP server list.
+2 · Make it from a chat
+Describe it, check the summary, test, turn on
+Say what you want. Pick Agent in the composer, or leave it on Auto, which treats "every morning…" or "when … tell me" as an agent request. The chat's agent asks only about gaps it can't fill from the servers' tool lists.
+The agent drafts it. agent_propose saves a definition switched off, the same rule as skills. The chat shows a card with the instructions and the "at a glance" rows.
+Fix the guesses. Anything assumed shows an Assumed badge. "Change" opens a picker built from what the agent already knows, such as the delivery channels or the people in the chat. Or you just say it in the chat.
+Test it. A dry run on today's data shows what it would send and publish, at what cost.
+Turn on. The definition gets version 1, and the scheduler sets its first run.
+Mockup · the draft card in the chat
+db
+Daily signups briefWhere each region's month will land, before the day starts
+Draft · offTest itTurn on
+Every day at 07:00, for each of the 7 regions.
+1. Look at signups-db and the revenue forecast.
+2. Work out where the month will land against target, with the forecasting skill.
+3. Publish a new version of the Signups brief page.
+4. Tell the regional leads by email: a short summary.
+ScopeEach of the 7 regionschecked one by oneChange
+RunsEvery day at 07:00Europe/BucharestChange
+Readssignups-db, revenue forecastChange
+TellsRegional leads Assumedby email, through the mail serverChange
+KnowsForecasting skilland your memory notesChange
+The instructions stay readable, and the summary is what actually runs. Each underlined word links to a field: a server, a skill, a page, a person. A dashed underline means the model guessed it. Changing a row rewrites the sentence it came from, and editing the sentence changes the row, so neither goes out of date.
+3 · The definition
+What gets stored
+This is the same row in the owner's UserDirectory SQLite that the group-chat proposal describes, with fields for running on its own.
+// shared/agents.ts
+interface AgentDefinition {
+id; name; avatar; job; model; effort; servers; sharedServers;   // as in the group-chat proposal
+instructions: string;                 // the text people read and edit
+trigger?: { kind: "schedule"; at: "07:00"; tz: string; days?: Weekday[] }
+| { kind: "watch"; step: LookAt; every: number; when: Condition };
+scope?: { list: LookAt; each: true }; // one run per item: "each region on its own"
+workflow: Step[];                     // compiled from instructions, editable
+autonomy: 1 | 2 | 3 | 4;              // inform · recommend · approve · run
+assumed: string[];                    // fields shown as "Assumed"
+status: "draft" | "on" | "off"; version: number;
+copiedFrom?: { owner: string; id: string; version: number };
+}
+type Step =
+| { kind: "look";   server; tool; input }        // code: an MCP read through the hub
+| { kind: "work";   prompt; skill?; model? }     // model: the only step that costs tokens
+| { kind: "onlyIf"; condition }                  // code: stop here when false
+| { kind: "if";     condition; then: Step[]; else?: Step[] }
+| { kind: "do";     server; tool; input }        // a write: autonomy and guardrails apply
+| { kind: "tell";   to: Recipient[]; via: "chat" | "notify" | { server; tool } }
+| { kind: "page";   artifactId; edit: "findings" | "rebuild" }
+| { kind: "handOver"; agent }                    // another agent's turn, as in group chats
+Conditions are small expressions over earlier steps' results, such as signups.weekly vs lastYear < -5%. They're checked in code, so a run with nothing to report never wakes the model.
+4 · A run
+From the alarm to the report
+[diagram: The scheduler's alarm wakes the agent object. A run opens a fresh Pi session and goes through the steps: When and Look at run in code, Work out uses the model, Only if is code and can stop the run, then Tell and Page deliver. Deliveries go to the agent's chat, a notification, a new page version, or an outside tool behind the autonomy gate.]
+Only one kind of step calls the model. The trigger, the reads and the conditions run in code through the same MCP hub that pages use. A morning with nothing new costs one alarm and a few reads. The scheduler is Scheduler from the Agents SDK, which shares the Lifecycle alarm with Pi. Local times are one-shot alarms, set again after each run, so 07:00 stays 07:00 across daylight-saving changes.
+Each run is a fresh session, made with sessions.create(), so a daily agent doesn't grow one endless transcript. The run record keeps the session id, so the run detail can show its full trace.
+Scope "each" lists the items once (regions, accounts, projects), then runs the steps per item, a few at a time. The run detail groups the items into "acted on" and "not today".
+Exactly once: the operation id is run:<agentId>:<dueAt>:<item>, so an alarm that fires twice can't send twice.
+Watches ("when signups drop 5% behind last year") are a Look at step plus a condition on an interval. They're cheap because nothing reaches the model until the condition holds. Identical watches from different people can share one source, as in the bots-and-rooms design.
+Mockup · one run, opened from the runs list
+Acted on 5 of 7 regionsTue 07:00 · on its schedule · 41 s · $0.04
+Sent
+Not today, 2
+North+2.1%
+Islands+0.4%
+What it sent · to regional leads, by email
+5 regions will land below target this month. West is furthest behind (−12.4% vs target, −8.0% vs last year), mostly paid search…
+How it got there
+WhenEvery day at 07:00, 7 regions
+Look atsignups-db.query, 7 regions · revenue forecast
+Work outMonth landing vs target, with forecasting
+PageSignups brief v38 published, browser check passed
+Tellmail.send to 5 people, autonomy level Run
+Used: forecasting skill · 4 memory notes · signups-db, revenue forecast
+5 · Daily dashboards
+A new page version each day, or a live page
+Live page, daily findings
+The numbers are live already, because the page calls MCP itself. The run only edits the findings block. That is an artifact_write with edits, then artifact_check and artifact_publish, so each day becomes v<n>. The Git history doubles as a day-by-day archive.
+Snapshot page
+For "what it looked like this morning", the run writes the day's data into the page, so the page makes no live calls. It's checked and published the same way. Each version is one day's frozen report.
+Built from findings
+When an alert fires, a Hand over step gives the findings to a page-building agent, which makes or updates a page. The two agents are the same ones a group chat would use.
+The publish rules stay as they are. A page with console errors, failed calls, or no browser check doesn't become a version. Then the run records "page not updated" and still sends its text report.
+6 · Limits
+Autonomy levels and guardrails
+|  | Level | What the agent may do on its own | Writes and outside messages
+| 1 · Inform | Read, work out, post to its own chat and notify its owner. | None. Tell steps go only to the owner.
+| 2 · Recommend | Also propose actions, as cards with the exact call and its input. | The owner presses a card to run it.
+| 3 · Approve | Also queue actions, which wait for the approver and expire after a set time. | They run after approval, as stored. The model can't change them.
+| 4 · Run | Carry out writes and outside messages itself. | Only within the guardrails, and every call is logged.
+Guardrails are rules on tool inputs, checked in the hub before any write call reaches a server, whatever the level. Each rule names a server, a tool and an argument from the tool's own input schema, so the app stays generic. The rule kinds are minimum and maximum, the largest change versus the current value, values that are never allowed, quiet dates, and calls per day. Each rule either blocks the call, sends it for approval, or lets it through with a warning. The strictest rule wins.
+Assistants in a chat stay at level 2: nothing changes until a person accepts it. A turn another agent started can't go above the level of the agent it handed over to.
+Mockup · limits for one agent
+AutonomyHow far Daily signups brief may go on its own
+4 · Run
+mail.send · toOnly people in your directory
+Blocks it
+crm.update_deal · discountMost 10%
+Needs approval
+Quiet dates24–26 Dec, every year: prepare only
+Blocks it
+Pending actions expireCancel unapproved actions after
+12 hours
+7 · Sharing and memory
+Shared agents, copies, and what an agent knows
+Shared agents: an owner can share an agent with the people in a chat. It always runs as the owner. Anyone else who opens it sees its instructions and runs. Their first change saves their own draft copy in their own directory, with copiedFrom, and the original keeps running untouched. The copy runs with their sign-ins and limits.
+Memory notes each have a scope (just me, this agent, or everyone in a chat), a source (learned in a conversation, or added by a person), a use count and a pin. Preferences learned in conversation save on their own. A fact that changes what an agent computes is saved off until someone confirms it, the same rule as skills. Forgetting a note only changes future runs and can be undone from "show forgotten".
+Connected data is the MCP server list, with what each server covers. Documents come from the user's files, and skills from the existing skills store.
+8 · Where results land
+An agent that posts in a conversation
+A report is most useful where people already talk. A routine's Tell step can post into three places, and every post is a message people can reply to, not a dead end.
+Its own conversation
+One ongoing chat per agent, listed in the sidebar like a contact, with its avatar, last post and unread count. It posts only when there is something to say, and you reply to dig in.
+A shared chat, like a channel
+The morning brief lands in a chat several people share. Anyone can reply to it or @ the agent. The agent belongs to the chat, so whoever comes next picks up where the last person left off.
+A page beside it
+Longer output, such as a dashboard, a report or a canvas, is a page version. The post carries its card and a two-line summary, and the page keeps every day's version.
+Mockup · a scheduled brief in a shared chat, and a reply
+Weekly numbersRAdb
+dbDaily signups briefagent · scheduled, 07:00Good morning. 5 of 7 regions will land below target this month. West is furthest behind, at −12.4%, mostly paid search. North and Islands are on track.
+Signups brief · v38
+AAnareply@brief is West's drop new this week?
+dbDaily signups briefagent · from this morning's runYes. It started Monday, when paid search spend fell 30%. Before that, West was 1% ahead.
+dbFollow-up · Radu asked yesterday for the campaign list and nobody has answered. Want me to pull it?
+A reply continues the run that wrote the post. It goes to a fork of that run's session, so the agent already has the numbers it worked out and answers without reading everything again. The last line shows a follow-up: the agent spots a request left unanswered in the chat and offers to pick it up, through the same funnel that controls unprompted posts.
+More ideas from always-on assistants
+Speak only when it matters. Each agent has a threshold for what is worth a post, and a quiet line in the run record for everything else. You set what you want to hear about and how often.
+Checks paced to the budget. Background checks every few hours rather than every minute, counted on the owner's usage meter. Urgent watches can be tighter.
+Read, draft and prepare alone; ask before sending, paying, signing or deleting. The ask shows the exact action. Some actions are never allowed, whatever the approval. These map to autonomy levels and guardrails.
+A "Needs you" list across all agents: approvals waiting, questions they asked, assumptions to confirm. It is part of one feed, where anyone who follows an agent or a page also sees its posts and new versions without being added to its chat.
+Offered from an answer. When a reply would be worth repeating, the agent ends with one offer, such as "Send this to Maria every Monday?", and yes opens the routine draft.
+Work in progress and finished work, kept apart: a Runs view for what's happening, and the existing Files and Artifacts for what's done.
+Big asks in stages. The agent posts a plan as a checklist message and updates it live as each stage finishes.
+Memory per chat. What an agent learns in a shared chat stays with that chat, unless its owner moves it to their own memory. That keeps one team's context out of another's.
+Limits per chat. The chat's owner sets which servers agents may use there and a daily token budget for the chat.
+More places to post later. An adapter for an outside chat app is one more Tell target and one more way to reply, built on the same run and reply model.
+9 · Plan
+Four steps
+Step 1Scheduled agent
+agent_propose from a chat, the draft card, Test it, Turn on.
+Scheduler with local-time one-shots, a fresh session per run, run records, the runs list and detail.
+Delivery to the agent's own conversation and a notification, and replies that continue the run. Level 1 only.
+Step 2Workflow and pages
+Compile instructions to steps, and an editable step list.
+Conditions in code, watches on an interval, scope "each".
+The Page step: findings edits and snapshots through check and publish.
+Step 3Limits
+Levels 2 to 4, the approval queue with expiry, and guardrail rules in the hub.
+Tell through outside tools (email, chat apps) at level 4 or with approval.
+Web Push for runs and approvals.
+Step 4Sharing and memory
+Shared agents and "make it mine" copies.
+The memory notes view, with scope, source, pin and forget.
+Posting into shared chats, follow-ups on unanswered requests, memory and limits per chat, and Hand over to other agents.
+How we'd build both pages on Cloudflare: Agents on Cloudflare: Tech Spec. The examples (regions, signups, servers) are illustrations. The app stays generic: it knows only the servers' names, tools and input schemas.

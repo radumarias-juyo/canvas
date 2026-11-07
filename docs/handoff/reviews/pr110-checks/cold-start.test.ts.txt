@@ -1,0 +1,101 @@
+// Scratch: a cold seat object reached first by the seatGive RPC. Native RPC does not start Lifecycle; the first harness
+// operation does (PiHarness._open -> lifecycle.ready() -> _ensureInitialized -> ChatAgent.onStart -> seats.wake()).
+import type { EntryRecord } from "@earendil-works/pi-durable";
+import { describe, expect, it } from "vitest";
+import type { AgentDefinition, ChatTurnData } from "../wt110/shared/agents.ts";
+import type { TurnResult } from "../wt110/worker/agents/controller.ts";
+import type { RoomLink, RoomRef, SeatResult, SeatTurn } from "../wt110/worker/agents/seats/link.ts";
+import { AgentSeats, type SeatHost } from "../wt110/worker/agents/seats/seat.ts";
+import { memorySql } from "../wt110/test/fakes.ts";
+
+const ROOM: RoomRef = { ownerUid: "radu", chatId: "room1" };
+const settle = async () => {
+  for (let n = 0; n < 20; n++) await new Promise<void>((r) => setImmediate(r));
+};
+const agent = { id: "p", name: "planner", enabled: true, instructions: "", job: "" } as unknown as AgentDefinition;
+
+class ColdHost implements SeatHost {
+  readonly uid = "ana";
+  seats!: AgentSeats;
+  started = false;
+  readonly ended: { turn: number; result: SeatResult }[] = [];
+  readonly submits: string[] = [];
+  readonly runs = new Map<string, (r: TurnResult) => void>();
+  readonly done = new Map<string, Promise<TurnResult>>();
+  #n = 0;
+  /** What every harness op does first: start the lifecycle once, whose onStart calls seats.wake(). */
+  #ready() {
+    if (this.started) return;
+    this.started = true;
+    this.seats.wake();
+  }
+  async definition() { return agent; }
+  room(): RoomLink {
+    return {
+      log: async () => ({ from: 0, through: -1, text: "", turn: 0 }),
+      ended: async (turn, result) => { this.ended.push({ turn, result }); return true; },
+    };
+  }
+  async create() { this.#ready(); return `s${++this.#n}`; }
+  async fork(s: string) { this.#ready(); return `${s}-fork${++this.#n}`; }
+  async write() { this.#ready(); }
+  async configure() { this.#ready(); await settle(); }
+  async submit(s: string, _i: string, op: string, _d: ChatTurnData) {
+    this.#ready();
+    const key = `${s}|${op}`;
+    this.submits.push(key);
+    this.done.set(key, new Promise((res) => this.runs.set(key, res)));
+  }
+  async wait(s: string, op: string): Promise<TurnResult> {
+    this.#ready();
+    const p = this.done.get(`${s}|${op}`);
+    return p ?? { status: "unanswered", reason: "not_found" };
+  }
+  async abort() { this.#ready(); }
+  async turnEntries(): Promise<readonly EntryRecord[]> { return []; }
+  async sources() { return { items: [], sources: [] }; }
+  waitUntil(p: Promise<unknown>) { p.catch(() => {}); }
+  later() {}
+}
+
+const turn = (id: number, byOwner = false): SeatTurn => ({
+  turn: id,
+  calledBy: byOwner ? { name: "Ana", uid: "ana" } : { name: "Mia", uid: "mia" },
+  hop: 0, ask: "[Mia · person]: hi", input: "Your turn", ownerName: "Ana", byOwner,
+});
+
+describe("cold seat object (scratch)", () => {
+  it("a member's turn to a cold object with nothing new to mirror ends as not_found", async () => {
+    const sql = memorySql();
+    // A first instance made the seat (turn 1), then was evicted.
+    const warm = new ColdHost();
+    warm.seats = new AgentSeats(sql, warm);
+    await warm.seats.give(ROOM, "p", turn(1), { from: 0, through: 3, text: "hello", turn: 1 });
+    await settle();
+    warm.runs.get("s1|turn:1")!({ status: "done", text: "one" });
+    await settle();
+    expect(warm.ended.map((e) => e.result.status)).toEqual(["done"]);
+    // A new instance, reached first by seatGive: the batch covers only the ask (its text is empty).
+    const cold = new ColdHost();
+    cold.seats = new AgentSeats(sql, cold);
+    await cold.seats.give(ROOM, "p", turn(2), { from: 4, through: 5, text: "", turn: 2 });
+    await settle();
+    expect(cold.ended).toEqual([{ turn: 2, result: expect.objectContaining({ status: "unanswered", reason: "not_found" }) }]);
+    expect(cold.submits).toEqual(["s1|turn:2"]); // it runs anyway, and nobody waits on it
+  });
+
+  it("an owner's (forked) turn to a cold object is fine: the fork starts the lifecycle before the row", async () => {
+    const sql = memorySql();
+    const warm = new ColdHost();
+    warm.seats = new AgentSeats(sql, warm);
+    await warm.seats.give(ROOM, "p", turn(1), { from: 0, through: 3, text: "hello", turn: 1 });
+    await settle();
+    warm.runs.get("s1|turn:1")!({ status: "done", text: "one" });
+    await settle();
+    const cold = new ColdHost();
+    cold.seats = new AgentSeats(sql, cold);
+    await cold.seats.give(ROOM, "p", turn(2, true), { from: 4, through: 5, text: "", turn: 2 });
+    await settle();
+    expect(cold.ended).toEqual([]);
+  });
+});

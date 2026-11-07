@@ -1,0 +1,152 @@
+import { describe, expect, it } from "vitest";
+import { fauxAssistantMessage, fauxProvider, fauxToolCall, Type, type AssistantMessage, type Message } from "@earendil-works/pi-ai";
+import { createModels } from "@earendil-works/pi-ai/models";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { createRegistry, defineExtension, defineTool, Harness, MemoryStorage, section } from "@earendil-works/pi-durable";
+import { MEMORY_RECALL_TOOL } from "../shared/memory.ts";
+import type { ChatKind } from "../shared/chat-kinds.ts";
+import { text } from "../worker/agent/output.ts";
+import { freshPrompt } from "../worker/memory/fresh.ts";
+import { ChatMemory } from "../worker/memory/chat.ts";
+import { UserMemory } from "../worker/memory/memory.ts";
+import { memorySql } from "./fakes.ts";
+
+describe("scratch: compaction started after freshPrompt looked", () => {
+  it("a blocking compaction created by a prepare that was rendering sections when the chat was shared", async () => {
+    const faux = fauxProvider({ models: [{ id: "m" }] });
+    const models = createModels();
+    models.setProvider(faux.provider);
+    const requests: Message[][] = [];
+    const replies: AssistantMessage[] = [fauxAssistantMessage(fauxToolCall(MEMORY_RECALL_TOOL, {}, { id: "c1" }), { stopReason: "toolUse" })];
+    faux.setResponses(
+      Array.from({ length: 12 }, () => (context: { messages: Message[] }) => {
+        const all = JSON.stringify(context);
+        // The summarizer keeps what the transcript it reads says (a recall result, here).
+        if (all.includes("context summarization assistant"))
+          return fauxAssistantMessage(all.includes("bonus") ? "Summary: the owner's bonus is private." : "Summary: nothing.");
+        requests.push(structuredClone(context.messages));
+        return replies.shift() ?? fauxAssistantMessage("ok");
+      }),
+    );
+    const notes = { text: "- [a1] (just me) My salary is private." };
+    let gate: Promise<void> | undefined;
+    let rendering!: () => void;
+    const rendered = new Promise<void>((resolve) => (rendering = resolve));
+    const registry = createRegistry();
+    const recall = defineTool({
+      name: MEMORY_RECALL_TOOL,
+      description: "Look through the memory notes.",
+      parameters: Type.Object({}),
+      execute: async () => ({ output: text("- [a2] (just me) My bonus is private too.") }),
+    });
+    registry.install(
+      defineExtension({
+        name: "memory",
+        sections: [
+          section("memory", async () => {
+            if (gate) {
+              rendering();
+              await gate;
+            }
+            return notes.text;
+          }),
+        ],
+        tools: [recall],
+      }),
+    );
+    const pi = await Harness.open(new MemoryStorage(), { models, registry }, BACKGROUND_CONTEXT);
+    const root = await pi.root(BACKGROUND_CONTEXT);
+    await root.configure({ model: { provider: faux.provider.id, modelId: "m" } }, BACKGROUND_CONTEXT);
+    const ask = async (content: string) => (await root.submit({ type: "input", content }, BACKGROUND_CONTEXT)).wait(BACKGROUND_CONTEXT);
+    try {
+      await ask(`first, what do you know? ${"words ".repeat(30_000)}`);
+      expect(JSON.stringify(requests.at(-1))).toContain("bonus");
+      // The owner's next message: its prepare renders the sections (an RPC to UserDirectory in the app) ...
+      let open!: () => void;
+      gate = new Promise<void>((resolve) => (open = resolve));
+      const turn = ask(`second ${"words ".repeat(30_000)}`);
+      await rendered;
+      // ... while a member joins: the chat is shared, the section no longer holds the owner's notes.
+      notes.text = "No notes yet.";
+      const fresh = await freshPrompt(root, pi);
+      // No compaction listed yet, so ChatMemory unmarks memory.own and never marks memory.summaries.
+      expect(fresh.compacting).toBeUndefined();
+      gate = undefined;
+      open();
+      await turn;
+      await fresh.placed;
+      await ask("and now?");
+      const last = JSON.stringify(requests.at(-1));
+      expect(last).not.toContain("salary");
+      // The leak: the compaction summarized the recall result before the fresh start's edits were placed.
+      expect(last).toContain("bonus");
+      for (const m of requests.at(-1)!) console.log("MSG", m.role, JSON.stringify(m.content).slice(0, 160));
+    } finally {
+      await pi.close(BACKGROUND_CONTEXT);
+    }
+  });
+});
+
+describe("scratch: memory.summaries after a restart", () => {
+  function chatOver(kv: Map<string, unknown>, state: { kind: ChatKind; alone: boolean; compacting?: Promise<unknown>; placed?: Promise<unknown> }, owner: UserMemory, fresh: (string | undefined)[]) {
+    return new ChatMemory({
+      ownerUid: "owner",
+      chatId: "c1",
+      kind: () => state.kind,
+      alone: () => state.alone,
+      agentFor: () => null,
+      piByOwner: async () => true,
+      freshPrompt: async (conversation) => {
+        fresh.push(conversation);
+        return { placed: state.placed ?? Promise.resolve(), ...(state.compacting && { compacting: state.compacting }) };
+      },
+      directory: () => ({
+        readNotes: (reader) => owner.read(reader),
+        useNotes: (ids) => owner.use(ids),
+        recallNotes: (reader, query, shown, offset) => owner.recall(reader, query, shown, offset),
+        learnNote: (writer, input) => owner.learn(writer, input),
+        forgetNoteFor: (writer, id) => owner.forgetFor(writer, id),
+      }),
+      kv: { get: <T>(key: string) => kv.get(key) as T | undefined, put: (key: string, value: unknown) => void kv.set(key, value) },
+    });
+  }
+
+  it("keeps leaving every summary out once the object went away before the follow-up edits were placed", async () => {
+    const owner = new UserMemory(
+      memorySql(),
+      { chatKind: () => "private", chatTitles: () => new Map(), agentNames: () => new Map(), changed: () => {} },
+      () => Date.now(),
+    );
+    const added = owner.add({ text: "My salary is private.", scope: "user" });
+    expect("error" in added).toBe(false);
+    const kv = new Map<string, unknown>();
+    const fresh: (string | undefined)[] = [];
+    const state: { kind: ChatKind; alone: boolean; compacting?: Promise<unknown>; placed?: Promise<unknown> } = { kind: "private", alone: true };
+    const before = chatOver(kv, state, owner, fresh);
+    await before.refresh();
+    expect(kv.get("memory.own")).toEqual(["pi"]);
+    // Shared while a turn waits for its compaction.
+    let settle!: () => void;
+    state.compacting = new Promise<void>((resolve) => (settle = resolve));
+    state.kind = "group";
+    state.alone = false;
+    await before.audienceChanged();
+    expect(kv.get("memory.summaries")).toEqual(["pi"]);
+    // The compaction placed its summary; the follow-up edits are queued behind the turn's tool round ...
+    state.compacting = undefined;
+    state.placed = new Promise(() => {});
+    settle();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fresh).toHaveLength(2);
+    expect(kv.get("memory.own")).toEqual([]);
+    // ... when the object restarts (a deploy). The edits are placed later by pi-durable; nobody unmarks memory.summaries.
+    state.placed = undefined;
+    const after = chatOver(kv, state, owner, fresh);
+    for (let turn = 0; turn < 3; turn++) await after.refresh();
+    await after.audienceChanged();
+    expect(fresh).toHaveLength(2);
+    // Every later summary (of the shared conversation, no owner notes in it) is still left out of every request.
+    expect(after.host().leavesOutSummaries("root")).toBe(true);
+    expect(kv.get("memory.summaries")).toEqual(["pi"]);
+  });
+});

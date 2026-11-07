@@ -1,0 +1,139 @@
+// Scratch checks for PR #110 items 6 and 15: a repeated give or a wake of a seat turn that is still being set up.
+import type { EntryRecord } from "@earendil-works/pi-durable";
+import { describe, expect, it } from "vitest";
+import type { AgentDefinition, ChatTurnData } from "../wt110/shared/agents.ts";
+import type { TurnResult } from "../wt110/worker/agents/controller.ts";
+import type { RoomLink, RoomRef, SeatResult, SeatTurn } from "../wt110/worker/agents/seats/link.ts";
+import { AgentSeats, type SeatHost } from "../wt110/worker/agents/seats/seat.ts";
+import { memorySql } from "../wt110/test/fakes.ts";
+
+const ROOM: RoomRef = { ownerUid: "radu", chatId: "room1" };
+const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
+async function settle(): Promise<void> {
+  for (let n = 0; n < 20; n++) await tick();
+}
+type Deferred<T> = { promise: Promise<T>; resolve: (value: T) => void };
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((yes) => (resolve = yes));
+  return { promise, resolve };
+}
+
+const agent: AgentDefinition = {
+  id: "p",
+  name: "planner",
+  avatar: "pl",
+  color: "teal",
+  job: "Plans.",
+  instructions: "You plan.",
+  autonomy: 1,
+  origin: "user",
+  enabled: true,
+  version: 1,
+  createdAt: 0,
+  updatedAt: 0,
+} as AgentDefinition;
+
+/** The member's object. `wait` answers as PiHarness.settled does: an operation never submitted is "not_found". */
+class Host implements SeatHost {
+  readonly uid = "ana";
+  readonly ended: { turn: number; result: SeatResult }[] = [];
+  readonly submits: string[] = [];
+  readonly aborts: string[] = [];
+  readonly runs = new Map<string, Deferred<TurnResult>>();
+  readonly kept: Promise<unknown>[] = [];
+  /** The next configure waits on this (a slow #refreshForTurn). */
+  gate: Deferred<void> | undefined;
+  #n = 0;
+  async definition() {
+    return agent;
+  }
+  room(): RoomLink {
+    return {
+      log: async () => ({ from: 0, through: -1, text: "", turn: 0 }),
+      ended: async (turn, result) => {
+        this.ended.push({ turn, result });
+        return true;
+      },
+    };
+  }
+  async create() {
+    return `s${++this.#n}`;
+  }
+  async fork(session: string) {
+    return `${session}-fork${++this.#n}`;
+  }
+  async write() {}
+  async configure() {
+    const gate = this.gate;
+    this.gate = undefined;
+    if (gate) await gate.promise;
+  }
+  async submit(session: string, _input: string, op: string, _data: ChatTurnData) {
+    this.submits.push(`${session}|${op}`);
+  }
+  run(session: string, op: string) {
+    const key = `${session}|${op}`;
+    let run = this.runs.get(key);
+    if (!run) this.runs.set(key, (run = deferred()));
+    return run;
+  }
+  async wait(session: string, op: string): Promise<TurnResult> {
+    if (!this.submits.includes(`${session}|${op}`)) return { status: "unanswered", reason: "not_found" };
+    return this.run(session, op).promise;
+  }
+  async abort(session: string) {
+    this.aborts.push(session);
+  }
+  async turnEntries(): Promise<readonly EntryRecord[]> {
+    return [];
+  }
+  async sources() {
+    return { items: [], sources: [] };
+  }
+  waitUntil(promise: Promise<unknown>) {
+    this.kept.push(promise);
+  }
+  later() {}
+}
+
+const turn = (id: number, byOwner = false): SeatTurn => ({
+  turn: id,
+  calledBy: byOwner ? { name: "Ana", uid: "ana" } : { name: "Mia", uid: "mia" },
+  hop: 0,
+  ask: "[Mia · person]: hi",
+  input: "Your turn",
+  ownerName: "Ana",
+  byOwner,
+});
+
+/** A cold seat object: its lifecycle starts at the first harness call, here configure's, and onStart wakes the seats. */
+class ColdHost extends Host {
+  seats!: AgentSeats;
+  #started = false;
+  override async configure() {
+    if (!this.#started) {
+      this.#started = true;
+      this.seats.wake(); // ChatAgent.onStart -> this.seats.wake(), run by lifecycle.ready() inside the first harness call
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20)); // #refreshForTurn: MCP listing, skills, files
+  }
+}
+
+describe("seat onStart race (scratch)", () => {
+  it("first give to a cold seat object, nothing new to write: onStart's wake ends it as not_found", async () => {
+    const host = new ColdHost();
+    const seats = new AgentSeats(memorySql(), host);
+    host.seats = seats;
+    // The seat exists from an earlier turn; the object was evicted since.
+    await seats.deliver(ROOM, "p", { from: 0, through: 3, text: "", turn: 1 });
+    const given = seats.give(ROOM, "p", turn(2), { from: 4, through: 5, text: "", turn: 2 });
+    await given;
+    await settle();
+    expect(host.ended).toEqual([{ turn: 2, result: expect.objectContaining({ status: "unanswered", reason: "not_found" }) }]);
+    expect(host.submits).toEqual(["s1|turn:2"]);
+    host.run("s1", "turn:2").resolve({ status: "done", text: "The real answer." });
+    await settle();
+    expect(host.ended).toHaveLength(1);
+  });
+});

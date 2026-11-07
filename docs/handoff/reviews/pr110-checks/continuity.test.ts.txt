@@ -1,0 +1,17 @@
+import { expect, it } from "vitest";
+import { CHAT_AGENT_KIND } from "../wt110/shared/agents.ts";
+import { askLine } from "../wt110/worker/agents/turns.ts";
+
+it("a forked own reply reaches the agent's session without its published page", () => {
+  const entry = {
+    id: 5, conversationId: 0, kind: CHAT_AGENT_KIND,
+    data: { agentId: "planner", name: "planner", text: "Done, the Sales dashboard is up.", forked: true, published: [{ artifactId: "abc123", title: "Sales", version: 1 }] },
+  } as never;
+  const line = askLine(entry, "planner", "radu");
+  console.log(line);
+  expect(line).toContain("your reply, as posted");
+  expect(line).not.toContain("abc123");
+  // An unforked own reply is not read at all (its session has the tool results already).
+  const unforked = { ...entry as object, data: { ...(entry as any).data, forked: undefined } } as never;
+  expect(askLine(unforked, "planner", "radu")).toBeUndefined();
+});

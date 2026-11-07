@@ -1,0 +1,177 @@
+Multi-Agent Group Chats
+Proposal · concept and technical design
+Multi-agent group chats
+Several people and several agents in one chat. Everyone, agent or person, sees the whole conversation. An agent only works when someone calls it, and it always works as the person who brought it. This builds on the shared chats we already have and on the bots-and-rooms design.
+1 · Concept
+What people get
+A team of agents in the chat
+Besides @pi, a chat can hold agents with their own name, job, model and tools, such as @research or @builder. Each member can also bring one of their own agents in.
+Everyone hears everything
+Every message reaches every agent as context, at no cost. Only the agent that is called runs: by @name, by a reply to it, or, if the chat allows it, picked by a small router model.
+Agents hand work to each other
+An agent can call another one in its reply, for example research handing its findings to builder to make a page. The chain is capped, so two agents can't ping-pong forever.
+RRaduownerWe need a view of last quarter's signups by region. @research what do we have?
+rsresearchagent · Radu'sTwo sources: the signups table and the regions sheet. Q3 has 41,200 signups, 7 regions. @builder can you chart it?
+bdbuilderagent · Radu'sHere's a live page with a map and a weekly trend.
+Signups by region · v1
+AAnamember@planner does this match our campaign calendar?
+plplanneragent · Ana'sMostly. The North spike in week 34 lines up with the August campaign; West has no campaign behind its rise.
+research and builder run with Radu's sign-ins and budget. planner runs with Ana's. Each one read the whole thread before answering.
+2 · Starting point
+What we already have, and what changes
+|  | Piece | Today | Multi-agent
+| Chat object | One Durable Object per chat with one Pi agent, pi, acting as the owner. | The chat keeps a log of its own and a roster of agents. Each agent is its own Pi session.
+| Summoning | @pi or a reply to pi starts a run; anything else is an aside. | The same rule for each agent name in the roster. A chat with one person and no mention goes to the default agent.
+| Asides | A passive Pi write: the model reads it next time, with no run and no tokens. | The same write, sent into every agent's session. This is the core mechanism, and it already works.
+| Members | Membership is checked on every socket and prompt; tags, presence, replies and reactions. | Kept. The people bar and the @ picker also list the agents, each with its own colour.
+| Tools, files, pages | One MCP hub, one sandbox and one artifact owner per chat. | Scoped per agent session. Only the agent that published a page can publish new versions of it. Pages still go through the browser check.
+3 · Architecture
+One log, one session per agent
+The chat object becomes the room. It holds the log everyone sees, numbered by seq, and decides who speaks. Each agent is a Pi session with its own system prompt, tools, model and transcript. The owner's agents live as sessions inside the chat object, using the harness's sessions.create(). An agent a member brings lives in that member's own agent object, so it never touches the owner's sign-ins.
+[diagram: People reach the Worker, which checks membership and reaches the chat object. The chat object holds the log and the turn controller. The log writes each message into every agent session, including a member's agent in the member's own namespace. The turn controller sends your turn to the one agent that was called. Agents call the model through AI Gateway and MCP servers with their own owner's tokens.]
+Every message is a write into every agent; only the called agent gets a turn. A write is today's aside: one RPC and one SQLite commit, no model call. In phase 2 the log and the turn controller move into a Room object that belongs to nobody, and every agent, the owner's included, is a seat in its owner's agent object.
+4 · Agent definitions
+Where an agent is defined, and how a chat uses it
+Saved in the owner's user directory. Each person's agents are rows in their own UserDirectory Durable Object, in its built-in SQLite storage, next to the chats, mcp_auth (MCP sign-ins) and skills tables it already has. There is one such object per user, named from the verified uid, and only code running inside it can read its storage. A definition is a few KB of JSON, so it needs no R2 or KV.
+-- UserDirectory (one per user), shaped like skills
+agents (id PRIMARY KEY, name, definition JSON, enabled, updated_at)
+-- definition: avatar, job line, instructions, model, effort,
+--             servers, servers allowed in shared chats
+-- chat object: a roster that points at definitions, never a copy
+roster (agent_id, owner_uid, name, session_id, added_by)
+Proposed off. An agent the model proposes is saved switched off until its owner turns it on, the same rule as skills.
+Read before every turn. The chat compares the definition's version with the one it last applied, as it does for skills today. When it changed, it rewrites that agent's system prompt section, sets the model with configure and filters its tools to the allowed servers. An edit takes effect at the agent's next turn, in every chat it's in.
+Phase 1, the owner's agents. Any member can call them by @name; they always run as the owner. Other people's messages are context, not instructions, and writes wait for the owner's approval.
+Phase 2, a member's agent. Its roster row names the member as owner. The definition stays in the member's directory and their own agent object reads it. The chat sees only its name, avatar and job line, for the people bar and the @ picker. Nobody else sees or edits its instructions.
+Leaving and names. Removing a person removes their agents from the roster; their past messages stay. Names are unique per chat, so a second planner shows as @planner-ana.
+Mockup · the agent editor
+rs
+researchFinds and checks data before anyone builds on it
+Proposed by pi · offTurn on
+Nameresearch · called as @research
+Job lineFinds and checks data before anyone builds on it
+InstructionsLook up the sources first and say which table each number comes from. Don't build pages yourself: hand charts to @builder with the numbers you found.
+ModelFast model·Effort: low
+Servers
+ServerThis agentShared chats
+signups-dbno sign-in
+analyticsno sign-in
+calendarsigned in as you
+filesyour private files
+Saved in your user directory · version 7 · used in 3 chats
+One form for the definition the chat reads before every turn. The header shows the state: pi proposed this agent, and it stays off until its owner presses Turn on. The two switch columns are the two server lists. "This agent" is what it may use when its owner asks. "Shared chats" is what anyone else in a shared chat can make it use. Servers that sign in as you start off there.
+5 · One turn
+From a message to the replies
+Save. The chat stores the message with the next seq and broadcasts it to everyone's socket, as it does today.
+Write to every agent. Each agent's session gets the message as a passive write, labelled [Ana · person], [research · agent] or [Radu · person · your owner]. The write id is chat:seq, so a retry is placed once. An agent's own reply is skipped, since it's already in its session.
+Pick who speaks. Mentioned agents first, in the order named, then the agent being replied to. With one person and no mention, the default agent answers. Optionally a small router model picks zero to two agents from their names and jobs. In chats with several people, agents answer only when called, by default.
+Give each one its turn. A one-line input, "Your turn: Ana asked you (seq 41)", with whenBusy: "followUp" so it waits in Pi's inbox if that agent is busy. Speakers go one after another, so each sees the replies before it.
+Post the reply. The reply text and any page card go into the log as a new message, which starts again at step 1. Tool calls and raw results stay in the agent's own session, shown in its step panel, so 40 KB of JSON from one agent doesn't flood the others.
+Cap hand-offs. An agent that names another agent starts that agent's turn, up to 3 hops and a token budget per human message. An agent can't call itself.
+Mockup · a chat with three agents, mid hand-off
+Q3 signups
+RA
+pirsbdpl
+RRaduowner@research what do we have for Q3 signups?
+research is working · signups-db.query · 2 of 3 tool calls Stop
+bdbuilder is next: research named it · hand-off 1 of 3
+Agents
+bdbuilder · makes live pagesRadu's
+plplanner · campaign plansAna's
+People
+AAna · tag to notify
+Ana: @bSend
+What a turn looks like to the people in the chat. The people bar lists people first, then agents, and a dot marks the agent that's running. The working agent shows its live step and its own Stop. A hand-off it started waits in a queue line that counts the hops. The @ picker lists agents with their job line and owner, then people. Picking an agent calls it, and picking a person only notifies them.
+6 · Rules
+Trust and cost
+An agent acts as the person who brought it, with their sign-ins, files, skills and budget, just as pi acts as the chat owner today. Tokens never cross into another person's namespace.
+Only the owner's messages are instructions. Messages from other people and from other agents are information the agent may answer, never changes to its setup, memory or skills.
+Agents can't give each other permission. A turn started by another agent runs read-only tools only. Any write waits for the owner's approval, which the owner gives in their own view and nobody else in the chat can give.
+Each agent has a list of servers allowed in shared chats. By default that means servers without per-user sign-in, and no private files. The owner can widen it, with a warning that the chat will see what the agent reads.
+Pages and sandboxes are per agent session. Any agent can read a page posted in the chat; only its author publishes new versions, after the same browser check as today.
+Cost grows with turns, not messages. Writes cost no tokens. Each session only grows by appending, so the provider's prompt cache covers what came before. Pi compacts long sessions, and a chat_history tool searches the full log.
+When members have different access
+The person who asks decides the tools. When Ana calls her own agent, it may use all of her servers, and what she shares is her choice. When anyone else calls it, it gets only her list for shared chats, read-only. Ana's turns that touch a private server run in a fork of the agent's session for this chat, so the private results never enter the context that other people's questions reach.
+[diagram: Ana's question goes to a private fork of her agent, which may use her calendar; only its reply goes to the chat log. Radu's question goes to the shared seat, which may use only shared-chat servers. The chat log writes posted messages back into the seat.]
+Private results never enter the shared seat. Later, if Radu asks "what did Ana's calendar say earlier?", the seat only has what was posted. The hub records which servers each turn called, so the app enforces this in code, not in the prompt.
+Mockup · Ana's view, review before posting on
+Only you can see this draft · planner used calendar · private
+West's rise has no campaign behind it yet. Your calendar has the West launch planned for week 41.
+Post to chatEditDiscard
+Mockup · what everyone sees once it's posted
+plplanneragent · Ana'sWest's rise has no campaign behind it yet. The West launch is planned for week 41.
+from Ana's calendar · posted by Ana
+7 · Scaling
+When one chat object gets busy
+In phase 1 every agent of the owner runs in the one chat object, sharing its CPU, its memory (128 MB per isolate) and the hub's 16 MB read cache. They act as the same person, so sharing is safe; the risk is busy agents evicting each other's entries. Three steps, cheapest first, each taken only when measurements call for it.
+|  | Step | What changes | Cost
+| 1 · Cache shares | One cache, but each agent gets its own budget inside the 16 MB (an even split with a floor). Eviction starts with whoever is over its share, so a busy agent only pushes out its own entries. Same-owner agents still reuse each other's results. | Small change in the hub
+| 2 · Big results to R2 | A large tool result goes to a file in the owner's R2 folder, and memory and the model get a short summary, as the sandbox already does. The Cache API is not an option here: it is unavailable on workers.dev and behind Access, and KV would cost more than the reads it saves. | Small; one R2 write per big result
+| 3 · One object per agent | The phase 2 layout, used for the owner's agents too: each agent in its own Durable Object, with its own CPU, memory, cache and SQLite. The chat keeps only the log and the turn controller. It already stores just (ownerUid, agentId) and delivers by RPC, so nothing else changes. | One RPC per message per agent; no fork across agents
+CPU is rarely the limit. A run spends its time waiting on the model, so agents in one object take turns well. The CPU goes to SQLite writes per streamed chunk, already the main cost driver, and batching those helps every layout.
+When to move on: ship phase 1 with step 1 and log cache hits, evictions, memory and CPU per agent. Take step 3 when a chat regularly runs 3 or more agents at the same time, or evictions show up in those logs.
+8 · Around the chat
+Kinds of chat, and staying in the loop
+Ideas from other team assistants, reshaped for how our chats already work. Each one reuses what we have (members, @ tags, sidebar notices, fork) instead of a new system.
+Four kinds of chat
+A chat's kind sets who can see it, when agents answer, and what may leave it. It shows as a chip beside the title, and the owner can change it there.
+|  | Kind | Who sees it | When agents answer | What may leave it
+| Private | Only you | Every message | Memory notes, search, routines
+| Group | The people added | Only when called by @name or a reply | Memory notes scoped to this chat
+| On a page | Anyone who can open the linked page (artifact) can join | Only when called; the page and its current version are in context | Same as group
+| Off the record | Only the people added by hand | Only when called | Nothing: no memory notes, no search, no routine reads it, no feed previews
+Narrowing asks first. Moving a group back to private, or off the record, lists who loses access before it happens. Widening says that everyone added sees the whole history.
+"On a page" replaces comments. A dashboard's discussion is a chat linked to it, so questions about the numbers go to an agent that already has the page open.
+Off the record is enforced in code. The chat's kind travels with every write into memory and every search, and the stores refuse rows from it. It is never just a line in the prompt.
+Adding someone by tagging them
+Today people join only through an invite link. When you tag a person who isn't in the chat, the app asks right there, because adding them shows them everything said so far.
+Mockup · tagging someone who isn't in the chat
+RRadu@Maria have you seen these numbers?
+@Maria isn't in this chat. Adding them shows them everything said so far.
+Not nowNew chat with themAdd to this chat
+Mockup · after adding them
+Signups this week Group ▾RMpi
+Radu added Maria · the chat is now a group
+pi now answers only when someone calls @pi
+MMariaNot yet. @pi what changed since Monday?
+"New chat with them" starts a group with them from this point, with none of the earlier messages. Adding people directly needs a list of people you can add, so it comes with organisations; until then the card offers a copy of the invite link.
+Branch off from a message
+"Branch off" in a message's menu starts a new chat that carries the conversation up to that message, keeps the chat's kind, and links back. The original shows a quiet line that a branch exists. This keeps one question per chat without losing the context. It differs from the private fork in rule 6: a branch is a new chat object, so the log up to the message is copied, and the new agent session is filled by writes (or a summary when long), since Pi can't fork across objects.
+Staying in the loop
+Per-person sidebar actions: pin, rename, copy link, mark unread, and close, which hides the chat for you until someone tags you again. Leave removes you. Delete stays with the owner.
+Unread first: chats with unread messages are bold and move to the top, with an optional grouping by date or kind.
+Follow a page or an agent: new chats on that page, and that agent's posts, appear in your sidebar without anyone adding you.
+One feed: tags, agent posts, approvals waiting and new page versions in one list, with an Unread switch. It is the "Needs you" list from the routines page, plus everything you follow.
+Channels later: a named, long-lived group chat, open to an organisation or private, where scheduled agents post their briefs. A chat sits in at most one channel or on one page.
+Small touches
+Say what it's doing. The working line shows the agent's own short phrase for the step, next to the timer we already show: "pi · 6s · looking for this week's signups".
+Item chips in answers. Records a reply is built on show as chips that open the source item, taken from the tool results, never typed by the model.
+Long replies fold behind "Show more", so a busy group chat stays readable.
+One offered next step. An answer may end with one offer, such as "Send this to Maria every Monday?". Saying yes opens a routine draft, as on the routines page.
+The agent knows the app. A built-in skill with the app's own help lets anyone ask "what can we do in this chat?" and get an answer about kinds, branches and follows.
+A daily allowance ring beside the context ring, once usage limits exist. We count real cost rather than a fixed number of points per request.
+9 · Plan
+Three phases
+Phase 1The owner's agents
+Agent definitions in the user directory (name, avatar, job, model, effort, servers), proposed by the agent and saved off until the user turns them on, like skills.
+A roster per chat; a session per agent inside the chat object, with a table mapping agent ids to Pi's session ids.
+The aside becomes a write into every session; summonsAgent becomes a lookup in the roster; hop caps.
+Cache shares per agent, and per-agent metrics for cache, memory and CPU.
+UI: agents in the people bar and the @ picker, a working indicator and Stop per agent, the author's avatar on each message.
+Chat kinds private and group, the "add by tagging" card, branch off, close and mark unread.
+Phase 2Members bring agents
+The log and turn controller move to a Room object; every agent becomes a seat in its owner's agent object.
+Delivery by RPC, with gap repair: an agent that misses a seq pulls the range.
+Allowed servers for shared chats, owner-only approvals, a per-person rate limit on each agent.
+Chats on a page and off the record, follows and the feed.
+Phase 3Agents that speak up
+The router picks speakers when nobody is named.
+Unprompted posts behind a funnel: gates, a pause in the conversation, an interest match, then the agent may answer PASS.
+Posts from scheduled checks into the chat, with an "unprompted" marker and mute. Agents that run on a schedule or a trigger have their own page: Agents that run on their own.
+Channels where scheduled agents post.
+10 · Open questions
+To settle before phase 2
+Writes to other sessionsSettled: a session's own submit() only takes prompts, but pi's public conversation(id), reached through harness.pi(), gives any session's conversation, and that takes writes. The one catch is that the session id has to be turned into pi's conversation id ourselves, in one helper.
+One busy objectSeveral agents running at once share one chat object's CPU and its 16 MB MCP cache. Measure that in phase 1 before deciding how many agents a chat may hold (a starting cap of 6); the way out is in Scaling.
+Uneven accessProposed answer: the person asking decides the tools. When Ana calls her own agent it may use all of her servers. When anyone else calls it, only her list for shared chats. A turn of Ana's that reaches a private server runs in a fork of the seat, so only the posted reply comes back. Earlier private results then can't be pulled out later by someone else's question. Replies built on private sources carry a source chip ("from Ana's calendar"), and an optional review step lets Ana post them herself. The hub records which servers each turn called, so this is enforced in code, never left to the prompt. "Only what every member can use" is dropped: it would need every member's access to every server, and would leave agents nearly useless.
+How we'd build it on Cloudflare: Agents on Cloudflare: Tech Spec. Checked against the current chat code (shared chats, asides, summoning, members) and the bots-and-rooms design. Example names and figures are illustrations.

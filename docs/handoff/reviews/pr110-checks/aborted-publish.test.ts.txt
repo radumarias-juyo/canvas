@@ -1,0 +1,67 @@
+import { describe, expect, it } from "vitest";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { fauxAssistantMessage, fauxProvider, fauxToolCall, Type } from "@earendil-works/pi-ai";
+import { createModels } from "@earendil-works/pi-ai/models";
+import { createRegistry, defineExtension, defineTool, Harness, MemoryStorage } from "@earendil-works/pi-durable";
+import { chatTraces } from "../wt110/worker/chat-traces.ts";
+import { PUBLISH_TOOL } from "../wt110/shared/protocol.ts";
+
+const context = BACKGROUND_CONTEXT;
+
+describe("a publish in flight when its conversation is aborted", () => {
+  it("leaves only an aborted result, without the details that name the page", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let started!: () => void;
+    const running = new Promise<void>((resolve) => (started = resolve));
+    const sideEffects: string[] = [];
+    const publish = defineTool({
+      name: PUBLISH_TOOL,
+      description: "publish",
+      parameters: Type.Object({}),
+      // Ignores its signal, as publishVersion does.
+      execute: async () => {
+        started();
+        await gate;
+        sideEffects.push("P"); // onPublished
+        return { output: [{ type: "text", text: "Published artifact P" }], details: { artifactId: "P", version: 1, title: "t" } };
+      },
+    });
+    const faux = fauxProvider({ models: [{ id: "m" }] });
+    faux.setResponses([fauxAssistantMessage(fauxToolCall(PUBLISH_TOOL, {}), { stopReason: "toolUse" }), fauxAssistantMessage("done")]);
+    const models = createModels();
+    models.setProvider(faux.provider);
+    const registry = createRegistry();
+    registry.install(defineExtension({ name: "pub", tools: [publish] }));
+    const harness = await Harness.open(new MemoryStorage(), { models, registry }, context);
+    const model = faux.getModel();
+    const root = await harness.root(context, { agent: { model: { provider: model.provider, modelId: model.id } } });
+    const submission = await root.submit({ type: "input", content: "go" }, context);
+    const r = await Promise.race([running.then(() => "running"), submission.wait(context).then((x: any) => JSON.stringify(x))]);
+    console.log("race:", r);
+
+    // Stop: the abort is requested while the tool runs; it resolves only once the tool returns.
+    let abortDone = false;
+    const aborting = root.abort(context).then(() => (abortDone = true));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(abortDone).toBe(false);
+
+    // A read at this point (the fork read "to its end" and settled).
+    const before = await root.entries({ order: "ascending" } as never, 500, undefined, context);
+    const tracesBefore = chatTraces(before.items as never);
+
+    release();
+    await aborting;
+    await submission.wait(context).catch(() => undefined);
+    const after = await root.entries({ order: "ascending" } as never, 500, undefined, context);
+    const results = after.items.flatMap((e: any) => (e.model ?? []).filter((m: any) => m.role === "toolResult"));
+    console.log(JSON.stringify(results, null, 1));
+    const tracesAfter = chatTraces(after.items as never);
+
+    expect(sideEffects).toEqual(["P"]); // the publish happened
+    expect([...tracesBefore.artifacts]).toEqual([]);
+    // Even read again to the very end, nothing in the transcript names P.
+    expect([...tracesAfter.artifacts]).toEqual([]);
+    await harness.close(context);
+  });
+});

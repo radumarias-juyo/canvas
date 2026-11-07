@@ -1,0 +1,124 @@
+import type { EntryRecord } from "@earendil-works/pi-durable";
+import { describe, expect, it } from "vitest";
+import type { AgentDefinition, ChatAgentReplyData, ChatTurnData } from "../wt110/shared/agents.ts";
+import { PUBLISH_TOOL } from "../wt110/shared/protocol.ts";
+import type { McpToolInfo } from "../wt110/worker/agent/mcp.ts";
+import { AgentTurns, operationId, type TurnHost, type TurnResult } from "../wt110/worker/agents/controller.ts";
+import { ChatRoster, type RosterEntry } from "../wt110/worker/agents/roster.ts";
+import { askOf, sharedServer, turnSources } from "../wt110/worker/agents/turns.ts";
+import { memorySql } from "../wt110/test/fakes.ts";
+
+const OWNER = "radu";
+const MCP = new Map<string, McpToolInfo>([["calendar__events", { server: "calendar", readOnly: true }]]);
+const SIGNS_IN = (s: string) => s === "calendar";
+const tick = () => new Promise<void>((r) => setImmediate(r));
+const settle = async () => {
+  for (let i = 0; i < 12; i++) await tick();
+};
+
+function def(): AgentDefinition {
+  return {
+    id: "planner000000000",
+    name: "planner",
+    avatar: "pl",
+    color: "teal",
+    job: "x",
+    instructions: "x",
+    autonomy: 1,
+    origin: "user",
+    enabled: true,
+    version: 1,
+    createdAt: 0,
+    updatedAt: 0,
+    reviewBeforePosting: true,
+  } as AgentDefinition;
+}
+
+function entry(toolName: string, details: object): EntryRecord {
+  const message = { role: "toolResult", toolCallId: "c", toolName, content: [], details, isError: false, timestamp: 0 };
+  return { id: 0, conversationId: 0, kind: "pi.tool-result", model: [message] } as unknown as EntryRecord;
+}
+
+class Host implements TurnHost {
+  readonly chatOwner = OWNER;
+  readonly roster = new ChatRoster(memorySql(), () => 0);
+  readonly posts: ChatAgentReplyData[] = [];
+  readonly runs = new Map<string, { promise: Promise<TurnResult>; resolve: (r: TurnResult) => void }>();
+  readonly entries = new Map<number, EntryRecord[]>();
+  readonly turns = new AgentTurns(this);
+  agent = def();
+  #n = 0;
+  run(op: string) {
+    let run = this.runs.get(op);
+    if (!run) {
+      let resolve!: (r: TurnResult) => void;
+      const promise = new Promise<TurnResult>((y) => (resolve = y));
+      this.runs.set(op, (run = { promise, resolve }));
+    }
+    return run;
+  }
+  async definition() {
+    return this.agent;
+  }
+  async configure() {}
+  async *logSince() {
+    yield [];
+  }
+  async write() {}
+  async submit() {}
+  wait(_s: string, op: string) {
+    return this.run(op).promise;
+  }
+  async abort() {}
+  async turnEntries(_s: string, turn: number) {
+    return this.entries.get(turn) ?? [];
+  }
+  async post(reply: ChatAgentReplyData) {
+    this.posts.push(reply);
+  }
+  async tellPi() {}
+  async handToPi(_i: string, _d: ChatTurnData) {}
+  changed() {}
+  waitUntil() {}
+  async fork() {
+    return `fork-${++this.#n}`;
+  }
+  async sources(_e: RosterEntry, entries: readonly EntryRecord[]) {
+    return { ...turnSources(entries, MCP, sharedServer(this.agent, SIGNS_IN)), review: true as const };
+  }
+  seat(): never {
+    throw new Error("no seats");
+  }
+  async mayCall() {
+    return true;
+  }
+  drafted() {}
+}
+
+describe("PR110 item 3: a failed fork", () => {
+  it("is marked posted (its pages become the chat's) though review is on and it read a private server", async () => {
+    const host = new Host();
+    host.roster.add({ agentId: def().id, ownerUid: OWNER, name: "planner", session: "planner-s", avatar: "pl", color: "teal", job: "x" });
+    const [turn] = host.turns.call([def().id], {
+      calledBy: { name: "Radu", uid: OWNER },
+      ask: askOf({ name: "Radu", kind: "person", owner: true }, "@planner calendar page"),
+      byOwner: true,
+    });
+    await settle();
+    const fork = host.roster.turn(turn.id)!.session!;
+    expect(host.roster.withheld()).toEqual(new Set([fork]));
+    host.entries.set(turn.id, [
+      entry("calendar__events", { server: "calendar" }),
+      entry(PUBLISH_TOOL, { artifactId: "page1", version: 1, title: "My week" }),
+    ]);
+    // The run fails after the publish (model error, step limit, ...).
+    host.run(operationId(turn.id)).resolve({ status: "failed", reason: "model error", text: "Here is your week: board dinner Friday" });
+    await settle();
+    // Not held for review...
+    expect(host.roster.held(OWNER)).toEqual([]);
+    // ...posted with the page and partial text...
+    expect(host.posts[0]).toMatchObject({ failed: "model error", published: [expect.objectContaining({ artifactId: "page1" })], sources: ["calendar"] });
+    // ...and the fork counts as posted: page1 becomes the chat's for members (contents, page calls to calendar).
+    expect(host.roster.withheld()).toEqual(new Set());
+  });
+});
