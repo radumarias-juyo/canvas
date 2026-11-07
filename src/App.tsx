@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, 
 import { ID_PATTERN, secondSeatUid, type ChatContents } from "../shared/protocol.ts";
 import { chatFileRoute, MAX_LISTED } from "../shared/uploads.ts";
 import { isActive, type SkillInfo } from "../shared/skills.ts";
-import { errorMessage } from "../shared/util.ts";
+import { errorMessage, plural } from "../shared/util.ts";
 import { AccountMenu } from "./AccountMenu.tsx";
 import { BackToSite } from "./BackToSite.tsx";
 import { api, inSecondSeat, type ArtifactSummary, type FileInfo, type Me } from "./api.ts";
@@ -485,7 +485,7 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, showMe
                 }}
               >
                 <span className="nav-title">
-                  {noteCount === 1 ? "1 note" : `${noteCount} notes`}
+                  {plural(noteCount, "note")}
                   {confirming > 0 && <small> · {confirming} to confirm</small>}
                 </span>
                 {confirming > 0 && <UnreadDot label="Notes to confirm" />}

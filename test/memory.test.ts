@@ -45,8 +45,12 @@ function directory(kinds: Record<string, ChatKind> = { [PRIVATE]: "private", [GR
     memorySql(),
     {
       chatKind: (id) => kinds[id] ?? null,
-      chatTitle: (id) => (id in kinds ? `Chat ${id}` : null),
-      agentName: (id) => ({ [RESEARCH]: "research", [BUILDER]: "builder" })[id] ?? null,
+      chatTitles: () => new Map(Object.keys(kinds).map((id) => [id, `Chat ${id}`])),
+      agentNames: () =>
+        new Map([
+          [RESEARCH, "research"],
+          [BUILDER, "builder"],
+        ]),
       changed: () => changes++,
     },
     clock(),
@@ -294,9 +298,9 @@ describe("UserMemory", () => {
     expect(exported.map((each) => each.text)).toEqual(["Cite sources.", "Use euros."]);
 
     const to = directory({ [PRIVATE]: "private" });
-    const results = [...exported, note({ id: "00000000000f", scope: "chat", chatId: GROUP, text: "Old chat." })].map((each) =>
-      to.memory.import(each, { [RESEARCH]: BUILDER }),
-    );
+    const results = to.memory.import([...exported, note({ id: "00000000000f", scope: "chat", chatId: GROUP, text: "Old chat." })], {
+      [RESEARCH]: BUILDER,
+    });
     expect(results.map((result) => ("error" in result ? "error" : "ok"))).toEqual(["ok", "ok", "error"]);
     expect(to.memory.list()).toEqual(
       expect.arrayContaining([
@@ -305,11 +309,11 @@ describe("UserMemory", () => {
       ]),
     );
     // Imported again, nothing is added.
-    expect(exported.map((each) => to.memory.import(each, { [RESEARCH]: BUILDER }))).toEqual([
+    expect(to.memory.import(exported, { [RESEARCH]: BUILDER })).toEqual([
       expect.objectContaining({ skipped: true }),
       expect.objectContaining({ skipped: true }),
     ]);
-    expect(to.memory.import({ text: "not a note" })).toHaveProperty("error");
+    expect(to.memory.import([{ text: "not a note" }])).toEqual([expect.objectContaining({ error: expect.any(String) })]);
   });
 
   it("checks what the Memory view sends", () => {

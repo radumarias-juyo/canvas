@@ -110,11 +110,14 @@ export type NotePlace = { scope: MemoryScope; agentId?: string; chatId: string; 
 export function placeNote(writer: MemoryWriter, scope: MemoryScope, kind: MemoryKind): NotePlace {
   if (offRecord(writer.kinds)) return { error: "This chat is off the record: nothing said in it is saved." };
   if (scope === "agent" && writer.agentId === undefined) return { error: 'Only an agent saves notes for itself: use scope "user" or "chat".' };
-  const confirmed = kind === "preference" && writer.byOwner;
-  if (scope !== "chat" && !mayLeave({ what: "memory", scope: "everywhere" }, ...writer.kinds)) {
-    return { scope: "chat", ...(writer.agentId && { agentId: writer.agentId }), chatId: writer.chatId, confirmed, narrowed: true };
-  }
-  return { scope, ...(writer.agentId && { agentId: writer.agentId }), chatId: writer.chatId, confirmed };
+  const narrowed = scope !== "chat" && !mayLeave({ what: "memory", scope: "everywhere" }, ...writer.kinds);
+  return {
+    scope: narrowed ? "chat" : scope,
+    ...(writer.agentId && { agentId: writer.agentId }),
+    chatId: writer.chatId,
+    confirmed: kind === "preference" && writer.byOwner,
+    ...(narrowed && { narrowed: true as const }),
+  };
 }
 
 /** A note's text, trimmed, on one line; or why it is not one. */
@@ -126,9 +129,19 @@ export function checkNoteText(value: unknown): string | { error: string } {
   return text;
 }
 
-/** Text compared for duplicates: the same words, whatever their case and spacing. */
-export function sameText(text: string): string {
-  return text.replace(/\s+/g, " ").trim().toLowerCase();
+/** Pinned notes first, then the most used, then the newest: how the prompt and memory_recall pick among notes. */
+export function byRank(a: Pick<MemoryNote, "pinned" | "uses" | "createdAt">, b: Pick<MemoryNote, "pinned" | "uses" | "createdAt">): number {
+  return Number(b.pinned) - Number(a.pinned) || b.uses - a.uses || b.createdAt - a.createdAt;
+}
+
+/** A note no agent reads yet: learned, not confirmed, and not forgotten. */
+export function waitsForConfirm(note: Pick<MemoryNote, "confirmed" | "forgottenAt">): boolean {
+  return !note.confirmed && note.forgottenAt === undefined;
+}
+
+/** A note not forgotten. */
+export function inUse(note: Pick<MemoryNote, "forgottenAt">): boolean {
+  return note.forgottenAt === undefined;
 }
 
 /**
@@ -140,7 +153,7 @@ export function promptNotes<T extends Pick<MemoryNote, "id" | "text" | "pinned" 
   notes: readonly T[],
   budget = PROMPT_NOTES_CHARS,
 ): T[] {
-  const ranked = [...notes].sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.uses - a.uses || b.createdAt - a.createdAt);
+  const ranked = [...notes].sort(byRank);
   const kept: T[] = [];
   let size = 0;
   for (const note of ranked) {
@@ -277,7 +290,6 @@ export function isExportedNote(value: unknown): value is MemoryNote {
     (MEMORY_SCOPES as readonly unknown[]).includes(value.scope) &&
     (MEMORY_KINDS as readonly unknown[]).includes(value.kind) &&
     (value.source === "learned" || value.source === "person") &&
-    typeof checkNoteText(value.text) === "string" &&
     checkNoteText(value.text) === value.text &&
     optional("agentId", "string") &&
     optional("chatId", "string") &&
@@ -291,6 +303,3 @@ export function isExportedNote(value: unknown): value is MemoryNote {
     (value.scope !== "chat" || typeof value.chatId === "string")
   );
 }
-
-/** Memory notes as an export carries them (shared/data-export.ts): never one of a chat off the record, which none is. */
-export type ExportedNote = MemoryNote;

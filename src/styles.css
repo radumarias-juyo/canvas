@@ -1149,8 +1149,9 @@ a.mention-chip:hover { text-decoration: underline; }
 .memory-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .memory-actions > button { padding: 3px 9px; font-size: 13px; }
 .memory-edit { display: flex; flex-direction: column; gap: 8px; }
-.memory-edit textarea, .memory-form textarea { padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); font: inherit; resize: vertical; }
-.memory-edit label, .memory-form label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 13px; font-weight: 500; }
+.memory-form textarea { resize: vertical; }
+.memory-edit textarea { padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); font: inherit; resize: vertical; }
+.memory-edit label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 13px; font-weight: 500; }
 .memory-edit select, .memory-form select { max-width: 100%; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); font: inherit; }
 .memory-reach { margin-top: 28px; border-top: 1px solid var(--border); }
 .memory-reach h3 { margin: 20px 0 6px; font-size: 15px; }

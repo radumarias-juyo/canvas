@@ -1,4 +1,4 @@
-import { NOTE_ID_PATTERN, type MemoryNote } from "../shared/memory.ts";
+import type { MemoryNote } from "../shared/memory.ts";
 import { json, readJson } from "./http.ts";
 import type { UserDirectory } from "./users.ts";
 
@@ -20,16 +20,15 @@ export async function memoryRoute(request: Request, directory: DurableObjectStub
   const method = request.method;
   const answer = (result: MemoryNote | { error: string } | null) => (result && "error" in result ? json(result, 400) : json(result ?? {}));
   if (path === "/api/memory" && method === "GET") {
-    const [notes, coverage] = await Promise.all([directory.listNotes(), directory.serverCoverage()]);
-    return json({ notes, coverage });
+    return json(await directory.memoryView());
   }
   if (path === "/api/memory" && method === "POST") {
     const body = await readJson(request);
     if (!body) return json({ error: "Expected a note as JSON (content-type: application/json)." }, 400);
     return answer(await directory.addNote(body));
   }
-  const one = path.match(/^\/api\/memory\/([a-f0-9]+)(\/forget|\/restore)?$/);
-  if (!one || !NOTE_ID_PATTERN.test(one[1])) return null;
+  const one = path.match(/^\/api\/memory\/([a-f0-9]{12})(\/forget|\/restore)?$/);
+  if (!one) return null;
   const [, id, action] = one;
   if (action === "/forget" && method === "POST") return answer(await directory.forgetNote(id));
   if (action === "/restore" && method === "POST") return answer(await directory.restoreNote(id));

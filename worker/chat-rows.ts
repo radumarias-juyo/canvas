@@ -120,6 +120,12 @@ export class ChatRows {
   }
 
   /** The kind of chat `id` as this sidebar last heard it, or null for a chat it does not list. */
+  /** The names this user's own chats go by in their sidebar, by id: their own name for one, if they gave it. */
+  ownTitles(): Map<string, string> {
+    const rows = this.#sql.exec("SELECT id, COALESCE(own_title, title) AS title FROM chats").toArray();
+    return new Map(rows.map((row) => [row.id as string, row.title as string]));
+  }
+
   kindOf(id: string): ChatKind | null {
     const row = this.#sql
       .exec("SELECT kind, shared AS members FROM chats WHERE id = ? UNION ALL SELECT kind, 1 FROM shared_chats WHERE id = ?", id, id)

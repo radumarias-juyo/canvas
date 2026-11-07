@@ -19,7 +19,6 @@ export interface ImportReport {
 
 const PARALLEL = 4;
 /** Memory notes are small: a hundred go in one request. */
-const NOTES_PER_REQUEST = 100;
 const FILES = ARCHIVE.file("");
 
 /** A file the browser reads from disk, a part at a time. */
@@ -185,9 +184,7 @@ export async function importData(zip: Blob, onProgress: (progress: Progress) => 
   await attempt("Memory notes", async () => {
     const notes = manifest.account.memory ?? [];
     if (!notes.length) return;
-    const results = [];
-    for (let at = 0; at < notes.length; at += NOTES_PER_REQUEST) results.push(...(await dataApi.importNotes(notes.slice(at, at + NOTES_PER_REQUEST), agentIds)));
-    results.forEach((result, i) => {
+    (await dataApi.importNotes(notes, agentIds)).forEach((result, i) => {
       if ("error" in result) report.failed.push(`Memory note “${String(notes[i]?.text ?? "").slice(0, 40)}”: ${result.error}`);
       else report[result.skipped ? "skipped" : "imported"].notes++;
     });

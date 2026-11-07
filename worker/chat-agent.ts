@@ -356,8 +356,8 @@ export class ChatAgent extends DurableObject<Env> {
   readonly turns = new AgentTurns(this.#turnHost());
   /** The memory notes each conversation of the chat reads and saves: pi's and each agent's (worker/memory/). */
   readonly memory = new ChatMemory({
-    ownerUid: parseChatAgentName(this.ctx.id.name!).uid,
-    chatId: parseChatAgentName(this.ctx.id.name!).chatId,
+    ownerUid: this.uid,
+    chatId: this.chatId,
     kind: () => this.kinds.kind(),
     alone: () => !this.members.hasAny(),
     agentFor: (conversation) => {
@@ -2600,9 +2600,18 @@ export class ChatAgent extends DurableObject<Env> {
     return { text: ask, recent: memoAsync(() => this.#recentEntries()) };
   }
 
-  /** The owner's tools, skills, files and prompt as they are now, before an agent's turn or one handed to pi (`ask`). */
-  async #refreshForTurn(ask: string): Promise<void> {
-    await Promise.all([this.refreshMcpTools(), this.refreshSkills(this.#skillsForTurn(ask)), this.refreshFiles(), this.refreshUserPrompt()]);
+  /**
+   * The owner's tools, skills, files and prompt as they are now, and the memory notes of the conversation that takes
+   * the turn (an agent's `session`, else pi's), before an agent's turn or one handed to pi (`ask`).
+   */
+  async #refreshForTurn(ask: string, session?: string): Promise<void> {
+    await Promise.all([
+      this.refreshMcpTools(),
+      this.refreshSkills(this.#skillsForTurn(ask)),
+      this.refreshFiles(),
+      this.refreshUserPrompt(),
+      this.memory.refresh(session),
+    ]);
   }
 
   /** The entry id of turn `turn`'s input in agent session `session`, from the newest entries back; none while it is not placed. */
@@ -2666,7 +2675,7 @@ export class ChatAgent extends DurableObject<Env> {
       },
       handToPi: async (input, data) => {
         await this.#watchRuns().catch((error: unknown) => console.error("chat status:", errorMessage(error)));
-        await Promise.all([this.#refreshForTurn(input), this.memory.refresh()]);
+        await this.#refreshForTurn(input);
         // The handing turn names the input: handed again after a restart, it is placed once. Its entry says which chain
         // pi's answer is in (#piScan).
         try {
@@ -2687,7 +2696,7 @@ export class ChatAgent extends DurableObject<Env> {
    * harness offers and runs no other.
    */
   async #configureAgent(entry: RosterEntry, agent: AgentDefinition, turn: AgentTurn, conversation: (session: string) => Promise<Conversation>): Promise<void> {
-    await Promise.all([this.#refreshForTurn(turn.ask), this.memory.refresh(entry.session)]);
+    await this.#refreshForTurn(turn.ask, entry.session);
     const [session, catalog, rootAgent] = await Promise.all([
       conversation(entry.session),
       this.#catalog(),

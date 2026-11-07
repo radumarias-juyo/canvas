@@ -1,5 +1,5 @@
 import type { AgentDefinition, AgentInput, AgentOrigin } from "./agents.ts";
-import type { ExportedNote } from "./memory.ts";
+import type { MemoryNote } from "./memory.ts";
 import type { ModelSetting } from "./models.ts";
 import { ID_PATTERN, type ArtifactVersion } from "./protocol.ts";
 import type { SkillFileInfo } from "./skill-files.ts";
@@ -75,7 +75,7 @@ export interface ExportedAccount {
   /** None in an export made before agents. */
   agents?: ExportedAgent[];
   /** The memory notes (shared/memory.ts); none in an export made before them. Never one of a chat off the record. */
-  memory?: ExportedNote[];
+  memory?: MemoryNote[];
   pageValues: ExportedPageValues[];
 }
 

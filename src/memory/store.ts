@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import type { MemoryNoteView, ServerCoverage } from "../../shared/memory.ts";
+import { waitsForConfirm, type MemoryNoteView, type ServerCoverage } from "../../shared/memory.ts";
 import { errorMessage } from "../../shared/util.ts";
 import { api } from "../api.ts";
 
@@ -60,5 +60,5 @@ export function useMemory(): MemoryState {
 
 /** Notes learned in a conversation that wait for the owner's confirm. */
 export function toConfirm(notes: readonly MemoryNoteView[] | null): number {
-  return (notes ?? []).filter((note) => !note.confirmed && note.forgottenAt === undefined).length;
+  return (notes ?? []).filter(waitsForConfirm).length;
 }

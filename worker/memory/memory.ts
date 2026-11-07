@@ -2,6 +2,7 @@ import type { ChatKind } from "../../shared/chat-kinds.ts";
 import {
   checkNoteChange,
   checkNoteInput,
+  byRank,
   checkNoteText,
   isExportedNote,
   MAX_RECALLED,
@@ -24,9 +25,10 @@ import { MemoryStore } from "./store.ts";
 export interface MemoryDeps {
   /** The kind of one of the owner's own chats, as its chat object last told; null for a chat that is not theirs. */
   chatKind(chatId: string): ChatKind | null;
-  chatTitle(chatId: string): string | null;
-  /** The name of one of the owner's agents; null for none. */
-  agentName(agentId: string): string | null;
+  /** The names the owner's sidebar shows for their own chats, by id. */
+  chatTitles(): ReadonlyMap<string, string>;
+  /** The owner's agents' names, by id. */
+  agentNames(): ReadonlyMap<string, string>;
   /** The notes changed: the open sidebars read them again. */
   changed(): void;
 }
@@ -63,10 +65,12 @@ export class UserMemory {
 
   /** Every note, forgotten ones too, newest first, with its chat's title and its agent's name. */
   list(): MemoryNoteView[] {
+    const titles = this.#deps.chatTitles();
+    const names = this.#deps.agentNames();
     return this.store.list().map((note) => {
-      const chatTitle = note.chatId ? this.#deps.chatTitle(note.chatId) : null;
-      const agentName = note.agentId ? this.#deps.agentName(note.agentId) : null;
-      return { ...note, ...(chatTitle !== null && { chatTitle }), ...(agentName !== null && { agentName }) };
+      const chatTitle = note.chatId && titles.get(note.chatId);
+      const agentName = note.agentId && names.get(note.agentId);
+      return { ...note, ...(chatTitle !== undefined && { chatTitle }), ...(agentName !== undefined && { agentName }) };
     });
   }
 
@@ -84,7 +88,7 @@ export class UserMemory {
 
   /** Why a note may not go to the agent or chat it names; null when it may. */
   #target(note: { scope: MemoryScope; agentId?: string; chatId?: string }): { error: string } | null {
-    if (note.scope === "agent" && (!note.agentId || this.#deps.agentName(note.agentId) === null)) return { error: "No such agent of yours." };
+    if (note.scope === "agent" && (!note.agentId || !this.#deps.agentNames().has(note.agentId))) return { error: "No such agent of yours." };
     if (note.scope === "chat") {
       const kind = note.chatId ? this.#deps.chatKind(note.chatId) : null;
       if (kind === null) return { error: "No such chat of yours." };
@@ -112,11 +116,12 @@ export class UserMemory {
     return { notes, more: readable.length - notes.length };
   }
 
-  /** Count a read of each note: each time it enters a conversation's prompt, or a recall returns it. */
+  /**
+   * Count a read of each note: each time it enters a conversation's prompt, or a recall returns it. Only a count, which
+   * the Memory view shows when it next reads the notes: the open sidebars are not told.
+   */
   use(ids: readonly string[]): void {
-    if (!ids.length) return;
     this.store.use(ids);
-    this.#deps.changed();
   }
 
   /** The notes `reader` reads that hold every word of `query` (all of them for none), pinned and most used first. */
@@ -125,7 +130,7 @@ export class UserMemory {
     const found = this.store
       .readable(this.#checked(reader))
       .filter((note) => words.every((word) => note.text.toLowerCase().includes(word)))
-      .sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.uses - a.uses || b.createdAt - a.createdAt)
+      .sort(byRank)
       .slice(0, MAX_RECALLED);
     this.use(found.map((note) => note.id));
     return found;
@@ -139,9 +144,7 @@ export class UserMemory {
     if (!writer.byOwner) return { error: "Only the owner can have a note forgotten here; they can forget it under Memory." };
     const note = this.store.get(id);
     if (!note || !reads(this.#checked(writer), note)) return { error: `No note [${id}] is read here.` };
-    this.store.forget(id);
-    this.#deps.changed();
-    return this.store.get(id)!;
+    return this.forget(id);
   }
 
   /** The owner changes a note from the Memory view: its text, pin, a confirm, or where it goes. */
@@ -158,9 +161,10 @@ export class UserMemory {
   }
 
   forget(id: string): MemoryNote | { error: string } {
-    if (!this.store.get(id)) return { error: "No such note." };
-    if (this.store.forget(id)) this.#deps.changed();
-    return this.store.get(id)!;
+    const forgotten = this.store.forget(id);
+    if ("error" in forgotten) return forgotten;
+    if (forgotten.changed) this.#deps.changed();
+    return forgotten.note;
   }
 
   restore(id: string): MemoryNote | { error: string } {
@@ -187,18 +191,32 @@ export class UserMemory {
 
   /** The notes an export carries: all but those of a chat that is off the record now, which nothing takes out of it. */
   exported(): MemoryNote[] {
-    return this.store.list().filter((note) => note.scope !== "chat" || !note.chatId || !offRecord([this.#deps.chatKind(note.chatId)]));
+    const kinds = new Map<string, ChatKind | null>();
+    const kindOf = (chatId: string) => (kinds.has(chatId) ? kinds.get(chatId)! : kinds.set(chatId, this.#deps.chatKind(chatId)).get(chatId)!);
+    return this.store.list().filter((note) => note.scope !== "chat" || !note.chatId || !offRecord([kindOf(note.chatId)]));
   }
 
   /**
-   * A note from an export: its agent by the id it has here (`agents`, from the export's ids), its chat only when it is
-   * one of the owner's that is not off the record. A note of an agent or chat that did not come along is left out.
+   * Notes from an export, each with its result: its agent by the id it has here (`agents`, from the export's ids), its
+   * chat only when it is one of the owner's that is not off the record. A note of an agent or chat that did not come
+   * along is left out. The sidebars are told once.
    */
-  import(value: unknown, agents: Readonly<Record<string, string>> = {}): { id: string; skipped?: true } | { error: string } {
+  import(values: readonly unknown[], agents: Readonly<Record<string, string>> = {}): ({ id: string; skipped?: true } | { error: string })[] {
+    const names = this.#deps.agentNames();
+    const results = values.map((value) => this.#import(value, agents, names));
+    if (results.some((result) => "id" in result && !result.skipped)) this.#deps.changed();
+    return results;
+  }
+
+  #import(
+    value: unknown,
+    agents: Readonly<Record<string, string>>,
+    names: ReadonlyMap<string, string>,
+  ): { id: string; skipped?: true } | { error: string } {
     if (!isExportedNote(value)) return { error: "Not a memory note." };
     const agentId = value.agentId && (agents[value.agentId] ?? value.agentId);
     const note: MemoryNote = { ...value, ...(agentId && { agentId }) };
-    if (note.agentId && this.#deps.agentName(note.agentId) === null) {
+    if (note.agentId && !names.has(note.agentId)) {
       if (note.scope === "agent") return { error: "its agent was not imported" };
       delete note.agentId;
     }
@@ -208,8 +226,6 @@ export class UserMemory {
         return { error: kind === null ? "its chat was not imported" : "its chat is off the record" };
       if (kind === null) delete note.chatId;
     }
-    const result = this.store.import(note);
-    if ("id" in result && !result.skipped) this.#deps.changed();
-    return result;
+    return this.store.import(note);
   }
 }

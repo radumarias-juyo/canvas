@@ -121,10 +121,8 @@ export class UserDirectory extends DurableObject<Env> {
     this.#memory = new UserMemory(ctx.storage.sql, {
       // Only the user's own chats keep notes: one shared with them is its owner's.
       chatKind: (id) => (this.hasChat(id) ? this.#rows.kindOf(id) : null),
-      // The name the user sees in their sidebar: their own for it, if they gave one.
-      chatTitle: (id) =>
-        this.ctx.storage.sql.exec<{ title: string }>("SELECT COALESCE(own_title, title) AS title FROM chats WHERE id = ?", id).toArray()[0]?.title ?? null,
-      agentName: (id) => this.#agents.get(id)?.name ?? null,
+      chatTitles: () => this.#rows.ownTitles(),
+      agentNames: () => this.#agents.names(),
       changed: () => this.#changed("memory"),
     });
     // The files of a skill imported as a package (SkillPackageFiles as JSON).
@@ -740,11 +738,6 @@ export class UserDirectory extends DurableObject<Env> {
     return deleted ? null : { error: `No skill named "${name}".` };
   }
 
-  /** The user's memory notes, forgotten ones too, newest first (shared/memory.ts). */
-  listNotes(): MemoryNoteView[] {
-    return this.#memory.list();
-  }
-
   /** A note the user writes under Memory. */
   addNote(input: unknown): MemoryNote | { error: string } {
     return this.#memory.add(input);
@@ -791,9 +784,14 @@ export class UserDirectory extends DurableObject<Env> {
     return this.#memory.forgetFor(writer, id);
   }
 
-  /** A note from an export (UserMemory.import), with the ids the import gave the agents it brought. */
-  importNote(note: unknown, agents?: Record<string, string>): { id: string; skipped?: true } | { error: string } {
-    return this.#memory.import(note, agents);
+  /** Notes from an export (UserMemory.import), with the ids the import gave the agents it brought. */
+  importNotes(notes: readonly unknown[], agents?: Record<string, string>): ({ id: string; skipped?: true } | { error: string })[] {
+    return this.#memory.import(notes, agents);
+  }
+
+  /** What the Memory view shows: every note, and what the servers cover. */
+  memoryView(): { notes: MemoryNoteView[]; coverage: ServerCoverage[] } {
+    return { notes: this.#memory.list(), coverage: this.serverCoverage() };
   }
 
   /** What the MCP servers cover, as one of the user's chats last listed them: what Memory shows of the data agents reach. */

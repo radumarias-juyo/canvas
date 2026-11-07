@@ -1,9 +1,11 @@
 import { useEffect, useState, type FormEvent } from "react";
 import type { AgentDefinition } from "../../shared/agents.ts";
 import {
+  inUse,
   offRecord,
   MAX_NOTE_CHARS,
   scopeLabel,
+  waitsForConfirm,
   type MemoryNoteView,
   type MemoryScope,
   type NoteChange,
@@ -24,13 +26,11 @@ export interface NoteTargets {
 }
 
 /** A picker's value for a note's reader: "user", "agent:<id>" or "chat:<id>". */
-type TargetValue = string;
-
-function targetOf(note: Pick<NoteInput, "scope" | "agentId" | "chatId">): TargetValue {
+function targetOf(note: Pick<NoteInput, "scope" | "agentId" | "chatId">): string {
   return note.scope === "user" ? "user" : note.scope === "agent" ? `agent:${note.agentId}` : `chat:${note.chatId}`;
 }
 
-function scopeOf(value: TargetValue): Pick<NoteInput, "scope" | "agentId" | "chatId"> {
+function scopeOf(value: string): Pick<NoteInput, "scope" | "agentId" | "chatId"> {
   const [scope, id] = value.split(":") as [MemoryScope, string | undefined];
   return { scope, ...(scope === "agent" && { agentId: id }), ...(scope === "chat" && { chatId: id }) };
 }
@@ -41,8 +41,8 @@ function TargetPicker({
   targets,
   label,
 }: {
-  value: TargetValue;
-  onChange: (value: TargetValue) => void;
+  value: string;
+  onChange: (value: string) => void;
   targets: NoteTargets;
   label: string;
 }) {
@@ -91,7 +91,7 @@ async function act(action: () => Promise<unknown>): Promise<string | null> {
 }
 
 /** The form that adds a note, for `initial`'s reader unless the user picks another. */
-export function AddNote({ targets, initial, onDone }: { targets: NoteTargets; initial: TargetValue; onDone: () => void }) {
+export function AddNote({ targets, initial, onDone }: { targets: NoteTargets; initial: string; onDone: () => void }) {
   const [text, setText] = useState("");
   const [target, setTarget] = useState(initial);
   const [error, setError] = useState<string | null>(null);
@@ -140,7 +140,7 @@ function sourceText(note: MemoryNoteView): string {
 
 /** One note: its text, who reads it, where it came from, how often it was read, and what the user can do with it. */
 function NoteRow({ note, targets }: { note: MemoryNoteView; targets: NoteTargets }) {
-  const [editing, setEditing] = useState<{ text: string; target: TargetValue } | null>(null);
+  const [editing, setEditing] = useState<{ text: string; target: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const run = async (action: () => Promise<unknown>) => {
@@ -150,7 +150,7 @@ function NoteRow({ note, targets }: { note: MemoryNoteView; targets: NoteTargets
     setError(failed);
     return !failed;
   };
-  const forgotten = note.forgottenAt !== undefined;
+  const forgotten = !inUse(note);
   const save = async (event: FormEvent) => {
     event.preventDefault();
     if (!editing) return;
@@ -159,7 +159,7 @@ function NoteRow({ note, targets }: { note: MemoryNoteView; targets: NoteTargets
     if (editing.target !== targetOf(note)) Object.assign(change, scopeOf(editing.target));
     if (!Object.keys(change).length || (await run(() => api.changeNote(note.id, change)))) setEditing(null);
   };
-  const classes = ["memory-note", forgotten && "forgotten", !note.confirmed && !forgotten && "unconfirmed"].filter(Boolean).join(" ");
+  const classes = ["memory-note", forgotten && "forgotten", waitsForConfirm(note) && "unconfirmed"].filter(Boolean).join(" ");
   return (
     <li className={classes}>
       {editing ? (
@@ -194,7 +194,7 @@ function NoteRow({ note, targets }: { note: MemoryNoteView; targets: NoteTargets
       )}
       <div className="memory-meta">
         <span className="pill">{scopeLabel(note)}</span>
-        {!note.confirmed && !forgotten && <span className="pill review">To confirm</span>}
+        {waitsForConfirm(note) && <span className="pill review">To confirm</span>}
         {note.kind === "fact" && note.confirmed && <span className="pill">Fact</span>}
         <span>{sourceText(note)}</span>
         <span>{note.uses ? `Read ${plural(note.uses, "time")}` : "Not read yet"}</span>
@@ -262,15 +262,13 @@ function NoteRow({ note, targets }: { note: MemoryNoteView; targets: NoteTargets
  */
 export function NoteList({ notes, targets, empty }: { notes: readonly MemoryNoteView[]; targets: NoteTargets; empty: string }) {
   const [showForgotten, setShowForgotten] = useState(false);
-  const inUse = notes
-    .filter((note) => note.forgottenAt === undefined)
-    .sort((a, b) => Number(a.confirmed) - Number(b.confirmed) || Number(b.pinned) - Number(a.pinned));
-  const forgotten = notes.filter((note) => note.forgottenAt !== undefined);
+  const used = notes.filter(inUse).sort((a, b) => Number(a.confirmed) - Number(b.confirmed) || Number(b.pinned) - Number(a.pinned));
+  const forgotten = notes.filter((note) => !inUse(note));
   return (
     <>
-      {inUse.length ? (
+      {used.length ? (
         <ul className="memory-list">
-          {inUse.map((note) => (
+          {used.map((note) => (
             <NoteRow key={note.id} note={note} targets={targets} />
           ))}
         </ul>

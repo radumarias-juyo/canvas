@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { waitsForConfirm } from "../../shared/memory.ts";
 import type { ChatSummary } from "../../shared/protocol.ts";
 import { useAgents } from "../agents/store.ts";
 import { MenuButton } from "../layout.tsx";
@@ -26,9 +27,7 @@ export function MemoryView({ chats, onMenu }: { chats: readonly ChatSummary[]; o
   const [filter, setFilter] = useState<Filter>("all");
   const targets: NoteTargets = { agents: agents ?? [], chats };
   const waiting = toConfirm(notes);
-  const shown = (notes ?? []).filter((note) =>
-    filter === "all" ? true : filter === "confirm" ? !note.confirmed && note.forgottenAt === undefined : note.scope === filter,
-  );
+  const shown = (notes ?? []).filter((note) => (filter === "all" ? true : filter === "confirm" ? waitsForConfirm(note) : note.scope === filter));
   return (
     <div className="skills memory">
       <header className="skills-head">

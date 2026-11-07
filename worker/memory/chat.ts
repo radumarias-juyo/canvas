@@ -99,8 +99,8 @@ export class ChatMemory {
       const fresh = notes.map((note) => note.id).filter((id) => !shown.has(id));
       if (fresh.length) {
         this.#deps.kv.put(SHOWN_KEY + key, [...shown, ...fresh].slice(-MAX_SHOWN));
-        // Only a count: a failure leaves the section as it is.
-        await Promise.resolve(directory.useNotes(fresh)).catch((error: unknown) => console.error("memory uses:", errorMessage(error)));
+        // Only a count, not waited for: a failure leaves the section as it is.
+        void Promise.resolve(directory.useNotes(fresh)).catch((error: unknown) => console.error("memory uses:", errorMessage(error)));
       }
       return memorySection(reader, notes, more);
     } catch (error) {

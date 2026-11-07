@@ -3,7 +3,6 @@ import {
   NOTE_ID_PATTERN,
   MAX_UNCONFIRMED,
   reads,
-  sameText,
   type MemoryKind,
   type MemoryNote,
   type MemoryReader,
@@ -90,9 +89,40 @@ export class MemoryStore {
     return this.#rows("WHERE id = ?", id)[0] ?? null;
   }
 
-  /** The notes `reader` reads (see `reads`), oldest first. */
+  /** The notes `reader` reads (see `reads`, which has the last word), oldest first. */
   readable(reader: MemoryReader): MemoryNote[] {
-    return this.#rows("WHERE forgotten_at IS NULL AND confirmed = 1 ORDER BY created_at, id").filter((note) => reads(reader, note));
+    // Only the rows that may be read: the user's own, the reader's agent's, the reader's chat's.
+    return this.#rows(
+      "WHERE forgotten_at IS NULL AND confirmed = 1 AND (scope = 'user' OR (scope = 'agent' AND agent_id = ?) OR (scope = 'chat' AND chat_id = ?)) ORDER BY created_at, id",
+      reader.agentId ?? "",
+      reader.chatId,
+    ).filter((note) => reads(reader, note));
+  }
+
+  #count(where = ""): number {
+    return this.#sql.exec(`SELECT COUNT(*) AS n FROM memory ${where}`).toArray()[0].n as number;
+  }
+
+  /** Write `note` as a new row. */
+  #insert(note: MemoryNote): void {
+    this.#sql.exec(
+      `INSERT INTO memory (id, scope, agent_id, chat_id, text, source, kind, learned_by, uses, pinned, confirmed, forgotten_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      note.id,
+      note.scope,
+      note.agentId ?? null,
+      note.chatId ?? null,
+      note.text,
+      note.source,
+      note.kind,
+      note.learnedBy ?? null,
+      note.uses,
+      note.pinned ? 1 : 0,
+      note.confirmed ? 1 : 0,
+      note.forgottenAt ?? null,
+      note.createdAt,
+      note.updatedAt,
+    );
   }
 
   /**
@@ -106,44 +136,23 @@ export class MemoryStore {
         this.#sql.exec("UPDATE memory SET confirmed = 1, updated_at = ? WHERE id = ?", this.#at(same), same.id);
       return { note: this.get(same.id)!, existed: true };
     }
-    const count = (where: string) => this.#sql.exec(`SELECT COUNT(*) AS n FROM memory ${where}`).toArray()[0].n as number;
-    if (count("") >= MAX_NOTES) return { error: `There are ${MAX_NOTES} memory notes, the most there can be; the owner deletes some first.` };
-    if (!fields.confirmed && count("WHERE confirmed = 0 AND forgotten_at IS NULL") >= MAX_UNCONFIRMED) {
+    if (this.#count() >= MAX_NOTES) return { error: `There are ${MAX_NOTES} memory notes, the most there can be; the owner deletes some first.` };
+    if (!fields.confirmed && this.#count("WHERE confirmed = 0 AND forgotten_at IS NULL") >= MAX_UNCONFIRMED) {
       return { error: `${MAX_UNCONFIRMED} notes already wait for the owner to confirm them; ask them to look at Memory first.` };
     }
-    const id = randomHex(6);
     const now = this.#now();
-    this.#sql.exec(
-      `INSERT INTO memory (id, scope, agent_id, chat_id, text, source, kind, learned_by, uses, pinned, confirmed, forgotten_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, NULL, ?, ?)`,
-      id,
-      fields.scope,
-      fields.agentId ?? null,
-      fields.chatId ?? null,
-      fields.text,
-      fields.source,
-      fields.kind,
-      fields.learnedBy ?? null,
-      fields.pinned ? 1 : 0,
-      fields.confirmed ? 1 : 0,
-      now,
-      now,
-    );
-    return { note: this.get(id)! };
+    const note: MemoryNote = { ...fields, id: randomHex(6), uses: 0, pinned: fields.pinned === true, createdAt: now, updatedAt: now };
+    this.#insert(note);
+    return { note: this.get(note.id)! };
   }
 
   /** A note in use with the same text for the same reader as `fields`. */
   #same(fields: Pick<NoteFields, "scope" | "agentId" | "chatId" | "text">): MemoryNote | undefined {
-    const target =
-      fields.scope === "agent"
-        ? ["agent_id = ?", fields.agentId ?? ""]
-        : fields.scope === "chat"
-          ? ["chat_id = ?", fields.chatId ?? ""]
-          : ["1 = ?", 1];
-    const text = sameText(fields.text);
-    return this.#rows(`WHERE scope = ? AND ${target[0]} AND forgotten_at IS NULL`, fields.scope, target[1]).find(
-      (note) => sameText(note.text) === text,
-    );
+    // Every note's text is already on one line (checkNoteText): only its case can differ. lower() on both sides, so
+    // both are lowered by the same rule.
+    const reader = fields.scope === "agent" ? "AND agent_id = ?" : fields.scope === "chat" ? "AND chat_id = ?" : "";
+    const target = fields.scope === "agent" ? [fields.agentId ?? ""] : fields.scope === "chat" ? [fields.chatId ?? ""] : [];
+    return this.#rows(`WHERE scope = ? ${reader} AND forgotten_at IS NULL AND lower(text) = lower(?)`, fields.scope, ...target, fields.text)[0];
   }
 
   /** A time strictly after `note`'s last change, so a view can tell the two apart. */
@@ -153,7 +162,8 @@ export class MemoryStore {
 
   /** Count one read of each note `ids` names. */
   use(ids: readonly string[]): void {
-    for (const id of new Set(ids)) this.#sql.exec("UPDATE memory SET uses = uses + 1 WHERE id = ?", id);
+    const unique = [...new Set(ids)];
+    if (unique.length) this.#sql.exec(`UPDATE memory SET uses = uses + 1 WHERE id IN (${unique.map(() => "?").join(", ")})`, ...unique);
   }
 
   /**
@@ -187,12 +197,14 @@ export class MemoryStore {
     return this.get(id)!;
   }
 
-  /** Forget a note: no agent reads it from now on, until it is brought back. False for no such note, or one forgotten. */
-  forget(id: string): boolean {
+  /** Forget a note: no agent reads it from now on, until it is brought back. `changed`: it was in use until now. */
+  forget(id: string): { note: MemoryNote; changed: boolean } | { error: string } {
     const note = this.get(id);
-    if (!note || note.forgottenAt !== undefined) return false;
+    if (!note) return { error: "No such note." };
+    if (note.forgottenAt !== undefined) return { note, changed: false };
     const at = this.#at(note);
-    return this.#sql.exec("UPDATE memory SET forgotten_at = ?, updated_at = ? WHERE id = ?", at, at, id).rowsWritten > 0;
+    this.#sql.exec("UPDATE memory SET forgotten_at = ?, updated_at = ? WHERE id = ?", at, at, id);
+    return { note: { ...note, forgottenAt: at, updatedAt: at }, changed: true };
   }
 
   /** Bring a forgotten note back. Refused when another note in use says the same for the same reader. */
@@ -229,28 +241,10 @@ export class MemoryStore {
   import(note: MemoryNote): { id: string; skipped?: true } | { error: string } {
     const same = note.forgottenAt === undefined ? this.#same(note) : undefined;
     if (same) return { id: same.id, skipped: true };
-    if ((this.#sql.exec("SELECT COUNT(*) AS n FROM memory").toArray()[0].n as number) >= MAX_NOTES)
-      return { error: `There are ${MAX_NOTES} memory notes already.` };
+    if (this.#count() >= MAX_NOTES) return { error: `There are ${MAX_NOTES} memory notes already.` };
     const id = NOTE_ID_PATTERN.test(note.id) && !this.get(note.id) ? note.id : randomHex(6);
     const now = this.#now();
-    this.#sql.exec(
-      `INSERT INTO memory (id, scope, agent_id, chat_id, text, source, kind, learned_by, uses, pinned, confirmed, forgotten_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      id,
-      note.scope,
-      note.agentId ?? null,
-      note.chatId ?? null,
-      note.text,
-      note.source,
-      note.kind,
-      note.learnedBy ?? null,
-      Math.max(0, Math.floor(note.uses) || 0),
-      note.pinned ? 1 : 0,
-      note.confirmed ? 1 : 0,
-      note.forgottenAt ?? null,
-      note.createdAt || now,
-      now,
-    );
+    this.#insert({ ...note, id, uses: Math.max(0, Math.floor(note.uses) || 0), createdAt: note.createdAt || now, updatedAt: now });
     return { id };
   }
 }
