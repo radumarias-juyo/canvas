@@ -4,6 +4,7 @@ import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { CHAT_AGENT_KIND, type AgentDraftView, type ChatAgentReplyData, type ChatAgentView } from "../../shared/agents.ts";
 import type { ChatAgentSettingsView } from "../../shared/agent-settings.ts";
 import type { AttachmentInput } from "../../shared/attachments.ts";
+import type { MakeKind } from "../../shared/make.ts";
 import type { MentionInput } from "../../shared/mentions.ts";
 import { modelKey } from "../../shared/models.ts";
 import {
@@ -506,13 +507,14 @@ export function useChat(chatId: string) {
     return true;
   }, []);
   const prompt = useCallback(
-    (text: string, attachments?: AttachmentInput[], mentions?: MentionInput[], replyTo?: number) =>
+    (text: string, attachments?: AttachmentInput[], mentions?: MentionInput[], replyTo?: number, make?: MakeKind) =>
       send({
         type: "prompt",
         text,
         ...(attachments?.length && { attachments }),
         ...(mentions?.length && { mentions }),
         ...(replyTo !== undefined && { replyTo }),
+        ...(make && { make }),
       }),
     [send],
   );

@@ -11,6 +11,7 @@ import type { AgentColor, AgentDraftView, ChatAgentView } from "./agents.ts";
 import type { ChatKind, ChatPage } from "./chat-kinds.ts";
 import type { ChatAgentSettingsView } from "./agent-settings.ts";
 import type { PendingActionView } from "./limits.ts";
+import type { MakeKind } from "./make.ts";
 
 export type McpErrorCode =
   | "server_not_connected"
@@ -591,7 +592,7 @@ export type ChatClientMessage =
   // `attachments` were uploaded first, with POST /api/chats/:id/attachments; `text` may then be empty.
   // `mentions` are the files, artifacts and people picked with "@" whose text is still in `text`.
   // `replyTo` is the transcript entry of the message it answers: a person's message, or one of the agent's replies.
-  | { type: "prompt"; text: string; attachments?: AttachmentInput[]; mentions?: MentionInput[]; replyTo?: number }
+  | { type: "prompt"; text: string; attachments?: AttachmentInput[]; mentions?: MentionInput[]; replyTo?: number; make?: MakeKind }
   // The owner's Yes to the next step that the reply `entry` offers (shared/offers.ts): the chat writes the reply, and
   // the turn it starts may only read and draft the routine.
   | { type: "offer_yes"; entry: number }
