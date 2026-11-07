@@ -7,6 +7,7 @@ import type { ArtifactMeta } from "../../../shared/protocol.ts";
 import type { RunDelivery } from "../../../shared/runs.ts";
 import { errorMessage, plural } from "../../../shared/util.ts";
 import { checkDraft, publishDraft, readPageSource, writeDraft, type PublishScope } from "../../agent/publish.ts";
+import { MAX_VERSION_MESSAGE } from "../../storage/artifacts.ts";
 import { passed, type DraftSummary } from "../../storage/drafts.ts";
 import { findingsEdit } from "./report.ts";
 
@@ -79,6 +80,8 @@ export async function publishRebuilt(
 }
 
 async function publishMarked(scope: PublishScope, meta: ArtifactMeta, draftId: string, message: string, mark: string): Promise<RunDelivery> {
-  const done = await publishDraft(scope, { draftId, title: meta.title, artifactId: meta.id, message: `${message} ${mark}` });
+  // The store keeps a message's first line, cut: the mark goes on what fits, so publishedAlready still finds it.
+  const head = message.replace(/\s+/g, " ").trim().slice(0, MAX_VERSION_MESSAGE - mark.length - 1);
+  const done = await publishDraft(scope, { draftId, title: meta.title, artifactId: meta.id, message: `${head} ${mark}` });
   return published(meta, done.meta.latest);
 }

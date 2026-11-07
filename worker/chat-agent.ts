@@ -2358,7 +2358,8 @@ export class ChatAgent extends DurableObject<Env> {
 
   #reconcileHome(): void {
     const id = this.ctx.storage.kv.get<string>(HOME_AGENT_KEY);
-    if (this.#reconciled || id === undefined || !this.ctx.storage.kv.get<boolean>(HOME_RUNS_KEY)) return;
+    // Unset in a home made before the key was: checked too, once per start, as reconcile is cheap with a row set.
+    if (this.#reconciled || id === undefined || this.ctx.storage.kv.get<boolean>(HOME_RUNS_KEY) === false) return;
     this.#reconciled = true;
     this.ctx.waitUntil(this.runner.reconcile(id).catch((error: unknown) => console.error("agent alarm:", errorMessage(error))));
   }
@@ -2823,6 +2824,8 @@ export class ChatAgent extends DurableObject<Env> {
     ].join("\n\n");
     const { result } = await this.#runStep(session, prompt, operationId);
     const delivery = await publishRebuilt(scope, meta, seed.id, run.dueAt, `Snapshot, ${whenOf(agent)}`, mark);
+    // The seed is only the page as it was: left behind, each run's would push the owner's own drafts out of the chat's.
+    await (await scope.drafts()).remove(seed.id).catch((error: unknown) => console.error("draft:", errorMessage(error)));
     return delivery.status === "failed" && result.reason ? { ...delivery, detail: `${delivery.detail} (${result.reason})` } : delivery;
   }
 

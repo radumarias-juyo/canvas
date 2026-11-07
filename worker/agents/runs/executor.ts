@@ -251,17 +251,18 @@ export class RunExecutor {
   async #run({ agent, dueAt, why, test = false, watch, previous }: RunStart): Promise<RunEnd> {
     const runs = this.#host.runs;
     const when = whenOf(agent);
+    const reads = serversNamed(agent, { reads: true });
     const { run, started } = runs.begin(agent.id, dueAt, why, test, {
       when,
       ...(watch !== undefined && { watch }),
       ...(previous !== undefined && { previous }),
-      used: { skills: skillsNamed(workflowOf(agent)), servers: serversNamed(agent, { reads: true }), models: [] },
+      used: { skills: skillsNamed(workflowOf(agent)), servers: reads, models: [] },
     });
     // Ended, or waiting for a sign-in that has not come: an alarm that fires twice sends once.
     if (!started && run.status !== "running") return { status: run.status, started: false };
     this.#host.changed(agent.id);
     try {
-      const missing = await this.#host.needsSignIn(serversNamed(agent, { reads: true }));
+      const missing = await this.#host.needsSignIn(reads);
       if (missing.length) return this.#waitForSignIn(run, missing);
       const elements = await this.#elements(agent);
       const outcomes = await mapLimit(elements, RUN_CONCURRENCY, (element) => this.#item(agent, run, element, when));
@@ -491,13 +492,15 @@ export class RunExecutor {
     const failed = items.filter((item) => item.status === "failed");
     // An item stopped after a delivery step still sent it: the run sent something.
     const delivered = deliveries.some((delivery) => delivery.status === "sent" || delivery.status === "recorded");
-    const status: RunStatus = acted.length || delivered ? "sent" : failed.length ? "failed" : "not_today";
+    // And one that went out to nobody (every send failed) is no quiet day: the run failed.
+    const undelivered = deliveries.find((delivery) => delivery.status === "failed" || delivery.status === "refused");
+    const status: RunStatus = acted.length || delivered ? "sent" : failed.length || undelivered ? "failed" : "not_today";
     const first = deliveries.find((delivery) => delivery.text)?.text ?? acted.find((item) => item.text)?.text;
     const summary =
       status === "sent"
         ? firstLine(first ?? `Acted on ${acted.length} of ${items.length}.`)
         : status === "failed"
-          ? `Failed: ${failed[0].reason ?? "a step failed"}`
+          ? `Failed: ${failed[0]?.reason ?? undelivered?.detail ?? "a step failed"}`
           : `Not today: ${items[0]?.reason ?? "nothing to report"}`;
     runs.update(agent.id, run.dueAt, { status, summary });
     return status;

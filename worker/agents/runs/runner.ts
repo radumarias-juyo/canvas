@@ -243,9 +243,21 @@ export class AgentRunner {
     if (!step || !mayUseServer(agent!, step.server) || !this.#host.sharedWatch(step) || (await sourceName(step)) !== source) {
       await this.#host.unsubscribe(agentId, source).catch((error: unknown) => console.error("agent watch:", errorMessage(error)));
       if (!step) await this.apply(agentId, agent);
+      // Still a watch it may read: a row set from that Source (no longer shared, or its notice not applied yet) is set
+      // again, so the watch goes on through its own interval or its new Source rather than stopping here.
+      else if (mayUseServer(agent!, step.server)) await this.#one(() => this.#resubscribe(agentId, agent!, source));
       return null;
     }
     return this.moved(agent!, value);
+  }
+
+  /** The agent's row says it watches through the Source named `source`, which it left: set its watch again from `agent`. */
+  async #resubscribe(agentId: string, agent: AgentDefinition, source: string): Promise<void> {
+    const row = this.#row(agentId);
+    if (row?.kind !== "watch" || row.schedule_id) return;
+    if ((await sourceName((JSON.parse(row.key) as { step: LookStep }).step)) !== source) return;
+    this.#sql.exec("DELETE FROM agent_schedules WHERE agent_id = ?", agentId);
+    await this.#apply(agentId, agent);
   }
 
   /** A watch read `value`: a run when it differs from the last one and the condition holds over it (and `previous`). */
@@ -294,7 +306,6 @@ export class AgentRunner {
     const newest = new Map(waiting.map((run) => [`${run.agentId}:${run.test}`, run]));
     const skip = (run: RunRecord, why: string) =>
       this.#host.runs.update(run.agentId, run.dueAt, { status: "not_today", summary: `Skipped once you signed in: ${why}.` });
-    for (const run of waiting) if (newest.get(`${run.agentId}:${run.test}`) !== run) skip(run, "a newer run went instead");
     const agentIds = [...new Set(waiting.map((run) => run.agentId))];
     const definitions = new Map(await Promise.all(agentIds.map(async (id) => [id, await this.#host.definition(id)] as const)));
     let restarted = 0;
@@ -308,6 +319,13 @@ export class AgentRunner {
       this.#host.runs.restart(run.agentId, run.dueAt);
       restarted++;
       this.#host.waitUntil(this.executor.start(startOf(agent, run)));
+    }
+    // The older ones go as their newest did: replaced by it when it went, skipped too when the agent is off, and left
+    // waiting when its definition could not be read.
+    for (const run of waiting) {
+      const agent = definitions.get(run.agentId);
+      if (!agent || newest.get(`${run.agentId}:${run.test}`) === run) continue;
+      skip(run, !run.test && !agent.enabled ? `@${agent.name} was off` : "a newer run went instead");
     }
     for (const agentId of agentIds) this.#host.changed(agentId);
     return restarted;

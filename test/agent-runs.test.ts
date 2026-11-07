@@ -12,7 +12,7 @@ import { AgentRuns } from "../worker/agents/runs/store.ts";
 import { writeDraft, type PublishScope } from "../worker/agent/publish.ts";
 import type { CheckReport } from "../worker/artifacts/check.ts";
 import type { McpHub } from "../worker/mcp/hub.ts";
-import type { ArtifactStore } from "../worker/storage/artifacts.ts";
+import { MAX_VERSION_MESSAGE, type ArtifactStore } from "../worker/storage/artifacts.ts";
 import { ChatDrafts } from "../worker/storage/drafts.ts";
 import { FakeBucket, memorySql } from "./fakes.ts";
 
@@ -505,6 +505,18 @@ describe("watches", () => {
     expect(host.works).toHaveLength(0);
   });
 
+  it("watches on its own interval once its Source's read is no longer shared", async () => {
+    const { host, runner, definition } = home(watched("signups.today < 50"));
+    host.shared = true;
+    await runner.apply(definition.id, definition);
+    expect(host.alarms.size).toBe(0);
+    host.shared = false;
+    const source = await sourceName((definition.trigger as { step: LookStep }).step);
+    expect(await runner.sourceMoved(definition.id, { today: 40 }, source)).toBeNull();
+    expect(host.left).toEqual([source]);
+    expect(host.alarms.size).toBe(1);
+  });
+
   it("gives the steps the value that fired the watch, and the one before", async () => {
     const { host, runner, definition } = home(watched("signups.count != previous.count"));
     await runner.moved(definition, { count: 3 });
@@ -712,6 +724,14 @@ describe("a run's page step", () => {
     expect(publishedAlready(after, mark)).toMatchObject({ status: "sent", version: 4 });
     expect(publishedAlready(after, runMark(T0, "3"))).toBeNull();
     expect(published).toHaveLength(1);
+  });
+
+  it("keeps the run's mark in a long message, which the store cuts", async () => {
+    const { publishScope, messages } = scope([]);
+    const mark = runMark(T0, "0");
+    await publishFindings(publishScope, meta, "Sales are up.", `Findings, when ${"signups.count > 10 and ".repeat(20)}true`, mark);
+    expect(messages[0].length).toBeLessThanOrEqual(MAX_VERSION_MESSAGE);
+    expect(messages[0].endsWith(mark)).toBe(true);
   });
 
   it("publishes a rebuilt page's checked draft of that page only", async () => {
