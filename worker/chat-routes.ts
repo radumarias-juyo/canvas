@@ -55,6 +55,9 @@ import type { UserDirectory } from "./users.ts";
  *                                             in the chat while the owner shares it there
  *   PATCH  /api/chats/:id/agents/:agentId     (owner) {shared}: share it with the people of the chat, or stop
  *   POST   /api/chats/:id/agents/:agentId/copy  {…fields, version}: someone's own copy of the version of a shared agent
+ *   POST   /api/chats/:id/agents/:agentId/mute  {muted}: mute an agent here (anyone in the chat), or unmute it (its owner, the chat's)
+ *   PUT    /api/chats/:id/agent-settings    (owner) {router?, speakUp?, servers?, dailyTokens?}: each given replaces, null clears;
+ *                                             everyone in the chat gets the settings (ChatAgentSettingsView) over its socket
  *                                             they read (a newer one refuses), with their changes,
  *                                             saved off in their directory with copiedFrom; it runs with their sign-ins
  *   POST   /api/invites/accept                {token}: join the chat an invite link is for
@@ -96,11 +99,11 @@ export async function chatRoute(
   }
 
   const match = url.pathname.match(
-    /^\/api\/chats\/([a-z0-9]+)(?:\/(ws|invites|members|attachments|mentions|contents|deletion|seen|seat|system-prompt|agents|kind|branch)(?:\/([a-z0-9-]+)(?:\/(copy))?)?)?$/,
+    /^\/api\/chats\/([a-z0-9]+)(?:\/(ws|invites|members|attachments|mentions|contents|deletion|seen|seat|system-prompt|agent-settings|agents|kind|branch)(?:\/([a-z0-9-]+)(?:\/(copy|mute))?)?)?$/,
   );
   if (!match || !ID_PATTERN.test(match[1])) return null;
   const [, chatId, what, item, sub] = match;
-  // Only an agent's copy has a part after its item.
+  // Only an agent's copy and mute have a part after its item.
   if (sub && what !== "agents") return null;
   const isSocket = what === "ws" && !item;
   if (isSocket && request.headers.get("upgrade") !== "websocket") return json({ error: "Expected a WebSocket upgrade" }, 426);
@@ -191,6 +194,16 @@ export async function chatRoute(
     const result =
       method === "GET" ? await chat.chatSystemPrompt(person.uid) : await chat.setChatSystemPrompt(person, (await readJson<{ text?: unknown }>(request))?.text);
     return "status" in result ? answer(result) : json(result satisfies ChatSystemPrompt);
+  }
+  if (what === "agent-settings" && !item && method === "PUT") {
+    // The settings reach the app over its socket; this changes them.
+    const result = await chat.setAgentSettings(person, await readJson(request));
+    return "status" in result ? answer(result) : json(result);
+  }
+  if (what === "agents" && sub === "mute") {
+    if (method !== "POST" || !item) return null;
+    const muted = await chat.setAgentMuted(person, item, (await readJson<{ muted?: unknown }>(request))?.muted);
+    return "status" in muted ? answer(muted) : json(muted);
   }
   if (what === "agents" && sub === "copy") {
     if (method !== "POST" || !item) return null;

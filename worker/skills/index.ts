@@ -2,6 +2,7 @@ import { parse, stringify } from "yaml";
 import { errorMessage } from "../../shared/util.ts";
 import { checkSkill, SkillError, splitTools, type SkillInput } from "../../shared/skills.ts";
 import analyzeFiles from "./builtin/analyze-files/SKILL.md?raw";
+import appHelp from "./builtin/app-help/SKILL.md?raw";
 import exploreMcpServer from "./builtin/explore-mcp-server/SKILL.md?raw";
 import reviseArtifact from "./builtin/revise-artifact/SKILL.md?raw";
 
@@ -34,7 +35,7 @@ export function formatSkillFile(skill: SkillInput): string {
 }
 
 /** The skills every user has, unless they turn one off. They ship as SKILL.md files in ./builtin/. */
-export const BUILTIN_SKILLS: readonly SkillInput[] = [analyzeFiles, reviseArtifact, exploreMcpServer].map(parseSkillFile);
+export const BUILTIN_SKILLS: readonly SkillInput[] = [analyzeFiles, reviseArtifact, exploreMcpServer, appHelp].map(parseSkillFile);
 
 export function builtinSkill(name: string): SkillInput | undefined {
   return BUILTIN_SKILLS.find((skill) => skill.name === name);

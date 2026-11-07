@@ -27,6 +27,8 @@ export interface RosterEntry {
   off: boolean;
   /** Its owner shares it with the people of the chat: they may open it read-only and copy it. */
   shared: boolean;
+  /** Someone in the chat muted it here: it posts nothing unprompted in this chat. */
+  muted: boolean;
 }
 
 /** What everyone sees of an agent, as its definition says now. */
@@ -48,8 +50,8 @@ export interface AgentTurn extends AgentTurnView {
   /** The run its reply carries, so a reply to that continues the run too. */
   run?: RunRef;
   /**
-   * In a chain no person started (a run's hand-over): it and its hand-offs never hand pi a turn, which would run with
-   * the owner's full tools; pi only reads their replies.
+   * In a chain no person started (a run's hand-over), or one a Yes to an offer started (it may only draft): it and its
+   * hand-offs never hand pi a turn, which would run with the owner's full tools; pi only reads their replies.
    */
   unattended?: true;
 }
@@ -82,6 +84,7 @@ type RosterRow = {
   mirrored: number;
   off: number;
   shared: number;
+  muted: number;
 };
 
 type TurnRow = {
@@ -118,6 +121,7 @@ function entryOf(row: RosterRow): RosterEntry {
     mirrored: row.mirrored,
     off: row.off === 1,
     shared: row.shared === 1,
+    muted: row.muted === 1,
   };
 }
 
@@ -166,7 +170,7 @@ export class ChatRoster {
       CREATE TABLE IF NOT EXISTS chat_agents (
         agent_id TEXT PRIMARY KEY, owner_uid TEXT NOT NULL, name TEXT NOT NULL UNIQUE, session TEXT NOT NULL, added_at INTEGER NOT NULL,
         avatar TEXT NOT NULL, color TEXT NOT NULL, job TEXT NOT NULL, mirrored INTEGER NOT NULL DEFAULT -1, off INTEGER NOT NULL DEFAULT 0,
-        shared INTEGER NOT NULL DEFAULT 0
+        shared INTEGER NOT NULL DEFAULT 0, muted INTEGER NOT NULL DEFAULT 0
       );
       CREATE TABLE IF NOT EXISTS chat_agent_turns (
         id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT NOT NULL, status TEXT NOT NULL, hop INTEGER NOT NULL, called_by TEXT NOT NULL,
@@ -181,9 +185,10 @@ export class ChatRoster {
     const columns = sql.exec("SELECT name FROM pragma_table_info('chat_agent_turns')").toArray();
     for (const name of ["session", "run"]) if (!columns.some((column) => column.name === name)) sql.exec(`ALTER TABLE chat_agent_turns ADD COLUMN ${name} TEXT`);
     if (!columns.some((column) => column.name === "unattended")) sql.exec("ALTER TABLE chat_agent_turns ADD COLUMN unattended INTEGER NOT NULL DEFAULT 0");
-    // A roster made before agents could be shared lacks the column.
-    if (!sql.exec("SELECT 1 FROM pragma_table_info('chat_agents') WHERE name = 'shared'").toArray().length) {
-      sql.exec("ALTER TABLE chat_agents ADD COLUMN shared INTEGER NOT NULL DEFAULT 0");
+    // A roster made before agents could be shared, or muted, lacks the column.
+    const agentColumns = sql.exec("SELECT name FROM pragma_table_info('chat_agents')").toArray();
+    for (const name of ["shared", "muted"]) {
+      if (!agentColumns.some((column) => column.name === name)) sql.exec(`ALTER TABLE chat_agents ADD COLUMN ${name} INTEGER NOT NULL DEFAULT 0`);
     }
   }
 
@@ -285,6 +290,11 @@ export class ChatRoster {
   /** Share an agent with the people of the chat, or stop; false when it is not here. */
   setShared(agentId: string, shared: boolean): boolean {
     return this.#sql.exec("UPDATE chat_agents SET shared = ? WHERE agent_id = ?", shared ? 1 : 0, agentId).rowsWritten > 0;
+  }
+
+  /** Mute an agent in this chat, or unmute it; false when it is not here. */
+  setMuted(agentId: string, muted: boolean): boolean {
+    return this.#sql.exec("UPDATE chat_agents SET muted = ? WHERE agent_id = ?", muted ? 1 : 0, agentId).rowsWritten > 0;
   }
 
   /** The newest log entry an agent's session has read: what it is sent next starts after it. */
@@ -459,6 +469,28 @@ export class ChatRoster {
     return rows.map(turnOf);
   }
 
+  /**
+   * An agent's turns nobody asked for (calledBy.unprompted), those it passed included: how many were queued since
+   * `since`, and when the last one was, whenever that was (a cooldown runs across midnight). What the funnel's daily cap
+   * and cooldown read (worker/agents/funnel.ts).
+   */
+  unpromptedSince(agentId: string, since: number): { count: number; lastAt?: number } {
+    const row = this.#sql
+      .exec(
+        `SELECT SUM(created_at >= ?) AS n, MAX(created_at) AS last FROM chat_agent_turns
+         WHERE agent_id = ? AND json_extract(called_by, '$.unprompted') IS NOT NULL`,
+        since,
+        agentId,
+      )
+      .toArray()[0] as { n: number | null; last: number | null };
+    return { count: row.n ?? 0, ...(row.last !== null && { lastAt: row.last }) };
+  }
+
+  /** Whether an agent has a turn waiting or running. */
+  isBusy(agentId: string): boolean {
+    return this.#sql.exec(`SELECT 1 FROM chat_agent_turns WHERE agent_id = ? AND ${OPEN} LIMIT 1`, agentId).toArray().length > 0;
+  }
+
   /** The newest turns, for a runs list. */
   recentTurns(agentId: string, limit = 20): AgentTurn[] {
     return this.#turns("agent_id = ? ORDER BY id DESC LIMIT ?", agentId, limit);
@@ -501,6 +533,7 @@ export class ChatRoster {
         ...(last && { ended: { turn: last.id, status: last.status as NonNullable<ChatAgentView["ended"]>["status"] } }),
         ...(entry.off && { off: true as const }),
         ...(entry.shared && { shared: true as const }),
+        ...(entry.muted && { muted: true as const }),
       };
     });
   }

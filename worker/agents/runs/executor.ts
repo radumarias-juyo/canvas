@@ -90,8 +90,11 @@ export interface ActContext {
 /** What the executor needs from the chat object it runs in. Tests pass fakes. */
 export interface RunHost {
   readonly runs: AgentRuns;
-  /** A read-only call through the hub, as the agent's owner: the result's payload. Throws SignInNeeded for a sign-in. */
-  read(server: string, tool: string, input: StepInput): Promise<Value>;
+  /**
+   * A read-only call through the hub, as the agent's owner: the result's payload. Throws SignInNeeded for a sign-in.
+   * `agentId`: whose share of the hub's read cache it is kept in.
+   */
+  read(server: string, tool: string, input: StepInput, agentId?: string): Promise<Value>;
   /**
    * A call that changes data, as this run's: through the write gate, at the agent's level and within its rules (run,
    * held for the owner, or refused). Throws SignInNeeded for a sign-in.
@@ -116,8 +119,11 @@ export interface RunHost {
   waitUntil(promise: Promise<unknown>): void;
   /** A fresh pi session for one item. */
   newSession(): Promise<string>;
-  /** Set an item's session up for its work steps: the agent's model (or `model`), instructions and read tools. */
-  configure(session: string, agent: AgentDefinition, model?: string): Promise<void>;
+  /**
+   * Set an item's session up for its work steps: the agent's model (or `model`), instructions and read tools. `dueAt`
+   * names the run, which the session's model calls are tagged with.
+   */
+  configure(session: string, agent: AgentDefinition, model?: string, dueAt?: number): Promise<void>;
   /** A passive write into a session: context, no model call. Placed once per `requestId`. */
   write(session: string, text: string, requestId: string): Promise<void>;
   /** A work step's prompt into its session, waited for. Placed once per `operationId`. */
@@ -126,6 +132,13 @@ export interface RunHost {
   deliver(request: DeliveryRequest): Promise<RunDelivery>;
   /** The run's list changed, or a run started or ended: tell the people looking. */
   changed(agentId: string): void;
+  /**
+   * Why a run may not spend today (its owner's daily spend cap is reached), its owner told once a day; undefined when it
+   * may. Not asked for a test, which its owner started by hand.
+   */
+  spendCap?(): Promise<string | undefined>;
+  /** A run went through its items and ended (not one stopped before, by the cap or a sign-in): for the metrics. */
+  ended?(run: { agentId: string; dueAt: number; status: RunStatus; items: number; wallMs: number }): void;
 }
 
 /** A run to start. */
@@ -220,7 +233,7 @@ export function itemKey(element: Value, index: number): { key: string; label: st
  */
 export async function readFor(host: Pick<RunHost, "read">, agent: AgentDefinition, step: Pick<LookStep, "server" | "tool">, input: StepInput): Promise<Value> {
   if (!mayUseServer(agent, step.server)) throw new Error(`${step.server} is not one of the servers @${agent.name} may use.`);
-  return host.read(step.server, step.tool, input);
+  return host.read(step.server, step.tool, input, agent.id);
 }
 
 /** What a work step's prompt says around the step's own words. */
@@ -326,7 +339,14 @@ export class RunExecutor {
         // Ended without going: an older run that waited for this one (its sign-in came meanwhile) goes now, on its own.
         // A run that went on from its row (resumed after a restart, or restarted after a sign-in) counts too.
         const went = end.status !== "failed" && end.status !== "needs_sign_in";
-        if (!went) this.#host.waitUntil(this.#wakeDeferred(agent.id, dueAt, test));
+        // A failed wake leaves the older run to resume() or a sign-in: this run's end stands.
+        if (!went) {
+          try {
+            this.#wakeDeferred(agent.id, dueAt, test);
+          } catch (error) {
+            console.error("runs: waking a run that waited failed:", errorMessage(error));
+          }
+        }
         return end;
       });
     this.#active.set(key, run);
@@ -340,12 +360,20 @@ export class RunExecutor {
     // Ended, or waiting for a sign-in that has not come: an alarm that fires twice sends once.
     if (!started && run.status !== "running") return { status: run.status, started: false };
     this.#host.changed(agent.id);
+    const startedAt = Date.now();
     try {
       // Here, not before the start, so it waits for a pass of the run still going (start).
       const stopped = started ? null : this.#stopIfChanged(agent, run);
       if (stopped) return { status: stopped, started };
-      const servers = runServers(agent, await this.#host.signInServers());
-      let missing = await this.#host.needsSignIn(servers);
+      const [capped, needed] = await Promise.all([
+        run.test ? undefined : this.#host.spendCap?.(),
+        this.#host.signInServers().then((signedIn) => this.#host.needsSignIn(runServers(agent, signedIn))),
+      ]);
+      if (capped) {
+        runs.update(agent.id, dueAt, { status: "failed", summary: capped });
+        return { status: "failed", started };
+      }
+      let missing = needed;
       // Read before the check for a late sign-in below, so no await comes between that and the wait.
       const off = missing.length ? await this.#turnedOffNow(agent, run) : null;
       if (off) return off;
@@ -355,6 +383,9 @@ export class RunExecutor {
       if (again.length) {
         const still = new Set(await this.#host.needsSignIn(again));
         missing = missing.filter((server) => !again.includes(server) || still.has(server));
+        // Turned off during that check: asked again, as before it.
+        const off = missing.length ? await this.#turnedOffNow(agent, run) : null;
+        if (off) return off;
       }
       if (missing.length) return this.#waitForSignIn(agent, run, missing);
       const elements = await this.#elements(agent, run);
@@ -382,6 +413,7 @@ export class RunExecutor {
         return { status: "waiting", started };
       }
       const status = await this.#finish(current, runs.get(agent.id, dueAt)!, outcomes);
+      this.#host.ended?.({ agentId: agent.id, dueAt, status, items: outcomes.length, wallMs: Date.now() - startedAt });
       return { status, started };
     } catch (error) {
       if (error instanceof SignInNeeded) return (await this.#turnedOffNow(agent, run)) ?? this.#waitForSignIn(agent, run, [error.server]);
@@ -426,18 +458,37 @@ export class RunExecutor {
     return status;
   }
 
-  /** The newest older run that waited for the one at `dueAt` to end: it starts again, unless its agent is off. */
-  async #wakeDeferred(agentId: string, dueAt: number, test: boolean): Promise<void> {
+  /**
+   * The run at `dueAt` ended without going: the newest older run released for it (its sign-in came while this one went)
+   * goes now. Its row is running again before any await, so a reset meanwhile leaves it to resume(), not waiting with
+   * nothing to wake it. It does not go when it is replaced: by a newer run that went, or by this one, which waits itself
+   * (only the newest goes); a newer one still going wakes it in turn.
+   */
+  #wakeDeferred(agentId: string, dueAt: number, test: boolean): void {
     const runs = this.#host.runs;
     const deferred = runs.deferred(agentId, dueAt, test);
     if (!deferred) return;
-    try {
-      const agent = await this.#host.definition(agentId);
-      if (!agent || (!test && !agent.enabled) || !runs.restart(agentId, deferred.dueAt)) return;
-      await this.start(startOf(agent, deferred));
-    } catch (error) {
-      console.error("runs: starting a run that waited failed:", errorMessage(error));
+    const newer = runs.newer(agentId, deferred.dueAt, test);
+    if (newer === "going") return;
+    const waits = runs.get(agentId, dueAt)?.status === "needs_sign_in";
+    if (newer === "went" || waits) {
+      runs.skipWaiting(agentId, deferred.dueAt, `Skipped: a newer run ${newer === "went" ? "went" : "waits"} instead.`);
+      this.#host.changed(agentId);
+      return;
     }
+    if (!runs.restart(agentId, deferred.dueAt)) return;
+    this.#host.changed(agentId);
+    this.#host.waitUntil(
+      (async () => {
+        const agent = await this.#host.definition(agentId);
+        if (!agent || (!test && !agent.enabled)) {
+          const summary = agent ? turnedOff(agent) : "Failed: the agent was deleted.";
+          runs.update(agentId, deferred.dueAt, { status: agent ? "not_today" : "failed", summary });
+          return;
+        }
+        await this.start(startOf(agent, { ...deferred, status: "running" }));
+      })().catch((error: unknown) => console.error("runs: starting a run that waited failed (resume() goes on with it):", errorMessage(error))),
+    );
   }
 
   /**
@@ -605,7 +656,7 @@ export class RunExecutor {
         case "work": {
           const model = step.model ?? state.agent.model;
           if (state.configured !== (model ?? "")) {
-            await this.#host.configure(state.session, state.agent, step.model);
+            await this.#host.configure(state.session, state.agent, step.model, state.run.dueAt);
             state.configured = model ?? "";
           }
           const result = await this.#host.work(state.session, workPrompt(step, state.when, state.element), `${opId(state)}:work:${key}`);

@@ -57,6 +57,7 @@ import {
   AUTO_MODEL,
   COMPACTION,
   compactionOverrides,
+  AGENT_ROUTER_LEDGER_PREFIX,
   HINT_LEDGER_PREFIX,
   isAuto,
   modelKey,
@@ -163,7 +164,7 @@ import {
   type SharedAgentView,
   type StepInput,
 } from "../shared/agents.ts";
-import { AgentTurns, sessionOf, type TurnHost } from "./agents/controller.ts";
+import { AgentTurns, sessionOf, type PiChain, type TurnHost, type TurnOutcome } from "./agents/controller.ts";
 import { isTurnEntry, TurnFilter } from "./agents/live.ts";
 import { ChatRoster, type AgentTurn, type RosterEntry } from "./agents/roster.ts";
 import { actedOf, jsonOf, missedDecisions, reportOf, SignInNeeded, whenOf, type ActContext, type ActResult, type DeliveryRequest } from "./agents/runs/executor.ts";
@@ -186,14 +187,19 @@ import {
   askOf,
   assistantText,
   attachedNote,
+  draftTools,
   MAX_ASK_CHARS,
   messageAskKey,
+  isPiConversation,
+  piBusy,
   piLogEntry,
   runTools,
   speakersFor,
 } from "./agents/turns.ts";
+import { entryOffer, OFFER_YES } from "../shared/offers.ts";
 import {
   answersEveryMessage,
+  CHAT_BUDGET_KIND,
   CHAT_CONTEXT_KIND,
   CHAT_EVENT_KIND,
   isChatKind,
@@ -201,6 +207,7 @@ import {
   legacyKind,
   losesAccess,
   type BranchedFrom,
+  type ChatBudgetData,
   type ChatEventData,
   type ChatKind,
   type ChatRef,
@@ -210,6 +217,22 @@ import {
 import { branchKind, ChatKindState, KIND_KV, MAX_BRANCHES, planKindChange } from "./chat-kind.ts";
 import { branchContext, branchCopies, summaryFor } from "./branch.ts";
 import { newId } from "./storage/index.ts";
+import {
+  agentRouterOn,
+  AgentSettingsError,
+  budgetDay,
+  chatAllowsServer,
+  checkAgentSettings,
+  type ChatAgentSettings,
+  type ChatAgentSettingsView,
+} from "../shared/agent-settings.ts";
+import { agentRouterId, agentRouterModel, AGENT_ROUTE_MS, piPicks, routeAgents, routesAgents } from "./agents/router.ts";
+import { answered, embedder, FOLLOW_UP_AFTER_MS, looksLikeAsk, PAUSE_MS } from "./agents/funnel.ts";
+import { SpeakUp, type FunnelEvent } from "./agents/speak-up.ts";
+import { ChatSpend, meterExtension, type Spent } from "./agents/spend.ts";
+import { Metrics } from "./metrics.ts";
+import { checklistExtension } from "./agent/checklist.ts";
+import { CHAT_CHECKLIST_KIND, checklistEntry, type ChecklistAuthor, type ChecklistInput } from "../shared/checklist.ts";
 
 /** Artifacts from the owner's other chats one chat remembers as named with "@" (see ChatAgent.#broughtIn). */
 const MAX_BROUGHT_IN = 200;
@@ -275,6 +298,10 @@ const RUNNING_WHEN_PICKED = "a reply started while the router picked, so the mes
 const PROGRESS = { partialIntervalMs: STREAM_STEP_MS, outputIntervalMs: STREAM_STEP_MS };
 /** The chat's status as the sidebars last heard it, in this object's storage: after a restart, whether a run may be going. */
 const STATUS_KEY = "status";
+/** Set while pi's tools are only those of a Yes to an offer (draftTools), until its run is over (#piTools). */
+const DRAFTING_KEY = "drafting";
+/** Why a Yes to pi's offer is refused while pi works: its tools change for the whole run (#piTools). */
+const PI_BUSY_FOR_YES = "pi is still working: say yes once it is done.";
 /** Set once the owner's sidebar heard whether this chat has members: chats shared before it kept that tell it once. */
 const SHARED_TOLD_KEY = "sharedTold";
 /** Set while the chat is on Auto: a router picks the model and effort for each message that starts a run. */
@@ -286,7 +313,31 @@ const SHOWN_SKILLS_KEY = "skillsShown";
 /** The artifacts of the owner's other chats this one brought in (see #broughtIn). */
 const BROUGHT_IN_KEY = "broughtIn";
 /** The settings of a chat its export carries, beside its tables (worker/chat-dump.ts), its own system prompt among them. */
-const EXPORTED_KV = [AUTO_KEY, SHOWN_SKILLS_KEY, BROUGHT_IN_KEY, SYSTEM_PROMPT_KEY, ...KIND_KV];
+/** The chat's agent settings (shared/agent-settings.ts). */
+const AGENT_SETTINGS_KEY = "agentSettings";
+/** The newest person's message a pause check waits behind (its sentAt), and whether a check is scheduled. */
+const PAUSE_KEY = "speakUpPause";
+/** The questions nobody answered yet, oldest first, and whether a follow-up check is scheduled. */
+const ASKS_KEY = "openAsks";
+/** Open questions a chat keeps, at most: the oldest go first. */
+const MAX_OPEN_ASKS = 20;
+/** How long an owner's spend gathers before it goes to their directory in one write. */
+const OWNER_SPEND_MS = 2_000;
+/** The day the owner was last told their runs stopped at the spend cap, and the day the chat's budget ran out. */
+const CAP_TOLD_KEY = "spendCapTold";
+const BUDGET_TOLD_KEY = "budgetTold";
+const EXPORTED_KV = [AUTO_KEY, SHOWN_SKILLS_KEY, BROUGHT_IN_KEY, SYSTEM_PROMPT_KEY, AGENT_SETTINGS_KEY, ...KIND_KV];
+
+/** The pause check's state: the newest person's message it waits behind, how often it waited on work, and whether it is set. */
+type PauseState = { after: number; tries: number; armed: boolean };
+/** The questions nobody answered yet, and whether the follow-up check is set. */
+type OpenAsks = { asks: { uid: string; name: string; text: string; sentAt: number }[]; armed: boolean };
+/** A pause check waits again while pi or an agent works, this many times at most. */
+const MAX_PAUSE_TRIES = 5;
+/** Which session posted a checklist (by its id): only that session may update it. */
+const CHECKLIST_KEY = "checklist:";
+/** The sessions whose model calls one turn's metrics add up, at most. */
+const MAX_TURN_SPEND = 200;
 /** Set once the sidebars of everyone in a chat shared before they remembered people have met (#meetOnce). */
 const PEOPLE_TOLD_KEY = "peopleTold";
 /** How much of a long chat a branch reads to copy, in pages of 200 entries, newest first. */
@@ -303,7 +354,7 @@ const IMPORTED_KEY = "imported";
  * within the chain's cap. Set when the first agent joins, so pi's earlier answers start nothing.
  */
 const PI_SCAN_KEY = "piScan";
-type PiScan = { through: number; chain?: { hop: number; root: number } };
+type PiScan = { through: number; chain?: PiChain };
 /**
  * Set on an agent's home conversation: the agent whose own chat this is (the owner's directory marks the chat with
  * it too). There the agent is on the roster and answers every message that calls nobody else; its runs run here.
@@ -328,6 +379,8 @@ type RecentEntries = () => Promise<readonly EntryRecord[] | undefined>;
 interface SkillsFor {
   text: string;
   recent: RecentEntries;
+  /** False: no classifier call (nothing paid for), only the skills the chat was shown, as the message would start it. */
+  pick?: boolean;
 }
 
 /** Which entries of a conversation to read, as Conversation.entries takes it. */
@@ -375,6 +428,16 @@ interface ArtifactCall {
 export class ChatAgent extends DurableObject<Env> {
   readonly hub = new McpHub(mcpServers(this.env), (server) => this.#connect(server));
   readonly storage = new Storage(this.env);
+  /** The agents' metrics (worker/metrics.ts): a no-op without the METRICS binding. */
+  readonly metrics = new Metrics(this.env.METRICS, { uid: this.uid, chatId: this.chatId });
+  /** What the chat's model calls cost today, its daily budget, and AI Gateway's tags (worker/agents/spend.ts). */
+  readonly spend = new ChatSpend({
+    kv: this.ctx.storage.kv,
+    uid: this.uid,
+    chatId: this.chatId,
+    budget: () => this.#agentSettings().dailyTokens,
+    spent: (spent) => this.#spent(spent),
+  });
   /** Gemini's thought signatures, read off its answers by the AI binding below and put back on its next requests. */
   readonly gemini = new GeminiCompat();
   /** Keeps the chat's Claude prompt cache from expiring between its calls (cache-warmer.ts). */
@@ -419,6 +482,28 @@ export class ChatAgent extends DurableObject<Env> {
   /** The chat's agents besides pi, each in a session of its own, and their turns (worker/agents/). */
   readonly roster = new ChatRoster(this.ctx.storage.sql);
   readonly turns = new AgentTurns(this.#turnHost());
+  /** The router that picks agents for a message naming nobody (AGENT_ROUTER_MODEL); undefined: none picks. */
+  readonly #agentRouter = agentRouterModel(this.env.AGENT_ROUTER_MODEL);
+  /** Agents that speak up (worker/agents/speak-up.ts). */
+  readonly speakUp = new SpeakUp({
+    roster: this.roster,
+    settings: () => this.#agentSettings(),
+    definition: async (entry) => this.#inThisChat(await this.#index(entry.ownerUid).getAgent(entry.agentId)),
+    budgetLeft: () => this.spend.refusal() === undefined,
+    spendLeft: async (ownerUid) => (await this.#runsCapped(ownerUid)) === undefined,
+    embedder: embedder(this.env.AI as unknown as ModelRunner, this.env.INTEREST_MODEL ?? ""),
+    give: (agentId, request) => {
+      this.turns.call([agentId], request);
+    },
+    observe: (event: FunnelEvent) => this.metrics.funnel({ ...event, stage: event.refusal ? `${event.stage}:${event.refusal}` : event.stage }),
+    now: () => Date.now(),
+  });
+  /** The spend not yet sent to each payer's directory, by uid (#spent). */
+  readonly #ownerSpend = new Map<string, { calls: number; tokens: number; cost: number }>();
+  /** What each session's model calls came to since its turn started, for the turn's metrics: tokens, dollars, tool calls. */
+  readonly #turnSpend = new Map<string, { tokens: number; costUsd: number; toolCalls: number }>();
+  /** What each run's model calls came to so far (by its tag, "<agentId>:<dueAt>"), for the run's metrics. */
+  readonly #runSpend = new Map<string, number>();
   /** The memory notes each conversation of the chat reads and saves: pi's and each agent's (worker/memory/). */
   readonly memory = new ChatMemory({
     ownerUid: this.uid,
@@ -445,8 +530,10 @@ export class ChatAgent extends DurableObject<Env> {
     queued: (ids) => this.queued(ids),
     incoming: () => this.incoming(),
     prompt: (text, author, attachments, mentions, replyTo) => this.prompt(text, author, attachments, mentions, replyTo),
+    takeOffer: (author, entry) => this.takeOffer(author, entry),
     abort: (by, agent) => this.abort(by, agent),
     agents: () => this.agentViews(),
+    agentSettings: () => this.#settingsView(),
     runningAgents: () => this.roster.runningSessions(),
     agentEvents: (session) => this.harness.session(session).events(),
     turnInputId: (session, turn) => this.#turnInputId(session, turn),
@@ -470,6 +557,9 @@ export class ChatAgent extends DurableObject<Env> {
       run: (payload: RunAlarm) => this.#onAlarm(() => this.runner.fired(payload)),
       watch: (payload: WatchAlarm) => this.#onAlarm(() => this.runner.watchTick(payload)),
       expire: (payload: { id: string }) => this.#onAlarm(() => this.#expireAction(payload.id)),
+      // Agents that speak up (worker/agents/speak-up.ts): after a pause in the chat, and once a question waited long.
+      pause: () => this.#onAlarm(() => this.#afterPause()),
+      followUp: () => this.#onAlarm(() => this.#followUps()),
       // Resumes the runs cut off (cheap when they are going here already: a run goes once), and takes the interval down
       // once none is going. onStart does the same on a cold wake, but an object that stayed up would not retry otherwise.
       resume: () => {
@@ -532,6 +622,8 @@ export class ChatAgent extends DurableObject<Env> {
   readonly #hinter: CallHinter | undefined = callHinter(this.env.AI as unknown as ModelRunner, this.env.CALL_HINT_MODEL);
   /** See #place. */
   #placing: Promise<void> = Promise.resolve();
+  /** How many times #piTools changed pi's tools: a tool pick read before a change is made again (#prompt). */
+  #piToolsChanges = 0;
   /** The deployment's tool picker (TOOL_PICK_MODEL); undefined: every MCP tool is offered with every message. */
   readonly #toolPicker = toolPicker(this.env.TOOL_PICK_MODEL);
   /** tool_search, which loads a deferred MCP tool the picker left out: installed while the MCP tools are deferred. */
@@ -564,6 +656,7 @@ export class ChatAgent extends DurableObject<Env> {
         this.#checkBrowser.withPage((page) => checkPage(page, input, this.#checkBridge(input.manifest)), { timeoutMs: CHECK_MS, signal }),
       chatArtifacts: () => this.#directory.listChatArtifacts(this.chatId),
       drafts: memoAsync(() => this.storage.chatDrafts(this.uid, this.chatId)),
+      toolResults: memoAsync(() => this.storage.toolResults(this.uid, this.chatId)),
       skillSets: (names) => this.#skillSets(names),
       readSkillFile: (skill, set, path) => this.#readSkillSetFile(skill, set, path),
       skillFolders: (names, maxBytes) => this.#skillFolders(names, maxBytes),
@@ -591,6 +684,14 @@ export class ChatAgent extends DurableObject<Env> {
     this.registry.install(agentsExtension(scope));
     if (env.SANDBOX_ENABLED === "true") this.registry.install(sandboxExtension(scope));
     this.registry.install(systemPromptExtension(() => this.#systemPrompts()));
+    // Which session each model request is for, for its tags and its count (worker/agents/spend.ts).
+    this.registry.install(meterExtension(this.spend));
+    // A big ask's plan, as one card that edits in place (worker/agent/checklist.ts).
+    this.registry.install(
+      checklistExtension({ postChecklist: (conversation, checklist, requestId) => this.#postChecklist(conversation, checklist, requestId) }),
+    );
+    // The read cache's hits and evictions, per agent.
+    this.hub.observe(this.metrics);
     this.registry.install(memoryExtension(this.memory.host()));
   }
 
@@ -601,7 +702,7 @@ export class ChatAgent extends DurableObject<Env> {
    */
   #memoryAgent(conversation: string): MemoryAgent | null {
     // pi's own conversation is no agent's, whatever a run's rows hold.
-    if (conversation === String(ROOT_CONVERSATION_ID)) return null;
+    if (isPiConversation(conversation)) return null;
     const entries = this.roster.list();
     const running = this.roster.allRunning();
     const turn = running.find((each) => {
@@ -828,9 +929,9 @@ export class ChatAgent extends DurableObject<Env> {
     return routed.pick;
   }
 
-  /** Whether a reply is running or a message waits for one, by pi's own queue. */
+  /** Whether a reply is running or a message waits for one, by pi's own queue: its conversation's, not the agents' sessions'. */
   async #replying(): Promise<boolean> {
-    return (await (await this.harness.pi()).inspect(BACKGROUND_CONTEXT)).submissions.length > 0;
+    return piBusy((await (await this.harness.pi()).inspect(BACKGROUND_CONTEXT)).submissions);
   }
 
   /** The picker's id of the model `agent` runs on. */
@@ -876,9 +977,7 @@ export class ChatAgent extends DurableObject<Env> {
       const picked = await pickTools(this.env.AI, picker, { message, history, tools }, AbortSignal.timeout(TOOL_PICK_MS));
       const id = pickerId(picker);
       // Paid for whether or not the pick is used. Only a record, off the prompt's path: a failure is logged.
-      void root
-        .commit((tx) => recordSpend(tx, root.id, `${TOOL_PICK_LEDGER_PREFIX}${id}`, picked.usage), BACKGROUND_CONTEXT)
-        .catch((error: unknown) => console.error("tool pick spend:", errorMessage(error)));
+      this.#sideSpend(`${TOOL_PICK_LEDGER_PREFIX}${id}`, picked.usage, "tool pick");
       return { tools: picked.tools, of: tools.length, picker: routerSpend(id, picked.usage, Date.now() - asked), ms: Date.now() - started };
     } catch (error) {
       console.error("tool pick:", errorMessage(error));
@@ -916,7 +1015,8 @@ export class ChatAgent extends DurableObject<Env> {
   /** pi-ai's models as the chat calls them: a model that cannot be called is marked for every chat (markFailing), so Auto leaves it out. */
   #models(): Models {
     const source = catalogSource(this.env, this.storage.models);
-    return withFailuresReported(piModels(this.ai.provider, this.gemini), (id, error) => this.ctx.waitUntil(markFailing(source, id, error)));
+    // Metered: each call counted for the chat's day and its owner's, tagged for AI Gateway, refused past the budget.
+    return this.spend.models(withFailuresReported(piModels(this.ai.provider, this.gemini), (id, error) => this.ctx.waitUntil(markFailing(source, id, error))));
   }
 
   /** The chat's one conversation. PiHarness has made it by the time pi() resolves. */
@@ -1014,9 +1114,10 @@ export class ChatAgent extends DurableObject<Env> {
         const answered = saved === undefined && (!message || ((await message.recent())?.some(({ kind }) => kind === "pi.assistant") ?? true));
         shown = new Set(answered ? listed.filter(isActive).map(({ name }) => name) : (saved ?? []));
         const waiting = listed.filter((skill) => isActive(skill) && !shown!.has(skill.name));
-        if (message && waiting.length) for (const name of await this.#pickSkills(classifier, message.text, message.recent, waiting)) shown.add(name);
+        const picking = message !== undefined && message.pick !== false && waiting.length > 0;
+        if (picking) for (const name of await this.#pickSkills(classifier, message.text, message.recent, waiting)) shown.add(name);
         // Not into a chat deleted meanwhile.
-        if ((saved === undefined || (message && waiting.length)) && !this.#gone) this.ctx.storage.kv.put(SHOWN_SKILLS_KEY, [...shown]);
+        if ((saved === undefined || picking) && !this.#gone) this.ctx.storage.kv.put(SHOWN_SKILLS_KEY, [...shown]);
       }
       const source = skillSource(listed, version, shown, {
         read: (skill, path) => this.#readSkillFile(skill, path),
@@ -1086,11 +1187,7 @@ export class ChatAgent extends DurableObject<Env> {
     const history = routeHistory((await recent()) ?? []);
     const pick = await classifier.pick({ message, history, skills: waiting });
     if (pick.errors.length) console.error("skills pick:", pick.errors.join("; "));
-    if (pick.usage.totalTokens > 0 || pick.usage.cost.total > 0) {
-      void this.#root()
-        .then((root) => root.commit((tx) => recordSpend(tx, root.id, `${SKILLS_LEDGER_PREFIX}${classifier.id}`, pick.usage), BACKGROUND_CONTEXT))
-        .catch((error: unknown) => console.error("skills spend:", errorMessage(error)));
-    }
+    if (pick.usage.totalTokens > 0 || pick.usage.cost.total > 0) this.#sideSpend(`${SKILLS_LEDGER_PREFIX}${classifier.id}`, pick.usage, "skills");
     return pick.add;
   }
 
@@ -1273,7 +1370,10 @@ export class ChatAgent extends DurableObject<Env> {
     // Everything the extension is built from: a server's new tool list, or a new reason it is unavailable, reinstalls it.
     const installed = JSON.stringify([deferred, [...catalog], [...unavailable]]);
     if (installed !== this.#mcp.key) {
-      const { extension, listing, toolInfo } = mcpExtension(this.hub, catalog, unavailable, () => this.discoverMcp(), { deferred });
+      const { extension, listing, toolInfo } = mcpExtension(this.hub, catalog, unavailable, () => this.discoverMcp(), {
+        deferred,
+        spill: (tool, text) => this.#spill(tool, text),
+      });
       this.registry.install(extension);
       this.#mcpTools = toolInfo;
       if (deferred) this.registry.install(this.#toolSearch);
@@ -1389,17 +1489,83 @@ export class ChatAgent extends DurableObject<Env> {
     attachments: readonly AttachmentInput[] = [],
     mentionInputs: readonly MentionInput[] = [],
     replyTo?: number,
+    drafts = false,
   ): Promise<void> {
     // When it came in: the refreshes and copies below can take seconds. Never the same as another's, which would make
     // two messages of one person, sent in the same millisecond, one incoming message (incomingKey).
     const sentAt = (this.#lastSentAt = Math.max(Date.now(), this.#lastSentAt + 1));
     let placed = false;
     try {
-      placed = await this.#prompt(text, author, attachments, mentionInputs, replyTo, sentAt);
+      placed = await this.#prompt(text, author, attachments, mentionInputs, replyTo, sentAt, drafts);
     } finally {
       const key = incomingKey({ uid: author.uid, sentAt });
       if (this.#incoming.delete(key)) this.sockets.broadcast({ type: "incoming", incoming: this.incoming(), ...(placed && { placed: key }) });
     }
+  }
+
+  /**
+   * The owner's Yes to the next step the reply `entryId` offers (shared/offers.ts): a reply to it the chat writes
+   * (OFFER_YES, never the offer's words as the owner's), whose turn may only read and draft the routine (draftTools).
+   * pi's tools change for its whole run, so not while it works on another (#piTools refuses it then).
+   */
+  async takeOffer(author: Person, entryId: unknown): Promise<void> {
+    if (author.uid !== this.uid) throw new Error("Only the chat's owner answers an offer.");
+    const entry = await this.#entryAt(entryId);
+    // The offer as the app shows it (entryOffer), so Yes is taken only where it is offered.
+    if (!entry || entryOffer(entry) === undefined) throw new Error("That message offers no next step.");
+    await this.prompt(OFFER_YES, author, [], [], entry.id, true);
+  }
+
+  /**
+   * pi's tools for the run a message starts: only reading and drafting for a Yes to its offer (draftTools), else all of
+   * them again. A message that joins a Yes's run gets what that run has: the tools come back once it is over. Called
+   * only inside #place, and only between runs (#replying, never the lagging run watch): a Yes refused while pi works.
+   */
+  async #piTools(drafts: boolean): Promise<void> {
+    // A Yes always sets the draft tools, whatever the mark says; only a restore goes by it.
+    if (!drafts && !this.#drafting()) return;
+    if (await this.#replying()) {
+      if (drafts) throw new Error(PI_BUSY_FOR_YES);
+      return;
+    }
+    const root = await this.#root();
+    this.#piToolsChanges++;
+    if (drafts) {
+      // Marked first: a change that fails halfway (or lands though its call failed) is undone with the next message.
+      // A restore of tools that were never narrowed only sets them as they are; a Yes sets them again whatever the mark.
+      this.ctx.storage.kv.put(DRAFTING_KEY, true);
+      await root.configure({ tools: this.#installedTools((names) => draftTools(names, this.#mcpTools, {})) }, BACKGROUND_CONTEXT);
+    } else {
+      // Cleared only once it is undone: a failed restore is tried again.
+      await root.configure({ tools: null }, BACKGROUND_CONTEXT);
+      this.ctx.storage.kv.delete(DRAFTING_KEY);
+    }
+  }
+
+  /** Whether pi's tools may still be a Yes's narrowed ones (#piTools). */
+  #drafting(): boolean {
+    return this.ctx.storage.kv.get<boolean>(DRAFTING_KEY) === true;
+  }
+
+  /** pi's tools back after a Yes, in turn with the messages going in: once a run or turn is over. Never throws. */
+  #restorePiTools(): Promise<void> {
+    if (!this.#drafting()) return Promise.resolve();
+    return this.#place(() => this.#tryRestorePiTools());
+  }
+
+  /** #piTools(false), whose failure is logged, never thrown: pi stays on the narrowed tools, and the mark has it tried again. */
+  #tryRestorePiTools(): Promise<void> {
+    return this.#piTools(false).catch((error: unknown) => console.error("pi tools:", errorMessage(error)));
+  }
+
+  /** The installed tools `allowed` keeps of them, by name, in install order. */
+  #installedTools(allowed: (installed: readonly string[]) => readonly string[]) {
+    const installed = this.registry
+      .snapshot()
+      .tools()
+      .map(({ tool }) => tool);
+    const keep = new Set(allowed(installed.map((tool) => tool.name)));
+    return installed.filter((tool) => keep.has(tool.name));
   }
 
   /** The messages the chat is getting ready to put in, oldest first (see IncomingMessage). */
@@ -1429,6 +1595,7 @@ export class ChatAgent extends DurableObject<Env> {
     mentionInputs: readonly MentionInput[],
     replyTo: number | undefined,
     sentAt: number,
+    drafts: boolean,
   ): Promise<boolean> {
     this.#requireInChat(author);
     const shared = this.members.hasAny();
@@ -1445,8 +1612,9 @@ export class ChatAgent extends DurableObject<Env> {
     // In an agent's home conversation, a message that calls nobody else is the agent's, not pi's: while the chat's kind
     // answers every message. With members in it, only a summons or a reply runs an agent, as in any other chat.
     const home = everyMessage ? this.#homeSpeaker() : undefined;
+    const roster = this.roster.list();
     const speakersOf = (named: readonly Mention[] = []) => {
-      const called = speakersFor(text, this.roster.list(), repliesTo, named);
+      const called = speakersFor(text, roster, repliesTo, named);
       if (!called.length && home !== undefined && !summonsAgent(text, named) && !repliesToAgent) called.push(home);
       return called;
     };
@@ -1464,11 +1632,30 @@ export class ChatAgent extends DurableObject<Env> {
     ]).then(([given, copied]) => [...given, ...copied]);
     // On Auto, the router picks the model while the rest gets ready. Its pick is used only if the message is a prompt.
     const images = attachments.filter((attachment) => attachment.image).length;
-    // What the router, the skill classifier and the tool picker read of the conversation: read once for all, and only if one asks.
-    const recent = calling ? memoAsync(() => this.#recentEntries()) : undefined;
+    // What the routers, the skill classifier and the tool picker read of the conversation: read once for all, and only if one asks.
+    const recentOnce = memoAsync(() => this.#recentEntries());
+    // Past the chat's daily budget pi's call is refused: nothing to pick for it either (picks are paid for and counted).
+    const underBudget = this.spend.refusal() === undefined;
+    // A message that names nobody, in a chat whose router is on: the router may pick agents of the roster for it, while
+    // the rest gets ready. Its pick is used only if the mentions name nobody either.
+    const agentRouter = this.#agentRouter;
+    const routes =
+      agentRouter !== undefined &&
+      routesAgents({
+        routerOn: agentRouterOn(this.#agentSettings(), this.kinds.kind()),
+        addressed: callsAgents || repliesTo !== undefined || repliesToAgent || home !== undefined || summonsAgent(text),
+        tagsPerson: mentionInputs.some((input) => input.kind === "person"),
+        anyOn: roster.some((entry) => !entry.off),
+        underBudget,
+      });
+    const agentPicking = routes ? this.#pickAgents(agentRouter, roster, text, everyMessage, recentOnce) : undefined;
+    // Pi's paid picks wait for that pick (capped at AGENT_ROUTE_MS): a message it hands to agents is not pi's (piPicks).
+    // The free work goes ahead meanwhile.
+    const picks = Promise.resolve(agentPicking ?? []).then((picked) => piPicks({ calling, underBudget, handedOn: picked.length > 0 }));
     // A new chat is put on Auto as it opens (startingSetting), which its first message may come before: wait for that.
-    const onAuto = recent && (this.#auto() || ((await this.harness.pi()) && this.#auto()));
-    const routing = onAuto ? this.#route(text, images, attachments.length + own.length - images, recent) : undefined;
+    const onAuto = calling && underBudget && (this.#auto() || ((await this.harness.pi()) && this.#auto()));
+    const otherFiles = attachments.length + own.length - images;
+    const routing = onAuto ? picks.then((picking) => (picking ? this.#route(text, images, otherFiles, recentOnce) : undefined)) : undefined;
     this.#announce({
       uid: author.uid,
       name: author.name,
@@ -1485,11 +1672,10 @@ export class ChatAgent extends DurableObject<Env> {
     // Picked (or not): the rest may still take a while, and should not say the router is still at it.
     void routing?.then(() => this.#picked(incomingKey({ uid: author.uid, sentAt })));
     // The tool picker reads the tools the refresh installs, while the rest gets ready. Used only if the message is a prompt.
-    const tooling = recent
-      ? this.refreshMcpTools()
-          .catch(() => {})
-          .then(() => this.#pickTools(text, recent))
-      : undefined;
+    const refreshing = calling ? this.refreshMcpTools().catch(() => {}) : undefined;
+    // pi's tools as the picker reads them: changed since (a Yes's narrowing undone), the pick is made again (#place below).
+    const toolsSeen = this.#piToolsChanges;
+    const tooling = refreshing && Promise.all([picks, refreshing]).then(([picking]) => (picking ? this.#pickTools(text, recentOnce) : undefined));
     const [[attached, title], { mentions, note, broughtIn }] = await Promise.all([
       // Named after its text, or its files when it has none: for the sidebars.
       attaching.then(async (inputs) => [
@@ -1510,14 +1696,19 @@ export class ChatAgent extends DurableObject<Env> {
       ),
       // A message to the people in the chat starts no run: the agent needs its tools only when it is called.
       tooling,
-      recent && this.refreshSkills({ text: skillText, recent }),
+      // Without a pick (handed to agents, or past the budget), the skills as they are: no classifier call. Still with the
+      // message, so a chat pi has not answered yet is not taken for one shown every skill.
+      calling && picks.then((pick) => this.refreshSkills({ text: skillText, recent: recentOnce, pick })),
       calling && this.refreshFiles(),
       calling && this.refreshUserPrompt(),
       calling && this.memory.refresh(),
     ]);
     // The files they named of their own are named too: "@pi notes.md" is not a call.
     const named = [...mentions, ...own];
-    const speakers = speakersOf(named);
+    let speakers = speakersOf(named);
+    // Picked by the router: nobody named an agent, pi or a person.
+    const routed = !speakers.length && agentPicking !== undefined && !summonsAgent(text, named) && !named.some((mention) => mention.kind === "person");
+    if (routed) speakers = await agentPicking;
     const summoned = (everyMessage && !speakers.length) || repliesToAgent || summonsAgent(text, named);
     // Again after the refreshes, which can take seconds: the author may have been removed meanwhile.
     this.#requireInChat(author);
@@ -1538,22 +1729,33 @@ export class ChatAgent extends DurableObject<Env> {
         sentAt,
         ...(auto && { auto }),
         ...(tools && { tools }),
+        ...(drafts && { drafts: true as const }),
       }) satisfies ChatMessageData;
     const summon = (data: ReturnType<typeof dataWith>) =>
       this.#summon(content, !everyMessage || speakers.length ? ({ ...data, summoned: true } satisfies ChatMessageData) : data);
     // The model and the tools change before the message goes in, so the run it starts is on the picks.
     if (summoned) {
       await this.#place(async () => {
+        // A Yes only reads and drafts, also one pi answers in place of an agent no longer on the roster; any other
+        // message gets pi all its tools back. First, so what follows reads pi as it will run.
+        // A restore that fails leaves pi on a Yes's narrowed tools (the mark stays, so it is tried again): the message
+        // still goes in. A Yes that cannot narrow them is refused.
+        await (drafts ? this.#piTools(true) : this.#tryRestorePiTools());
         const now = memoAsync(() => this.#now());
         const auto = routing && (await this.#applyPick(await routing, now));
-        await summon(dataWith(auto, await this.#applyTools(await tooling, now)));
+        const picked = await tooling;
+        // The picker may have read pi's tools while a Yes still narrowed them (undone by this message, a run's end or a
+        // hand-off since): pick again, from all of them.
+        const repick = !drafts && this.#piToolsChanges !== toolsSeen && (await picks);
+        const tools = repick ? await this.#pickTools(text, recentOnce) : picked;
+        await summon(dataWith(auto, await this.#applyTools(tools, now)));
       });
     } else {
       const aside = await this.#aside(content, dataWith());
       // Meant for the agent, though it did not call it? Its author may be offered to (#hintCall). Off the prompt's path.
       // Not while the agent works: it reads the message at its next step. The classifier reads whom it replies to too.
       const hinter = this.#hinter;
-      if (hinter && !speakers.length && this.#status() !== "running" && worthAsking(text)) {
+      if (hinter && underBudget && !speakers.length && this.#status() !== "running" && worthAsking(text)) {
         const asked = [quote && replyLine(quote), text].filter(Boolean).join("\n\n");
         void this.#hintCall(hinter, aside, author, asked).catch((error) => console.error("call hint:", errorMessage(error)));
       }
@@ -1567,7 +1769,9 @@ export class ChatAgent extends DurableObject<Env> {
       const continued =
         byOwner && repliesTo && speakers.includes(repliesTo) ? await this.#continuedRun(replied).catch(() => undefined) : undefined;
       const caller = {
-        calledBy: { name: author.name, uid: author.uid },
+        calledBy: { name: author.name, uid: author.uid, ...(routed && { routed: true as const }), ...(drafts && { drafts: true as const }) },
+        // A Yes's chain never hands pi a turn: pi would run it with the owner's full tools.
+        ...(drafts && { unattended: true as const }),
         // The catch-up leaves the message out (askKey), so the input carries all of it a hand-off would.
         ask: `${askOf({ name: author.name, kind: "person", owner: byOwner }, written, MAX_ASK_CHARS)}${files}`,
         askKey: messageAskKey({ uid: author.uid, sentAt }),
@@ -1584,6 +1788,10 @@ export class ChatAgent extends DurableObject<Env> {
     void this.#touchIndexes(title, author, tags, text, `${author.uid}:${sentAt}`, { reached: speakers, sentAt }).catch((error) =>
       console.error("chat index:", errorMessage(error)),
     );
+    // Agents that speak up: after a pause in the conversation, and for a question nobody was asked to answer.
+    this.#answerAsks(author.uid);
+    this.#notePause(sentAt);
+    if (!summoned && !speakers.length) this.#noteAsk(author, sentAt, text);
     return true;
   }
 
@@ -1643,11 +1851,7 @@ export class ChatAgent extends DurableObject<Env> {
     };
     const { probability, usage } = await hinter.ask(request, AbortSignal.timeout(HINT_MS));
     // Paid for whatever it said. Only a record: a failure is logged.
-    if (usage) {
-      await root
-        .commit((tx) => recordSpend(tx, root.id, `${HINT_LEDGER_PREFIX}${hinter.id}`, usage), BACKGROUND_CONTEXT)
-        .catch((error: unknown) => console.error("call hint spend:", errorMessage(error)));
-    }
+    if (usage) this.#sideSpend(`${HINT_LEDGER_PREFIX}${hinter.id}`, usage, "call hint");
     if (probability >= HINT_THRESHOLD) this.sockets.sendTo(author.uid, { type: "callHint", entry });
   }
 
@@ -1843,6 +2047,9 @@ export class ChatAgent extends DurableObject<Env> {
     this.#settle = setTimeout(() => {
       this.#unwatchRuns();
       this.#publishStatus(status);
+      this.#quietFrom(Date.now());
+      // A Yes's run is over: pi gets all its tools back, in turn with the messages going in (a Yes's among them).
+      void this.#restorePiTools();
     }, SETTLE_MS);
   }
 
@@ -2402,6 +2609,8 @@ export class ChatAgent extends DurableObject<Env> {
         // The store checks each is this chat's: the transcript's ids come from tool results.
         ...traces.artifacts.map((id) => this.storage.artifacts.delete(id, this.uid, this.chatId)),
         toDelete.length && this.scope.files().then((store) => store.delete(toDelete)),
+        // The tool results kept whole for this chat's turns (#spill).
+        this.scope.toolResults().then((results) => results.deleteAll()),
         this.scope.drafts().then((drafts) => drafts.deleteAll()),
         this.env.SANDBOX_ENABLED === "true" && exports.Sandbox.getByName(sandboxName(this.uid, this.chatId)).destroy(),
       ]);
@@ -2691,6 +2900,358 @@ export class ChatAgent extends DurableObject<Env> {
     return { agents, turns: Object.fromEntries(agents.map((agent) => [agent.id, this.roster.recentTurns(agent.id).map(turnView)])) };
   }
 
+  /** The chat's agent settings as its owner set them (shared/agent-settings.ts). */
+  #agentSettings(): ChatAgentSettings {
+    return this.ctx.storage.kv.get<ChatAgentSettings>(AGENT_SETTINGS_KEY) ?? {};
+  }
+
+  /** The chat's agent settings as everyone in it sees them, with what the deployment can do and today's use. */
+  #settingsView(): ChatAgentSettingsView {
+    const settings = this.#agentSettings();
+    return {
+      settings,
+      router: agentRouterOn(settings, this.kinds.kind()),
+      available: { router: this.#agentRouter !== undefined, speakUp: this.speakUp.available() },
+      today: this.spend.today(),
+      servers: this.hub.servers().map((server) => server.name),
+    };
+  }
+
+  /** Tell everyone's app the agent settings. */
+  #broadcastSettings(): void {
+    this.sockets.broadcast({ type: "agentSettings", settings: this.#settingsView() });
+  }
+
+  /** (owner) Change the chat's agent settings: each field given replaces the stored one, null clears it. */
+  setAgentSettings(by: Person, input: unknown): ChatAgentSettingsView | ChatRefusal {
+    if (by.uid !== this.uid) return refuse(403, "Only the chat's owner can change its agent settings.");
+    if (this.#gone) return refuse(404, DELETED);
+    let next: ChatAgentSettings;
+    try {
+      next = checkAgentSettings(input, this.#agentSettings());
+    } catch (error) {
+      if (error instanceof AgentSettingsError) return refuse(400, error.message);
+      throw error;
+    }
+    this.ctx.storage.kv.put(AGENT_SETTINGS_KEY, next);
+    // Agents may no longer speak up here: the checks waiting find nothing to do.
+    if (!next.speakUp) {
+      this.ctx.storage.kv.delete(PAUSE_KEY);
+      this.ctx.storage.kv.delete(ASKS_KEY);
+    }
+    this.#broadcastSettings();
+    return this.#settingsView();
+  }
+
+  /**
+   * Mute an agent of the roster in this chat, or unmute it: muted, it posts nothing unprompted here. Anyone in the chat
+   * may mute an agent that spoke up unasked; only the chat's owner, or the agent's, may unmute it.
+   */
+  setAgentMuted(by: Person, agentId: string, muted: unknown): ChatAgentView[] | ChatRefusal {
+    if (this.#gone) return refuse(404, DELETED);
+    if (!this.isInChat(by.uid)) return refuse(403, "You are not in this chat.");
+    if (typeof muted !== "boolean") return refuse(400, "Expected {muted: true | false}.");
+    const entry = this.roster.get(agentId);
+    if (!entry) return refuse(404, "No such agent in this chat.");
+    if (!muted && by.uid !== this.uid && by.uid !== entry.ownerUid) return refuse(403, `Only the chat's owner or @${entry.name}'s can unmute it.`);
+    this.roster.setMuted(agentId, muted);
+    this.#broadcastAgents();
+    return this.agentViews();
+  }
+
+  /**
+   * An agent's definition as it may run in this chat: with the chat's server list (ChatAgentSettings.servers), only
+   * the servers both name. Every reader of `servers` (a turn's tools, a run's tools, its reads and watches) follows it.
+   */
+  #inThisChat(agent: AgentDefinition | null): AgentDefinition | null {
+    const settings = this.#agentSettings();
+    if (!agent || !settings.servers) return agent;
+    const here = (server: string) => chatAllowsServer(settings, server);
+    const mine = agent.servers ?? this.hub.servers().map((server) => server.name);
+    return {
+      ...agent,
+      servers: mine.filter(here),
+      ...(agent.sharedServers && { sharedServers: agent.sharedServers.filter(here) }),
+    };
+  }
+
+  /**
+   * The agents the router picks for a message that names nobody (worker/agents/router.ts), best first: at most two of
+   * the roster's agents that are on. None when it fails or is unsure, which the metrics count.
+   */
+  async #pickAgents(
+    model: NonNullable<ReturnType<typeof agentRouterModel>>,
+    roster: readonly RosterEntry[],
+    text: string,
+    piAnswers: boolean,
+    recent: RecentEntries,
+  ): Promise<string[]> {
+    const agents = roster.filter((entry) => !entry.off).map(({ agentId, name, job }) => ({ id: agentId, name, job }));
+    const started = Date.now();
+    try {
+      const request = { message: text, history: routeHistory((await recent()) ?? []), agents, piAnswers };
+      const { agents: picked, usage } = await routeAgents(this.env.AI as unknown as ModelRunner, model, request, AbortSignal.timeout(AGENT_ROUTE_MS));
+      this.metrics.router({ picked, candidates: agents.length, ms: Date.now() - started });
+      this.#sideSpend(`${AGENT_ROUTER_LEDGER_PREFIX}${agentRouterId(model)}`, usage, "agent router");
+      return picked;
+    } catch (error) {
+      const failed = errorMessage(error);
+      console.error("agent router:", failed);
+      this.metrics.router({ picked: [], candidates: agents.length, ms: Date.now() - started, failed });
+      return [];
+    }
+  }
+
+  /**
+   * A call on Workers AI beside the conversation (a router's, a picker's): in pi's ledger, and in the chat's day and its
+   * owner's, which the budgets stop at. Paid for whether or not its answer is used. Only a record: a failure is logged.
+   */
+  #sideSpend(ledger: string, usage: Usage, what: string): void {
+    this.spend.record(usage);
+    void this.#root()
+      .then((root) => root.commit((tx) => recordSpend(tx, root.id, ledger, usage), BACKGROUND_CONTEXT))
+      .catch((error: unknown) => console.error(`${what} spend:`, errorMessage(error)));
+  }
+
+  /**
+   * A person said something: once the chat has been quiet for PAUSE_MS after the newest message, an agent may speak up
+   * about it (#afterPause). One check is set at a time; when it fires early (newer messages came), it is set again.
+   */
+  #notePause(sentAt: number): void {
+    if (!this.speakUp.possible()) return;
+    const kept = this.ctx.storage.kv.get<PauseState>(PAUSE_KEY);
+    this.ctx.storage.kv.put(PAUSE_KEY, { after: Math.max(sentAt, kept?.after ?? 0), tries: 0, armed: kept?.armed ?? false } satisfies PauseState);
+    if (!kept?.armed) this.ctx.waitUntil(this.#armPause(sentAt + PAUSE_MS));
+  }
+
+  async #armPause(at: number): Promise<void> {
+    try {
+      await this.scheduler.set(new Date(at), "pause", {});
+      const kept = this.ctx.storage.kv.get<PauseState>(PAUSE_KEY);
+      if (kept) this.ctx.storage.kv.put(PAUSE_KEY, { ...kept, armed: true } satisfies PauseState);
+    } catch (error) {
+      console.error("speak up:", errorMessage(error));
+    }
+  }
+
+  /**
+   * The pause check: once the chat was quiet for PAUSE_MS after a person's message, the agents past the gates whose job
+   * is close to the conversation may speak up (worker/agents/speak-up.ts). While pi or an agent works, it waits again.
+   */
+  /** pi or an agent just finished: a pause waiting counts its quiet from now, not from the person's message. */
+  #quietFrom(at: number): void {
+    const kept = this.ctx.storage.kv.get<PauseState>(PAUSE_KEY);
+    if (kept && kept.after < at) this.ctx.storage.kv.put(PAUSE_KEY, { ...kept, after: at } satisfies PauseState);
+  }
+
+  async #afterPause(): Promise<void> {
+    const kept = this.ctx.storage.kv.get<PauseState>(PAUSE_KEY);
+    if (!kept) return;
+    const quietAt = kept.after + PAUSE_MS;
+    const busy = this.#status() === "running" || this.roster.allRunning().length > 0;
+    if (this.speakUp.possible() && (Date.now() < quietAt || (busy && kept.tries < MAX_PAUSE_TRIES))) {
+      this.ctx.storage.kv.put(PAUSE_KEY, { ...kept, armed: false, tries: kept.tries + (Date.now() < quietAt ? 0 : 1) } satisfies PauseState);
+      await this.#armPause(Math.max(quietAt, Date.now() + (busy ? PAUSE_MS : 0)));
+      return;
+    }
+    this.ctx.storage.kv.delete(PAUSE_KEY);
+    if (!this.speakUp.possible() || busy) return;
+    const recent = await this.#recentEntries();
+    if (!recent) return;
+    const last = recent.find((entry) => entry.kind === CHAT_MESSAGE_KIND);
+    const data = last?.data as Partial<ChatMessageData> | undefined;
+    if (!data?.text || data.uid === undefined || data.sentAt === undefined) return;
+    const line = askOf({ name: data.name ?? "someone", kind: "person" }, data.text, MAX_ASK_CHARS);
+    await this.speakUp.afterPause(recent, { line, askKey: messageAskKey({ uid: data.uid, sentAt: data.sentAt }) });
+  }
+
+  /**
+   * Someone asked something nobody was called for: if nobody answers within FOLLOW_UP_AFTER_MS, an agent may offer to
+   * (#followUps). The open questions are kept in one list, oldest first, with one check set for the oldest.
+   */
+  #noteAsk(author: Person, sentAt: number, text: string): void {
+    if (!this.speakUp.possible() || !looksLikeAsk(text)) return;
+    const kept = this.ctx.storage.kv.get<OpenAsks>(ASKS_KEY);
+    const asks = [...(kept?.asks ?? []), { uid: author.uid, name: author.name, text, sentAt }].slice(-MAX_OPEN_ASKS);
+    this.ctx.storage.kv.put(ASKS_KEY, { asks, armed: kept?.armed ?? false } satisfies OpenAsks);
+    if (!kept?.armed) this.ctx.waitUntil(this.#armAsks(asks[0].sentAt + FOLLOW_UP_AFTER_MS));
+  }
+
+  async #armAsks(at: number): Promise<void> {
+    try {
+      await this.scheduler.set(new Date(at), "followUp", {});
+      const kept = this.ctx.storage.kv.get<OpenAsks>(ASKS_KEY);
+      if (kept) this.ctx.storage.kv.put(ASKS_KEY, { ...kept, armed: true } satisfies OpenAsks);
+    } catch (error) {
+      console.error("follow-up:", errorMessage(error));
+    }
+  }
+
+  /** Someone else wrote in the chat: the open questions of others are taken as answered (as `answered` reads it). */
+  #answerAsks(uid: string): void {
+    const kept = this.ctx.storage.kv.get<OpenAsks>(ASKS_KEY);
+    if (!kept?.asks.some((ask) => ask.uid !== uid)) return;
+    this.ctx.storage.kv.put(ASKS_KEY, { ...kept, asks: kept.asks.filter((ask) => ask.uid === uid) } satisfies OpenAsks);
+  }
+
+  /** The follow-up check: the questions whose wait is over, each offered to the agents; the next check set for the rest. */
+  async #followUps(): Promise<void> {
+    const kept = this.ctx.storage.kv.get<OpenAsks>(ASKS_KEY);
+    if (!kept) return;
+    const now = Date.now();
+    const due = kept.asks.filter((ask) => ask.sentAt + FOLLOW_UP_AFTER_MS <= now);
+    const rest = kept.asks.filter((ask) => !due.includes(ask));
+    if (rest.length) {
+      this.ctx.storage.kv.put(ASKS_KEY, { asks: rest, armed: false } satisfies OpenAsks);
+      await this.#armAsks(rest[0].sentAt + FOLLOW_UP_AFTER_MS);
+    } else this.ctx.storage.kv.delete(ASKS_KEY);
+    for (const ask of due) await this.#followUp(ask);
+  }
+
+  /** A question's wait is over: when nobody answered it and its asker is still here, an agent may offer to pick it up. */
+  async #followUp({ uid, name, text, sentAt }: OpenAsks["asks"][number]): Promise<void> {
+    if (!this.speakUp.possible() || !this.isInChat(uid)) return;
+    // What came after the question, from the newest entries back to it.
+    const after: EntryRecord[] = [];
+    let found = false;
+    search: for await (const page of this.#log({ order: "descending" }, 100, 5)) {
+      for (const entry of page) {
+        const data = entry.kind === CHAT_MESSAGE_KIND ? (entry.data as Partial<ChatMessageData> | undefined) : undefined;
+        if (data?.uid === uid && data.sentAt === sentAt) {
+          found = true;
+          break search;
+        }
+        after.push(entry);
+      }
+    }
+    if (!found || answered(after, uid)) return;
+    await this.speakUp.followUp({ text, name, uid, sentAt, askKey: messageAskKey({ uid, sentAt }) });
+  }
+
+  /** Whether `key`'s notice is yet to be given today (UTC): true once a day, and from then on false until tomorrow. */
+  #firstToday(key: string): boolean {
+    const day = budgetDay(Date.now());
+    if (this.ctx.storage.kv.get<string>(key) === day) return false;
+    this.ctx.storage.kv.put(key, day);
+    return true;
+  }
+
+  /**
+   * One model answer was counted (worker/agents/spend.ts): it adds to its turn's metrics and to its payer's day (sent
+   * every OWNER_SPEND_MS, not per answer), and the chat is told once a day when its budget runs out.
+   */
+  #spent(spent: Spent): void {
+    if (spent.conversation) {
+      const kept = this.#turnSpend.get(spent.conversation) ?? { tokens: 0, costUsd: 0, toolCalls: 0 };
+      this.#turnSpend.delete(spent.conversation);
+      this.#turnSpend.set(spent.conversation, { tokens: kept.tokens + spent.tokens, costUsd: kept.costUsd + spent.costUsd, toolCalls: kept.toolCalls + spent.toolCalls });
+      if (this.#turnSpend.size > MAX_TURN_SPEND) this.#turnSpend.delete(this.#turnSpend.keys().next().value!);
+    }
+    if (spent.tags.run) {
+      const kept = this.#runSpend.get(spent.tags.run) ?? 0;
+      this.#runSpend.delete(spent.tags.run);
+      this.#runSpend.set(spent.tags.run, kept + spent.costUsd);
+      if (this.#runSpend.size > MAX_TURN_SPEND) this.#runSpend.delete(this.#runSpend.keys().next().value!);
+    }
+    // A roster agent's calls are its owner's (a member's own agent is the member's); everything else is the chat owner's.
+    const payer = (spent.tags.agent !== AGENT_NAME && this.roster.get(spent.tags.agent)?.ownerUid) || this.uid;
+    if (!this.#ownerSpend.size) this.ctx.waitUntil(new Promise((resolve) => setTimeout(resolve, OWNER_SPEND_MS)).then(() => this.#sendOwnerSpend()));
+    const pending = this.#ownerSpend.get(payer) ?? { calls: 0, tokens: 0, cost: 0 };
+    this.#ownerSpend.set(payer, { calls: pending.calls + 1, tokens: pending.tokens + spent.tokens, cost: pending.cost + spent.costUsd });
+    const refusal = this.spend.refusal();
+    if (refusal && this.#firstToday(BUDGET_TOLD_KEY)) {
+      this.metrics.budget({ scope: "chat", usedTokens: this.spend.today().tokens });
+      this.#notice({ kind: CHAT_BUDGET_KIND, data: { scope: "chat", text: refusal } satisfies ChatBudgetData });
+      this.#broadcastSettings();
+    }
+  }
+
+  /** The owner's daily meter, which their runs stop at (RUNS_DAILY_USD): what was spent since it was last sent. */
+  async #sendOwnerSpend(): Promise<void> {
+    const pending = [...this.#ownerSpend];
+    this.#ownerSpend.clear();
+    await Promise.all(
+      pending.map(([uid, spent]) =>
+        Promise.resolve(this.#index(uid).recordModelSpend(spent)).catch((error: unknown) => console.error("owner spend:", errorMessage(error))),
+      ),
+    );
+  }
+
+  /** A roster agent's turn ended: its metrics. */
+  #turnEnded(turn: AgentTurn, outcome: TurnOutcome): void {
+    this.#quietFrom(outcome.endedAt);
+    // A restore a Yes's run left undone (pi was busy at its settle) comes once anything ends.
+    void this.#restorePiTools();
+    const entry = this.roster.get(turn.agentId);
+    const session = entry ? sessionOf(entry, turn) : undefined;
+    const used = (session && this.#turnSpend.get(session)) || { tokens: 0, costUsd: 0, toolCalls: 0 };
+    if (session) this.#turnSpend.delete(session);
+    this.metrics.turn({
+      agent: turn.agentId,
+      status: outcome.status,
+      wallMs: Math.max(0, outcome.endedAt - outcome.startedAt),
+      ...used,
+      byOwner: turn.byOwner,
+      unprompted: turn.calledBy.unprompted !== undefined,
+      cacheBytes: this.hub.cacheBytes(turn.agentId),
+    });
+  }
+
+  /** What `ownerUid`'s model calls cost today, when it is past the daily cap for runs (RUNS_DAILY_USD); undefined while not. */
+  async #runsCapped(ownerUid: string): Promise<{ spent: number; cap: number } | undefined> {
+    const cap = Number(this.env.RUNS_DAILY_USD);
+    if (!Number.isFinite(cap) || cap <= 0) return undefined;
+    const { costUsd } = await this.#index(ownerUid).modelSpentToday();
+    return costUsd >= cap ? { spent: costUsd, cap } : undefined;
+  }
+
+  /** Why the owner's runs may not spend today (RunHost.spendCap), the chat told once a day; undefined when they may. */
+  async #runSpendCap(): Promise<string | undefined> {
+    const capped = await this.#runsCapped(this.uid);
+    if (!capped) return undefined;
+    const text = `Skipped: today's model calls cost $${capped.spent.toFixed(2)}, past the daily cap of $${capped.cap.toFixed(2)} for agents' runs. Runs start again tomorrow (UTC).`;
+    if (this.#firstToday(CAP_TOLD_KEY)) {
+      this.metrics.budget({ scope: "user", usedUsd: capped.spent });
+      this.#notice({ kind: CHAT_BUDGET_KIND, data: { scope: "runs", text } satisfies ChatBudgetData });
+    }
+    return text;
+  }
+
+  /**
+   * Keep a tool result too long for a turn whole, for the agent to read on (worker/storage/tool-results.ts): outside the
+   * owner's files, a bounded few per chat, gone with the chat. Its path, for the spill note.
+   */
+  async #spill(tool: string, text: string): Promise<string> {
+    // Not into a chat deleted meanwhile (a slow call outlasting deleteChat's deleteAll): the clipped result goes instead.
+    if (this.#gone) throw new Error("The chat is deleted.");
+    return (await this.scope.toolResults()).put(tool, text);
+  }
+
+  /**
+   * Post or update a checklist card (worker/agent/checklist.ts) for the session `conversation`: pi's, or a roster
+   * agent's. Its id comes from the call's request id, so a call run again after a restart names the same card, and
+   * only the session that posted a card may update it.
+   */
+  async #postChecklist(conversation: string, checklist: ChecklistInput, requestId: string): Promise<{ id: string } | { error: string }> {
+    const by = this.#checklistAuthor(conversation);
+    if (!by) return { error: "only pi and the agents of this chat post checklists here." };
+    const id = checklist.id ?? (await sha256Hex(requestId)).slice(0, 12);
+    const owner = this.ctx.storage.kv.get<string>(`${CHECKLIST_KEY}${id}`);
+    if (checklist.id && owner !== conversation) return { error: `there is no checklist ${checklist.id} of yours in this chat; leave id out to post a new one.` };
+    if (!owner) this.ctx.storage.kv.put(`${CHECKLIST_KEY}${id}`, conversation);
+    const data = checklistEntry(id, checklist, by, Date.now());
+    await (await this.#root()).submit({ type: "write", requestId, entry: { kind: CHAT_CHECKLIST_KIND, data: data as unknown as JsonObject } }, BACKGROUND_CONTEXT);
+    return { id };
+  }
+
+  /** Who a session posts as: pi for the chat's own, the agent for a roster agent's (or its turn's fork); none for another. */
+  #checklistAuthor(conversation: string): ChecklistAuthor | undefined {
+    if (isPiConversation(conversation)) return { name: AGENT_NAME };
+    const running = this.roster.runningSessions().find((turn) => turn.session === conversation);
+    const entry = this.roster.list().find((agent) => agent.session === conversation) ?? (running && this.roster.get(running.agentId));
+    return entry ? { name: entry.name, agentId: entry.agentId, avatar: entry.avatar, color: entry.color } : undefined;
+  }
+
   /** Read pi's new answers for the agents they name (#piScan), off the caller's path. Nothing while the chat has no agents. */
   #scanPi(): void {
     if (this.#gone || !this.roster.hasAny()) return;
@@ -2718,6 +3279,9 @@ export class ChatAgent extends DurableObject<Env> {
         } else if (seen.input === "handOff") {
           const { data } = seen;
           chain = typeof data?.hop === "number" && typeof data.root === "number" ? { hop: data.hop, root: data.root } : undefined;
+        } else if (seen.input === "message" && seen.drafts) {
+          // A Yes's run: the agents its answer names never hand pi a turn (unattended), which would have its full tools again.
+          chain = { hop: 0, unattended: true };
         } else chain = undefined;
       }
       if (this.#gone) return;
@@ -2758,7 +3322,7 @@ export class ChatAgent extends DurableObject<Env> {
     const turnEntries = async (session: string, turn: number) => (await this.#entriesFrom(await this.#conversation(session), (entry) => isTurnEntry(entry, turn))).slice(1);
     return {
       roster: this.roster,
-      definition: (entry) => this.#index(entry.ownerUid).getAgent(entry.agentId),
+      definition: async (entry) => this.#inThisChat(await this.#index(entry.ownerUid).getAgent(entry.agentId)),
       configure: (entry, agent, turn) => this.#configureAgent(entry, agent, turn),
       logSince: (after) => this.#log({ order: "descending", minEntryId: (after + 1) as EntryId }),
       write: async (session, text, requestId) => this.#writeAside(await this.#conversation(session), text, requestId),
@@ -2786,7 +3350,16 @@ export class ChatAgent extends DurableObject<Env> {
         // pi's answer is in (#piScan).
         try {
           const operationId = `pi-turn:${data.turn}`;
-          await this.harness.submit(input, { operationId, whenBusy: "followUp", entry: { kind: CHAT_TURN_KIND, data } });
+          const submit = () => this.harness.submit(input, { operationId, whenBusy: "followUp", entry: { kind: CHAT_TURN_KIND, data } });
+          // After a Yes, placed in turn with the messages once pi's tools are back (a Yes's chain hands pi nothing,
+          // unattended, so this is someone's own ask). One that joins a Yes's run still going gets what that run has, as
+          // a message does; otherwise it waits for no message's picks.
+          if (this.#drafting()) {
+            await this.#place(async () => {
+              await this.#tryRestorePiTools();
+              await submit();
+            });
+          } else await submit();
         } catch (error) {
           this.#resumeSettle();
           throw error;
@@ -2794,6 +3367,8 @@ export class ChatAgent extends DurableObject<Env> {
       },
       changed: () => this.#broadcastAgents(),
       waitUntil: (promise) => this.ctx.waitUntil(promise),
+      refusal: () => this.spend.refusal(),
+      ended: (turn, outcome) => this.#turnEnded(turn, outcome),
     };
   }
 
@@ -2877,11 +3452,23 @@ export class ChatAgent extends DurableObject<Env> {
    * harness offers and runs no other.
    */
   async #configureAgent(entry: RosterEntry, agent: AgentDefinition, turn: AgentTurn): Promise<void> {
+    const session = sessionOf(entry, turn);
     // The memory notes of the session the turn runs in: its agent's, or its own (a reply to a run's report).
-    await Promise.all([this.#refreshForTurn(turn.ask), this.memory.refresh(sessionOf(entry, turn))]);
+    await Promise.all([this.#refreshForTurn(turn.ask), this.memory.refresh(session)]);
+    this.spend.tag(session, { agent: entry.agentId });
+    this.#turnSpend.delete(session);
     const allowed = (installed: readonly string[]) =>
-      allowedTools(installed, this.#mcpTools, agent, turn.byOwner, (server) => this.hub.server(server)?.auth === "oauth");
-    await this.#configureSession(sessionOf(entry, turn), this.#agentChoice(agent), agentInstructions(agent, this.#nameOf(entry.ownerUid)), allowed);
+      turn.calledBy.drafts
+        ? draftTools(installed, this.#mcpTools, agent)
+        : allowedTools(
+            installed,
+            this.#mcpTools,
+            agent,
+            turn.byOwner,
+            (server) => this.hub.server(server)?.auth === "oauth",
+            !!turn.calledBy.unprompted,
+          );
+    await this.#configureSession(session, this.#agentChoice(agent), agentInstructions(agent, this.#nameOf(entry.ownerUid)), allowed);
   }
 
   /**
@@ -2896,12 +3483,7 @@ export class ChatAgent extends DurableObject<Env> {
     allowed: (installed: readonly string[]) => readonly string[],
   ): Promise<void> {
     const [found, choice] = await Promise.all([this.#conversation(session), choosing]);
-    const installed = this.registry
-      .snapshot()
-      .tools()
-      .map(({ tool }) => tool);
-    const keep = new Set(allowed(installed.map((tool) => tool.name)));
-    const enabled = installed.filter((tool) => keep.has(tool.name));
+    const enabled = this.#installedTools(allowed);
     const deferred = enabled.filter((tool) => tool.deferred);
     // The page the chat is on (or a branch came from), as it is now: told every turn, as an agent's catch-up may have
     // left out the note about it.
@@ -3016,10 +3598,14 @@ export class ChatAgent extends DurableObject<Env> {
       this.runs.forget(agentId);
       this.#broadcastAgents();
     }
-    await this.runner.apply(agentId, agent);
     // The sign-ins its runs read with are kept alive daily and warned about before they end (worker/mcp/sign-ins.ts).
     const runs = agent?.enabled && agent.trigger ? runServers(agent, oauthServerNames(this.env)) : [];
-    await this.#directory.setRunServers(this.chatId, runs).catch((error: unknown) => console.error("agent sign-ins:", errorMessage(error)));
+    // Those it reads in a step it cannot go on without: their notices offer no Disconnect (for its runs waiting too).
+    // Before the alarms and waits follow: a run apply sets going again asks for its sign-ins with these as they are now.
+    // Off, none: turning it off is a way out, so Disconnect is offered again (its waits are skipped).
+    const steps = agent?.enabled ? [...stepServers(agent)] : [];
+    await this.#directory.setRunServers(this.chatId, runs, steps).catch((error: unknown) => console.error("agent sign-ins:", errorMessage(error)));
+    await this.runner.apply(agentId, agent);
     if (agent?.enabled && agent.trigger && !agent.workflow?.length) this.ctx.waitUntil(this.#compile(agent).catch(() => {}));
   }
 
@@ -3206,14 +3792,15 @@ export class ChatAgent extends DurableObject<Env> {
     const signInOr = (error: unknown) => (error instanceof McpFailure && error.error.code === "auth_required" ? new SignInNeeded(error.error.server ?? "") : error);
     return {
       runs: this.runs,
-      read: async (server, tool, input) => {
+      read: async (server, tool, input, agentId) => {
         const info = await this.hub.tool(server, tool).catch((error: unknown) => {
           throw signInOr(error);
         });
         if (!info) throw new Error(`${server} has no tool "${tool}".`);
         if (!isReadOnly(info)) throw new Error(`${server}.${tool} changes data: a look step only reads.`);
         try {
-          const { result } = await this.hub.read(server, tool, input, { staleMs: RUN_STALE_MS, viewer: this.uid });
+          // Kept in the agent's share of the read cache, so one busy agent does not push out the others' reads.
+          const { result } = await this.hub.read(server, tool, input, { staleMs: RUN_STALE_MS, viewer: this.uid, ...(agentId && { owner: agentId }) });
           return (result.payload ?? null) as Value;
         } catch (error) {
           throw signInOr(error);
@@ -3238,23 +3825,27 @@ export class ChatAgent extends DurableObject<Env> {
       signInNeeded: (agent, servers, quiet) => {
         const directory = this.#directory;
         const context = { chatId: this.chatId, what: `@${agent.name}`, ...(quiet && { quiet }) };
-        // A server it reads in a step it cannot go without: its notice offers no Disconnect.
-        const steps = stepServers(agent);
+        // Whether it reads one in a step (no Disconnect offered) the directory knows from setRunServers (agentChanged).
         const asking = servers.map((server) =>
-          directory
-            .notifySignInNeeded(server, { ...context, ...(steps.has(server) && { stepReads: true }) })
-            .catch((error: unknown) => console.error(`agent sign-in (${server}):`, errorMessage(error))),
+          directory.notifySignInNeeded(server, context).catch((error: unknown) => console.error(`agent sign-in (${server}):`, errorMessage(error))),
         );
         this.ctx.waitUntil(Promise.all(asking));
       },
       newSession: async () => (await this.harness.sessions.create()).id,
-      configure: (session, agent, model) => this.#configureRun(session, agent, model),
+      configure: (session, agent, model, dueAt) => this.#configureRun(session, agent, model, undefined, dueAt),
       write: async (session, text, requestId) => this.#writeAside(await this.#conversation(session), text, requestId),
       work: async (session, prompt, operationId) => {
         const { result, entries } = await this.#runStep(session, prompt, operationId);
         return { status: result.status, ...(result.text !== undefined && { text: result.text }), ...(result.reason && { reason: result.reason }), ...workSpend(entries) };
       },
       deliver: (request) => this.#deliverRun(request),
+      spendCap: () => this.#runSpendCap(),
+      ended: ({ agentId, dueAt, status, items, wallMs }) => {
+        const run = `${agentId}:${dueAt}`;
+        const costUsd = this.#runSpend.get(run) ?? 0;
+        this.#runSpend.delete(run);
+        this.metrics.run({ agent: agentId, outcome: status, wallMs, costUsd, items });
+      },
       // Over the owner's sidebar socket: the Runs tab is a page of its own, with no chat socket open.
       changed: (agentId) => {
         this.ctx.waitUntil(this.#directory.runsChanged(agentId));
@@ -3269,7 +3860,7 @@ export class ChatAgent extends DurableObject<Env> {
         const alarm = await this.scheduler.get(id);
         return alarm ? alarm.time * 1000 : null;
       },
-      definition: (agentId) => this.#directory.getAgent(agentId),
+      definition: async (agentId) => this.#inThisChat(await this.#directory.getAgent(agentId)),
       sharedWatch: (step) => {
         const server = this.hub.server(step.server);
         return !!server && watchableForAll(server);
@@ -3299,8 +3890,9 @@ export class ChatAgent extends DurableObject<Env> {
    * tools (runTools). `pageTools`: a page rebuild's, which has the report as its data and gets these artifact tools in
    * place of the servers' (so nothing a server returns can steer what it writes).
    */
-  async #configureRun(session: string, agent: AgentDefinition, model: string | undefined, pageTools?: readonly string[]): Promise<void> {
+  async #configureRun(session: string, agent: AgentDefinition, model: string | undefined, pageTools?: readonly string[], dueAt?: number): Promise<void> {
     await Promise.all([this.#runRefresh(agent), this.memory.refresh(session)]);
+    this.spend.tag(session, { agent: agent.id, ...(dueAt !== undefined && { run: `${agent.id}:${dueAt}` }) });
     const allowed = (installed: readonly string[]) =>
       pageTools ? [...runTools(installed, new Map(), agent), ...pageTools] : runTools(installed, this.#mcpTools, agent);
     await this.#configureSession(session, this.#agentChoice(agent, model), runInstructions(agent, this.#nameOf(this.uid)), allowed);
@@ -3501,7 +4093,7 @@ export class ChatAgent extends DurableObject<Env> {
     });
     const seed = await writeDraft(scope, { artifact: meta, edits: [], mcp });
     const session = request.session ?? (await this.harness.sessions.create()).id;
-    await this.#configureRun(session, agent, undefined, ["artifact_read", WRITE_TOOL, CHECK_TOOL]);
+    await this.#configureRun(session, agent, undefined, ["artifact_read", WRITE_TOOL, CHECK_TOOL], run.dueAt);
     const operationId = `run:${agent.id}:${run.dueAt}:page:${request.key}`;
     const prompt = [
       `Rebuild the page "${meta.title}" (artifact ${meta.id}) as a snapshot of this run: today's data written into the page, so it makes no live calls.`,
@@ -3818,7 +4410,7 @@ export class ChatAgent extends DurableObject<Env> {
 
       if (mode === "read") {
         const staleMs = clampStaleMs(request.staleMs);
-        const read = await this.hub.read(server, tool, input, { staleMs, viewer });
+        const read = await this.hub.read(server, tool, input, { staleMs, viewer, owner: "pages" });
         const config = this.hub.server(server);
         return {
           response: { ok: true, result: read.result, storedAt: read.storedAt, nextRefreshAt: staleMs > 0 ? read.nextRefreshAt : undefined },
@@ -3873,7 +4465,7 @@ export class ChatAgent extends DurableObject<Env> {
           return { ok: false, error: { code: "not_granted", server, message: `${tool} can change data, so the check does not run it; the page gets this error instead.` } };
         }
         if (++calls > MAX_CHECK_CALLS) return { ok: false, error: { code: "rate_limited", server, message: `A check makes at most ${MAX_CHECK_CALLS} live calls.` } };
-        const read = await this.hub.read(server, tool, request.input, { staleMs: CHECK_STALE_MS, viewer: this.uid });
+        const read = await this.hub.read(server, tool, request.input, { staleMs: CHECK_STALE_MS, viewer: this.uid, owner: "pages" });
         return { ok: true, result: read.result };
       } catch (error) {
         return { ok: false, error: callFailure(error, server) };
@@ -3965,9 +4557,13 @@ interface ChatSession {
   queued(ids: readonly number[]): Promise<QueuedMessage[]>;
   incoming(): IncomingMessage[];
   prompt(text: string, author: Person, attachments: readonly AttachmentInput[], mentions: readonly MentionInput[], replyTo?: number): Promise<void>;
+  /** The owner's Yes to the next step a reply offers. */
+  takeOffer(author: Person, entry: unknown): Promise<void>;
   abort(by: Person, agent?: string): Promise<void>;
   /** The chat's agents besides pi, as everyone sees them. */
   agents(): ChatAgentView[];
+  /** The chat's agent settings, as everyone in it sees them. */
+  agentSettings(): ChatAgentSettingsView;
   /** The agents' turns running now, each with its session: what the sockets follow live. */
   runningAgents(): { agentId: string; session: string; turn: number }[];
   /** An agent's session's events: a snapshot, then one batch per commit. */
@@ -4129,7 +4725,8 @@ class ChatSockets extends LifecycleCapability implements DurableObjectCapability
         const text = String(message.text ?? "").trim().slice(0, 20_000);
         const replyTo = typeof message.replyTo === "number" ? message.replyTo : undefined;
         if (text || attachments.length) await this.#chat.prompt(text, person, attachments, mentions, replyTo);
-      } else if (message.type === "abort") await this.#chat.abort(person, typeof message.agent === "string" ? message.agent : undefined);
+      } else if (message.type === "offer_yes") await this.#chat.takeOffer(person, message.entry);
+      else if (message.type === "abort") await this.#chat.abort(person, typeof message.agent === "string" ? message.agent : undefined);
       else if (message.type === "model") await this.#chat.setModel(message, person);
       else if (message.type === "react") await this.#chat.react(person, message.entry, message.emoji, message.on === true);
     } catch (error) {
@@ -4194,6 +4791,7 @@ class ChatSockets extends LifecycleCapability implements DurableObjectCapability
       send(ws, { type: "incoming", incoming: this.#chat.incoming() });
       send(ws, { type: "agents", agents: this.#chat.agents() });
       send(ws, { type: "actions", actions: this.#chat.actions() });
+      send(ws, { type: "agentSettings", settings: this.#chat.agentSettings() });
       this.#followAgents(ws);
       // Timed only once it is to be sent: a wake attaches every socket again, and most find their snapshot already sent.
       // Someone else's socket never gets what memory tools found (the owner's own notes, before others were in).

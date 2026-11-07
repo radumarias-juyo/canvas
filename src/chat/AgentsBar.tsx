@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useId, useState } from "react";
+import type { ChatAgentSettingsView } from "../../shared/agent-settings.ts";
 import { isDraftAgent, MAX_CHAT_AGENTS, type AgentDefinition, type AgentTurnView, type ChatAgentView } from "../../shared/agents.ts";
 import { AGENT_NAME } from "../../shared/mentions.ts";
 import { everyone, type ChatPeople, type Presence } from "../../shared/protocol.ts";
@@ -9,6 +10,7 @@ import { useDismiss } from "../layout.tsx";
 import { callerName, turnLine } from "./agentLines.ts";
 import { formatElapsed, useElapsed } from "./elapsed.ts";
 import { ownerLabel } from "./Mentions.tsx";
+import { AgentSettingsPanel } from "./AgentSettings.tsx";
 import { AgentAvatar, Avatar, tintOf } from "./people.tsx";
 import { SentTime } from "./SentTime.tsx";
 import type { AgentsLive } from "./useChat.ts";
@@ -16,8 +18,8 @@ import type { AgentsLive } from "./useChat.ts";
 /** What an agent is doing, as its badge's hover and its menu say it. */
 function agentState(agent: ChatAgentView): string {
   if (agent.off) return "off: its owner turned it off";
-  if (agent.busy) return agent.queued ? `working, ${agent.queued} more waiting` : "working";
-  return agent.queued ? `${agent.queued} waiting` : "idle";
+  const doing = agent.busy ? (agent.queued ? `working, ${agent.queued} more waiting` : "working") : agent.queued ? `${agent.queued} waiting` : "idle";
+  return agent.muted ? `${doing}, muted here` : doing;
 }
 
 /**
@@ -35,6 +37,7 @@ export function PeopleBar({
   piWorking,
   agents,
   live,
+  settings,
   bar = true,
 }: {
   chatId: string;
@@ -45,6 +48,8 @@ export function PeopleBar({
   agents: readonly ChatAgentView[];
   /** The agents' live turns, for when each started as this socket heard it (useChat). */
   live: AgentsLive;
+  /** The chat's agent settings (useChat), for the owner's panel. */
+  settings: ChatAgentSettingsView | null;
   bar?: boolean;
 }) {
   // Each open window is a socket; someone no longer in the chat may still show for a moment, so only people in it count.
@@ -126,7 +131,7 @@ export function PeopleBar({
           onClose={close}
         />
       )}
-      {open === ADDING && <AddAgents chatId={chatId} roster={agents} onClose={close} />}
+      {open === ADDING && <AddAgents chatId={chatId} roster={agents} settings={settings} onClose={close} />}
     </div>
   );
 }
@@ -172,6 +177,20 @@ function AgentMenu({
       live = false;
     };
   }, [chatId, agent.id, running, agent.queued]);
+  const [muting, setMuting] = useState(false);
+  // Anyone in the chat may mute it; only its owner, or the chat's, may unmute it.
+  const mayUnmute = isOwner || agent.ownerUid === uid;
+  const toggleMute = async () => {
+    setMuting(true);
+    setError(undefined);
+    try {
+      await api.muteChatAgent(chatId, agent.id, !agent.muted);
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setMuting(false);
+    }
+  };
   const remove = async () => {
     setRemoving(true);
     try {
@@ -208,6 +227,16 @@ function AgentMenu({
         </ul>
       )}
       {error && <div className="chat-error">{error}</div>}
+      {(!agent.muted || mayUnmute) && (
+        <button
+          type="button"
+          onClick={toggleMute}
+          disabled={muting}
+          title={agent.muted ? "Let it speak up unasked here again" : "It posts nothing here unless someone calls it"}
+        >
+          {muting ? "…" : agent.muted ? "Unmute here" : "Mute here"}
+        </button>
+      )}
       {isOwner && (
         <button type="button" className="danger" onClick={remove} disabled={removing}>
           {removing ? "Removing…" : "Remove from this chat"}
@@ -240,7 +269,17 @@ function Working({ running, startedAt: heard }: { running: NonNullable<ChatAgent
  * The owner's list of their agents that are on and not in the chat yet, each with Add: the agent joins the chat's roster
  * and answers when called. Drafts the model proposed wait for their owner in the agent editor, and do not show.
  */
-function AddAgents({ chatId, roster, onClose }: { chatId: string; roster: readonly ChatAgentView[]; onClose: () => void }) {
+function AddAgents({
+  chatId,
+  roster,
+  settings,
+  onClose,
+}: {
+  chatId: string;
+  roster: readonly ChatAgentView[];
+  settings: ChatAgentSettingsView | null;
+  onClose: () => void;
+}) {
   const [mine, setMine] = useState<AgentDefinition[] | null>(null);
   const [error, setError] = useState<string>();
   const [adding, setAdding] = useState<string | null>(null);
@@ -300,6 +339,7 @@ function AddAgents({ chatId, roster, onClose }: { chatId: string; roster: readon
         </ul>
       )}
       {error && <div className="chat-error">{error}</div>}
+      <AgentSettingsPanel chatId={chatId} view={settings} agents={roster} />
     </div>
   );
 }

@@ -1,4 +1,5 @@
 import type { EntryRecord } from "@earendil-works/pi-durable";
+import type { ChatAgentSettings, ChatAgentSettingsView } from "../shared/agent-settings.ts";
 import type { AgentChanges, AgentChatUse, AgentDefinition, AgentInput, AgentServerInfo, ChatAgents, ChatAgentView, SharedAgentView } from "../shared/agents.ts";
 import type {
   ArtifactVersionImport,
@@ -241,6 +242,11 @@ export const api = {
   /** (owner) Bring one of their agents into the chat. */
   addChatAgent: (chatId: string, agentId: string) => request<ChatAgentView[]>(chatPath(chatId, "/agents"), post({ agentId })),
   removeChatAgent: (chatId: string, agentId: string) => request<ChatAgentView[]>(chatPath(chatId, `/agents/${agentId}`), { method: "DELETE" }),
+  /** Mute an agent in a chat (it posts nothing unprompted there), or unmute it (its owner, or the chat's). */
+  muteChatAgent: (chatId: string, agentId: string, muted: boolean) => request<ChatAgentView[]>(chatPath(chatId, `/agents/${agentId}/mute`), post({ muted })),
+  /** (owner) Change a chat's agent settings (router, speaking up, servers, daily budget): each field given replaces the stored one, null clears it. */
+  setAgentSettings: (chatId: string, change: { [K in keyof ChatAgentSettings]?: ChatAgentSettings[K] | null }) =>
+    request<ChatAgentSettingsView>(chatPath(chatId, "/agent-settings"), send("PUT", change)),
   /** The user's sign-ins to servers that sign in each user: which, since when, and any notice about them. */
   signIns: () => request<McpSignInView[]>("/api/mcp/sign-ins"),
   /** Forget the stored sign-in to `server`: the next use asks for a new one. */

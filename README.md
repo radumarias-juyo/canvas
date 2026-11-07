@@ -382,8 +382,10 @@ a request fits one, the agent calls `activate_skill` and gets the rest. Skills u
 `skills()` from `agents/harness/pi`.
 
 - **Built-in skills** ship as `SKILL.md` files in `worker/skills/builtin/`: `analyze-files` (questions about uploaded
-  files, with `run_python`), `revise-artifact` (change a published page from its current version) and
-  `explore-mcp-server` (learn a server with one small read-only call). Each user can turn them off.
+  files, with `run_python`), `revise-artifact` (change a published page from its current version),
+  `explore-mcp-server` (learn a server with one small read-only call) and `app-help` (what the app and this chat can
+  do: kinds, sharing, agents, routines; the agent answers from it, never from what other apps do). Each user can turn
+  them off.
 - **Your own skills** are kept per user in `UserDirectory` and apply in all your chats. Write them, import a `SKILL.md`,
   download one, turn them on and off or delete them under **Skills** in the sidebar (`/skills`, API under
   `/api/skills`, in `worker/skills-routes.ts`). A change applies from the next message in any chat.

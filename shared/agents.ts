@@ -11,7 +11,7 @@ import { checkRules, GuardrailError, MAX_APPROVAL_HOURS, type GuardrailRule } fr
 import { AGENT_NAME } from "./mentions.ts";
 import { EFFORT_LABELS } from "./models.ts";
 import type { RunRef } from "./runs.ts";
-import { isObject, isTimeZone } from "./util.ts";
+import { isObject, isTimeZone, withoutUnseen } from "./util.ts";
 
 /** An agent's handle, as "@name" calls it: a lowercase letter, then letters, digits or hyphens. */
 export const AGENT_NAME_PATTERN = /^[a-z][a-z0-9-]{1,23}$/;
@@ -119,6 +119,11 @@ export interface AgentInput {
   approvalHours?: number;
   /** The fields the model guessed, shown as "Assumed" until a person confirms them. */
   assumed?: string[];
+  /**
+   * It may post in a chat unasked, when the chat allows it too: after a pause in a conversation close to its job, or to
+   * offer to pick up a question nobody answered (worker/agents/funnel.ts). Off when absent.
+   */
+  speaksUp?: boolean;
 }
 
 /** Who made an agent: its owner, or the model in a chat (saved off until the owner turns it on, as skills are). */
@@ -166,13 +171,14 @@ function fail(message: string): never {
  * A text field, trimmed. `field` words its messages: what a missing one needs ("An agent needs a job line") and whose
  * it is ("An agent's job line").
  */
-function str(value: unknown, field: { needs: string; its: string }, max: number, { required = true } = {}): string | undefined {
+function str(value: unknown, field: { needs: string; its: string }, max: number, { required = true, seen = false } = {}): string | undefined {
   if (value === undefined || value === null || value === "") {
     if (required) fail(`${field.needs}.`);
     return undefined;
   }
   if (typeof value !== "string") fail(`${field.its} must be text.`);
-  const trimmed = value.trim();
+  // `seen`: text the agent follows, which its owner reads first (a draft card, the editor): nothing hidden in it.
+  const trimmed = (seen ? withoutUnseen(value) : value).trim();
   if (!trimmed && required) fail(`${field.needs}.`);
   if (trimmed.length > max) fail(`${field.its} is at most ${max} characters.`);
   return trimmed || undefined;
@@ -330,9 +336,10 @@ function checkSteps(value: unknown, depth = 0, count = { steps: 0 }): AgentStep[
       case "look":
         return checkLook(step, "A look step");
       case "work": {
-        const skill = str(step.skill, field("A work step", "a", "skill"), 64, { required: false });
+        const skill = str(step.skill, field("A work step", "a", "skill"), 64, { required: false, seen: true });
         const model = str(step.model, field("A work step", "a", "model"), 200, { required: false });
-        return { kind: "work", prompt: str(step.prompt, field("A work step", "a", "prompt"), 4_000)!, ...(skill && { skill }), ...(model && { model }) };
+        const prompt = str(step.prompt, field("A work step", "a", "prompt"), 4_000, { seen: true })!;
+        return { kind: "work", prompt, ...(skill && { skill }), ...(model && { model }) };
       }
       case "onlyIf":
         return { kind: "onlyIf", condition: condition(step.condition, field("An onlyIf step", "a", "condition")) };
@@ -411,12 +418,14 @@ export function checkAgent(input: unknown): AgentInput {
     fail(`Actions wait 1 to ${MAX_APPROVAL_HOURS} hours for approval.`);
   }
   const assumed = names(input.assumed, "assumed fields");
+  const speaksUp = input.speaksUp ?? undefined;
+  if (speaksUp !== undefined && typeof speaksUp !== "boolean") fail("An agent's speaksUp is true or false.");
   return {
     name,
     ...(avatar && { avatar }),
     ...(color !== undefined && { color: color as AgentColor }),
-    job: str(input.job, field("An agent", "a", "job line"), MAX_AGENT_JOB)!,
-    instructions: str(input.instructions, field("An agent", "", "instructions"), MAX_AGENT_INSTRUCTIONS)!,
+    job: str(input.job, field("An agent", "a", "job line"), MAX_AGENT_JOB, { seen: true })!,
+    instructions: str(input.instructions, field("An agent", "", "instructions"), MAX_AGENT_INSTRUCTIONS, { seen: true })!,
     ...(model && { model }),
     ...(effort !== undefined && { effort: effort as ModelThinkingLevel }),
     ...(servers && { servers }),
@@ -428,6 +437,7 @@ export function checkAgent(input: unknown): AgentInput {
     ...(guardrails?.length && { guardrails }),
     ...(hours !== undefined && { approvalHours: hours as number }),
     ...(assumed?.length && { assumed }),
+    ...(speaksUp && { speaksUp: true }),
   };
 }
 
@@ -466,6 +476,8 @@ export interface ChatAgentView {
   ended?: { turn: number; status: Exclude<AgentTurnStatus, "queued" | "running"> };
   /** Its owner shares it with the people of this chat: they can open it read-only, and copy it (SharedAgentView). */
   shared?: true;
+  /** Someone in the chat muted it here: it posts nothing unprompted in this chat (its owner's agent settings can undo it). */
+  muted?: true;
 }
 
 /** An MCP server of the deployment, as the agent editor lists it: whether it signs in each user, and this one now. */
@@ -511,6 +523,7 @@ export const COPIED_FIELDS = [
   "trigger",
   "scope",
   "workflow",
+  "speaksUp",
 ] as const satisfies readonly (keyof AgentInput)[];
 export type CopiedField = (typeof COPIED_FIELDS)[number];
 
@@ -571,8 +584,14 @@ export type ChatAgentReplyData = {
   ownerUid: string;
   /** The reply's text, as its session's final answer gave it; empty when it ended without one. */
   text: string;
-  /** Who gave it this turn: a person, another agent (a hand-off), or its schedule. */
-  calledBy: { name: string; uid?: string; agentId?: string; schedule?: true };
+  /**
+   * Who gave it this turn: a person, another agent (a hand-off), or its schedule. `routed`: the person named nobody, and
+   * the chat's router picked this agent. `unprompted`: nobody did: the agent spoke up after a pause in a conversation
+   * close to its job ("speak-up"), or offers to pick up a question nobody answered ("follow-up"); `name` is then the
+   * person whose message it answers. `drafts`: its owner said Yes to the next step its reply offered, and the turn
+   * may only read and draft the routine (worker/agents/turns.ts, draftTools).
+   */
+  calledBy: { name: string; uid?: string; agentId?: string; schedule?: true; routed?: true; unprompted?: UnpromptedKind; drafts?: true };
   /** The turn's id in the chat's turn table. */
   turn: number;
   /** How many hand-offs led to this turn: 0 when a person called it. */
@@ -590,6 +609,9 @@ export type ChatAgentReplyData = {
 };
 
 export type AgentTurnStatus = "queued" | "running" | "done" | "failed" | "stopped";
+
+/** Why an agent posts unasked: after a pause in a conversation close to its job, or to pick up an unanswered question. */
+export type UnpromptedKind = "speak-up" | "follow-up";
 
 /** One turn an agent of a chat was given, as the people in the chat see it (its runs). */
 export interface AgentTurnView {

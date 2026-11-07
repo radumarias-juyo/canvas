@@ -54,7 +54,9 @@ class FakeHome implements RunnerHost {
   readonly runs = new AgentRuns(this.sql, () => this.clock.now, (run) => this.endings.push(`${run.dueAt}:${run.status}`));
   readonly definitions = new Map<string, AgentDefinition>();
   readonly values = new Map<string, Value | ((input: StepInput) => Value)>([["crm.weekly_sales", { total: 940, lastYear: 1000 }]]);
-  readonly reads: { call: string; input: StepInput }[] = [];
+  readonly reads: { call: string; input: StepInput; agentId?: string }[] = [];
+  /** Why runs may not spend today, while set (RunHost.spendCap). */
+  capped: string | undefined;
   readonly signIn = new Set<string>();
   readonly writes = new Map<string, { session: string; text: string }>();
   readonly works: { session: string; prompt: string; operationId: string }[] = [];
@@ -73,8 +75,8 @@ class FakeHome implements RunnerHost {
   concurrent = 0;
   mostConcurrent = 0;
 
-  async read(server: string, tool: string, input: StepInput): Promise<Value> {
-    this.reads.push({ call: `${server}.${tool}`, input });
+  async read(server: string, tool: string, input: StepInput, agentId?: string): Promise<Value> {
+    this.reads.push({ call: `${server}.${tool}`, input, ...(agentId && { agentId }) });
     if (this.signIn.has(server)) throw new SignInNeeded(server);
     const value = this.values.get(`${server}.${tool}`);
     if (value === undefined) throw new Error(`${server} has no tool "${tool}".`);
@@ -86,6 +88,14 @@ class FakeHome implements RunnerHost {
   async act(call: { server: string; tool: string; input: StepInput }, context: ActContext): Promise<ActResult> {
     this.acts.push({ call: `${call.server}.${call.tool}`, input: call.input, context });
     return this.actAnswer(`${call.server}.${call.tool}`, call.input);
+  }
+  async spendCap() {
+    return this.capped;
+  }
+  /** The runs that went through their items, as the metrics hear of them. */
+  readonly endedRuns: { agentId: string; status: string; items: number }[] = [];
+  ended({ agentId, status, items }: { agentId: string; status: string; items: number }) {
+    this.endedRuns.push({ agentId, status, items });
   }
   async needsSignIn(servers: readonly string[]) {
     return servers.filter((server) => this.signIn.has(server));
@@ -206,6 +216,29 @@ describe("scheduled runs", () => {
     expect(run).toMatchObject({ status: "sent", why: "schedule", cost: 0.01, items: { total: 1, acted: 1 }, summary: "Sales fell 6% against last year." });
   });
 
+  it("skips a run once its owner's spend today is past the cap, with the reason as its summary, and runs the next", async () => {
+    const { host, runner, definition } = home();
+    await runner.apply(definition.id, definition);
+    host.clock.now = SEVEN;
+    host.capped = "Skipped: today's model calls cost $5.20, past the daily cap of $5.00 for agents' runs.";
+    expect(await runner.fired({ agentId: definition.id, dueAt: SEVEN })).toEqual({ status: "failed", started: true });
+    expect(host.reads).toEqual([]);
+    expect(host.works).toEqual([]);
+    expect(host.delivered).toEqual([]);
+    expect(host.runs.list(definition.id)[0]).toMatchObject({ status: "failed", summary: host.capped });
+    // Stopped before its items: no run for the metrics.
+    expect(host.endedRuns).toEqual([]);
+    // The next one is still set, and runs once the cap lets it.
+    const next = runAlarm(host).at!;
+    expect(next).toBeGreaterThan(SEVEN);
+    host.capped = undefined;
+    host.clock.now = next;
+    expect(await runner.fired({ agentId: definition.id, dueAt: next })).toEqual({ status: "sent", started: true });
+    expect(host.endedRuns).toEqual([{ agentId: definition.id, status: "sent", items: 1 }]);
+    // Its reads are kept in its own share of the read cache.
+    expect(host.reads.map((read) => read.agentId)).toEqual([definition.id]);
+  });
+
   it("sends once when the alarm fires twice, at once or later", async () => {
     const { host, runner, definition } = home();
     await runner.apply(definition.id, definition);
@@ -319,6 +352,29 @@ describe("scheduled runs", () => {
     await reads.runner.now(reads.definition.id, false);
     await reads.host.settled();
     expect(reads.host.runs.list(reads.definition.id)[0]).toMatchObject({ status: "sent" });
+  });
+
+  it("lets a waiting run go once its agent's steps no longer use the server, and keeps it waiting while they do", async () => {
+    const { host, runner, definition } = home(agent({ servers: ["crm", "calendar"] }));
+    host.oauth.push("calendar");
+    host.signIn.add("calendar");
+    await runner.apply(definition.id, definition);
+    await runner.now(definition.id, false);
+    await host.settled();
+    expect(host.runs.list(definition.id)[0]).toMatchObject({ status: "needs_sign_in", needsSignIn: ["calendar"] });
+    // A change that still uses calendar (its work step's tools may come from it): it waits on.
+    const renamed = { ...definition, job: "Morning sales", version: definition.version + 1 };
+    host.definitions.set(definition.id, renamed);
+    await runner.apply(definition.id, renamed);
+    await host.settled();
+    expect(host.runs.list(definition.id)[0]?.status).toBe("needs_sign_in");
+    // Its steps changed so nothing uses calendar: it goes again with the servers it uses now.
+    const changed = { ...renamed, servers: ["crm"], version: renamed.version + 1 };
+    host.definitions.set(definition.id, changed);
+    await runner.apply(definition.id, changed);
+    await host.settled();
+    expect(host.runs.list(definition.id)[0]).toMatchObject({ status: "sent" });
+    expect(host.delivered).toHaveLength(1);
   });
 
   it("skips a waiting run once a newer one went, before the sign-in comes", async () => {
@@ -477,6 +533,96 @@ describe("scheduled runs", () => {
     expect(host.runs.get(definition.id, T0)).toMatchObject({ status: "not_today", summary: "Skipped: a newer run went instead." });
     expect(host.asked).toEqual(["crm"]);
     expect(host.delivered).toHaveLength(1);
+  });
+
+  describe("an older run released for a newer one", () => {
+    /** The run at T0 waits for crm, released: its sign-in came while a newer run went. */
+    function released() {
+      const setup = home();
+      const id = setup.definition.id;
+      setup.host.runs.begin(id, T0, "schedule", false);
+      setup.host.runs.update(id, T0, { status: "needs_sign_in", detail: { needsSignIn: ["crm"], released: ["crm"] } });
+      return { ...setup, id };
+    }
+    /** The newer run's read fails once, so it ends failed without going. */
+    function failOnce(host: ReturnType<typeof home>["host"]) {
+      let reads = 0;
+      host.values.set("crm.weekly_sales", () => {
+        if (reads++ === 0) throw new Error("crm is down");
+        return { total: 940, lastYear: 1000 };
+      });
+    }
+
+    it("is running again before the wake awaits anything, so resume() goes on with it after a reset", async () => {
+      const { host, runner, definition, id } = released();
+      failOnce(host);
+      // The wake's read of the agent fails (the object reset, or the directory is down).
+      host.failDefinition = true;
+      await runner.executor.start({ agent: definition, dueAt: T0 + 1, why: "schedule" });
+      await host.settled();
+      expect(host.runs.get(id, T0 + 1)?.status).toBe("failed");
+      expect(host.runs.get(id, T0)?.status).toBe("running");
+      host.failDefinition = false;
+      runner.resume();
+      await host.settled();
+      expect(host.runs.get(id, T0)?.status).toBe("sent");
+      expect(host.delivered).toHaveLength(1);
+    });
+
+    it("stays released while a newer run still goes, and is replaced by one that waits itself", async () => {
+      const going = released();
+      // A third run is still going when the second fails: that one wakes it, or replaces it, in turn.
+      going.host.runs.begin(going.id, T0 + 2, "schedule", false);
+      failOnce(going.host);
+      await going.runner.executor.start({ agent: going.definition, dueAt: T0 + 1, why: "schedule" });
+      await going.host.settled();
+      expect(going.host.runs.get(going.id, T0)).toMatchObject({ status: "needs_sign_in", detail: { released: ["crm"] } });
+      expect(going.host.delivered).toHaveLength(0);
+
+      // The newer run waits for a sign-in itself: only the newest goes, so the older one is skipped.
+      const waits = released();
+      waits.host.signIn.add("crm");
+      await waits.runner.executor.start({ agent: waits.definition, dueAt: T0 + 1, why: "schedule" });
+      await waits.host.settled();
+      expect(waits.host.runs.get(waits.id, T0 + 1)?.status).toBe("needs_sign_in");
+      expect(waits.host.runs.get(waits.id, T0)).toMatchObject({ status: "not_today", summary: "Skipped: a newer run waits instead." });
+    });
+  });
+
+  it("keeps both sign-ins that come at once while a newer run goes, as released", async () => {
+    const { host, runner, definition } = home();
+    const id = definition.id;
+    host.runs.begin(id, T0, "schedule", false);
+    host.runs.update(id, T0, { status: "needs_sign_in", detail: { needsSignIn: ["crm", "mail"] } });
+    host.runs.begin(id, T0 + 1, "schedule", false);
+    // Both read the agent before either marks the run.
+    await Promise.all([runner.signedIn("crm"), runner.signedIn("mail")]);
+    expect(host.runs.get(id, T0)?.detail.released?.sort()).toEqual(["crm", "mail"]);
+    // A run that no longer waits is not marked.
+    host.runs.update(id, T0, { status: "not_today" });
+    host.runs.release(id, T0, "calendar");
+    expect(host.runs.get(id, T0)?.detail.released).not.toContain("calendar");
+  });
+
+  it("does not wait when its agent is turned off during the late-sign-in check", async () => {
+    const { host, runner, definition } = home();
+    const id = definition.id;
+    host.runs.begin(id, T0, "schedule", false);
+    host.runs.update(id, T0, { status: "needs_sign_in", detail: { needsSignIn: ["crm"], released: ["crm"] } });
+    host.signIn.add("crm");
+    const check = host.needsSignIn.bind(host);
+    let checks = 0;
+    host.needsSignIn = async (servers) => {
+      // The second check is the one for the released sign-in: the agent is turned off while it goes.
+      if (++checks === 2) host.definitions.set(id, { ...definition, version: 2, enabled: false });
+      return check(servers);
+    };
+    host.clock.now = T0 + 1;
+    await runner.executor.start({ agent: definition, dueAt: T0 + 1, why: "schedule" });
+    await host.settled();
+    expect(checks).toBe(2);
+    expect(host.runs.get(id, T0 + 1)).toMatchObject({ status: "not_today", summary: `Skipped: @${definition.name} was turned off.` });
+    expect(host.asked).toEqual([]);
   });
 
   it("finds a sign-in failure mid-run too", async () => {

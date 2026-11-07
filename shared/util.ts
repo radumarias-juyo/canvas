@@ -205,3 +205,17 @@ export function jsonIn(text: string): unknown {
 export function searchWords(query: string): string[] {
   return query.toLowerCase().split(/\s+/).filter(Boolean);
 }
+
+/**
+ * Characters a browser draws as nothing: format characters (zero-width, bidi controls, tags), private and unassigned
+ * code points, variation selectors but the emoji ones (U+FE0E, U+FE0F), and the Hangul fillers. The zero-width joiner
+ * and non-joiner stay: they join emoji into one ("👩‍💻") or keep letters apart (Persian, Indic scripts),
+ * and hide nothing alone. So do the format characters a browser draws as a sign (the Arabic, Syriac and Kaithi number marks).
+ */
+const UNSEEN =
+  /(?![\u200c\u200d\u0600-\u0605\u06dd\u070f\u0890\u0891\u08e2\u{110bd}\u{110cd}])[\p{Cf}\p{Co}\p{Cn}\uFE00-\uFE0D\u{E0100}-\u{E01EF}\u115F\u1160\u3164\uFFA0]/gu;
+
+/** `text` with only what its reader sees: nothing hidden rides along (UNSEEN). */
+export function withoutUnseen(text: string): string {
+  return text.replace(UNSEEN, "");
+}

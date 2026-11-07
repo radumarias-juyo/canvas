@@ -82,6 +82,19 @@ export default defineConfig({
       // (by its id, as CALL_HINT_MODEL; through the AI binding) says which of the user's skills not shown in the chat yet the message
       // needs; only those join the ones shown (worker/agent/skill-pick.ts). Empty: every enabled skill, always.
       SKILLS_MODEL: bindings.text("typesafe/jev"),
+      // The agent router: in a chat whose owner lets it (on by default in private chats), a message that names no agent
+      // goes through this System One classifier on Workers AI (by its id, as CALL_HINT_MODEL; through the AI binding),
+      // which picks up to two of the chat's agents by their names and job lines (worker/agents/router.ts). A failed or
+      // slow pick picks none. Empty: no routing.
+      AGENT_ROUTER_MODEL: bindings.text(process.env.PI_OFFLINE === "1" ? "" : "typesafe/jev"),
+      // Agents that speak up: an embeddings model on Workers AI (through the AI binding) tells how close the end of a
+      // conversation, or a question nobody answered, is to each agent's job (worker/agents/funnel.ts). Empty: no agent
+      // posts unprompted.
+      INTEREST_MODEL: bindings.text(process.env.PI_OFFLINE === "1" ? "" : "@cf/baai/bge-m3"),
+      // What one user's model calls in their chats may cost a day (UTC), in dollars, before their scheduled runs and their
+      // agents' unprompted posts stop for the day (a notice tells them). Their own messages are never stopped by it.
+      // Counted in their UserDirectory. Empty or 0: no cap.
+      RUNS_DAILY_USD: bindings.text("5.00"),
       // The models Auto picks among, by the picker's id, each with what it is best at, which the router reads. Those the
       // picker does not list (no key in AI Gateway for their provider) are left out, as are those that cannot be called
       // (no credits, no access): each gets a tiny call whenever the providers are asked for their lists (worker/model-health.ts).
@@ -154,6 +167,9 @@ export default defineConfig({
       // small, cheap model reads its source and lists bugs, security holes and simpler code; the agent fixes them before
       // publishing. A comma-separated list of the picker's model ids, tried in order, as PAGE_AI_MODEL. Empty: no review.
       REVIEW_MODEL: bindings.text(process.env.PI_OFFLINE === "1" ? "" : "@cf/openai/gpt-oss-120b,google-ai-studio/gemini-flash-lite-latest"),
+      // Agents' metrics in Workers Analytics Engine (worker/metrics.ts): turns, runs, router picks, the funnel of
+      // unprompted posts, budgets, and the hub's read cache per agent. The dataset is made on the first write.
+      METRICS: bindings.analyticsEngineDataset({ name: "pi_artifacts_metrics" }),
       // Workers AI binding. Pi's createAI() routes Claude through AI Gateway with it.
       AI: bindings.ai({}),
       // Each user's files (users/<uid>/files/…) and drafts (users/<uid>/drafts/<chatId>/…), and a read cache of artifact versions (artifacts/<id>/…).

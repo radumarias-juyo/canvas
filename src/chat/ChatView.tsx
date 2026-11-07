@@ -1,6 +1,7 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode, type RefObject } from "react";
+import { assistantOffer } from "../../shared/offers.ts";
 import { CHAT_AGENT_KIND, proposedBy, type ChatAgentReplyData, type ChatAgentView } from "../../shared/agents.ts";
 import { DraftCard } from "../agents/DraftCard.tsx";
 import type { ItemRef } from "../../shared/items.ts";
@@ -56,6 +57,8 @@ import { ownMessages, useHistory } from "./history.ts";
 import { AgentReply } from "./AgentReply.tsx";
 import { ActionCard, ChatActions } from "./ActionCard.tsx";
 import { CHAT_ACTION_KIND, type ChatActionData } from "../../shared/limits.ts";
+import { ChecklistCard } from "./ChecklistCard.tsx";
+import { CHAT_CHECKLIST_KIND, checklistAt, foldChecklists, type ChatChecklistData } from "../../shared/checklist.ts";
 import { ArtifactCard } from "./ArtifactCard.tsx";
 import { Markdown } from "./Markdown.tsx";
 import { MentionList, MentionText, useMentions } from "./Mentions.tsx";
@@ -65,8 +68,18 @@ import { OrphanResult, StepRun, StepsProvider, stepLabel } from "./Steps.tsx";
 import { endedEarly, stepRuns, streamingSteps, type MessageSteps, type StepRuns, type StreamingSteps } from "./stepRuns.ts";
 import { Thinking } from "./Thinking.tsx";
 import { useRevealedText } from "./reveal.ts";
-import { blocks, firstNew, isAgent, openHints, published, replyItems, sentAt, shown, showsAsCard, userText } from "./entries.ts";
-import { answersEveryMessage, CHAT_COPY_KIND, CHAT_EVENT_KIND, legacyKind, type ChatCopyData, type ChatEventData } from "../../shared/chat-kinds.ts";
+import { blocks, firstNew, inReply, isAgent, liveOffer, openHints, published, replyItems, sentAt, shown, showsAsCard, userText } from "./entries.ts";
+import { OfferRow } from "./Offer.tsx";
+import {
+  answersEveryMessage,
+  CHAT_BUDGET_KIND,
+  CHAT_COPY_KIND,
+  CHAT_EVENT_KIND,
+  legacyKind,
+  type ChatBudgetData,
+  type ChatCopyData,
+  type ChatEventData,
+} from "../../shared/chat-kinds.ts";
 import { BranchOff, ChatEventNotice, EntryOf, KindChip, TagCard } from "./ChatKinds.tsx";
 
 interface Props {
@@ -94,7 +107,8 @@ const GROWS_ITSELF = CSS.supports("field-sizing", "content");
 const atBottom = (el: HTMLElement) => el.scrollHeight - el.scrollTop - el.clientHeight < 80;
 
 export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity, onLeft, onMenu, onOpenChat }: Props) {
-  const { state, connected, people, online, prompt, abort, setModel, auto, reactions, react, hints, dropHint, agents, live, actions } = useChat(chatId);
+  const { state, connected, people, online, prompt, takeOffer: sendYes, abort, setModel, auto, reactions, react, hints, dropHint, agents, agentSettings, live, actions } =
+    useChat(chatId);
   // pi, or an agent of the chat, is working or has turns waiting: Stop stops them all.
   const working = state.busy || agents.some((agent) => agent.busy || agent.queued);
   const chatReactions = useMemo(() => ({ uid, react }), [uid, react]);
@@ -138,6 +152,17 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
       following.current = true;
     },
     [prompt, dropHint],
+  );
+  // The latest next step a reply offered (shared/offers.ts), which only the chat's owner answers: Yes replies to that
+  // message, which calls the agent that wrote it, asking it to set the step up.
+  const offered = useMemo(() => (isOwner ? liveOffer(state.entries) : undefined), [isOwner, state.entries]);
+  const takeOffer = useCallback(
+    (entry: number) => {
+      if (!sendYes(entry)) return false;
+      following.current = true;
+      return true;
+    },
+    [sendYes],
   );
   // Branch off a new chat from a message, and go to it.
   // One branch at a time: a second click while one is made does nothing.
@@ -314,6 +339,8 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
   // pi's replies' item chips: the records its tool results held, under the reply built on them.
   const itemsBefore = useRef<ReadonlyMap<number, ItemRef[]>>(undefined);
   const items = useMemo(() => (itemsBefore.current = replyItems(state.entries, itemsBefore.current)), [state.entries]);
+  // Each plan an agent posted, as its latest entry says, drawn where it was first posted: only that entry draws again.
+  const checklists = useMemo(() => foldChecklists(state.entries), [state.entries]);
   // The agents working now, each with its live steps, its time and its own Stop; then who waits for a turn.
   const liveTurns = useMemo(() => shownLive(live, agents, state.entries), [live, agents, state.entries]);
   const waiting = useMemo(() => queueLines(agents), [agents]);
@@ -335,7 +362,7 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
               {people?.kind && <KindChip chatId={chatId} kind={people.kind} page={people.page} isOwner={isOwner} />}
               {!group && <span className="chat-people">{mine > 1 && `Open in ${mine} of your windows`}</span>}
               {people && (group || isOwner) && (
-                <PeopleBar chatId={chatId} people={people} online={online} uid={uid} piWorking={state.busy} agents={agents} live={live} bar={group !== null} />
+                <PeopleBar chatId={chatId} people={people} online={online} uid={uid} piWorking={state.busy} agents={agents} live={live} settings={agentSettings} bar={group !== null} />
               )}
               <ChatCost usage={state.usage} entries={state.entries} time={time} />
               {shared && <NotifyButton />}
@@ -378,10 +405,12 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
                               onReply={reply}
                               hinted={hinted.has(entry.id as number)}
                               onAskAgent={askAgent}
+                              onOffer={entry.id === offered ? takeOffer : undefined}
                               onNoHint={dropHint}
                               onOpenChat={onOpenChat}
                               chatId={chatId}
                               items={items.get(entry.id as number)}
+                              checklist={checklistAt(checklists, entry)}
                             />
                           </EntryOf.Provider>
                           {spend && <PromptCost spend={spend} />}
@@ -590,6 +619,8 @@ const Entry = memo(function Entry({
   onOpenChat,
   chatId,
   items,
+  checklist,
+  onOffer,
 }: {
   entry: EntryRecord;
   /** Where an agent message's steps show (stepRuns.ts). */
@@ -610,8 +641,13 @@ const Entry = memo(function Entry({
   chatId: string;
   /** For one of pi's replies: the records its tool results held, as chips under it. */
   items?: ItemRef[];
+  /** For the entry a checklist was first posted at: its latest state (the same object until it changes). */
+  checklist?: ChatChecklistData;
+  /** Set on the reply with the chat's latest offer, for its owner: Yes under it replies to it (false when not sent). */
+  onOffer?: (entry: number) => boolean;
 }) {
   const people = useSharedChat();
+  const offerYes = onOffer && (() => onOffer(entry.id as number));
   const reactions = useMessageReactions(isReactable(entry) ? entry.id : undefined, byEmoji);
   const message = entry.model?.[0];
   // What a reply to it quotes: none for a message from before replies (pi.user).
@@ -649,6 +685,7 @@ const Entry = memo(function Entry({
     const [them, you] = PEOPLE_EVENTS[data.event].map((said) => said.replace("{agent}", agent).replace("{by}", data.by ?? "the owner"));
     return <div className="chat-notice">{data.uid === uid ? `You ${you}` : `${data.name} ${them}`}</div>;
   }
+  if (entry.kind === CHAT_BUDGET_KIND) return <div className="chat-notice budget-notice">{(entry.data as unknown as ChatBudgetData).text}</div>;
   if (entry.kind === CHAT_EVENT_KIND) return <ChatEventNotice data={entry.data as unknown as ChatEventData} uid={uid} onOpenChat={onOpenChat} />;
   if (entry.kind === CHAT_COPY_KIND) {
     const data = entry.data as unknown as ChatCopyData;
@@ -656,12 +693,36 @@ const Entry = memo(function Entry({
     const copied = { role: "assistant", content: [{ type: "text", text: data.text }], timestamp: data.sentAt ?? 0, stopReason: "stop" } as unknown as AssistantMessage;
     return <Assistant message={copied} reactions={reactions} onReply={answer} />;
   }
+  // A checklist's later entries draw nothing: its card, where it was first posted, shows what they say.
+  if (entry.kind === CHAT_CHECKLIST_KIND) return checklist ? <ChecklistCard data={checklist} /> : null;
   if (entry.kind === CHAT_AGENT_KIND) {
-    return <AgentReply data={entry.data as unknown as ChatAgentReplyData} chatId={chatId} viewerUid={uid} reactions={reactions} onReply={answer} onOpen={onOpen} />;
+    return (
+      <AgentReply
+        data={entry.data as unknown as ChatAgentReplyData}
+        chatId={chatId}
+        viewerUid={uid}
+        reactions={reactions}
+        onReply={answer}
+        onOpen={onOpen}
+        entry={entry.id as number}
+        onOfferYes={offerYes}
+      />
+    );
   }
   if (entry.kind === CHAT_ACTION_KIND) return <ActionCard action={(entry.data as unknown as ChatActionData).action} />;
   if (entry.kind === "pi.assistant" && message?.role === "assistant") {
-    return <Assistant message={message} steps={steps} reactions={reactions} onReply={answer} items={items} foldKey={String(entry.id)} />;
+    return (
+      <Assistant
+        message={message}
+        steps={steps}
+        reactions={reactions}
+        onReply={answer}
+        items={items}
+        foldKey={String(entry.id)}
+        entry={entry.id as number}
+        onOfferYes={offerYes}
+      />
+    );
   }
   if (entry.kind === "pi.tool-result" && message?.role === "toolResult") {
     const artifact = published(entry);
@@ -718,12 +779,16 @@ function useNewInView(list: RefObject<HTMLDivElement | null>, following: RefObje
   }, [list, following, newAt, since]);
 }
 
-/** The agent's entries that start one of its replies: the first of its own after anything else the chat shows. */
+/**
+ * The agent's entries that start one of its replies: the first of its own after anything else the chat shows. Its own
+ * plan, and a plan's later entries, which draw nothing, do not end a reply (inReply).
+ */
 function agentTurns(entries: readonly EntryRecord[]): Set<number> {
   const starts = new Set<number>();
+  const posted = new Set<string>();
   let inTurn = false;
   for (const entry of entries) {
-    if (!shown(entry)) continue;
+    if (!shown(entry) || inReply(entry, posted)) continue;
     if (isAgent(entry) && !inTurn) starts.add(entry.id as number);
     inTurn = isAgent(entry);
   }
@@ -731,7 +796,9 @@ function agentTurns(entries: readonly EntryRecord[]): Set<number> {
 }
 
 function endsInAgentTurn(entries: readonly EntryRecord[]): boolean {
-  const last = entries.findLast(shown);
+  const posted = new Set<string>();
+  let last: EntryRecord | undefined;
+  for (const entry of entries) if (shown(entry) && !inReply(entry, posted)) last = entry;
   return last !== undefined && isAgent(last);
 }
 
@@ -1012,6 +1079,8 @@ function Assistant({
   items,
   foldKey,
   bare = false,
+  entry,
+  onOfferYes,
 }: {
   message: AssistantMessage;
   steps?: MessageSteps;
@@ -1025,27 +1094,35 @@ function Assistant({
   foldKey?: string;
   /** Without reactions, actions and its time: a live agent's message, whose reply the chat shows once it is posted. */
   bare?: boolean;
+  /** Its entry in the transcript, which the answer to its offered next step is remembered by. */
+  entry?: number;
+  /** On the chat's latest offer, for its owner: what Yes does (OfferRow). */
+  onOfferYes?: () => boolean;
 }) {
   const content = useRef<HTMLDivElement>(null);
   // What a copy pastes as plain text: its Markdown. Not while it streams, when it has no actions.
   const text = streaming ? "" : textOf(blocks(message.content), "\n\n");
+  // The next step its answer offers, shown under it without its line in the text; not before the answer is whole.
+  const offered = streaming || bare ? null : assistantOffer(message.content);
   const parts = message.content.map((block, i) => {
     if (!block) return null;
-    if (block.type === "text")
+    if (block.type === "text") {
+      const said = offered?.block === i ? offered.body : block.text;
       // The fold goes round the bubble, so a copy (the bubbles' HTML) holds neither "Show more" nor the fold's height.
-      return block.text ? (
+      return said ? (
         !streaming && foldKey ? (
           <Fold key={i} foldKey={`${foldKey}:${i}`}>
             <div className="bubble markdown">
-              <Markdown text={block.text} />
+              <Markdown text={said} />
             </div>
           </Fold>
         ) : (
           <div key={i} className="bubble markdown">
-            {streaming ? <RevealedMarkdown text={block.text} onGrow={onGrow} /> : <Markdown text={block.text} />}
+            {streaming ? <RevealedMarkdown text={said} onGrow={onGrow} /> : <Markdown text={said} />}
           </div>
         )
       ) : null;
+    }
     // A step shows in its run, at the run's first step.
     const run = steps?.get(i);
     return run ? <StepRun key={i} items={run} /> : null;
@@ -1059,6 +1136,7 @@ function Assistant({
       {message.stopReason === "error" && <div className="chat-error">The model failed: {message.errorMessage ?? "unknown error"}</div>}
       {message.stopReason === "aborted" && <div className="tool-call">Stopped.</div>}
       {items && <ItemChips items={items} />}
+      {offered && <OfferRow offer={offered.offer} entry={entry} onYes={onOfferYes} />}
       {text && !bare && (
         <>
           <ReactionChips reactions={reactions} />
