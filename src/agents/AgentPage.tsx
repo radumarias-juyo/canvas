@@ -14,8 +14,10 @@ import { AgentAvatar } from "../chat/people.tsx";
 import { MenuButton, opensElsewhere } from "../layout.tsx";
 import { stateLabel } from "./glance.ts";
 import { agentPath, NEW_AGENT, type AgentPlace } from "./nav.ts";
+import { RunsTab } from "./RunsTab.tsx";
 import { SetupTab } from "./SetupTab.tsx";
 import { KnowsTab } from "../memory/KnowsTab.tsx";
+import { WorkflowTab } from "./WorkflowTab.tsx";
 import { dropAgent, putAgent, reloadAgents, useAgents } from "./store.ts";
 
 /**
@@ -41,6 +43,9 @@ export interface AgentTabProps {
   notice: (notice: PageNotice | null) => void;
   /** Whether the tab has changes not saved yet: the header holds what would make a new version meanwhile. */
   onDirty?: (dirty: boolean) => void;
+  /** Where the page is (a tab that opens deeper, as Runs on one run, reads it) and how to go elsewhere in the app. */
+  place: AgentPlace;
+  navigate: (path: string) => void;
 }
 
 /** A line under the page's header, about one agent: the page of another says nothing of it. */
@@ -69,6 +74,8 @@ export const TABS: AgentTab[] = [
     fields: ["name", "job", "instructions", "avatar", "color", "model", "effort", "servers", "sharedServers"],
     Component: SetupTab,
   },
+  { id: "workflow", label: "Workflow", fields: ["trigger", "scope", "workflow"], Component: WorkflowTab },
+  { id: "runs", label: "Runs", fields: [], Component: RunsTab },
   { id: "knows", label: "Knows", fields: [], Component: KnowsTab },
 ];
 
@@ -211,6 +218,8 @@ export function AgentPage({
           save={save}
           notice={setNotice}
           onDirty={setDirty}
+          place={place}
+          navigate={navigate}
         />
       </div>
     </div>
