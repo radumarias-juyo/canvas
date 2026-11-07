@@ -4770,7 +4770,7 @@ export class ChatAgent extends DurableObject<Env> {
         sentAt,
         chat: this.#chatRef(),
         chats: [this.chatId],
-        ...(others.length &&{ detail: `not ${others.join(", ")}: at Inform, an agent notifies only its owner` }),
+        ...(others.length && { detail: `not ${others.join(", ")}: at Inform, an agent notifies only its owner` }),
       };
     }
     // To chats: its home (this one), and the owner's chats it is in, by id or title. The list only when one is named.
@@ -4804,7 +4804,7 @@ export class ChatAgent extends DurableObject<Env> {
       status: sent.length ? "sent" : "refused",
       ...(answered && { sentAt: answered.at, chat: answered.chat }),
       ...(placed.length && { chats: placed.map((outcome) => outcome.chat.id) }),
-      ...(refused.length &&{ detail: `not posted to ${refused.join(", ")}` }),
+      ...(refused.length && { detail: `not posted to ${refused.join(", ")}` }),
     };
   }
 
