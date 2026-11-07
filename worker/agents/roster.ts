@@ -376,7 +376,8 @@ export class ChatRoster {
 
   /** After a restart: the running turns whose input never reached their session go back to the queue, at their place. */
   requeueUnsubmitted(): void {
-    this.#sql.exec("UPDATE chat_agent_turns SET status = 'queued', started_at = NULL WHERE status = 'running' AND submitted_at IS NULL");
+    // A fork made for it before it went in is left: its next start decides again whether it forks, after its catch-up.
+    this.#sql.exec("UPDATE chat_agent_turns SET status = 'queued', started_at = NULL, session = NULL WHERE status = 'running' AND submitted_at IS NULL");
   }
 
   /** Whether any turn waits, runs or has a reply to deliver: what a restarted object picks up again. */

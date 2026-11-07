@@ -2282,6 +2282,10 @@ export class ChatAgent extends DurableObject<Env> {
       () => {},
     );
     this.#refreshed = { ask, at: now, done };
+    // A failed refresh is not kept: the next turn's set-up tries again.
+    done.catch(() => {
+      if (this.#refreshed?.done === done) this.#refreshed = undefined;
+    });
     return done;
   }
 
@@ -2968,8 +2972,8 @@ class ChatSockets extends LifecycleCapability implements DurableObjectCapability
       send(ws, { type: "auto", on: this.#chat.auto() });
       send(ws, { type: "incoming", incoming: this.#chat.incoming() });
       send(ws, { type: "agents", agents: this.#chat.agents() });
-      const drafts = this.#chat.drafts(attachment.person.uid);
-      if (drafts.length) send(ws, { type: "agentDrafts", drafts });
+      // Also when none: a reconnecting app may still show drafts posted or discarded from another window meanwhile.
+      send(ws, { type: "agentDrafts", drafts: this.#chat.drafts(attachment.person.uid) });
       this.#followAgents(ws);
       // Timed only once it is to be sent: a wake attaches every socket again, and most find their snapshot already sent.
       const snapshot = await this.#events([events.snapshot], false);

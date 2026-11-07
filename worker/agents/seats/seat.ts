@@ -7,8 +7,7 @@ import type { EntryRecord } from "@earendil-works/pi-durable";
 import type { AgentDefinition, ChatTurnData } from "../../../shared/agents.ts";
 import { errorMessage } from "../../../shared/util.ts";
 import type { Sql } from "../../members.ts";
-import { operationId, type Outputs, type TurnResult } from "../controller.ts";
-import { itemsIn, publishedIn } from "../turns.ts";
+import { operationId, outputsOf, type Outputs, type TurnResult } from "../controller.ts";
 import type { RoomLink, RoomRef, SeatBatch, SeatResult, SeatTurn } from "./link.ts";
 
 /** What a seat needs of the object it is in: its owner's definitions, pi's sessions there, and its rooms. */
@@ -53,6 +52,9 @@ type SeatTurnRow = {
   status: "running" | "ended";
   result: string | null;
 };
+
+/** How long a seat waits before it posts a turn's result again, after each failed post (#report); then the next wake. */
+const REPORT_RETRIES = [1_000, 5_000, 30_000];
 
 const refOf = (row: Pick<SeatRow, "room_owner" | "room_chat">): RoomRef => ({ ownerUid: row.room_owner, chatId: row.room_chat });
 
@@ -204,11 +206,10 @@ export class AgentSeats {
   async #outputs(row: SeatTurnRow): Promise<Outputs> {
     try {
       const entries = await this.#host.turnEntries(row.session, row.turn);
-      const published = publishedIn(entries);
-      if (!row.forked) return { published, items: itemsIn(entries), sources: [] };
-      const agent = await this.#host.definition(row.agent_id);
-      if (!agent) return { published, items: [], sources: [], forked: true };
-      return { published, forked: true, ...(await this.#host.sources(agent, entries)) };
+      return await outputsOf(entries, row.forked === 1, async () => {
+        const agent = await this.#host.definition(row.agent_id);
+        return agent ? this.#host.sources(agent, entries) : { items: [], sources: [] };
+      });
     } catch (error) {
       console.error("agent seat, outputs:", errorMessage(error));
       return { published: [], items: [], sources: [], ...(row.forked && { forked: true }) };
@@ -226,16 +227,25 @@ export class AgentSeats {
     );
   }
 
-  /** Post an ended turn's result to its room, and let it go once the room took it. A failure keeps it for the next wake. */
+  /**
+   * Post an ended turn's result to its room, and let it go once the room took it. A failed post is tried again a few
+   * times (the room's turn runs until it hears, and its agent's next turns wait on it), then kept for the next wake.
+   */
   async #report(ref: RoomRef, turn: number): Promise<void> {
-    const row = this.#turn(ref, turn);
-    if (row?.status !== "ended" || !row.result) return;
-    try {
-      if (await this.#host.room(ref, row.agent_id).ended(turn, JSON.parse(row.result) as SeatResult)) {
-        this.#sql.exec("DELETE FROM agent_seat_turns WHERE room_owner = ? AND room_chat = ? AND turn = ?", ref.ownerUid, ref.chatId, turn);
+    for (let attempt = 0; ; attempt++) {
+      const row = this.#turn(ref, turn);
+      if (row?.status !== "ended" || !row.result) return;
+      try {
+        if (await this.#host.room(ref, row.agent_id).ended(turn, JSON.parse(row.result) as SeatResult)) {
+          this.#sql.exec("DELETE FROM agent_seat_turns WHERE room_owner = ? AND room_chat = ? AND turn = ?", ref.ownerUid, ref.chatId, turn);
+        }
+        return;
+      } catch (error) {
+        console.error("agent seat, reply:", errorMessage(error));
+        const delay = REPORT_RETRIES[attempt];
+        if (delay === undefined) return;
+        await new Promise((resolve) => setTimeout(resolve, delay));
       }
-    } catch (error) {
-      console.error("agent seat, reply:", errorMessage(error));
     }
   }
 

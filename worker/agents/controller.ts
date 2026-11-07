@@ -381,9 +381,7 @@ export class AgentTurns {
   async #outputs(entry: RosterEntry, turn: AgentTurn): Promise<Outputs> {
     try {
       const entries = await this.#host.turnEntries(sessionOf(entry, turn), turn.id);
-      const published = publishedIn(entries);
-      if (turn.session !== undefined) return { published, forked: true, ...(await this.#host.sources(entry, entries)) };
-      return { published, items: itemsIn(entries), sources: [] };
+      return await outputsOf(entries, turn.session !== undefined, () => this.#host.sources(entry, entries));
     } catch (error) {
       console.error("agent turn, outputs:", errorMessage(error));
       return NO_OUTPUTS;
@@ -490,6 +488,20 @@ export class AgentTurns {
       ...(chain.root !== undefined && { root: chain.root }),
     });
   }
+}
+
+/**
+ * What a turn left among its session's entries: the pages it published, and the records its results held; for one in
+ * a fork, only those `sources` keeps (the shared servers'), with the private servers it called.
+ */
+export async function outputsOf(
+  entries: readonly EntryRecord[],
+  forked: boolean,
+  sources: () => Promise<Pick<Outputs, "items" | "sources" | "review">>,
+): Promise<Outputs> {
+  const published = publishedIn(entries);
+  if (!forked) return { published, items: itemsIn(entries), sources: [] };
+  return { published, forked: true, ...(await sources()) };
 }
 
 /** A turn's operation id in its agent's session: submitting it twice places it once. */

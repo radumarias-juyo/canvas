@@ -45,7 +45,8 @@ export function AgentReply({
   const people = useSharedChat();
   // Whose agent it is: it works with their sign-ins and budget.
   const owner = people && everyone(people).find((person) => person.uid === data.ownerUid)?.name;
-  const source = sourceLine(data, owner ?? undefined);
+  // In a shared chat whose people no longer list the owner (they left), never "your": the viewer is not the owner.
+  const source = sourceLine(data, people ? (owner ?? "its owner") : undefined);
   return (
     <div className="agent-reply" ref={content}>
       <AgentByline name={data.name} badge={data} note={["agent", owner && `${owner}'s`, calledByLabel(data.calledBy)].filter(Boolean).join(" · ")} />
