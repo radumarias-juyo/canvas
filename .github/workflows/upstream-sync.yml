@@ -4,6 +4,9 @@
 #    this private repo, so the upstream commits can be merged here.
 # 2. Points the `upstream-sync` branch at upstream's main and opens (or refreshes)
 #    a PR into main. Review and merge it; resolve conflicts in the PR if any.
+# 3. Mirrors every upstream branch to `upstream/<branch>` here, with its Git LFS
+#    files: moved branches are force-updated and mirrors of branches deleted
+#    upstream are removed. Branches outside `upstream/` are never touched.
 #
 # Nothing is ever pushed to upstream. Run it anytime from the Actions tab.
 #
@@ -40,7 +43,8 @@ jobs:
       - name: Fetch upstream
         run: |
           git remote add upstream https://github.com/radumarias/pi-artifacts
-          git fetch upstream main
+          git fetch --prune upstream '+refs/heads/*:refs/remotes/upstream/*'
+          git fetch --prune origin '+refs/heads/upstream/*:refs/remotes/mirror/*'
 
       - name: Check for new upstream commits
         id: check
@@ -79,3 +83,19 @@ jobs:
               --title "Sync from upstream pi-artifacts ($count commits)" --body "$body"; then
             echo "::warning::Could not open the PR automatically (enable 'Allow GitHub Actions to create and approve pull requests'). Open it here: https://github.com/${{ github.repository }}/compare/main...upstream-sync"
           fi
+
+      # Last, so a failure here never holds up the main sync above.
+      - name: Mirror every upstream branch to upstream/<branch>
+        run: |
+          moved=()
+          for ref in $(git for-each-ref --format='%(refname:strip=3)' refs/remotes/upstream/); do
+            [ "$(git rev-parse "upstream/$ref")" = "$(git rev-parse -q --verify "mirror/$ref")" ] || moved+=("upstream/$ref")
+          done
+          if [ ${#moved[@]} -gt 0 ]; then
+            echo "Copying LFS files for: ${moved[*]}"
+            git lfs fetch --all upstream "${moved[@]}"
+            git lfs push --all origin "${moved[@]}"
+          fi
+          # Updates moved mirrors and deletes mirrors of branches upstream deleted;
+          # --prune only ever touches refs/heads/upstream/*.
+          git push --prune origin '+refs/remotes/upstream/*:refs/heads/upstream/*'
