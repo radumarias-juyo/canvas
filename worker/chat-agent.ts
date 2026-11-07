@@ -79,7 +79,7 @@ import { callHinter, HINT_MS, HINT_THRESHOLD, worthAsking, type CallHinter } fro
 import { recordSpend } from "./agent/ledger.ts";
 import type { ModelRunner } from "./agent/workers-ai.ts";
 import { RunTracker } from "./chat-status.ts";
-import { mcpExtension, type ServerCatalog } from "./agent/mcp.ts";
+import { mcpExtension, type McpToolInfo, type ServerCatalog } from "./agent/mcp.ts";
 import { deferredTools, MIN_TOOLS_TO_PICK, pickerId, pickFailure, pickTools, TOOL_PICK_MS, toolPicker, toolsToOffer, type PickableTool } from "./agent/tool-pick.ts";
 import { artifactExtension, filesExtension, filesIndexExtension, reactionsExtension, sandboxExtension, sandboxName, skillsExtension, type ChatScope } from "./agent/tools.ts";
 import type { SandboxFile } from "./sandbox.ts";
@@ -120,6 +120,21 @@ import {
 import { withFailuresReported } from "./model-health.ts";
 import { inboxIds, queuedIdsOf, queuedMessages } from "./queue.ts";
 import { mcpAuthStore, readSystemPrompt, saveSystemPrompt, SYSTEM_PROMPT_KEY, type Tag } from "./users.ts";
+import {
+  AGENT_ID_PATTERN,
+  CHAT_AGENT_KIND,
+  CHAT_TURN_KIND,
+  type AgentDefinition,
+  type AgentTurnView,
+  type ChatAgentReplyData,
+  type ChatAgents,
+  type ChatAgentView,
+  type ChatTurnData,
+} from "../shared/agents.ts";
+import { AgentTurns, type TurnHost } from "./agents/controller.ts";
+import { ChatRoster, type AgentTurn, type RosterEntry } from "./agents/roster.ts";
+import { agentsExtension } from "./agents/tools.ts";
+import { agentInstructions, allowedTools, askOf, assistantText, attachedNote, MAX_ASK_CHARS, messageAskKey, speakersFor } from "./agents/turns.ts";
 
 /** Artifacts from the owner's other chats one chat remembers as named with "@" (see ChatAgent.#broughtIn). */
 const MAX_BROUGHT_IN = 200;
@@ -187,6 +202,13 @@ const EXPORTED_KV = [AUTO_KEY, SHOWN_SKILLS_KEY, BROUGHT_IN_KEY, SYSTEM_PROMPT_K
 const IMPORTING_KEY = "importing";
 /** Set once an import stored every part: until its owner's list has the chat, the same import may start it again. */
 const IMPORTED_KEY = "imported";
+/**
+ * How far pi's log was read for the agents pi's answers name (#scanPi): the newest entry read, and the chain of
+ * hand-offs pi's latest input is in when another agent handed it that turn, so the agents pi names in its answer stay
+ * within the chain's cap. Set when the first agent joins, so pi's earlier answers start nothing.
+ */
+const PI_SCAN_KEY = "piScan";
+type PiScan = { through: number; chain?: { hop: number; root: number } };
 
 /** The newest transcript entries, read at most once per message (see #recentEntries). */
 type RecentEntries = () => Promise<readonly EntryRecord[] | undefined>;
@@ -196,6 +218,23 @@ interface SkillsFor {
   recent: RecentEntries;
 }
 
+/** Which entries of a conversation to read, as Conversation.entries takes it. */
+type EntryQuery = Parameters<Conversation["entries"]>[0];
+
+/** A conversation's entries `query` matches, a page of `size` at a time: at most `max` pages. */
+async function* entryPages(
+  conversation: Pick<Conversation, "entries">,
+  query: EntryQuery,
+  size: number,
+  max = Infinity,
+): AsyncGenerator<readonly EntryRecord[]> {
+  let cursor: Cursor | undefined;
+  for (let n = 0; n < max; n++) {
+    const page = await conversation.entries(query, size, cursor, BACKGROUND_CONTEXT);
+    yield page.items;
+    if (!(cursor = page.next)) return;
+  }
+}
 
 /** The name of a user's chat object. The uid must come from a verified identity: it is what keeps users apart. */
 export function chatAgentName(uid: string, chatId: string): string {
@@ -267,6 +306,9 @@ export class ChatAgent extends DurableObject<Env> {
     defaults: this.#defaults(defaultModelChoice(this.env.MODEL, this.env.THINKING_LEVEL)),
   });
   readonly members = new ChatMembers(this.ctx.storage.sql);
+  /** The chat's agents besides pi, each in a session of its own, and their turns (worker/agents/). */
+  readonly roster = new ChatRoster(this.ctx.storage.sql);
+  readonly turns = new AgentTurns(this.#turnHost());
   readonly reactions = new ChatReactions(this.ctx.storage.sql);
   readonly sockets = new ChatSockets({
     events: () => this.harness.session().events(),
@@ -277,7 +319,8 @@ export class ChatAgent extends DurableObject<Env> {
     queued: (ids) => this.queued(ids),
     incoming: () => this.incoming(),
     prompt: (text, author, attachments, mentions, replyTo) => this.prompt(text, author, attachments, mentions, replyTo),
-    abort: (by) => this.abort(by),
+    abort: (by, agent) => this.abort(by, agent),
+    agents: () => this.agentViews(),
     setModel: (input, by) => this.setModel(input, by),
     auto: () => this.#auto(),
     reactions: () => this.reactions.all(),
@@ -296,6 +339,8 @@ export class ChatAgent extends DurableObject<Env> {
    * tools are deferred, for the tool picker to pick from.
    */
   #mcp = { key: "", listing: "", generation: 0, deferred: false };
+  /** Each MCP agent tool's server, and whether it only reads: what an agent's turn is limited by. */
+  #mcpTools: ReadonlyMap<string, McpToolInfo> = new Map();
   #mcpListings = 0;
   /** The fingerprint of the skills the agent has now, so a refresh reinstalls them only on a change. */
   #skillsInstalled: string | undefined;
@@ -321,8 +366,12 @@ export class ChatAgent extends DurableObject<Env> {
   #sharedWrites: Promise<unknown> = Promise.resolve();
   /** The last read of the queue, by the inbox ids it was for: every socket asks after the same commit. */
   #queuedRead: { key: string; read: Promise<QueuedMessage[]> } | undefined;
-  /** What the transcript names, as far as it was read (see #transcriptTraces). */
-  #seen: { through: number; traces: ChatTraces } = { through: -1, traces: chatTraces([]) };
+  /** What the transcript names, and how far each of pi's sessions was read for it (see #transcriptTraces). */
+  #seen: { through: Map<string, number>; traces: ChatTraces } = { through: new Map(), traces: chatTraces([]) };
+  /** Set while a broadcast of the agents' view waits for the current task to end (#broadcastAgents). */
+  #agentsChanged = false;
+  /** The asking line the skill classifier last read for an agent's turn (#skillsForTurn). */
+  #skillsAsked: string | undefined;
   /** See #oneShotModels. */
   #oneShot: Models | undefined;
   /** What tells whether an aside is meant for the agent (CALL_HINT_MODEL); undefined when hints are off. */
@@ -356,6 +405,7 @@ export class ChatAgent extends DurableObject<Env> {
       onPublished: (artifact) => this.#directory.recordArtifact({ ...artifact, chatId: this.chatId }),
       broughtIn: (id) => this.#broughtIn().includes(id),
       proposeSkill: (skill) => this.#directory.saveSkill(skill, "agent", false),
+      proposeAgent: (input) => this.#directory.saveAgent(input, "agent", false),
       checkPage: (input, signal) =>
         this.#checkBrowser.withPage((page) => checkPage(page, input, this.#checkBridge(input.manifest)), { timeoutMs: CHECK_MS, signal }),
       chatArtifacts: () => this.#directory.listChatArtifacts(this.chatId),
@@ -370,11 +420,17 @@ export class ChatAgent extends DurableObject<Env> {
       react: (emoji) => this.#agentReact(emoji),
     });
     this.registry.install(promptExtension);
-    this.registry.install(peopleExtension(() => this.people()));
+    this.registry.install(
+      peopleExtension(
+        () => this.people(),
+        () => this.roster.list().filter((entry) => !entry.off),
+      ),
+    );
     this.registry.install(artifactExtension(scope));
     this.registry.install(filesExtension(scope));
     this.registry.install(skillsExtension(scope));
     this.registry.install(reactionsExtension(scope));
+    this.registry.install(agentsExtension(scope));
     if (env.SANDBOX_ENABLED === "true") this.registry.install(sandboxExtension(scope));
     this.registry.install(systemPromptExtension(() => this.#systemPrompts()));
   }
@@ -399,8 +455,13 @@ export class ChatAgent extends DurableObject<Env> {
    * now; otherwise the next prompt refreshes them, and a wake stays short: no MCP connections, no listing of files.
    */
   onStart(): void {
+    if (this.#gone) return;
+    // The agents' turns that were running, or waiting, go on: cheap when there are none.
+    this.turns.resume();
+    // An answer pi gave before the restart may not have been read for the agents it names, even once its run ended.
+    this.#scanPi();
     // The sidebars show the chat working: the object restarted mid-run. Follow the run it resumes, or tell them it is over.
-    if (this.#gone || this.#status() !== "running") return;
+    if (this.#status() !== "running") return;
     void this.refreshMcpTools();
     void this.refreshSkills();
     void this.refreshFiles();
@@ -671,6 +732,11 @@ export class ChatAgent extends DurableObject<Env> {
     return (await this.harness.pi()).root(BACKGROUND_CONTEXT);
   }
 
+  /** The chat's log (the root conversation) entries `query` matches, a page at a time. */
+  async *#log(query: EntryQuery, size = 100, max?: number): AsyncGenerator<readonly EntryRecord[]> {
+    yield* entryPages(await this.#root(), query, size, max);
+  }
+
   /**
    * The people's messages among `ids` (inbox items an event batch reports), in that order: what everyone sees queued.
    * Read from the inbox as it is now; the sockets' event streams keep the conversation's view loaded, so this is cheap.
@@ -711,8 +777,8 @@ export class ChatAgent extends DurableObject<Env> {
    * A notice in the transcript that someone joined or left. A passive write: everyone sees it at once, even mid-run,
    * and the model does not read it. Only a notice: it does not hold up the change it reports, and a failure is logged.
    */
-  #notePeople({ uid, name }: Person, event: ChatPeopleData["event"]): void {
-    const entry = { kind: CHAT_PEOPLE_KIND, data: { uid, name, event } satisfies ChatPeopleData };
+  #notePeople({ uid, name }: Person, event: ChatPeopleData["event"], agent?: string): void {
+    const entry = { kind: CHAT_PEOPLE_KIND, data: { uid, name, event, ...(agent && { agent }) } satisfies ChatPeopleData };
     void this.#root()
       .then((root) => root.submit({ type: "write", entry }, BACKGROUND_CONTEXT))
       .catch((error: unknown) => console.error("people notice:", errorMessage(error)));
@@ -1004,8 +1070,9 @@ export class ChatAgent extends DurableObject<Env> {
     // Everything the extension is built from: a server's new tool list, or a new reason it is unavailable, reinstalls it.
     const installed = JSON.stringify([deferred, [...catalog], [...unavailable]]);
     if (installed !== this.#mcp.key) {
-      const { extension, listing } = mcpExtension(this.hub, catalog, unavailable, () => this.discoverMcp(), { deferred });
+      const { extension, listing, toolInfo } = mcpExtension(this.hub, catalog, unavailable, () => this.discoverMcp(), { deferred });
       this.registry.install(extension);
+      this.#mcpTools = toolInfo;
       if (deferred) this.registry.install(this.#toolSearch);
       else this.registry.uninstall(this.#toolSearch);
       const deferring = deferred && !this.#mcp.deferred;
@@ -1156,9 +1223,15 @@ export class ChatAgent extends DurableObject<Env> {
     this.#requireInChat(author);
     const shared = this.members.hasAny();
     const quote = replyTo === undefined ? null : await this.#quote(replyTo);
-    // A reply to the agent calls it too, as a follow-up to what it said. Told for sure once the mentions are known.
-    const repliesToAgent = quote !== null && "agent" in quote;
-    const calling = !shared || repliesToAgent || summonsAgent(text);
+    // A reply to pi calls it too, as a follow-up to what it said; a reply to another agent calls that agent. Told for
+    // sure once the mentions are known.
+    const repliesToAgent = quote !== null && "agent" in quote && !quote.agentId;
+    // The agents of the roster it calls ("@research"), who take turns of their own (worker/agents/). A message that
+    // calls only them is not pi's to answer, even in a chat nobody shares. Told for sure once the mentions are known.
+    const repliesTo = quote && "agent" in quote ? quote.agentId : undefined;
+    // With files, artifacts or people named, their "@name"s may hide what looks like a call now: pi may be summoned after all.
+    const callsAgents = mentionInputs.length === 0 && speakersFor(text, this.roster.list(), repliesTo).length > 0;
+    const calling = (!shared && !callsAgents) || repliesToAgent || summonsAgent(text);
     const byOwner = author.uid === this.uid;
     // Someone else's own files they named come as attachments, copied to the owner's files, where the agent works. The
     // owner's second seat has none of its own.
@@ -1221,7 +1294,9 @@ export class ChatAgent extends DurableObject<Env> {
       calling && this.refreshUserPrompt(),
     ]);
     // The files they named of their own are named too: "@pi notes.md" is not a call.
-    const summoned = !shared || repliesToAgent || summonsAgent(text, [...mentions, ...own]);
+    const named = [...mentions, ...own];
+    const speakers = speakersFor(text, this.roster.list(), repliesTo, named);
+    const summoned = (!shared && !speakers.length) || repliesToAgent || summonsAgent(text, named);
     // Again after the refreshes, which can take seconds: the author may have been removed meanwhile.
     this.#requireInChat(author);
     // Nothing left to say: every attachment was one they may not attach.
@@ -1242,7 +1317,8 @@ export class ChatAgent extends DurableObject<Env> {
         ...(auto && { auto }),
         ...(tools && { tools }),
       }) satisfies ChatMessageData;
-    const summon = (data: ReturnType<typeof dataWith>) => this.#summon(content, shared ? ({ ...data, summoned: true } satisfies ChatMessageData) : data);
+    const summon = (data: ReturnType<typeof dataWith>) =>
+      this.#summon(content, shared || speakers.length ? ({ ...data, summoned: true } satisfies ChatMessageData) : data);
     // The model and the tools change before the message goes in, so the run it starts is on the picks.
     if (summoned) {
       await this.#place(async () => {
@@ -1255,10 +1331,21 @@ export class ChatAgent extends DurableObject<Env> {
       // Meant for the agent, though it did not call it? Its author may be offered to (#hintCall). Off the prompt's path.
       // Not while the agent works: it reads the message at its next step. The classifier reads whom it replies to too.
       const hinter = this.#hinter;
-      if (hinter && this.#status() !== "running" && worthAsking(text)) {
+      if (hinter && !speakers.length && this.#status() !== "running" && worthAsking(text)) {
         const asked = [quote && replyLine(quote), text].filter(Boolean).join("\n\n");
         void this.#hintCall(hinter, aside, author, asked).catch((error) => console.error("call hint:", errorMessage(error)));
       }
+    }
+    // The agents it calls take their turns, each in its own session; the turn's input carries the message.
+    if (speakers.length) {
+      const files = attachedNote(attached?.attachments.map((attachment) => attachment.path) ?? []);
+      this.turns.call(speakers, {
+        calledBy: { name: author.name, uid: author.uid },
+        // The catch-up leaves the message out (askKey), so the input carries all of it a hand-off would.
+        ask: `${askOf({ name: author.name, kind: "person", owner: byOwner }, written, MAX_ASK_CHARS)}${files}`,
+        askKey: messageAskKey({ uid: author.uid, sentAt }),
+        byOwner,
+      });
     }
     // The sidebars are only a convenience: update them off the prompt's path, and let a failure be.
     // Only a tag whose "@name" is in the text: one sent without it would notify someone of nothing they can see.
@@ -1477,6 +1564,8 @@ export class ChatAgent extends DurableObject<Env> {
       this.#onStatus(shown);
       events.start(async (batch) => {
         tracker.apply(batch);
+        // pi answered: the agents its answer names get turns.
+        if (this.#runWatch === watch && batch.some((event) => event.type === "run_end")) this.#scanPi();
         // Most batches are streamed tokens, which change nothing here.
         if (this.#runWatch !== watch || tracker.status === shown) return;
         shown = tracker.status;
@@ -1669,6 +1758,7 @@ export class ChatAgent extends DurableObject<Env> {
     this.#tellShared();
     // The agent acts as the owner: a removed person's queued requests must not run after they are out.
     await this.#withdrawQueued(uid).catch((error: unknown) => console.error("withdraw queued:", errorMessage(error)));
+    await this.turns.leave(uid);
     if (this.#hasSidebar(uid)) await this.#index(uid).removeSharedChat(this.chatId, this.uid);
     return null;
   }
@@ -1714,7 +1804,7 @@ export class ChatAgent extends DurableObject<Env> {
     let disposed = false;
     try {
       // Nothing may publish or save while its traces are read: abort resolves once the run's tools have stopped.
-      await this.harness.abort().catch((error: unknown) => console.error("delete, abort:", errorMessage(error)));
+      await Promise.all([this.harness.abort(), this.turns.stop()]).catch((error: unknown) => console.error("delete, abort:", errorMessage(error)));
       const traces = await this.#traces();
       // Only files the owner was shown, and only this chat's: never one the preview left out, nor any other path sent.
       const confirmed = new Set(files);
@@ -1824,20 +1914,20 @@ export class ChatAgent extends DurableObject<Env> {
   }
 
   /**
-   * What the transcript names (chatTraces), read on from where the last read stopped: entries never change once
+   * What the transcript names (chatTraces), in every one of pi's sessions (the chat's, and each agent's, whose tool
+   * calls publish and save for the chat as pi's do), read on from where the last read stopped: entries never change once
    * written, so a chat's files are known without reading its whole history on every request.
    */
   readonly #transcriptTraces = singleFlight(async (): Promise<ChatTraces> => {
-    const root = await this.#root();
     const seen = this.#seen;
-    let cursor: Cursor | undefined;
-    do {
-      const page = await root.entries({ order: "ascending", minEntryId: (seen.through + 1) as EntryId }, 500, cursor, BACKGROUND_CONTEXT);
-      chatTraces(page.items, seen.traces);
-      const last = page.items.at(-1);
-      if (last) seen.through = last.id as number;
-      cursor = page.next;
-    } while (cursor);
+    for (const { id } of await this.harness.sessions.list()) {
+      const query = { order: "ascending", minEntryId: ((seen.through.get(id) ?? -1) + 1) as EntryId } as const;
+      for await (const page of entryPages(await this.harness.conversation(id), query, 500)) {
+        chatTraces(page, seen.traces);
+        const last = page.at(-1);
+        if (last) seen.through.set(id, last.id as number);
+      }
+    }
     return seen.traces;
   });
 
@@ -1870,17 +1960,13 @@ export class ChatAgent extends DurableObject<Env> {
 
   /** The agent's reaction (the react tool): to the newest message a person sent, which is the one it is answering. */
   async #agentReact(emoji: Reaction): Promise<string | null> {
-    const root = await this.#root();
-    let cursor: Cursor | undefined;
     // Newest first, past the run's own tool calls and results; not an aside, which can be written while the agent works.
-    for (let pages = 0; pages < 10; pages++) {
-      const page = await root.entries({ order: "descending" }, 50, cursor, BACKGROUND_CONTEXT);
-      const found = page.items.find((entry) => entry.kind === CHAT_MESSAGE_KIND && !(entry.data as Partial<ChatMessageData> | undefined)?.aside);
+    for await (const page of this.#log({ order: "descending" }, 50, 10)) {
+      const found = page.find((entry) => entry.kind === CHAT_MESSAGE_KIND && !(entry.data as Partial<ChatMessageData> | undefined)?.aside);
       if (found) {
         this.#setReaction(found.id as number, emoji, AGENT_REACTOR, true);
         return (found.data as Partial<ChatMessageData> | undefined)?.name ?? "someone";
       }
-      if (!(cursor = page.next)) break;
     }
     return null;
   }
@@ -1890,13 +1976,262 @@ export class ChatAgent extends DurableObject<Env> {
     if (this.reactions.set(entry, emoji, who, on)) this.sockets.broadcast({ type: "reacted", entry, reactions: this.reactions.of(entry) });
   }
 
-  /** Stop the agent's run, and the messages queued for it. In a shared chat the others see who stopped it. */
-  async abort(by: Person): Promise<void> {
+  /** What everyone's app shows of the chat's agents besides pi. */
+  agentViews(): ChatAgentView[] {
+    return this.roster.views((uid) => this.#nameOf(uid));
+  }
+
+  /** The name to show for someone in the chat, owner or member; their uid when they are neither. */
+  #nameOf(uid: string): string {
+    return everyone(this.people()).find((person) => person.uid === uid)?.name ?? uid;
+  }
+
+  /** Tell everyone's app the agents' view, once for the changes one task makes. */
+  #broadcastAgents(): void {
+    if (this.#agentsChanged) return;
+    this.#agentsChanged = true;
+    queueMicrotask(() => {
+      this.#agentsChanged = false;
+      this.sockets.broadcast({ type: "agents", agents: this.agentViews() });
+    });
+  }
+
+  /**
+   * The owner brings one of their agents into the chat: it gets a pi session of its own, configured at its first turn.
+   * Only an agent that is on. Adding one already here changes nothing.
+   */
+  async addAgent(by: Person, agentId: unknown): Promise<ChatAgentView[] | ChatRefusal> {
+    if (by.uid !== this.uid) return refuse(403, "Only the chat's owner can add agents to it.");
+    if (this.#gone) return refuse(404, DELETED);
+    if (typeof agentId !== "string" || !AGENT_ID_PATTERN.test(agentId)) return refuse(400, "Expected {agentId}.");
+    if (this.roster.get(agentId)) return this.agentViews();
+    const agent = await this.#directory.getAgent(agentId);
+    if (!agent) return refuse(404, "No such agent.");
+    if (!agent.enabled) return refuse(409, `@${agent.name} is off: turn it on first.`);
+    // Before its session is made: a session made for an agent the roster refuses would stay, read by every traces read.
+    const early = this.roster.refusal(agent.name);
+    if (early) return refuse(409, early.error);
+    const [session, newest] = await Promise.all([
+      this.harness.sessions.create(),
+      this.roster.hasAny() ? undefined : this.#root().then((root) => root.entries({ order: "descending" }, 1, undefined, BACKGROUND_CONTEXT)),
+    ]);
+    const first = !this.roster.hasAny();
+    const refused = this.roster.add({
+      agentId,
+      ownerUid: this.uid,
+      name: agent.name,
+      session: session.id,
+      avatar: agent.avatar,
+      color: agent.color,
+      job: agent.job,
+    });
+    if (refused) return refuse(409, refused.error);
+    // The first agent: pi's answers from now on are read for the agents they name, none before.
+    if (first) this.ctx.storage.kv.put(PI_SCAN_KEY, { through: (newest?.items[0]?.id as number | undefined) ?? -1 } satisfies PiScan);
+    this.#broadcastAgents();
+    this.#notePeople(by, "agent-added", agent.name);
+    return this.agentViews();
+  }
+
+  /** The owner takes an agent out of the chat: its turns stop, and its past replies stay in the log. */
+  async removeAgent(by: Person, agentId: string): Promise<ChatAgentView[] | ChatRefusal> {
+    if (by.uid !== this.uid) return refuse(403, "Only the chat's owner can remove agents from it.");
+    const entry = this.roster.get(agentId);
+    if (!entry) return refuse(404, "No such agent in this chat.");
+    await this.turns.stop(agentId);
+    this.roster.remove(agentId);
+    this.#broadcastAgents();
+    this.#notePeople(by, "agent-removed", entry.name);
+    return this.agentViews();
+  }
+
+  /** The chat's agents and their latest turns, for someone in it (a runs list). */
+  agentsFor(uid: string): ChatAgents | ChatRefusal {
+    if (!this.isInChat(uid)) return refuse(403, "You are not in this chat.");
+    const agents = this.agentViews();
+    const view = ({ root: _root, ask: _ask, submitted: _submitted, ...turn }: AgentTurn): AgentTurnView => turn;
+    return { agents, turns: Object.fromEntries(agents.map((agent) => [agent.id, this.roster.recentTurns(agent.id).map(view)])) };
+  }
+
+  /** Read pi's new answers for the agents they name (#piScan), off the caller's path. Nothing while the chat has no agents. */
+  #scanPi(): void {
+    if (this.#gone || !this.roster.hasAny()) return;
+    this.ctx.waitUntil(this.#piScan().catch((error: unknown) => console.error("agent hand-offs:", errorMessage(error))));
+  }
+
+  /**
+   * pi's log, read on from where the last read stopped (PI_SCAN_KEY): the agents of the roster pi's final answers name
+   * get turns, within the chain pi's input was in. Its inputs are placed in its log in order, so the latest one read
+   * says whose turn its next answer is: a turn another agent handed it (chat.turn, with its chain) or a person's
+   * message (a chain of its own). One read at a time; each page's turns and how far it read are written together, so
+   * a restart gives none twice.
+   */
+  readonly #piScan = serial(async (): Promise<void> => {
+    const scan = this.ctx.storage.kv.get<PiScan>(PI_SCAN_KEY);
+    if (!scan) return;
+    let { through, chain } = scan;
+    for await (const page of this.#log({ order: "ascending", minEntryId: (through + 1) as EntryId })) {
+      for (const entry of page) {
+        through = entry.id as number;
+        if (entry.kind === CHAT_TURN_KIND) {
+          const data = entry.data as Partial<ChatTurnData> | undefined;
+          chain = typeof data?.hop === "number" && typeof data.root === "number" ? { hop: data.hop, root: data.root } : undefined;
+        } else if (entry.kind === "pi.user" || (entry.kind === CHAT_MESSAGE_KIND && !(entry.data as Partial<ChatMessageData> | undefined)?.aside)) {
+          chain = undefined;
+        } else if (entry.kind === "pi.assistant") {
+          const message = entry.model?.[0];
+          if (message?.role === "assistant" && message.stopReason === "stop") this.turns.fromPi(assistantText(message), through, chain);
+        }
+      }
+      if (this.#gone) return;
+      this.ctx.storage.kv.put(PI_SCAN_KEY, { through, ...(chain && { chain }) } satisfies PiScan);
+    }
+  });
+
+  /**
+   * What the skill classifier reads for an agent's turn, or one handed to pi: the asking line, with the chat's newest
+   * entries. Its pick adds to the chat's list as a person's message does, so the list only grows. Undefined for the
+   * same line as the last one (one message calling several agents), which it picked for already.
+   */
+  #skillsForTurn(ask: string): SkillsFor | undefined {
+    if (ask === this.#skillsAsked) return undefined;
+    this.#skillsAsked = ask;
+    return { text: ask, recent: memoAsync(() => this.#recentEntries()) };
+  }
+
+  /** The owner's tools, skills, files and prompt as they are now, before an agent's turn or one handed to pi (`ask`). */
+  async #refreshForTurn(ask: string): Promise<void> {
+    await Promise.all([this.refreshMcpTools(), this.refreshSkills(this.#skillsForTurn(ask)), this.refreshFiles(), this.refreshUserPrompt()]);
+  }
+
+  /** What the turn controller needs of this chat (worker/agents/controller.ts). */
+  #turnHost(): TurnHost {
+    const conversation = async (session: string) => {
+      const found = await this.harness.conversation(session);
+      if (!found) throw new Error(`The agent's session ${session} is gone.`);
+      return found;
+    };
+    const turnEntries = async (session: string, turn: number) => {
+      const found: EntryRecord[] = [];
+      for await (const page of entryPages(await conversation(session), { order: "descending" }, 100, 10)) {
+        for (const entry of page) {
+          if (entry.kind === CHAT_TURN_KIND && (entry.data as ChatTurnData | undefined)?.turn === turn) return found.reverse();
+          found.push(entry);
+        }
+      }
+      return [];
+    };
+    return {
+      roster: this.roster,
+      definition: (entry) => this.#index(entry.ownerUid).getAgent(entry.agentId),
+      configure: (entry, agent, turn) => this.#configureAgent(entry, agent, turn, conversation),
+      logSince: (after) => this.#log({ order: "descending", minEntryId: (after + 1) as EntryId }),
+      write: async (session, text, requestId) => {
+        const message: UserMessage = { role: "user", content: text, timestamp: Date.now() };
+        await (await conversation(session)).submit({ type: "write", requestId, entry: { kind: CHAT_ASIDE_KIND, model: [message] } }, BACKGROUND_CONTEXT);
+      },
+      submit: async (session, input, operationId, data) => {
+        await this.harness.submit(input, { session, operationId, whenBusy: "followUp", entry: { kind: CHAT_TURN_KIND, data } });
+      },
+      wait: (session, operationId) => this.harness.wait(operationId, { session }),
+      abort: async (session) => {
+        await this.harness.abort({ session });
+      },
+      turnEntries,
+      // Request ids, so a reply posted again after a restart is placed once.
+      post: async (reply) => {
+        const requestId = `agent-reply:${reply.agentId}:${reply.turn}`;
+        await (await this.#root()).submit({ type: "write", requestId, entry: { kind: CHAT_AGENT_KIND, data: reply } }, BACKGROUND_CONTEXT);
+        // Unread in everyone's sidebar, as a person's message is. Only a view: a failure is logged.
+        const author = { uid: `agent:${reply.agentId}`, name: reply.name };
+        void this.#touchIndexes(reply.text || reply.name, author, [], reply.text).catch((error) => console.error("chat index:", errorMessage(error)));
+      },
+      tellPi: async (reply) => {
+        if (!reply.text) return;
+        const said: UserMessage = { role: "user", content: askOf({ name: reply.name, kind: "agent" }, reply.text), timestamp: Date.now() };
+        const requestId = `agent-aside:${reply.agentId}:${reply.turn}`;
+        await (await this.#root()).submit({ type: "write", requestId, entry: { kind: CHAT_ASIDE_KIND, model: [said] } }, BACKGROUND_CONTEXT);
+      },
+      handToPi: async (input, data) => {
+        await this.#watchRuns().catch((error: unknown) => console.error("chat status:", errorMessage(error)));
+        await this.#refreshForTurn(input);
+        // The handing turn names the input: handed again after a restart, it is placed once. Its entry says which chain
+        // pi's answer is in (#piScan).
+        try {
+          await this.harness.submit(input, { operationId: `pi-turn:${data.turn}`, whenBusy: "followUp", entry: { kind: CHAT_TURN_KIND, data } });
+        } catch (error) {
+          this.#resumeSettle();
+          throw error;
+        }
+      },
+      changed: () => this.#broadcastAgents(),
+      waitUntil: (promise) => this.ctx.waitUntil(promise),
+    };
+  }
+
+  /**
+   * Set an agent's session up for a turn: the owner's tools and skills as they are now, its model and effort (the
+   * chat's model when it names none), its own instructions, and only the tools this turn may use (allowedTools): the
+   * harness offers and runs no other.
+   */
+  async #configureAgent(entry: RosterEntry, agent: AgentDefinition, turn: AgentTurn, conversation: (session: string) => Promise<Conversation>): Promise<void> {
+    await this.#refreshForTurn(turn.ask);
+    const [session, catalog, rootAgent] = await Promise.all([
+      conversation(entry.session),
+      this.#catalog(),
+      this.#root().then((root) => root.agent(BACKGROUND_CONTEXT)),
+    ]);
+    const named = agent.model && checkSetting(catalog, { model: agent.model, thinkingLevel: agent.effort });
+    const choice =
+      named && !isAuto(named)
+        ? named
+        : (catalog.check({ model: this.#modelOf(rootAgent), thinkingLevel: agent.effort ?? rootAgent.thinkingLevel }) ?? {
+            model: this.#modelOf(rootAgent),
+            thinkingLevel: rootAgent.thinkingLevel,
+          });
+    const installed = this.registry
+      .snapshot()
+      .tools()
+      .map(({ tool }) => tool);
+    const allowed = new Set(
+      allowedTools(
+        installed.map((tool) => tool.name),
+        this.#mcpTools,
+        agent,
+        turn.byOwner,
+        (server) => this.hub.server(server)?.auth === "oauth",
+      ),
+    );
+    const enabled = installed.filter((tool) => allowed.has(tool.name));
+    const deferred = enabled.filter((tool) => tool.deferred);
+    await session.configure(
+      {
+        ...this.#agentChange(choice),
+        instructions: agentInstructions(agent, this.#nameOf(entry.ownerUid)),
+        // Exactly these: a tool installed after this turn was set up stays off for it.
+        tools: enabled,
+        // An agent's turns are few and its own: it gets every MCP tool it may use, without the tool picker.
+        modelTools: deferred.length ? { add: deferred } : null,
+      },
+      BACKGROUND_CONTEXT,
+    );
+  }
+
+  /**
+   * Stop pi's run and the messages queued for it, and every agent's turns; or with `agent`, only that agent's. In a shared
+   * chat the others see who stopped it.
+   */
+  async abort(by: Person, agent?: string): Promise<void> {
     this.#requireInChat(by);
+    if (agent !== undefined) {
+      const entry = this.roster.get(agent);
+      if (entry && (await this.turns.stop(agent)) && this.members.hasAny()) this.#notePeople(by, "stopped", entry.name);
+      return;
+    }
     // Only for the notice: a failure to read pi's queue must not keep the run from stopping.
     const running = await this.#replying().catch(() => false);
-    await this.harness.abort();
-    if (running && this.members.hasAny()) this.#notePeople(by, "stopped");
+    const [, agents] = await Promise.all([this.harness.abort(), this.turns.stop()]);
+    if ((running || agents) && this.members.hasAny()) this.#notePeople(by, "stopped");
   }
 
   /**
@@ -2058,7 +2393,9 @@ interface ChatSession {
   queued(ids: readonly number[]): Promise<QueuedMessage[]>;
   incoming(): IncomingMessage[];
   prompt(text: string, author: Person, attachments: readonly AttachmentInput[], mentions: readonly MentionInput[], replyTo?: number): Promise<void>;
-  abort(by: Person): Promise<void>;
+  abort(by: Person, agent?: string): Promise<void>;
+  /** The chat's agents besides pi, as everyone sees them. */
+  agents(): ChatAgentView[];
   setModel(input: { model?: unknown; thinkingLevel?: unknown }, by: Person): Promise<void>;
   /** Whether the chat is on Auto. */
   auto(): boolean;
@@ -2207,8 +2544,7 @@ class ChatSockets extends LifecycleCapability implements DurableObjectCapability
         const text = String(message.text ?? "").trim().slice(0, 20_000);
         const replyTo = typeof message.replyTo === "number" ? message.replyTo : undefined;
         if (text || attachments.length) await this.#chat.prompt(text, person, attachments, mentions, replyTo);
-      }
-      else if (message.type === "abort") await this.#chat.abort(person);
+      } else if (message.type === "abort") await this.#chat.abort(person, typeof message.agent === "string" ? message.agent : undefined);
       else if (message.type === "model") await this.#chat.setModel(message, person);
       else if (message.type === "react") await this.#chat.react(person, message.entry, message.emoji, message.on === true);
     } catch (error) {
@@ -2269,6 +2605,7 @@ class ChatSockets extends LifecycleCapability implements DurableObjectCapability
       // After events(): a new chat that starts on Auto is set so as pi opens it.
       send(ws, { type: "auto", on: this.#chat.auto() });
       send(ws, { type: "incoming", incoming: this.#chat.incoming() });
+      send(ws, { type: "agents", agents: this.#chat.agents() });
       // Timed only once it is to be sent: a wake attaches every socket again, and most find their snapshot already sent.
       const snapshot = await this.#events([events.snapshot], false);
       const sent = await sha256Hex(JSON.stringify([snapshot.events, snapshot.queued]));

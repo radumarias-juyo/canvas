@@ -2,10 +2,12 @@
 // The MCP shapes mirror the contract Claude's artifacts use, so pages written
 // for one read naturally against the other.
 
-import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
+import type { ModelThinkingLevel, ToolResultMessage } from "@earendil-works/pi-ai";
+import type { EntryRecord } from "@earendil-works/pi-durable";
 import type { EntryReactions, Reactions } from "./reactions.ts";
 import type { Attachment, AttachmentInput } from "./attachments.ts";
 import type { Mention, MentionInput } from "./mentions.ts";
+import type { ChatAgentView } from "./agents.ts";
 
 export type McpErrorCode =
   | "server_not_connected"
@@ -210,6 +212,15 @@ export type PublishedDetails = {
   check?: CheckedDetails;
 };
 
+/** The artifact a publish's result made (pi's, or an agent's in its own session), which shows as a card. */
+export function publishedBy(entry: EntryRecord): PublishedDetails | undefined {
+  if (entry.kind !== "pi.tool-result") return undefined;
+  const message = entry.model?.[0] as ToolResultMessage | undefined;
+  if (message?.toolName !== PUBLISH_TOOL || message.isError) return undefined;
+  const details = message.details as Partial<PublishedDetails> | undefined;
+  return details?.artifactId && details.version ? (details as PublishedDetails) : undefined;
+}
+
 /** The tool that renders a page in a headless browser before it is published, and what its result shows in the chat. */
 export const CHECK_TOOL = "artifact_check";
 export type CheckedDetails = {
@@ -299,7 +310,7 @@ export interface ChatSummary {
  * What the sidebar's socket (GET /api/me/ws) sends: the name of a list that changed, so the app reads it again. A
  * MentionNotice comes as JSON.
  */
-export type SidebarList = "chats" | "artifacts" | "skills";
+export type SidebarList = "chats" | "artifacts" | "skills" | "agents";
 
 /** Someone tagged this user in a shared chat: the app shows it, and the browser too when it may and the app is not in view. */
 export interface MentionNotice {
@@ -453,8 +464,11 @@ export function autoPickFailed(pick: AutoPick): boolean {
 /** A router call: the router's picker id, what the call cost, in dollars and tokens, and how long the call alone took (`ms`, absent on older picks). */
 export type RouterSpend = { model: string; cost: number; input: number; output: number; ms?: number };
 
-/** A message a reply quotes: its transcript entry, who wrote it (the agent, or a person) and the start of its text. */
-export type ReplyQuote = { id: number; name: string; text: string } & ({ agent: true } | { uid: string });
+/**
+ * A message a reply quotes: its transcript entry, who wrote it (pi, another agent of the chat by `agentId`, or a person)
+ * and the start of its text.
+ */
+export type ReplyQuote = { id: number; name: string; text: string } & ({ agent: true; agentId?: string } | { uid: string });
 
 /** How much of the message a reply quotes. */
 export const REPLY_QUOTE_CHARS = 280;
@@ -483,7 +497,9 @@ export interface ChatPeopleData extends Person {
    * `rejoined`: someone already in the chat opened an invite link to it, in another window or on another device.
    * `stopped`: they stopped the agent mid-run.
    */
-  event: "joined" | "rejoined" | "left" | "removed" | "stopped";
+  event: "joined" | "rejoined" | "left" | "removed" | "stopped" | "agent-added" | "agent-removed";
+  /** For agent-added and agent-removed, and a stopped that stopped one agent only: the agent's handle. */
+  agent?: string;
 }
 
 /** A message waiting for the agent: sent while it was busy, in the order it will be answered. `id` is pi's submission id. */
@@ -524,7 +540,8 @@ export type ChatClientMessage =
   // `mentions` are the files, artifacts and people picked with "@" whose text is still in `text`.
   // `replyTo` is the transcript entry of the message it answers: a person's message, or one of the agent's replies.
   | { type: "prompt"; text: string; attachments?: AttachmentInput[]; mentions?: MentionInput[]; replyTo?: number }
-  | { type: "abort" }
+  // Stop the chat: pi and every agent, with what waits for them; with `agent`, only that agent of the roster.
+  | { type: "abort"; agent?: string }
   // Add (`on`) or take back a reaction (shared/reactions.ts) to a transcript entry: a person's message or the agent's reply.
   | { type: "react"; entry: number; emoji: string; on: boolean }
   // Run the chat on another model or effort (shared/models.ts), or on Auto (AUTO_MODEL). The change reaches every socket
@@ -558,6 +575,8 @@ export type ChatServerMessage =
    * its transcript entry, under which the app offers to call the agent on it.
    */
   | { type: "callHint"; entry: number }
+  /** The chat's agents besides pi (shared/agents.ts): on connect, and whenever one is added, removed, starts or ends a turn. */
+  | { type: "agents"; agents: ChatAgentView[] }
   /** Sent just before the chat closes a removed person's socket, in case the close code is lost on the way. */
   | { type: "removed" }
   /** Sent to everyone just before the chat closes their sockets, when its owner deleted it. */
