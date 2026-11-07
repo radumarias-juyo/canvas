@@ -11,10 +11,8 @@ import {
   CHAT_MESSAGE_KIND,
   CHAT_PEOPLE_KIND,
   CHECK_TOOL,
-  DRAFTS_TOOL,
   isOwnedBy,
   isReadOnly,
-  PUBLISH_TOOL,
   WRITE_TOOL,
   manifestOf,
   secondSeat,
@@ -23,6 +21,7 @@ import {
   SOCKET_PING,
   STREAM_STEP_MS,
   type ArtifactManifest,
+  type ArtifactMeta,
   type ChatClientMessage,
   type ChatContents,
   type ChatDeletion,
@@ -148,10 +147,9 @@ import { reportOf, SignInNeeded, whenOf, type DeliveryRequest } from "./agents/r
 import { AgentRunner, type RunAlarm, type RunnerHost, type WatchAlarm } from "./agents/runs/runner.ts";
 import { AgentRuns } from "./agents/runs/store.ts";
 import { reportContext, runInstructions, RUN_STEP_KIND, workSpend, type RunStepData } from "./agents/runs/report.ts";
-import { publishFindings } from "./agents/runs/page.ts";
+import { publishedAlready, publishFindings, publishRebuilt, runMark } from "./agents/runs/page.ts";
 import { compileWorkflow } from "./agents/runs/compile.ts";
 import { sourceName } from "./agents/runs/source.ts";
-import { publishedIn } from "./agents/turns.ts";
 import type { Value } from "../shared/conditions.ts";
 import { runRef, type AgentRunDetail, type AgentRunView, type RunDelivery, type RunRef } from "../shared/runs.ts";
 import { agentsExtension } from "./agents/tools.ts";
@@ -501,6 +499,7 @@ export class ChatAgent extends DurableObject<Env> {
     // The agents' turns that were running, or waiting, go on: cheap when there are none. So do runs cut off.
     this.turns.resume();
     this.runner.resume();
+    this.#reconcileHome();
     // An answer pi gave before the restart may not have been read for the agents it names, even once its run ended.
     this.#scanPi();
     // The sidebars show the chat working: the object restarted mid-run. Follow the run it resumes, or tell them it is over.
@@ -1403,8 +1402,9 @@ export class ChatAgent extends DurableObject<Env> {
         byOwner,
       };
       const others = continued ? speakers.filter((id) => id !== continued.agentId) : speakers;
-      if (continued) this.turns.call([continued.agentId], { ...caller, session: continued.session, run: continued.run });
-      if (others.length) this.turns.call(others, caller);
+      // One message, one chain: the other agents' turns share the continued one's, so MAX_HOPS holds for all of them.
+      const [first] = continued ? this.turns.call([continued.agentId], { ...caller, session: continued.session, run: continued.run }) : [];
+      if (others.length) this.turns.call(others, { ...caller, ...(first && { root: first.root }) });
     }
     // The sidebars are only a convenience: update them off the prompt's path, and let a failure be.
     // Only a tag whose "@name" is in the text: one sent without it would notify someone of nothing they can see.
@@ -2351,10 +2351,25 @@ export class ChatAgent extends DurableObject<Env> {
     return entry && !entry.off ? entry.agentId : undefined;
   }
 
-  /** A scheduler callback: a failed run is the run's to record, never a retry of the alarm. */
-  async #onAlarm(work: () => Promise<unknown>): Promise<void> {
+  /** Whether this instance checked its home agent's alarms (once per start: an alarm job may have gone with no next). */
+  #reconciled = false;
+
+  #reconcileHome(): void {
+    const id = this.ctx.storage.kv.get<string>(HOME_AGENT_KEY);
+    if (this.#reconciled || id === undefined) return;
+    this.#reconciled = true;
+    this.ctx.waitUntil(this.runner.reconcile(id).catch((error: unknown) => console.error("agent alarm:", errorMessage(error))));
+  }
+
+  /**
+   * A scheduler callback: its work goes on detached, so the job queue (pi's own wake jobs, a retry's backoff) is not held
+   * while a run takes minutes; runner.resume picks up a run cut off by a restart. A failed run is the run's to record,
+   * never a retry of the alarm.
+   */
+  #onAlarm(work: () => Promise<unknown>): void {
     if (this.#gone) return;
-    await work().catch((error: unknown) => console.error("agent run:", errorMessage(error)));
+    const detached = work().catch((error: unknown) => console.error("agent run:", errorMessage(error)));
+    if (!this.lifecycle.trackAlarmWork(detached)) this.ctx.waitUntil(detached);
   }
 
   /**
@@ -2515,9 +2530,9 @@ export class ChatAgent extends DurableObject<Env> {
    * A Source this chat's agent watches through says its value moved. The run it may start goes on here, off the
    * Source's poll: the Source does not wait for its subscribers' runs.
    */
-  sourceMoved(agentId: string, value: Value): void {
+  sourceMoved(agentId: string, value: Value, source: string): void {
     if (this.#gone) return;
-    this.ctx.waitUntil(this.runner.sourceMoved(agentId, value).catch((error: unknown) => console.error("agent watch:", errorMessage(error))));
+    this.ctx.waitUntil(this.runner.sourceMoved(agentId, value, source).catch((error: unknown) => console.error("agent watch:", errorMessage(error))));
   }
 
   /**
@@ -2607,8 +2622,8 @@ export class ChatAgent extends DurableObject<Env> {
       subscribe: async (agentId, step, everyMinutes) => {
         await exports.Source.getByName(await sourceName(step)).subscribe(step, { uid: this.uid, chatId: this.chatId, agentId }, everyMinutes);
       },
-      unsubscribe: async (agentId, step) => {
-        await exports.Source.getByName(await sourceName(step)).unsubscribe({ uid: this.uid, agentId });
+      unsubscribe: async (agentId, source) => {
+        await exports.Source.getByName(source).unsubscribe({ uid: this.uid, agentId });
       },
       waitUntil: (promise) => this.ctx.waitUntil(promise),
     };
@@ -2760,41 +2775,48 @@ export class ChatAgent extends DurableObject<Env> {
 
   /**
    * A page step: the report in the page's findings block (an edit), or the page rebuilt as a snapshot of today's data
-   * (the model writes it), then the usual check and publish. A page that fails its check is not published: the run
-   * records "page not updated" and still sends its other deliveries.
+   * (the model writes it), then the usual check and publish, in code and in the chat the page belongs to, as its
+   * versions always are. A page that fails its check is not published: the run records "page not updated" and still
+   * sends its other deliveries.
    */
   async #pageStep(request: DeliveryRequest, step: Extract<AgentStep, { kind: "page" }>): Promise<RunDelivery> {
     const meta = await this.storage.artifacts.readMeta(step.artifactId);
     const to = meta?.title ?? `page ${step.artifactId}`;
     if (!meta || meta.ownerUid !== this.uid) return { kind: "page", to, status: "refused", detail: "page not updated: it is not one of your pages" };
-    if (step.edit === "rebuild") return this.#rebuildPage(request, meta.id, meta.title);
-    // Published in the chat the page belongs to, as its versions always are.
     const scope: PublishScope = {
       ...this.scope,
       chatId: meta.chatId,
       onPublished: (artifact) => this.#directory.recordArtifact({ ...artifact, chatId: meta.chatId }),
     };
-    return publishFindings(scope, meta, request.text, `Findings, ${whenOf(request.agent)}`);
+    const mark = runMark(request.run.dueAt, request.key);
+    if (step.edit === "rebuild") return publishedAlready(meta, mark) ?? this.#rebuildPage(request, meta, scope, mark);
+    return publishFindings(scope, meta, request.text, `Findings, ${whenOf(request.agent)}`, mark);
   }
 
-  /** A page rebuilt as today's snapshot: one model turn in a fresh session that may write, check and publish only it. */
-  async #rebuildPage(request: DeliveryRequest, artifactId: string, title: string): Promise<RunDelivery> {
+  /**
+   * A page rebuilt as today's snapshot: one model turn, in the delivery's session, that may only read the page and
+   * write and check drafts of it (no servers' tools: nothing a server returns steers what it writes, and it publishes
+   * nothing). Its page is a draft made here from the latest version; the newest draft of it that passed its check is
+   * published in code (publishRebuilt).
+   */
+  async #rebuildPage(request: DeliveryRequest, meta: ArtifactMeta, scope: PublishScope, mark: string): Promise<RunDelivery> {
     const { agent, run } = request;
-    // The artifact tools take this chat's pages and the ones brought in.
-    this.#bringIn([artifactId]);
-    const session = (await this.harness.sessions.create()).id;
-    await this.#configureRun(session, agent, undefined, ["artifact_read", WRITE_TOOL, CHECK_TOOL, PUBLISH_TOOL, DRAFTS_TOOL]);
+    // artifact_read takes this chat's pages and the ones brought in.
+    this.#bringIn([meta.id]);
+    const seed = await writeDraft(scope, { artifact: meta, edits: [] });
+    const session = request.session ?? (await this.harness.sessions.create()).id;
+    await this.#configureRun(session, agent, undefined, ["artifact_read", WRITE_TOOL, CHECK_TOOL]);
     const operationId = `run:${agent.id}:${run.dueAt}:page:${request.key}`;
     const prompt = [
-      `Rebuild the page "${title}" (artifact ${artifactId}) as a snapshot of this run: today's data written into the page, so it makes no live calls.`,
+      `Rebuild the page "${meta.title}" (artifact ${meta.id}) as a snapshot of this run: today's data written into the page, so it makes no live calls.`,
       `The run's report:\n\n${request.text}`,
-      `Read the page with artifact_read, write the new page with ${WRITE_TOOL}, check it with ${CHECK_TOOL} and fix what it finds, ` +
-        `then publish it with ${PUBLISH_TOOL} and artifact_id "${artifactId}". Answer with one line on what changed.`,
+      `The page as it is now is the draft "${seed.id}" (read it with artifact_read, artifact_id "${meta.id}"). Change it with ${WRITE_TOOL}, ` +
+        `draft_id "${seed.id}" and edits (a new page written whole is not this page's and is not published), check the new draft with ` +
+        `${CHECK_TOOL} and fix what it finds. The newest draft that passes is published for you. Answer with one line on what changed.`,
     ].join("\n\n");
-    const { result, entries } = await this.#runStep(session, prompt, operationId);
-    const page = publishedIn(entries).find((one) => one.artifactId === artifactId);
-    if (!page) return { kind: "page", to: title, status: "failed", detail: `page not updated${result.reason ? `: ${result.reason}` : ": it was not published"}` };
-    return { kind: "page", to: title, status: "sent", detail: `${title} v${page.version} published`, version: page.version };
+    const { result } = await this.#runStep(session, prompt, operationId);
+    const delivery = await publishRebuilt(scope, meta, seed.id, run.dueAt, `Snapshot, ${whenOf(agent)}`, mark);
+    return delivery.status === "failed" && result.reason ? { ...delivery, detail: `${delivery.detail} (${result.reason})` } : delivery;
   }
 
   /**

@@ -256,6 +256,30 @@ function checkTrigger(value: unknown): AgentTrigger | undefined {
   fail('An agent\'s trigger is a "schedule" or a "watch".');
 }
 
+
+/** Whether an agent may use a server: every one when it has no `servers` list, else those on it. */
+export function mayUseServer(agent: Pick<AgentDefinition, "servers">, server: string): boolean {
+  return !agent.servers || agent.servers.includes(server);
+}
+
+/** The servers a definition's trigger, scope and steps read or call (a tell through a tool too), nested steps included. */
+export function serversNamed(agent: Pick<AgentDefinition, "trigger" | "scope" | "workflow">): string[] {
+  const found = new Set<string>();
+  const walk = (steps: readonly AgentStep[]) => {
+    for (const step of steps) {
+      if (step.kind === "look" || step.kind === "do") found.add(step.server);
+      else if (step.kind === "tell" && typeof step.via === "object") found.add(step.via.server);
+      else if (step.kind === "if") {
+        walk(step.then);
+        walk(step.else ?? []);
+      }
+    }
+  };
+  if (agent.trigger?.kind === "watch") found.add(agent.trigger.step.server);
+  if (agent.scope) found.add(agent.scope.list.server);
+  walk(agent.workflow ?? []);
+  return [...found];
+}
 /** A workflow's steps, counting those inside an if's branches toward MAX_WORKFLOW_STEPS. */
 function checkSteps(value: unknown, depth = 0, count = { steps: 0 }): AgentStep[] {
   if (!Array.isArray(value)) fail("A workflow is a list of steps.");
@@ -332,6 +356,11 @@ export function checkAgent(input: unknown): AgentInput {
       ? undefined
       : { list: checkLook(isObject(input.scope) ? input.scope.list : undefined, "A scope's list"), each: true as const };
   const workflow = input.workflow === undefined || input.workflow === null ? undefined : checkSteps(input.workflow);
+  if (servers) {
+    // A run reads and calls only the servers the agent may use, as its work steps' tools do.
+    const outside = serversNamed({ trigger, scope, workflow }).find((server) => !servers.includes(server));
+    if (outside) fail(`A step names ${outside}, which is not one of the agent's servers: add it to its servers, or change the step.`);
+  }
   const assumed = names(input.assumed, "assumed fields");
   return {
     name,

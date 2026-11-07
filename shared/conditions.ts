@@ -26,7 +26,13 @@ type Node =
   | { kind: "unary"; op: "-" | "not"; operand: Node }
   | { kind: "binary"; op: string; left: Node; right: Node };
 
-type Token = { kind: "number" | "string" | "name" | "op" | "end"; text: string; value?: Value; at: number };
+type Token = { kind: "number" | "string" | "name" | "key" | "op" | "end"; text: string; value?: Value; at: number };
+
+/** The condition language in one paragraph, as the models that write conditions read it (the compiler, agent_propose). */
+export const CONDITIONS_HELP =
+  'Conditions are small expressions over the results by their names: numbers, "text", comparisons (< <= > >= == !=), and/or/not, + - * /, ' +
+  "paths (sales.total, rows[0].value), a vs b (the change of a against b as a fraction), percentages (5% is 0.05), and len, sum, avg, min, " +
+  "max, abs, round, count, first, last, exists, contains, lower, upper, number, change. Never free text: a condition the language does not parse is refused.";
 
 /** The longest a condition may be, as checkAgent allows it. */
 export const MAX_CONDITION = 500;
@@ -44,6 +50,14 @@ function tokenize(source: string): Token[] {
       continue;
     }
     const at = i;
+    // After ".", a key as written: digits (an index: a.1.2 is a[1][2], never a[1.2]) or a name in its own case (a.True).
+    const previous = tokens[tokens.length - 1];
+    const key = previous?.kind === "op" && previous.text === "." ? /^(?:\d+|[A-Za-z_$][A-Za-z0-9_$]*)/.exec(source.slice(i)) : null;
+    if (key) {
+      tokens.push({ kind: "key", text: key[0], at });
+      i += key[0].length;
+      continue;
+    }
     const number = /^(\d+(?:\.\d+)?)(?:[eE][+-]?\d+)?(%?)/.exec(source.slice(i));
     if (number) {
       const value = Number(number[0].replace("%", ""));
@@ -141,10 +155,10 @@ class Parser {
     for (;;) {
       if (this.#take(".")) {
         const key = this.#next;
-        if (key.kind !== "name" && key.kind !== "number") throw new ConditionError(`Expected a name after "." at ${key.at + 1}.`);
+        if (key.kind !== "key") throw new ConditionError(`Expected a name after "." at ${key.at + 1}.`);
         this.#i++;
-        // a.0 is a[0]: a number token reads "0" as 0.
-        node = { kind: "member", object: node, key: { kind: "literal", value: key.kind === "number" ? Number(key.text) : key.text } };
+        // a.0 is a[0].
+        node = { kind: "member", object: node, key: { kind: "literal", value: /^\d/.test(key.text) ? Number(key.text) : key.text } };
       } else if (this.#take("[")) {
         const key = this.#deeper(this.#or);
         this.#expect("]");

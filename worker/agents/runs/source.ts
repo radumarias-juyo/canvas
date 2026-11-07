@@ -23,7 +23,8 @@ export function sourceName(step: Pick<LookStep, "server" | "tool" | "input">): P
 /** What a Source needs around it: the read, the subscribers' objects, an alarm and a clock. Tests pass fakes. */
 export interface SourceHost {
   read(step: Pick<LookStep, "server" | "tool" | "input">): Promise<Value>;
-  notify(subscriber: Subscriber, value: Value): Promise<void>;
+  /** Tell a subscriber the value; `source` is this Source's name, so it can tell a read it no longer watches. */
+  notify(subscriber: Subscriber, value: Value, source: string): Promise<void>;
   setAlarm(at: number): void;
   now(): number;
 }
@@ -98,13 +99,16 @@ export class SourceCore {
     const moved = last?.value !== json;
     if (moved) this.#sql.exec("INSERT OR REPLACE INTO source_last (id, value, at) VALUES (1, ?, ?)", json, this.#host.now());
     const telling = moved ? subscribers : subscribers.filter((row) => row.fresh === 1);
+    const source = await sourceName(JSON.parse(call.step) as LookStep);
     const told = await Promise.allSettled(
-      telling.map((row) => this.#host.notify({ uid: row.uid, chatId: row.chat_id, agentId: row.agent_id }, value)),
+      telling.map((row) => this.#host.notify({ uid: row.uid, chatId: row.chat_id, agentId: row.agent_id }, value, source)),
     );
     told.forEach((result, index) => {
+      const row = telling[index];
       if (result.status === "rejected") console.error("source notify:", errorMessage(result.reason));
-      else if (telling[index].fresh === 1)
-        this.#sql.exec("UPDATE source_subscribers SET fresh = 0 WHERE uid = ? AND agent_id = ?", telling[index].uid, telling[index].agent_id);
+      // A subscriber not told (the new value is saved already) is told at the next poll, as a new one is.
+      const fresh = result.status === "rejected" ? 1 : 0;
+      if (row.fresh !== fresh) this.#sql.exec("UPDATE source_subscribers SET fresh = ? WHERE uid = ? AND agent_id = ?", fresh, row.uid, row.agent_id);
     });
     return { moved, told: told.filter((result) => result.status === "fulfilled").length };
   }

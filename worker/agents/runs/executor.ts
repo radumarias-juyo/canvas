@@ -4,7 +4,7 @@
 // them. Deliveries (tell, page, hand over) wait until every item is done and go out once, each with the parts of the
 // items that reached it. A test run records them instead.
 
-import { AUTONOMY_LABELS, type AgentDefinition, type AgentStep, type LookStep, type StepInput, type StepValue } from "../../../shared/agents.ts";
+import { AUTONOMY_LABELS, mayUseServer, type AgentDefinition, type AgentStep, type LookStep, type StepInput, type StepValue } from "../../../shared/agents.ts";
 import { ConditionError, evaluate, holds, type Value } from "../../../shared/conditions.ts";
 import { excerpt } from "../../../shared/replies.ts";
 import {
@@ -54,6 +54,8 @@ export type DeliveryRequest = {
   text: string;
   agent: AgentDefinition;
   run: Pick<RunRecord, "agentId" | "dueAt" | "why" | "test">;
+  /** A page rebuild's session: the same one again when the run goes on after a restart, so its turn is placed once. */
+  session?: string;
 };
 
 /** What the executor needs from the chat object it runs in. Tests pass fakes. */
@@ -85,6 +87,8 @@ export interface RunStart {
   test?: boolean;
   /** The result of the watch that started it: its steps read it as `watch`, and as the watch step's name. */
   watch?: Value;
+  /** The watch's result before that one, when it was kept: its steps read it as `previous`. */
+  previous?: Value;
 }
 
 /** The workflow a definition runs: its own, else its instructions as one work step reported to its home chat. */
@@ -185,6 +189,15 @@ export function itemKey(element: Value, index: number): { key: string; label: st
   return { key, label: (field(["name", "title", "label", "key", "id"]) ?? key).slice(0, 80) };
 }
 
+/**
+ * A read of the agent's: refused for a server outside its `servers` when it has that list, as its work steps' tools are
+ * (runTools). A definition naming one is refused on save too (checkAgent); this holds for one saved before that.
+ */
+export async function readFor(host: Pick<RunHost, "read">, agent: AgentDefinition, step: Pick<LookStep, "server" | "tool">, input: StepInput): Promise<Value> {
+  if (!mayUseServer(agent, step.server)) throw new Error(`${step.server} is not one of the servers @${agent.name} may use.`);
+  return host.read(step.server, step.tool, input);
+}
+
 /** What a work step's prompt says around the step's own words. */
 function workPrompt(step: Extract<AgentStep, { kind: "work" }>, when: string, item?: { label: string; value: Value }): string {
   return [
@@ -207,6 +220,8 @@ interface ItemRun {
   /** The delivery steps it reached, by key. */
   reached: string[];
   texts: string[];
+  /** The item's text as it was at each delivery step it reached, while later work steps add to it. */
+  textAt: Record<string, string>;
   cost: number;
   configured?: string;
   when: string;
@@ -248,12 +263,13 @@ export class RunExecutor {
     return run;
   }
 
-  async #run({ agent, dueAt, why, test = false, watch }: RunStart): Promise<RunEnd> {
+  async #run({ agent, dueAt, why, test = false, watch, previous }: RunStart): Promise<RunEnd> {
     const runs = this.#host.runs;
     const when = whenOf(agent);
     const { run, started } = runs.begin(agent.id, dueAt, why, test, {
       when,
       ...(watch !== undefined && { watch }),
+      ...(previous !== undefined && { previous }),
       used: { skills: skillsNamed(workflowOf(agent)), servers: serversRead(agent), models: [] },
     });
     // Ended, or waiting for a sign-in that has not come: an alarm that fires twice sends once.
@@ -289,7 +305,7 @@ export class RunExecutor {
     if (!agent.scope) return [{ key: "", label: "" }];
     // Listed again by a run cut off by a restart: the items it ended are read back as they were (#item).
     const list = agent.scope.list;
-    const result = await this.#host.read(list.server, list.tool, list.input);
+    const result = await readFor(this.#host, agent, list, list.input);
     const seen = new Set<string>();
     return itemsOf(result)
       .slice(0, MAX_RUN_ITEMS)
@@ -306,10 +322,13 @@ export class RunExecutor {
     const runs = this.#host.runs;
     const { view, started } = await runs.beginItem(agent.id, run.dueAt, element.key, element.label, () => this.#host.newSession());
     if (!started && view.status !== "running") return view;
-    const scope: Record<string, Value> = {};
-    if (run.detail.watch !== undefined) {
-      scope.watch = run.detail.watch as Value;
-      if (agent.trigger?.kind === "watch") scope[resultName(agent.trigger.step)] = run.detail.watch as Value;
+    // With no prototype: a result named "__proto__" or "constructor" is a name like any other.
+    const scope = Object.create(null) as Record<string, Value>;
+    const watched = run.detail.watch as Value | undefined;
+    if (watched !== undefined) {
+      scope.watch = watched;
+      scope.previous = (run.detail.previous as Value | undefined) ?? null;
+      if (agent.trigger?.kind === "watch") scope[resultName(agent.trigger.step)] = watched;
     }
     if (agent.scope) scope.item = element.value ?? null;
     const state: ItemRun = {
@@ -321,6 +340,7 @@ export class RunExecutor {
       steps: [],
       reached: [],
       texts: [],
+      textAt: {},
       cost: 0,
       when,
       ...(agent.scope && { element: { label: element.label, value: element.value ?? null } }),
@@ -328,6 +348,13 @@ export class RunExecutor {
     let status: RunItemStatus = "acted";
     let reason: string | undefined;
     try {
+      // The value that started a watch's run goes into its session first, so its work steps see what fired it.
+      if (watched !== undefined && agent.trigger?.kind === "watch") {
+        const { server, tool } = agent.trigger.step;
+        const read = `${server}.${tool}, as ${resultName(agent.trigger.step)} and watch`;
+        const text = `The watch that started this run (${read}) read:\n${clip(jsonOf(watched), MAX_RESULT_CHARS)}`;
+        await this.#host.write(state.session, text, `${opId(state)}:watch`);
+      }
       const stopped = await this.#steps(state, workflowOf(agent), "");
       if (stopped) {
         status = "not_today";
@@ -344,6 +371,7 @@ export class RunExecutor {
       ...(state.texts.length && { text: state.texts.join("\n\n") }),
       ...(reason !== undefined && { reason }),
       ...(state.reached.length && { reached: state.reached }),
+      ...(Object.keys(state.textAt).length && { textAt: state.textAt }),
       cost: state.cost,
     });
     this.#host.changed(agent.id);
@@ -363,7 +391,7 @@ export class RunExecutor {
           const label = `${STEP_LABELS.look} ${step.server}.${step.tool}`;
           let value: Value;
           try {
-            value = await this.#host.read(step.server, step.tool, input);
+            value = await readFor(this.#host, state.agent, step, input);
           } catch (error) {
             if (!(error instanceof SignInNeeded)) record(label, false, errorMessage(error));
             throw error;
@@ -424,6 +452,8 @@ export class RunExecutor {
         case "page":
         case "handOver":
           state.reached.push(key);
+          // What it sends is the work done before it; a work step after it adds to the text of later deliveries only.
+          state.textAt[key] = state.texts.join("\n\n");
           record(deliveryLabel(step), true, "sent once every item is done");
           break;
       }
@@ -448,14 +478,17 @@ export class RunExecutor {
     if (!used.models.includes(model)) this.#host.runs.update(state.agent.id, state.run.dueAt, { detail: { used: { ...used, models: [...used.models, model] } } });
   }
 
-  /** Every item is done: send each delivery step once, with the parts of the items that reached it, and end the run. */
+  /**
+   * Every item is done: send each delivery step once, with the parts of the items that reached it (also an item a later
+   * condition stopped, or a later step failed: it got there), and end the run.
+   */
   async #finish(agent: AgentDefinition, run: RunRecord, items: readonly RunItemView[]): Promise<RunStatus> {
     const runs = this.#host.runs;
     const acted = items.filter((item) => item.status === "acted");
     const deliveries = [...run.detail.deliveries];
     const sent = new Set(run.detail.sent ?? []);
     for (const { key, step } of deliverySteps(workflowOf(agent))) {
-      const parts = acted.filter((item) => item.reached?.includes(key));
+      const parts = items.filter((item) => item.reached?.includes(key)).map((item) => ({ label: item.label, text: item.textAt?.[key] ?? item.text }));
       if (!parts.length || sent.has(key)) continue;
       const text = reportOf(parts);
       const request: DeliveryRequest = { step, key, text, agent, run: { agentId: agent.id, dueAt: run.dueAt, why: run.why, test: run.test } };
@@ -463,6 +496,7 @@ export class RunExecutor {
       if (run.test) delivery = recorded(request);
       else {
         try {
+          if (step.kind === "page" && step.edit === "rebuild") request.session = await this.#deliverySession(run, key);
           delivery = await this.#host.deliver(request);
         } catch (error) {
           delivery = { kind: kindOf(step), to: targetOf(step), status: "failed", detail: errorMessage(error) };
@@ -474,7 +508,9 @@ export class RunExecutor {
       runs.update(agent.id, run.dueAt, { detail: { deliveries, sent: [...sent] } });
     }
     const failed = items.filter((item) => item.status === "failed");
-    const status: RunStatus = acted.length ? "sent" : failed.length ? "failed" : "not_today";
+    // An item stopped after a delivery step still sent it: the run sent something.
+    const delivered = deliveries.some((delivery) => delivery.status === "sent" || delivery.status === "recorded");
+    const status: RunStatus = acted.length || delivered ? "sent" : failed.length ? "failed" : "not_today";
     const first = deliveries.find((delivery) => delivery.text)?.text ?? acted.find((item) => item.text)?.text;
     const summary =
       status === "sent"
@@ -484,6 +520,15 @@ export class RunExecutor {
           : `Not today: ${items[0]?.reason ?? "nothing to report"}`;
     runs.update(agent.id, run.dueAt, { status, summary });
     return status;
+  }
+
+  /** A delivery's own session (a page rebuild's), made once and kept in the run's row before it is used. */
+  async #deliverySession(run: RunRecord, key: string): Promise<string> {
+    const sessions = this.#host.runs.get(run.agentId, run.dueAt)?.detail.sessions ?? {};
+    if (sessions[key]) return sessions[key];
+    const session = await this.#host.newSession();
+    this.#host.runs.update(run.agentId, run.dueAt, { detail: { sessions: { ...sessions, [key]: session } } });
+    return session;
   }
 }
 
@@ -543,5 +588,10 @@ function firstLine(text: string, max = 140): string {
 
 /** Whether a watch's value says it fires: its condition holds over the new value (and the one before, as `previous`). */
 export function watchFires(when: string, name: string, value: Value, previous: Value | undefined): boolean {
-  return holds(when, { [name]: value, watch: value, previous: previous ?? null });
+  // No prototype: a step named __proto__ is a name like any other.
+  const scope: Record<string, Value> = Object.create(null);
+  scope[name] = value;
+  scope.watch = value;
+  scope.previous = previous ?? null;
+  return holds(when, scope);
 }

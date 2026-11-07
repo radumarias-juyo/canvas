@@ -63,6 +63,8 @@ export interface RunItemView {
   reason?: string;
   /** The delivery steps (tell, page, hand over) it reached, by their place in the workflow: what its text goes out with. */
   reached?: string[];
+  /** For a delivery step it reached before its last work step: its text as it was then, which that delivery sends. */
+  textAt?: Record<string, string>;
   cost: number;
   startedAt: number;
   endedAt?: number;

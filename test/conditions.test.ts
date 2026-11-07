@@ -85,6 +85,15 @@ describe("conditions", () => {
     expect(() => parseCondition("(".repeat(60) + "1" + ")".repeat(60))).toThrow(/too deep/);
   });
 
+  it("reads a path's keys as written: digits as indexes, names in their own case", () => {
+    const nested = { a: [[1, 2], [3, 4, 5]], b: { True: "yes", true: "no", Null: 7 } };
+    expect(evaluate("a.1.2", nested)).toBe(5);
+    expect(evaluate("a.0.1 + a.1.0", nested)).toBe(5);
+    expect(evaluate("b.True", nested)).toBe("yes");
+    expect(evaluate("b.Null", nested)).toBe(7);
+    expect(evaluate("1.5 + 1", nested)).toBe(2.5);
+  });
+
   it("names what a condition reads", () => {
     expect(conditionNames("signups.weekly vs lastYear < -5% and len(alerts) > 0").sort()).toEqual(["alerts", "lastYear", "signups"]);
   });

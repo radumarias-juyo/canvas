@@ -44,10 +44,13 @@ export interface RunDetail {
   needsSignIn?: string[];
   when?: string;
   used?: { skills: string[]; servers: string[]; models: string[] };
-  /** The watch result that started it, for its steps to read as `watch`. */
+  /** The watch result that started it, for its steps to read as `watch`, and the one before it (`previous`). */
   watch?: unknown;
+  previous?: unknown;
   /** The delivery keys it sent already: a run that goes on after a restart sends each once. */
   sent?: string[];
+  /** A page rebuild's session, by its delivery's key, kept before it starts: a run that goes on uses it again. */
+  sessions?: Record<string, string>;
 }
 
 /** What an item's row keeps: its steps, its part of the report and why it stopped. */
@@ -57,6 +60,8 @@ interface ItemDetail {
   reason?: string;
   /** The keys of the delivery steps (tell, page, hand over) it reached: what its text goes out with. */
   reached?: string[];
+  /** For a delivery step it reached before its last work step: its text as it was then (by the step's key). */
+  textAt?: Record<string, string>;
 }
 
 /** A run as its own row has it. */
@@ -109,6 +114,7 @@ function itemOf(row: RunRow): RunItemView {
     ...(detail.text !== undefined && { text: detail.text }),
     ...(detail.reason !== undefined && { reason: detail.reason }),
     ...(detail.reached?.length && { reached: detail.reached }),
+    ...(detail.textAt && { textAt: detail.textAt }),
     cost: row.cost,
     startedAt: row.started_at,
     ...(row.ended_at !== null && { endedAt: row.ended_at }),

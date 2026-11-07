@@ -4,12 +4,12 @@ import type { Value } from "../shared/conditions.ts";
 import type { ArtifactMeta } from "../shared/protocol.ts";
 import type { RunDelivery } from "../shared/runs.ts";
 import { fillInput, itemKey, itemsOf, reportOf, SignInNeeded, type DeliveryRequest, type WorkResult } from "../worker/agents/runs/executor.ts";
-import { publishFindings } from "../worker/agents/runs/page.ts";
+import { publishFindings, publishRebuilt, runMark } from "../worker/agents/runs/page.ts";
 import { findingsEdit, FINDINGS_END, FINDINGS_START, reportHtml, workSpend } from "../worker/agents/runs/report.ts";
 import { AgentRunner, type RunAlarm, type RunnerHost, type WatchAlarm } from "../worker/agents/runs/runner.ts";
-import { SourceCore, type Subscriber } from "../worker/agents/runs/source.ts";
+import { sourceName, SourceCore, type Subscriber } from "../worker/agents/runs/source.ts";
 import { AgentRuns } from "../worker/agents/runs/store.ts";
-import type { PublishScope } from "../worker/agent/publish.ts";
+import { writeDraft, type PublishScope } from "../worker/agent/publish.ts";
 import type { CheckReport } from "../worker/artifacts/check.ts";
 import type { McpHub } from "../worker/mcp/hub.ts";
 import type { ArtifactStore } from "../worker/storage/artifacts.ts";
@@ -61,6 +61,7 @@ class FakeHome implements RunnerHost {
   readonly alarms = new Map<string, { at?: number; every?: number; payload: RunAlarm | WatchAlarm }>();
   readonly subscribed: { agentId: string; step: LookStep; everyMinutes: number }[] = [];
   readonly unsubscribed: string[] = [];
+  readonly left: string[] = [];
   shared = false;
   readonly pending: Promise<unknown>[] = [];
   #sessions = 0;
@@ -121,6 +122,7 @@ class FakeHome implements RunnerHost {
     this.alarms.delete(id);
   }
   async definition(agentId: string) {
+    if (this.failDefinition) throw new Error("directory unreachable");
     return this.definitions.get(agentId) ?? null;
   }
   sharedWatch() {
@@ -129,9 +131,12 @@ class FakeHome implements RunnerHost {
   async subscribe(agentId: string, step: LookStep, everyMinutes: number) {
     this.subscribed.push({ agentId, step, everyMinutes });
   }
-  async unsubscribe(agentId: string) {
+  async unsubscribe(agentId: string, source: string) {
     this.unsubscribed.push(agentId);
+    this.left.push(source);
   }
+  /** A definition read that fails, as at a deploy reset, while set. */
+  failDefinition = false;
   waitUntil(promise: Promise<unknown>) {
     this.pending.push(promise);
   }
@@ -349,6 +354,93 @@ describe("scheduled runs", () => {
     expect(host.alarms.size).toBe(0);
     expect(runner.nextRun(definition.id)).toBeNull();
   });
+
+  it("tries a due time again when its definition cannot be read, and sets it again after a restart", async () => {
+    const { host, runner, definition } = home();
+    await runner.apply(definition.id, definition);
+    host.clock.now = SEVEN;
+    host.failDefinition = true;
+    await expect(runner.fired({ agentId: definition.id, dueAt: SEVEN })).rejects.toThrow("directory unreachable");
+    // The same time, five minutes on: the schedule did not stop.
+    expect([...host.alarms.values()].at(-1)).toEqual({ at: SEVEN + 5 * 60_000, payload: { agentId: definition.id, dueAt: SEVEN, attempt: 1 } });
+    host.failDefinition = false;
+    expect(await runner.fired({ agentId: definition.id, dueAt: SEVEN, attempt: 1 })).toEqual({ status: "sent", started: true });
+    expect(runner.nextRun(definition.id)).toBe(Date.parse("2026-11-05T05:00:00Z"));
+    // An object whose alarms went (no schedule row): reconcile sets them from the definition.
+    const fresh = home(definition);
+    await fresh.runner.reconcile(definition.id);
+    expect(fresh.runner.nextRun(definition.id)).toBe(SEVEN);
+  });
+
+  it("ignores a definition older than the one its alarm was set from", async () => {
+    const { host, runner, definition } = home(agent({ version: 3 }));
+    await runner.apply(definition.id, definition);
+    await runner.apply(definition.id, agent({ version: 2, enabled: false }));
+    expect(runner.nextRun(definition.id)).toBe(SEVEN);
+    expect(host.alarms.size).toBe(1);
+  });
+
+  it("restarts only the newest waiting run per agent once signed in, and none of an agent now off", async () => {
+    const { host, runner, definition } = home();
+    host.signIn.add("crm");
+    for (const at of [T0, T0 + 1]) {
+      host.clock.now = at;
+      await runner.now(definition.id, false);
+      await host.settled();
+    }
+    host.signIn.delete("crm");
+    expect(await runner.signedIn("crm")).toBe(1);
+    await host.settled();
+    const [newest, older] = host.runs.list(definition.id);
+    expect(newest).toMatchObject({ dueAt: T0 + 1, status: "sent" });
+    expect(older).toMatchObject({ dueAt: T0, status: "not_today", summary: "Skipped once you signed in: a newer run went instead." });
+    expect(host.delivered).toHaveLength(1);
+    // Off by the time the sign-in comes: skipped.
+    host.signIn.add("crm");
+    host.clock.now = T0 + 2;
+    await runner.now(definition.id, false);
+    await host.settled();
+    host.definitions.set(definition.id, { ...definition, enabled: false });
+    host.signIn.delete("crm");
+    expect(await runner.signedIn("crm")).toBe(0);
+    expect(host.runs.get(definition.id, T0 + 2)).toMatchObject({ status: "not_today", summary: "Skipped once you signed in: @brief was off." });
+  });
+
+  it("reads only the agent's own servers", async () => {
+    const { host, runner, definition } = home(agent({ servers: ["other"] }));
+    await runner.now(definition.id, false);
+    await host.settled();
+    expect(host.reads).toHaveLength(0);
+    expect(host.runs.list(definition.id)[0]).toMatchObject({ status: "failed" });
+    expect(host.runs.list(definition.id)[0].summary).toContain("not one of the servers @brief may use");
+  });
+
+  it("sends a delivery an item reached before a later step stopped it, with the work done before it", async () => {
+    const workflow: AgentStep[] = [
+      sales,
+      { kind: "work", prompt: "First." },
+      { kind: "tell", to: ["owner"], via: "chat" },
+      { kind: "work", prompt: "Second." },
+      { kind: "onlyIf", condition: "sales.total > 5000" },
+      { kind: "tell", to: ["owner"], via: "notify" },
+    ];
+    const { host, runner, definition } = home(agent({ workflow }));
+    host.answer = (prompt) => ({ status: "done", text: prompt.includes("First.") ? "One." : "Two.", cost: 0 });
+    await runner.now(definition.id, false);
+    await host.settled();
+    expect(host.delivered.map((request) => [request.step.kind === "tell" && request.step.via, request.text])).toEqual([["chat", "One."]]);
+    expect(host.runs.list(definition.id)[0]).toMatchObject({ status: "sent" });
+  });
+
+  it("keeps a page rebuild's session in the run, for a run that goes on", async () => {
+    const workflow: AgentStep[] = [sales, { kind: "work", prompt: "Say." }, { kind: "page", artifactId: "a1", edit: "rebuild" }];
+    const { host, runner, definition } = home(agent({ workflow }));
+    await runner.now(definition.id, false);
+    await host.settled();
+    const [request] = host.delivered;
+    expect(request.session).toMatch(/^session-/);
+    expect(host.runs.get(definition.id, T0)!.detail.sessions).toEqual({ [request.key]: request.session });
+  });
 });
 
 describe("watches", () => {
@@ -392,9 +484,48 @@ describe("watches", () => {
     await runner.apply(definition.id, definition);
     expect(host.alarms.size).toBe(0);
     expect(host.subscribed).toEqual([{ agentId: definition.id, step: (definition.trigger as { step: LookStep }).step, everyMinutes: 60 }]);
-    expect(await runner.sourceMoved(definition.id, { today: 40 })).toMatchObject({ status: "sent" });
+    const source = await sourceName((definition.trigger as { step: LookStep }).step);
+    expect(await runner.sourceMoved(definition.id, { today: 40 }, source)).toMatchObject({ status: "sent" });
     await runner.apply(definition.id, null);
     expect(host.unsubscribed).toEqual([definition.id]);
+    expect(host.left).toEqual([source]);
+  });
+
+  it("leaves a Source it no longer watches through, and runs nothing for it", async () => {
+    const { host, runner, definition } = home(watched("signups.today < 50"));
+    host.shared = true;
+    await runner.apply(definition.id, definition);
+    expect(await runner.sourceMoved(definition.id, { today: 40 }, "an-old-read")).toBeNull();
+    expect(host.left).toEqual(["an-old-read"]);
+    // A server the agent may no longer use: the Source is left too.
+    host.definitions.set(definition.id, { ...definition, servers: ["other"] });
+    const source = await sourceName((definition.trigger as { step: LookStep }).step);
+    expect(await runner.sourceMoved(definition.id, { today: 30 }, source)).toBeNull();
+    expect(host.left).toEqual(["an-old-read", source]);
+    expect(host.works).toHaveLength(0);
+  });
+
+  it("gives the steps the value that fired the watch, and the one before", async () => {
+    const { host, runner, definition } = home(watched("signups.count != previous.count"));
+    await runner.moved(definition, { count: 3 });
+    await host.settled();
+    host.clock.now += 1;
+    host.works.length = 0;
+    host.writes.clear();
+    const workflow: AgentStep[] = [{ kind: "onlyIf", condition: "watch.count > previous.count" }, ...definition.workflow!];
+    expect(await runner.moved({ ...definition, workflow }, { count: 5 })).toMatchObject({ status: "sent" });
+    // The value is in the item's session before its steps, and kept for a run that goes on.
+    expect([...host.writes.values()].some((write) => write.text.includes('"count":5'))).toBe(true);
+    const [run] = host.runs.list(definition.id);
+    expect(host.runs.get(definition.id, run.dueAt)!.detail).toMatchObject({ watch: { count: 5 }, previous: { count: 3 } });
+  });
+
+  it("reads a watch named __proto__ like any other name", async () => {
+    const step: LookStep = { kind: "look", server: "crm", tool: "signups", input: {}, as: "__proto__" };
+    const { runner, definition } = home(
+      agent({ trigger: { kind: "watch", step, everyMinutes: 60, when: "__proto__.count > 2" }, workflow: [{ kind: "work", prompt: "Say." }] }),
+    );
+    expect(await runner.moved(definition, { count: 3 })).toMatchObject({ status: "sent" });
   });
 });
 
@@ -411,7 +542,11 @@ describe("Source", () => {
         host.reads++;
         return host.value;
       },
-      notify: async (subscriber: Subscriber, value: Value) => void host.told.push({ subscriber, value }),
+      failing: new Set<string>(),
+      notify: async (subscriber: Subscriber, value: Value) => {
+        if (host.failing.has(subscriber.uid)) throw new Error("unreachable");
+        host.told.push({ subscriber, value });
+      },
       setAlarm: (at: number) => void host.alarms.push(at),
       now: () => host.clock,
     };
@@ -448,6 +583,18 @@ describe("Source", () => {
     core.subscribe(step, ben, 60);
     // It polls now, not an interval away.
     expect(host.alarms.at(-1)).toBe(host.clock);
+    expect(await core.poll()).toEqual({ moved: false, told: 1 });
+    expect(host.told.map((told) => told.subscriber.uid)).toEqual(["ana", "ben"]);
+    expect(await core.poll()).toEqual({ moved: false, told: 0 });
+  });
+
+  it("tells a subscriber it could not reach at the next poll, though the value did not move again", async () => {
+    const { core, host } = source();
+    core.subscribe(step, ana, 60);
+    core.subscribe(step, ben, 60);
+    host.failing.add("ben");
+    expect(await core.poll()).toEqual({ moved: true, told: 1 });
+    host.failing.clear();
     expect(await core.poll()).toEqual({ moved: false, told: 1 });
     expect(host.told.map((told) => told.subscriber.uid)).toEqual(["ana", "ben"]);
     expect(await core.poll()).toEqual({ moved: false, told: 0 });
@@ -507,6 +654,7 @@ describe("a run's page step", () => {
 
   function scope(errors: string[]) {
     const published: string[] = [];
+    const messages: string[] = [];
     const drafts = new ChatDrafts(new FakeBucket().r2, "ada", "0123456789abcdef", new ArrayBuffer(32));
     const publishScope: PublishScope = {
       uid: "ada",
@@ -514,8 +662,9 @@ describe("a run's page step", () => {
       hub: { servers: () => [] } as unknown as McpHub,
       artifacts: {
         readHtml: async () => page,
-        publishVersion: async (input: { html: string; title: string }) => {
+        publishVersion: async (input: { html: string; title: string; message?: string }) => {
           published.push(input.html);
+          messages.push(input.message ?? "");
           return { id: "a1", title: input.title, latest: 4, updatedAt: 0 } as ArtifactMeta;
         },
       } as unknown as ArtifactStore,
@@ -527,12 +676,12 @@ describe("a run's page step", () => {
       readSkillFile: async () => null,
       publishUnchecked: false,
     };
-    return { publishScope, published };
+    return { publishScope, published, messages, drafts };
   }
 
   it("publishes a page whose check passes, with the report in it", async () => {
     const { publishScope, published } = scope([]);
-    expect(await publishFindings(publishScope, meta, "Sales are up.", "Findings")).toEqual({
+    expect(await publishFindings(publishScope, meta, "Sales are up.", "Findings", runMark(T0, "0"))).toEqual({
       kind: "page",
       to: "Sales brief",
       status: "sent",
@@ -545,12 +694,38 @@ describe("a run's page step", () => {
 
   it("does not publish a page that fails its check, and says so", async () => {
     const { publishScope, published } = scope(["TypeError: x is undefined"]);
-    expect(await publishFindings(publishScope, meta, "Sales are up.", "Findings")).toEqual({
+    expect(await publishFindings(publishScope, meta, "Sales are up.", "Findings", runMark(T0, "0"))).toEqual({
       kind: "page",
       to: "Sales brief",
       status: "failed",
       detail: "page not updated: its check found 1 error",
     });
     expect(published).toEqual([]);
+  });
+
+  it("publishes once per run: a version with the run's mark is the one it sent", async () => {
+    const { publishScope, published, messages } = scope([]);
+    const mark = runMark(T0, "2");
+    expect(await publishFindings(publishScope, meta, "Sales are up.", "Findings", mark)).toMatchObject({ status: "sent", version: 4 });
+    expect(messages).toEqual([`Findings ${mark}`]);
+    const after = { ...meta, latest: 4, versions: [...meta.versions, { version: 4, message: messages[0] }] } as unknown as ArtifactMeta;
+    expect(await publishFindings(publishScope, after, "Sales are up.", "Findings", mark)).toMatchObject({ status: "sent", version: 4 });
+    expect(published).toHaveLength(1);
+  });
+
+  it("publishes a rebuilt page's checked draft of that page only", async () => {
+    const { publishScope, published, drafts } = scope([]);
+    const seed = await writeDraft(publishScope, { artifact: meta, edits: [] });
+    const other = await writeDraft(publishScope, { html: "<!doctype html><main>another page</main>" });
+    await drafts.recordCheck(other.id, { errors: 0, warnings: 0 });
+    // Nothing of this page passed: the other page's draft is not published in its place.
+    expect(await publishRebuilt(publishScope, meta, seed.id, T0, "Snapshot", runMark(T0, "1"))).toMatchObject({
+      status: "failed",
+      detail: "page not updated: no draft of it passed its check",
+    });
+    const rebuilt = await writeDraft(publishScope, { draftId: seed.id, edits: [{ old: "yesterday", new: "today" }] });
+    await drafts.recordCheck(rebuilt.id, { errors: 0, warnings: 0 });
+    expect(await publishRebuilt(publishScope, meta, seed.id, T0, "Snapshot", runMark(T0, "1"))).toMatchObject({ status: "sent", version: 4 });
+    expect(published).toEqual([expect.stringContaining("<p>today</p>")]);
   });
 });

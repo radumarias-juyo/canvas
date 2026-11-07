@@ -378,6 +378,17 @@ describe("checkAgent: workflows", () => {
     expect((look as { input: object }).input).not.toBe(input);
   });
 
+  it("refuses a step, scope or watch that names a server outside the agent's servers, once it has some", () => {
+    const workflow = [{ kind: "look", ...read }, { kind: "if", condition: "1 > 0", then: [{ kind: "do", server: "mail", tool: "send", input: {} }] }];
+    expect(agent({ workflow }).workflow).toHaveLength(2);
+    expect(refusal({ servers: ["crm"], workflow })).toBe(
+      "A step names mail, which is not one of the agent's servers: add it to its servers, or change the step.",
+    );
+    expect(agent({ servers: ["crm", "mail"], workflow }).workflow).toHaveLength(2);
+    expect(refusal({ servers: ["mail"], scope: { list: { kind: "look", ...read }, each: true } })).toContain("names crm");
+    expect(refusal({ servers: ["mail"], trigger: { kind: "watch", step: { kind: "look", ...read }, everyMinutes: 60, when: "1 > 0" } })).toContain("names crm");
+  });
+
   it("refuses a step of no known kind", () => {
     for (const step of [{ kind: "run" }, {}, "look", null, ["look"]]) {
       expect(refusal({ workflow: [step] })).toBe(`Each workflow step is one of ${STEP_KINDS.join(", ")}.`);

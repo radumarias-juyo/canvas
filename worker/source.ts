@@ -23,7 +23,8 @@ export class Source extends DurableObject<Env> {
       if (!isReadOnly(info)) throw new Error(`${step.server}.${step.tool} changes data: a watch only reads.`);
       return ((await this.hub.call(step.server, step.tool, step.input)).payload ?? null) as Value;
     },
-    notify: (subscriber, value) => exports.ChatAgent.getByName(chatAgentName(subscriber.uid, subscriber.chatId)).sourceMoved(subscriber.agentId, value as never),
+    notify: (subscriber, value, source) =>
+      exports.ChatAgent.getByName(chatAgentName(subscriber.uid, subscriber.chatId)).sourceMoved(subscriber.agentId, value as never, source),
     setAlarm: (at) => void this.ctx.storage.setAlarm(at),
     now: () => Date.now(),
   });
