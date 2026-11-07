@@ -175,6 +175,8 @@ export class AgentTurns {
       if (turn.session === undefined && turn.byOwner && (await this.#host.forks(entry, agent, turn))) {
         // A fork sees the agent's session as it is when made: the catch-up goes in first.
         await this.#catchUp(entry, turn.id);
+        // Stopped meanwhile: no fork, which nothing would run in or abort.
+        if (!live()) return;
         const session = await this.#host.fork(entry.session);
         if (!live()) return;
         roster.setFork(turn.id, session);
@@ -386,7 +388,10 @@ export class AgentTurns {
   async #outputs(entry: RosterEntry, turn: AgentTurn): Promise<Outputs> {
     try {
       const entries = await this.#host.turnEntries(sessionOf(entry, turn), turn.id);
-      return await outputsOf(entries, turn.forked === true, () => this.#host.sources(entry, entries));
+      // A reply in a run's own session ran with its owner's tools in a session that holds the run's private reads: it
+      // shows what a fork's does, but is no fork (its reply says so by its run).
+      const found = await outputsOf(entries, turn.session !== undefined, () => this.#host.sources(entry, entries));
+      return turn.forked ? found : { ...found, forked: false };
     } catch (error) {
       console.error("agent turn, outputs:", errorMessage(error));
       return NO_OUTPUTS;

@@ -3079,7 +3079,6 @@ export class ChatAgent extends DurableObject<Env> {
   async #addToRoster(agent: AgentDefinition, by?: Person): Promise<{ error: string } | { name: string }> {
     const member = by && by.uid !== this.uid ? by : undefined;
     const ownerUid = member?.uid ?? this.uid;
-    const mine = !member;
     const name = member ? memberAgentName(agent.name, member.name, (taken) => this.roster.byName(taken) !== null) : agent.name;
     if (!name) return { error: `This chat already has an agent named "${agent.name}".` };
     // Before its session is made: a session made for an agent the roster refuses would stay, read by every traces read.
@@ -3087,7 +3086,7 @@ export class ChatAgent extends DurableObject<Env> {
     if (early) return early;
     const [session, newest] = await Promise.all([
       // A member's runs in their own object: no session here.
-      mine ? this.harness.sessions.create().then((made) => made.id as string) : "",
+      member ? "" : this.harness.sessions.create().then((made) => made.id as string),
       this.roster.hasAny() ? undefined : this.#root().then((root) => root.entries({ order: "descending" }, 1, undefined, BACKGROUND_CONTEXT)),
     ]);
     const first = !this.roster.hasAny();
@@ -3099,7 +3098,7 @@ export class ChatAgent extends DurableObject<Env> {
       avatar: agent.avatar,
       color: agent.color,
       job: agent.job,
-      ...(!mine && { seat: seatChatId(agent.id) }),
+      ...(member && { seat: seatChatId(agent.id) }),
     });
     if (refused) return refused;
     // The first agent: pi's answers from now on are read for the agents they name, none before.
@@ -3438,10 +3437,15 @@ export class ChatAgent extends DurableObject<Env> {
 
   /** Hand a run's report to another agent of the owner's, as a turn in this chat (on the roster, brought in when not). */
   async #handOver(request: DeliveryRequest, name: string): Promise<RunDelivery> {
-    const to = `@${name.replace(/^@/, "")}`;
-    let entry = this.roster.byName(name.replace(/^@/, ""));
+    const handle = name.replace(/^@/, "");
+    const to = `@${handle}`;
+    let entry = this.roster.byName(handle);
+    // A member's agent here may have the name: the report, read with the owner's sign-ins, goes to no one else's.
+    if (entry && entry.ownerUid !== this.uid) {
+      return { kind: "handOver", to, status: "refused", detail: `${to} in this chat is someone else's agent` };
+    }
     if (!entry) {
-      const agent = (await this.#directory.listAgents()).find((one) => one.name === name.replace(/^@/, "").toLowerCase());
+      const agent = (await this.#directory.listAgents()).find((one) => one.name === handle.toLowerCase());
       if (!agent?.enabled) return { kind: "handOver", to, status: "refused", detail: agent ? `${to} is off` : `you have no agent ${to}` };
       const added = await this.#addToRoster(agent);
       if ("error" in added) return { kind: "handOver", to, status: "failed", detail: added.error };

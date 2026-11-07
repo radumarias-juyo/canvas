@@ -590,9 +590,9 @@ export class ChatRoster {
     return running.flatMap((turn) => {
       const entry = entries.get(turn.agentId);
       if (!entry || entry.seat !== undefined) return [];
-      // A run's reply turn works in its own session (a fork of the run's), not the agent's; a private turn in a fork
-      // shows only its owner.
-      return [{ agentId: turn.agentId, session: sessionOf(entry, turn), turn: turn.id, ...(turn.forked && { only: entry.ownerUid }) }];
+      // A run's reply turn works in its own session (a fork of the run's, with what the run read as its owner), not the
+      // agent's; so does a private turn in a fork. Either shows only its owner.
+      return [{ agentId: turn.agentId, session: sessionOf(entry, turn), turn: turn.id, ...(turn.session !== undefined && { only: entry.ownerUid }) }];
     });
   }
 

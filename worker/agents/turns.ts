@@ -253,12 +253,11 @@ export function allowedTools(
   byOwner: boolean,
   signsIn: (server: string) => boolean,
 ): string[] {
-  const own = (server: string) => mayUseServer(agent, server);
   const shared = sharedServer(agent, signsIn);
   return tools.filter((name) => {
     if (NEVER_FOR_AGENTS.includes(name)) return false;
     const info = mcp.get(name);
-    if (byOwner) return !info || own(info.server);
+    if (byOwner) return !info || mayUseServer(agent, info.server);
     return info ? info.readOnly && shared(info.server) : READ_TOOLS.includes(name);
   });
 }
