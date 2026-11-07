@@ -16,14 +16,28 @@ import {
   type MentionInput,
   type MentionOptions,
 } from "../../shared/mentions.ts";
-import { everyone, type ChatPeople } from "../../shared/protocol.ts";
+import { everyone, type ChatPeople, type Person } from "../../shared/protocol.ts";
 import { formatBytes } from "../../shared/util.ts";
 import { api } from "../api.ts";
 import { AgentAvatar, Avatar, tintOf, tintStyle, useSharedChat } from "./people.tsx";
 
 /** The agent, as the picker offers it in a shared chat, where "@pi" is what calls it. */
 const AGENT_CHOICE = { agent: true, detail: "agent · asks it to answer" } as const;
-type Choice = MentionChoice | typeof AGENT_CHOICE;
+/** For the owner, when nobody they know matches: tag the name anyway, and get an invite link to send them. */
+type InviteChoice = { invite: string; detail: string };
+type Choice = MentionChoice | typeof AGENT_CHOICE | InviteChoice;
+
+/**
+ * Who "@" knows besides the people in the chat: the people the user shares other chats with (`known`), whom tagging
+ * offers to add (TagCard). `canInvite`: the user owns the chat, so a name nobody matches can get an invite link.
+ */
+export interface Outside {
+  known: readonly Person[];
+  canInvite: boolean;
+}
+
+/** Someone just tagged who is not in the chat: one the user knows, or (`invite`) a name nobody matched. */
+export type Outsider = Person | { name: string; invite: true };
 
 /**
  * "@" in the composer: as the user types "@" (or presses the @ button), a list of the chat owner's files and
@@ -39,8 +53,13 @@ export function useMentions(
   input: RefObject<HTMLTextAreaElement | null>,
   people: ChatPeople | null,
   uid: string,
+  outside?: Outside,
+  /** All in the chat, the owner too, also in a chat nobody shares, where `people` is null: who is not an outsider. */
+  inChat: readonly Person[] = [],
 ) {
   const shared = people !== null;
+  // The last person tagged who is not in the chat, until the user answers the card about them.
+  const [outsider, setOutsider] = useState<Outsider | null>(null);
   const [options, setOptions] = useState<MentionOptions | null>(null);
   const [picked, setPicked] = useState<Mention[]>([]);
   const [caret, setCaret] = useState(0);
@@ -75,18 +94,23 @@ export function useMentions(
   }, [typing]);
 
   // Everyone else in a shared chat: they are known before the files and artifacts load.
-  const others = useMemo<MentionChoice[]>(
-    () =>
-      people
-        ? everyone(people)
-            .filter((person) => person.uid !== uid)
-            .map((person) => ({
-              mention: { kind: "person" as const, uid: person.uid, name: person.name },
-              detail: person.uid === people.owner.uid ? "owner · gets a notice" : "in this chat · gets a notice",
-            }))
-        : [],
-    [people, uid],
-  );
+  // The people the user knows who are not in the chat: tagging one asks whether to add them (TagCard).
+  const outsiders = useMemo(() => {
+    const here = new Set([uid, ...inChat.map((person) => person.uid)]);
+    return (outside?.known ?? []).filter((person) => !here.has(person.uid));
+  }, [uid, inChat, outside?.known]);
+  const others = useMemo<MentionChoice[]>(() => {
+    const inside = people
+      ? everyone(people)
+          .filter((person) => person.uid !== uid)
+          .map((person) => ({
+            mention: { kind: "person" as const, uid: person.uid, name: person.name },
+            detail: person.uid === people.owner.uid ? "owner · gets a notice" : "in this chat · gets a notice",
+          }))
+      : [];
+    const known = outsiders.map((person) => ({ mention: { kind: "person" as const, uid: person.uid, name: person.name }, detail: "not in this chat" }));
+    return [...inside, ...known];
+  }, [people, uid, outsiders]);
   const all = useMemo<MentionChoice[]>(
     () =>
       options
@@ -106,8 +130,15 @@ export function useMentions(
   const choices = useMemo<Choice[]>(() => {
     if (!query) return [];
     const callsAgent = shared && AGENT_NAME.startsWith(query.query.trim().toLowerCase());
-    return [...(callsAgent ? [AGENT_CHOICE] : []), ...matchMentions([...others, ...all], query.query)];
-  }, [all, others, query?.query, shared]);
+    const matched = matchMentions([...others, ...all], query.query);
+    // A name, typed in full, that is nobody the user knows: the owner may invite them by link.
+    const name = query.query.trim();
+    const invite =
+      outside?.canInvite && /^[\p{L}][\p{L}\p{N}._-]{1,31}$/u.test(name) && !matched.some((choice) => choice.mention.kind === "person") && !AGENT_NAME.startsWith(name.toLowerCase())
+        ? [{ invite: name, detail: "not in this chat · invite by link" }]
+        : [];
+    return [...(callsAgent ? [AGENT_CHOICE] : []), ...matched, ...invite];
+  }, [all, others, query?.query, shared, outside?.canInvite]);
   // An "@" in running text ("@ the team") matches nothing once a space follows: then it was not a mention.
   const open = query !== null && !(options && choices.length === 0 && /\s/.test(query.query));
 
@@ -127,6 +158,13 @@ export function useMentions(
     if (!query) return;
     // The agent is called by the text itself: nothing to send with the message.
     if ("agent" in choice) return replace(query.start, caret, `${AGENT_TOKEN} `);
+    // Nobody to send either: the card offers an invite link.
+    if ("invite" in choice) {
+      setOutsider({ name: choice.invite, invite: true });
+      return replace(query.start, caret, `@${choice.invite} `);
+    }
+    const { mention } = choice;
+    if (mention.kind === "person" && outsiders.some((person) => person.uid === mention.uid)) setOutsider({ uid: mention.uid, name: mention.name });
     replace(query.start, caret, `${mentionToken(choice.mention)} `);
     // Its text now follows the "@", so the list closes for it (see `done`).
     setPicked((current) => (current.some((m) => sameMention(m, choice.mention)) ? current : [...current, choice.mention]));
@@ -179,7 +217,22 @@ export function useMentions(
   };
 
   // The agent and the people are there before the files and artifacts have loaded.
-  return { open, loaded: options !== null || choices.length > 0, choices, active, setActive, pick, onKeyDown, track, insertAt, take, clear, restore };
+  return {
+    open,
+    loaded: options !== null || choices.length > 0,
+    choices,
+    active,
+    setActive,
+    pick,
+    onKeyDown,
+    track,
+    insertAt,
+    take,
+    clear,
+    restore,
+    outsider,
+    dismissOutsider: () => setOutsider(null),
+  };
 }
 
 export function MentionList({ mentions }: { mentions: ReturnType<typeof useMentions> }) {
@@ -216,12 +269,14 @@ export function MentionList({ mentions }: { mentions: ReturnType<typeof useMenti
             >
               {"agent" in choice ? (
                 <AgentAvatar />
-              ) : choice.mention.kind === "person" && people ? (
-                <Avatar name={choice.mention.name} tint={tintOf(people, choice.mention.uid)} />
+              ) : "invite" in choice ? (
+                <Avatar name={choice.invite} tint={0} />
+              ) : choice.mention.kind === "person" ? (
+                <Avatar name={choice.mention.name} tint={people ? tintOf(people, choice.mention.uid) : 0} />
               ) : (
                 <span className="mention-icon">{choice.mention.kind === "file" ? "▤" : "▦"}</span>
               )}
-              <span className="mention-label">{"agent" in choice ? AGENT_NAME : mentionLabel(choice.mention)}</span>
+              <span className="mention-label">{"agent" in choice ? AGENT_NAME : "invite" in choice ? choice.invite : mentionLabel(choice.mention)}</span>
               <small>{choice.detail}</small>
             </button>
           </Fragment>
@@ -234,11 +289,13 @@ export function MentionList({ mentions }: { mentions: ReturnType<typeof useMenti
 /** The heading a choice is listed under: the agent, people, then files and artifacts. */
 function choiceGroup(choice: Choice): string {
   if ("agent" in choice) return "Agent";
+  if ("invite" in choice) return "People";
   return { person: "People", file: "Files", artifact: "Artifacts" }[choice.mention.kind];
 }
 
 function choiceKey(choice: Choice): string {
   if ("agent" in choice) return "agent";
+  if ("invite" in choice) return `i:${choice.invite}`;
   const { mention } = choice;
   if (mention.kind === "person") return `p:${mention.uid}`;
   return mention.kind === "file" ? `f:${mention.own ? "own:" : ""}${mention.path}` : `a:${mention.id}`;

@@ -1,3 +1,4 @@
+import { isJoinedVia, type ChatMemberVia, type JoinedVia } from "../shared/chat-kinds.ts";
 import { ID_PATTERN, UID_PATTERN, type ChatInvite, type Person } from "../shared/protocol.ts";
 import { randomHex, sha256Hex } from "../shared/util.ts";
 
@@ -47,6 +48,9 @@ export class ChatMembers {
       CREATE TABLE IF NOT EXISTS chat_invites (secret_hash TEXT PRIMARY KEY, id TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS chat_owner (uid TEXT PRIMARY KEY, name TEXT NOT NULL);
     `);
+    // Added later: how each member joined (JoinedVia), which narrowing the chat's kind reads. Members from before joined by invite.
+    const columns = sql.exec("SELECT name FROM pragma_table_info('chat_members')").toArray();
+    if (!columns.some((row) => row.name === "via")) sql.exec("ALTER TABLE chat_members ADD COLUMN via TEXT NOT NULL DEFAULT 'invite'");
   }
 
   /** The owner's name as they last showed it; their uid if they never did. */
@@ -65,10 +69,15 @@ export class ChatMembers {
   }
 
   list(): Person[] {
+    return this.listVia().map(({ uid, name }) => ({ uid, name }));
+  }
+
+  /** The members as they joined, each with how (JoinedVia). */
+  listVia(): ChatMemberVia[] {
     return this.#sql
-      .exec("SELECT uid, name FROM chat_members ORDER BY joined_at")
+      .exec("SELECT uid, name, via FROM chat_members ORDER BY joined_at")
       .toArray()
-      .map((row) => ({ uid: row.uid as string, name: row.name as string }));
+      .map((row) => ({ uid: row.uid as string, name: row.name as string, via: isJoinedVia(row.via) ? row.via : "invite" }));
   }
 
   has(uid: string): boolean {
@@ -149,19 +158,24 @@ export class ChatMembers {
     const refused = this.#refusal(secretHash, now);
     if (refused) return refused;
     this.#sql.exec("DELETE FROM chat_invites WHERE secret_hash = ?", secretHash);
-    this.#insert(person, now);
+    this.#insert(person, "invite", now);
     return null;
   }
 
-  /** Add someone not yet a member, with no invite: the owner's second seat (secondSeat), which the owner adds for themselves. */
-  add(person: Person, now = Date.now()): { error: string } | null {
+  /**
+   * Add someone not yet a member, with no invite: the owner's second seat (secondSeat), which the owner adds for
+   * themselves; someone the owner adds directly (`added`); someone joining from the chat's page (`page`). Someone
+   * already in is left as they joined.
+   */
+  add(person: Person, via: Exclude<JoinedVia, "invite"> = "seat", now = Date.now()): { error: string } | null {
+    if (this.has(person.uid)) return null;
     const full = this.#full();
     if (full) return full;
-    this.#insert(person, now);
+    this.#insert(person, via, now);
     return null;
   }
 
-  #insert(person: Person, now: number): void {
-    this.#sql.exec("INSERT INTO chat_members (uid, name, joined_at) VALUES (?, ?, ?)", person.uid, person.name, now);
+  #insert(person: Person, via: JoinedVia, now: number): void {
+    this.#sql.exec("INSERT INTO chat_members (uid, name, joined_at, via) VALUES (?, ?, ?, ?)", person.uid, person.name, now, via);
   }
 }

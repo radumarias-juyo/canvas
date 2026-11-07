@@ -11,6 +11,8 @@ import {
   CHAT_PEOPLE_KIND,
   isOwnedBy,
   isReadOnly,
+  isSecondSeatUid,
+  type ArtifactSummary,
   manifestOf,
   secondSeat,
   secondSeatUid,
@@ -135,6 +137,22 @@ import { AgentTurns, type TurnHost } from "./agents/controller.ts";
 import { ChatRoster, type AgentTurn, type RosterEntry } from "./agents/roster.ts";
 import { agentsExtension } from "./agents/tools.ts";
 import { agentInstructions, allowedTools, askOf, assistantText, attachedNote, MAX_ASK_CHARS, messageAskKey, speakersFor } from "./agents/turns.ts";
+import {
+  answersEveryMessage,
+  CHAT_CONTEXT_KIND,
+  CHAT_EVENT_KIND,
+  isChatKind,
+  kindAfterJoin,
+  losesAccess,
+  type BranchedFrom,
+  type ChatEventData,
+  type ChatKind,
+  type ChatMemberVia,
+  type ChatPage,
+} from "../shared/chat-kinds.ts";
+import { ChatKindState, KIND_KV, MAX_BRANCHES, planKindChange } from "./chat-kind.ts";
+import { branchContext, branchCopies, summaryFor } from "./branch.ts";
+import { newId } from "./storage/index.ts";
 
 /** Artifacts from the owner's other chats one chat remembers as named with "@" (see ChatAgent.#broughtIn). */
 const MAX_BROUGHT_IN = 200;
@@ -197,7 +215,13 @@ const SHOWN_SKILLS_KEY = "skillsShown";
 /** The artifacts of the owner's other chats this one brought in (see #broughtIn). */
 const BROUGHT_IN_KEY = "broughtIn";
 /** The settings of a chat its export carries, beside its tables (worker/chat-dump.ts), its own system prompt among them. */
-const EXPORTED_KV = [AUTO_KEY, SHOWN_SKILLS_KEY, BROUGHT_IN_KEY, SYSTEM_PROMPT_KEY];
+const EXPORTED_KV = [AUTO_KEY, SHOWN_SKILLS_KEY, BROUGHT_IN_KEY, SYSTEM_PROMPT_KEY, ...KIND_KV];
+/** Set once the sidebars of everyone in a chat shared before they remembered people have met (#meetOnce). */
+const PEOPLE_TOLD_KEY = "peopleTold";
+/** How much of a long chat a branch reads to copy, in pages of 200 entries, newest first. */
+const MAX_BRANCH_PAGES = 25;
+/** Entries copied into a branch per call to it. */
+const BRANCH_COPY_BATCH = 200;
 /** Set while an import fills the chat (ChatImportStart): what it puts in place of what. */
 const IMPORTING_KEY = "importing";
 /** Set once an import stored every part: until its owner's list has the chat, the same import may start it again. */
@@ -306,6 +330,8 @@ export class ChatAgent extends DurableObject<Env> {
     defaults: this.#defaults(defaultModelChoice(this.env.MODEL, this.env.THINKING_LEVEL)),
   });
   readonly members = new ChatMembers(this.ctx.storage.sql);
+  /** The chat's kind, the page it discusses and the chat it branched off from (worker/chat-kind.ts). */
+  readonly kinds = new ChatKindState(this.ctx.storage.kv, () => this.members.hasAny());
   /** The chat's agents besides pi, each in a session of its own, and their turns (worker/agents/). */
   readonly roster = new ChatRoster(this.ctx.storage.sql);
   readonly turns = new AgentTurns(this.#turnHost());
@@ -402,7 +428,11 @@ export class ChatAgent extends DurableObject<Env> {
       artifacts: this.storage.artifacts,
       // Deriving the user's key is not free, so derive it once per object.
       files: memoAsync(() => this.storage.userFiles(this.uid)),
-      onPublished: (artifact) => this.#directory.recordArtifact({ ...artifact, chatId: this.chatId }),
+      onPublished: async (artifact) => {
+        await this.#directory.recordArtifact({ ...artifact, chatId: this.chatId });
+        // Off the publish's path: the chat that discusses the page hears of its new version.
+        void this.#tellPageChat(artifact).catch((error: unknown) => console.error("page chat:", errorMessage(error)));
+      },
       broughtIn: (id) => this.#broughtIn().includes(id),
       proposeSkill: (skill) => this.#directory.saveSkill(skill, "agent", false),
       proposeAgent: (input) => this.#directory.saveAgent(input, "agent", false),
@@ -777,11 +807,22 @@ export class ChatAgent extends DurableObject<Env> {
    * A notice in the transcript that someone joined or left. A passive write: everyone sees it at once, even mid-run,
    * and the model does not read it. Only a notice: it does not hold up the change it reports, and a failure is logged.
    */
-  #notePeople({ uid, name }: Person, event: ChatPeopleData["event"], agent?: string): void {
-    const entry = { kind: CHAT_PEOPLE_KIND, data: { uid, name, event, ...(agent && { agent }) } satisfies ChatPeopleData };
+  #notePeople({ uid, name }: Person, event: ChatPeopleData["event"], agent?: string, by?: string): void {
+    this.#notice({ kind: CHAT_PEOPLE_KIND, data: { uid, name, event, ...(agent && { agent }), ...(by && { by }) } satisfies ChatPeopleData });
+  }
+
+  /** A display-only notice in the transcript (see #notePeople), which everyone sees at once. Only a notice: a failure is logged. */
+  #notice(entry: { kind: string; data: JsonObject }): void {
     void this.#root()
       .then((root) => root.submit({ type: "write", entry }, BACKGROUND_CONTEXT))
-      .catch((error: unknown) => console.error("people notice:", errorMessage(error)));
+      .catch((error: unknown) => console.error("chat notice:", errorMessage(error)));
+  }
+
+  /** What the agent reads that the app does not show (CHAT_CONTEXT_KIND): a passive write, placed at its next step. */
+  async #contextWrite(about: "page" | "branch", text: string): Promise<void> {
+    const message: UserMessage = { role: "user", content: text, timestamp: Date.now() };
+    const root = await this.#root();
+    await root.submit({ type: "write", entry: { kind: CHAT_CONTEXT_KIND, data: { about }, model: [message] } }, BACKGROUND_CONTEXT);
   }
 
   /**
@@ -1138,11 +1179,13 @@ export class ChatAgent extends DurableObject<Env> {
     if (person.uid === this.uid) {
       this.members.setOwnerName(person);
       this.#tellSharedOnce();
+      this.#meetOnce();
       return true;
     }
     if (this.members.has(person.uid)) {
       this.members.rename(person);
       this.#tellSharedOnce();
+      this.#meetOnce();
       return true;
     }
     if (this.#hasSidebar(person.uid)) void this.#index(person.uid).removeSharedChat(this.chatId, this.uid);
@@ -1155,7 +1198,20 @@ export class ChatAgent extends DurableObject<Env> {
 
   /** What one person's app shows: everyone in the chat, and for the owner the invites still open. */
   peopleFor(uid: string): ChatPeopleView {
-    return { ...this.people(), ...(uid === this.uid && { invites: this.members.invites() }) };
+    const page = this.kinds.page();
+    const branchedFrom = this.kinds.branchedFrom();
+    return {
+      ...this.people(),
+      ...(uid === this.uid && { invites: this.members.invites() }),
+      kind: this.kinds.kind(),
+      ...(page && { page }),
+      ...(branchedFrom && { branchedFrom }),
+    };
+  }
+
+  /** The chat's kind (shared/chat-kinds.ts): what other stores ask before taking anything out of it, with mayLeave. */
+  chatKind(): ChatKind {
+    return this.kinds.kind();
   }
 
   /**
@@ -1222,6 +1278,8 @@ export class ChatAgent extends DurableObject<Env> {
   ): Promise<boolean> {
     this.#requireInChat(author);
     const shared = this.members.hasAny();
+    // In a private chat its agent answers every message; in any other only those that call it (shared/chat-kinds.ts).
+    const everyMessage = answersEveryMessage(this.kinds.kind());
     const quote = replyTo === undefined ? null : await this.#quote(replyTo);
     // A reply to pi calls it too, as a follow-up to what it said; a reply to another agent calls that agent. Told for
     // sure once the mentions are known.
@@ -1231,7 +1289,7 @@ export class ChatAgent extends DurableObject<Env> {
     const repliesTo = quote && "agent" in quote ? quote.agentId : undefined;
     // With files, artifacts or people named, their "@name"s may hide what looks like a call now: pi may be summoned after all.
     const callsAgents = mentionInputs.length === 0 && speakersFor(text, this.roster.list(), repliesTo).length > 0;
-    const calling = (!shared && !callsAgents) || repliesToAgent || summonsAgent(text);
+    const calling = (everyMessage && !callsAgents) || repliesToAgent || summonsAgent(text);
     const byOwner = author.uid === this.uid;
     // Someone else's own files they named come as attachments, copied to the owner's files, where the agent works. The
     // owner's second seat has none of its own.
@@ -1296,7 +1354,7 @@ export class ChatAgent extends DurableObject<Env> {
     // The files they named of their own are named too: "@pi notes.md" is not a call.
     const named = [...mentions, ...own];
     const speakers = speakersFor(text, this.roster.list(), repliesTo, named);
-    const summoned = (!shared && !speakers.length) || repliesToAgent || summonsAgent(text, named);
+    const summoned = (everyMessage && !speakers.length) || repliesToAgent || summonsAgent(text, named);
     // Again after the refreshes, which can take seconds: the author may have been removed meanwhile.
     this.#requireInChat(author);
     // Nothing left to say: every attachment was one they may not attach.
@@ -1318,7 +1376,7 @@ export class ChatAgent extends DurableObject<Env> {
         ...(tools && { tools }),
       }) satisfies ChatMessageData;
     const summon = (data: ReturnType<typeof dataWith>) =>
-      this.#summon(content, shared || speakers.length ? ({ ...data, summoned: true } satisfies ChatMessageData) : data);
+      this.#summon(content, !everyMessage || speakers.length ? ({ ...data, summoned: true } satisfies ChatMessageData) : data);
     // The model and the tools change before the message goes in, so the run it starts is on the picks.
     if (summoned) {
       await this.#place(async () => {
@@ -1685,9 +1743,7 @@ export class ChatAgent extends DurableObject<Env> {
     if (this.#gone) return refuse(404, DELETED);
     if (this.isInChat(person.uid)) {
       // A member whose sidebar entry went missing gets it back, as joining by link always gave it.
-      if (person.uid !== this.uid) {
-        await this.#index(person.uid).addSharedChat({ id: this.chatId, ownerUid: this.uid, ownerName: this.members.ownerName(this.uid), title, status: this.#status() });
-      }
+      if (person.uid !== this.uid) await this.#index(person.uid).addSharedChat(this.#sharedRow(title));
       this.#notePeople(person, "rejoined");
       return null;
     }
@@ -1695,7 +1751,7 @@ export class ChatAgent extends DurableObject<Env> {
     if (refused) return refuse(403, refused.error);
     // The sidebar entry before the invite is used up: a member without one could not reach the chat.
     const index = this.#index(person.uid);
-    await index.addSharedChat({ id: this.chatId, ownerUid: this.uid, ownerName: this.members.ownerName(this.uid), title, status: this.#status() });
+    await index.addSharedChat(this.#sharedRow(title, kindAfterJoin(this.kinds.kind())));
     const failed = await this.members.accept(secret, person);
     if (failed) {
       // Used by someone else meanwhile: the entry goes again. Should that fail too, admit removes it.
@@ -1715,17 +1771,65 @@ export class ChatAgent extends DurableObject<Env> {
     if (this.#gone) return refuse(404, DELETED);
     const seat = secondSeat(by);
     if (this.members.has(seat.uid)) return null;
-    const full = this.members.add(seat);
+    const full = this.members.add(seat, "seat");
     if (full) return refuse(409, full.error);
     this.#joined(seat);
     return null;
   }
 
-  /** Someone new is in the chat: everyone's app and the transcript hear it, and the owner's sidebar that it is shared. */
-  #joined(person: Person): void {
+  /** A sidebar row for this chat in a member's directory, under `title`, of `kind` (the chat's own by default). */
+  #sharedRow(title: string, kind = this.kinds.kind()) {
+    return { id: this.chatId, ownerUid: this.uid, ownerName: this.members.ownerName(this.uid), title, status: this.#status(), kind };
+  }
+
+  /**
+   * Someone new is in the chat: everyone's app and the transcript hear it, and the owner's sidebar that it is shared.
+   * A private chat with someone in it is a group from now on: its agents answer only when called. `by`: the owner added
+   * them directly (addMember).
+   */
+  #joined(person: Person, by?: Person): void {
+    const before = this.kinds.kind();
+    const after = kindAfterJoin(before);
+    if (after !== before) this.kinds.setKind(after);
     this.sockets.broadcastPeople();
-    this.#notePeople(person, "joined");
+    if (by) this.#notePeople(person, "added", undefined, by.name);
+    else this.#notePeople(person, "joined");
+    if (after !== before) {
+      this.#notice({ kind: CHAT_EVENT_KIND, data: { event: "kind", kind: after, from: before, auto: true } satisfies ChatEventData });
+      this.#tellKind();
+    }
     this.#tellShared();
+    this.#meet([person]);
+  }
+
+  /** Tell every sidebar that lists the chat its kind, as the chat has it now. Only a view: a failure is logged. */
+  #tellKind(): void {
+    const kind = this.kinds.kind();
+    void Promise.allSettled(this.#everyonesIndexes().map((index) => index.setChatKind(this.chatId, this.uid, kind))).then((results) => {
+      for (const result of results) if (result.status === "rejected") console.error("chat kind:", errorMessage(result.reason));
+    });
+  }
+
+  /**
+   * The people in the chat now share it with `newcomers` (all of them: everyone): each one's sidebar remembers the
+   * others, whom "@" then offers to add to their other chats (ChatRows.knowPeople). Second seats are the owner. Only a view.
+   */
+  #meet(newcomers: readonly Person[]): void {
+    const everybody = everyone(this.people()).filter((person) => this.#hasSidebar(person.uid));
+    const fresh = new Set(newcomers.map((person) => person.uid));
+    const writes = everybody.map((person) =>
+      this.#index(person.uid).knowPeople(fresh.has(person.uid) ? everybody : everybody.filter((other) => fresh.has(other.uid))),
+    );
+    void Promise.allSettled(writes).then((results) => {
+      for (const result of results) if (result.status === "rejected") console.error("chat people:", errorMessage(result.reason));
+    });
+  }
+
+  /** For a chat shared before sidebars remembered people: everyone meets everyone, once. */
+  #meetOnce(): void {
+    if (this.ctx.storage.kv.get(PEOPLE_TOLD_KEY) || !this.members.hasAny()) return;
+    this.ctx.storage.kv.put(PEOPLE_TOLD_KEY, true);
+    this.#meet(everyone(this.people()));
   }
 
   /**
@@ -1750,17 +1854,215 @@ export class ChatAgent extends DurableObject<Env> {
   /** The owner removes a member, or a member leaves. Their open sockets close at once, and the chat leaves their sidebar. */
   async removeMember(by: Person, uid: string): Promise<ChatRefusal | null> {
     if (by.uid !== this.uid && by.uid !== uid) return refuse(403, "Only the chat's owner can remove people.");
-    const member = this.members.remove(uid);
-    if (!member) return refuse(404, "No such member.");
-    this.sockets.disconnect(uid);
-    this.sockets.broadcastPeople();
-    this.#notePeople(member, by.uid === uid ? "left" : "removed");
-    this.#tellShared();
-    // The agent acts as the owner: a removed person's queued requests must not run after they are out.
-    await this.#withdrawQueued(uid).catch((error: unknown) => console.error("withdraw queued:", errorMessage(error)));
-    await this.turns.leave(uid);
-    if (this.#hasSidebar(uid)) await this.#index(uid).removeSharedChat(this.chatId, this.uid);
+    if (!this.members.has(uid)) return refuse(404, "No such member.");
+    await this.#drop([uid], by.uid === uid ? "left" : "removed");
     return null;
+  }
+
+  /** Take members out of the chat: their open sockets close at once, their waiting requests are withdrawn, and the chat leaves their sidebars. */
+  async #drop(uids: readonly string[], event: "left" | "removed", notice = true): Promise<void> {
+    const gone = uids.map((uid) => this.members.remove(uid)).filter((member) => member !== undefined);
+    if (!gone.length) return;
+    for (const member of gone) {
+      this.sockets.disconnect(member.uid);
+      if (notice) this.#notePeople(member, event);
+    }
+    this.sockets.broadcastPeople();
+    this.#tellShared();
+    for (const member of gone) {
+      // The agent acts as the owner: a removed person's queued requests must not run after they are out.
+      await this.#withdrawQueued(member.uid).catch((error: unknown) => console.error("withdraw queued:", errorMessage(error)));
+      await this.turns.leave(member.uid);
+    }
+    await Promise.all(gone.filter((member) => this.#hasSidebar(member.uid)).map((member) => this.#index(member.uid).removeSharedChat(this.chatId, this.uid)));
+  }
+
+  /**
+   * The owner adds someone they share another chat with (their directory knows them: ChatRows.knowPeople) directly,
+   * with no invite: they see the whole conversation, and hear of it in their sidebar as a tag. Adding someone to a
+   * private chat makes it a group.
+   */
+  async addMember(by: Person, uid: unknown): Promise<ChatPeopleView | ChatRefusal> {
+    if (by.uid !== this.uid) return refuse(403, "Only the chat's owner can add people.");
+    if (this.#gone) return refuse(404, DELETED);
+    if (typeof uid !== "string" || uid === this.uid || isSecondSeatUid(uid)) return refuse(400, "Pick someone to add.");
+    if (this.members.has(uid)) return this.peopleFor(by.uid);
+    const person = await this.#directory.knownPerson(uid);
+    if (!person) return refuse(404, "You can add only people you share another chat with. Send anyone else an invite link.");
+    const title = (await this.#directory.chatTitle(this.chatId)) ?? "";
+    const index = this.#index(uid);
+    await index.addSharedChat(this.#sharedRow(title, kindAfterJoin(this.kinds.kind())));
+    // After the awaits: another add may have taken the last seat meanwhile.
+    const full = this.members.add(person, "added");
+    if (full) {
+      await index.removeSharedChat(this.chatId, this.uid).catch(() => {});
+      return refuse(409, full.error);
+    }
+    this.members.setOwnerName(by);
+    this.#joined(person, by);
+    const tag: Tag = { from: by.name, text: "added you to this chat", at: Date.now(), added: true };
+    void index.touchSharedChat(this.chatId, this.uid, title, true, tag).catch((error: unknown) => console.error("chat added:", errorMessage(error)));
+    return this.peopleFor(by.uid);
+  }
+
+  /** Who would lose access if the chat became `kind`, for the owner to confirm (changeKind). */
+  kindPreview(by: Person, kind: unknown): { loses: Person[] } | ChatRefusal {
+    if (by.uid !== this.uid) return refuse(403, "Only the chat's owner can change what kind of chat it is.");
+    if (!isChatKind(kind)) return refuse(400, "Not a kind of chat.");
+    return { loses: losesAccess(kind, this.members.listVia()).map(({ uid, name }) => ({ uid, name })) };
+  }
+
+  /**
+   * The owner makes the chat `kind`. Narrowing removes those it shuts out, in the same request, but only if they are
+   * exactly the ones the owner was shown (`confirmed`, uids from kindPreview); otherwise nothing changes, and the
+   * refusal carries the new list. The chat's own kind changes first: it is what the stores check with every write, so a
+   * chat made off the record lets nothing out from then on, even while the sidebars hear of it.
+   */
+  async changeKind(by: Person, kind: unknown, confirmed: unknown): Promise<ChatPeopleView | (ChatRefusal & { loses?: Person[] })> {
+    if (by.uid !== this.uid) return refuse(403, "Only the chat's owner can change what kind of chat it is.");
+    if (this.#gone) return refuse(404, DELETED);
+    const asked = Array.isArray(confirmed) ? confirmed.filter((uid): uid is string => typeof uid === "string") : [];
+    const from = this.kinds.kind();
+    const plan = planKindChange(from, kind, this.members.listVia(), asked, this.kinds.page() !== undefined);
+    if ("error" in plan) return { ...refuse(plan.status, plan.error), ...(plan.loses && { loses: plan.loses.map(({ uid, name }) => ({ uid, name })) }) };
+    const to = kind as ChatKind;
+    if (to === from) return this.peopleFor(by.uid);
+    this.kinds.setKind(to);
+    const removed = plan.removed.map(({ uid, name }) => ({ uid, name }));
+    await this.#drop(
+      removed.map((member) => member.uid),
+      "removed",
+      false,
+    );
+    this.#notice({ kind: CHAT_EVENT_KIND, data: { event: "kind", kind: to, from, by: { uid: by.uid, name: by.name }, ...(removed.length && { removed }) } satisfies ChatEventData });
+    this.#tellKind();
+    this.sockets.broadcastPeople();
+    return this.peopleFor(by.uid);
+  }
+
+  /**
+   * Make this new chat the one that discusses the owner's artifact `page` (Discuss on its page): anyone who can open
+   * the page may join it. The agent may read the page (as if named with "@"), and is told which page it is.
+   */
+  async startPage(by: Person, page: ChatPage): Promise<ChatRefusal | null> {
+    if (by.uid !== this.uid) return refuse(403, "Only the page's author can start its chat.");
+    if (this.#gone) return refuse(404, DELETED);
+    this.members.setOwnerName(by);
+    this.kinds.setKind("page");
+    this.kinds.setPage(page);
+    this.#bringIn([page.id]);
+    await this.#contextWrite("page", pageNote(page, "discusses"));
+    return null;
+  }
+
+  /**
+   * Someone who opened the page this chat discusses joins it (Discuss). Opening the page is all it takes, so the Worker
+   * checked only that they may open it; the chat checks it is still on that page.
+   */
+  async joinPage(person: Person, artifactId: string, title: string): Promise<ChatRefusal | null> {
+    if (this.#gone) return refuse(404, DELETED);
+    const page = this.kinds.page();
+    if (this.kinds.kind() !== "page" || page?.id !== artifactId) return refuse(403, "This chat is no longer open to everyone who can see the page.");
+    if (this.isInChat(person.uid)) {
+      if (person.uid !== this.uid) await this.#index(person.uid).addSharedChat(this.#sharedRow(title));
+      return null;
+    }
+    await this.#index(person.uid).addSharedChat(this.#sharedRow(title));
+    // After the await: the owner may have changed the kind meanwhile.
+    if (this.kinds.kind() !== "page") {
+      await this.#index(person.uid).removeSharedChat(this.chatId, this.uid).catch(() => {});
+      return refuse(403, "This chat is no longer open to everyone who can see the page.");
+    }
+    const full = this.members.add(person, "page");
+    if (full) {
+      await this.#index(person.uid).removeSharedChat(this.chatId, this.uid).catch(() => {});
+      return refuse(409, full.error);
+    }
+    this.#joined(person);
+    return null;
+  }
+
+  /** The page this chat discusses has a new version: everyone sees a line, and the agent is told, as a passive write. */
+  async pageVersion(page: ChatPage): Promise<void> {
+    if (this.#gone || this.kinds.page()?.id !== page.id) return;
+    this.kinds.setPage(page);
+    this.#notice({ kind: CHAT_EVENT_KIND, data: { event: "page", page } satisfies ChatEventData });
+    await this.#contextWrite("page", pageNote(page, "has a new version"));
+    this.sockets.broadcastPeople();
+  }
+
+  /** Tell the chat that discusses a page this chat just published a version of, if there is one. Only a notice. */
+  async #tellPageChat(artifact: Omit<ArtifactSummary, "chatId">): Promise<void> {
+    const chatId = await this.#directory.pageChat(artifact.id);
+    if (!chatId || chatId === this.chatId) return;
+    await exports.ChatAgent.getByName(chatAgentName(this.uid, chatId)).pageVersion({ id: artifact.id, title: artifact.title, version: artifact.latest });
+  }
+
+  /**
+   * Branch off a new chat from transcript entry `entry`, for someone in the chat: it carries the conversation up to
+   * there (copied into its log, and read by its agent from one passive write), keeps this chat's kind and people, and
+   * links back here; this chat shows a line that the branch exists. The new chat is the owner's, as this one is.
+   */
+  async branchOff(by: Person, entry: unknown): Promise<{ chatId: string } | ChatRefusal> {
+    if (!this.isInChat(by.uid)) return refuse(403, "You are not in this chat.");
+    if (this.kinds.branches().length >= MAX_BRANCHES) return refuse(409, `This chat has ${MAX_BRANCHES} branches, the most there can be.`);
+    const at = await this.#entryAt(entry);
+    if (!at) return refuse(404, "No such message in this chat.");
+    const pages: EntryRecord[][] = [];
+    for await (const page of this.#log({ maxEntryId: at.id }, 200, MAX_BRANCH_PAGES)) pages.push([...page]);
+    const entries = pages.flat().reverse();
+    const owner = { uid: this.uid, name: this.members.ownerName(this.uid) };
+    const title = (await this.#directory.chatTitle(this.chatId)) ?? "";
+    const chatId = newId();
+    const branchTitle = branchTitleOf(title);
+    const kind = this.kinds.kind();
+    await this.#directory.createChat(chatId, { title: branchTitle, kind });
+    const from: BranchedFrom = { chatId: this.chatId, title, entry: at.id as number };
+    const branch = exports.ChatAgent.getByName(chatAgentName(this.uid, chatId));
+    const copies = branchCopies(entries, owner);
+    const summarize = (older: string) => summaryFor(this.#oneShotModels, this.ai(this.env.TITLE_MODEL), older);
+    const context = await branchContext(entries, this.uid, title, summarize);
+    for (let i = 0; i < copies.length; i += BRANCH_COPY_BATCH) await branch.copyIntoBranch(copies.slice(i, i + BRANCH_COPY_BATCH));
+    const page = this.kinds.page();
+    await branch.finishBranch({ by, owner, from, kind, title: branchTitle, members: this.members.listVia(), context, ...(page && { page }) });
+    this.kinds.addBranch({ chatId, entry: from.entry, at: Date.now() });
+    this.#notice({ kind: CHAT_EVENT_KIND, data: { event: "branch", chatId, title: branchTitle, entry: from.entry, by: { uid: by.uid, name: by.name } } satisfies ChatEventData });
+    return { chatId };
+  }
+
+  /** In a new branch (branchOff): put entries copied from the chat it branched off from into its log, as they were. */
+  async copyIntoBranch(copies: readonly { kind: string; data: JsonObject }[]): Promise<void> {
+    const root = await this.#root();
+    for (const copy of copies) await root.submit({ type: "write", entry: copy }, BACKGROUND_CONTEXT);
+  }
+
+  /**
+   * End a new branch: its kind, page and people as in the chat it came from (each member gets it in their sidebar), the
+   * line that links back, and what its agent reads of the conversation it carries.
+   */
+  async finishBranch(made: {
+    by: Person;
+    owner: Person;
+    from: BranchedFrom;
+    kind: ChatKind;
+    title: string;
+    members: readonly ChatMemberVia[];
+    context: string;
+    page?: ChatPage;
+  }): Promise<void> {
+    this.members.setOwnerName(made.owner);
+    this.kinds.setKind(made.kind);
+    this.kinds.setBranchedFrom(made.from);
+    if (made.page) {
+      this.kinds.setPage(made.page);
+      this.#bringIn([made.page.id]);
+    }
+    for (const member of made.members) this.members.add(member, member.via === "invite" ? "added" : member.via);
+    const rows = this.#listingMembers().map((member) => this.#index(member.uid).addSharedChat(this.#sharedRow(made.title)));
+    await Promise.allSettled(rows);
+    if (this.members.hasAny()) this.#tellShared();
+    this.#notice({ kind: CHAT_EVENT_KIND, data: { event: "branched", from: made.from, by: { uid: made.by.uid, name: made.by.name } } satisfies ChatEventData });
+    await this.#contextWrite("branch", made.context);
   }
 
   /** What deleting the chat would delete with it, for the owner to confirm. */
@@ -2699,4 +3001,17 @@ function send(ws: WebSocket, message: ChatServerMessage): boolean {
   } catch {
     return false;
   }
+}
+
+/** What a page's chat tells its agent about the page (`what`: "discusses" it, or it "has a new version"). */
+function pageNote(page: ChatPage, what: "discusses" | "has a new version"): string {
+  const which = `the page (artifact) "${page.title}", id ${page.id}, version ${page.version}`;
+  return what === "discusses"
+    ? `This chat discusses ${which}. People here ask about it; read it with artifact_read when a question needs it.`
+    : `The page this chat discusses has a new version: ${which}. Read it again with artifact_read before answering about what changed.`;
+}
+
+/** A branch's title, from the chat it branched off from. */
+function branchTitleOf(title: string): string {
+  return `${title || "Chat"} (branch)`;
 }

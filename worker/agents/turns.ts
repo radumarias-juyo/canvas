@@ -6,6 +6,7 @@ import type { EntryRecord } from "@earendil-works/pi-durable";
 import { TOOL_SEARCH_TOOL_NAME } from "@earendil-works/pi-durable/tool-search";
 import { CHAT_AGENT_KIND, MAX_HOPS, speakerLabel, type AgentDefinition, type ChatAgentReplyData } from "../../shared/agents.ts";
 import { textOf } from "../../shared/canonical.ts";
+import { CHAT_CONTEXT_KIND, CHAT_COPY_KIND, type ChatCopyData } from "../../shared/chat-kinds.ts";
 import { AGENT_NAME, calledNames, type Mention } from "../../shared/mentions.ts";
 import { CHAT_MESSAGE_KIND, incomingKey, publishedBy, type ChatMessageData } from "../../shared/protocol.ts";
 import type { McpToolInfo } from "../agent/mcp.ts";
@@ -183,6 +184,16 @@ export function askLine(entry: EntryRecord, self: string, ownerUid: string): str
   if (entry.kind === "pi.user" && message?.role === "user") {
     const text = userText(message);
     return text ? askOf({ name: "the owner", kind: "person", owner: true }, text) : undefined;
+  }
+  // One of pi's replies copied into a branch; the people's messages and agents' replies are copied as they were.
+  if (entry.kind === CHAT_COPY_KIND) {
+    const data = entry.data as unknown as ChatCopyData;
+    return data.from === "pi" && data.text ? askOf({ name: AGENT_NAME, kind: "agent" }, data.text) : undefined;
+  }
+  // What the app tells the agents of the page the chat discusses: never a person's words.
+  if (entry.kind === CHAT_CONTEXT_KIND && (entry.data as { about?: unknown } | undefined)?.about === "page" && message?.role === "user") {
+    const text = userText(message);
+    return text ? `[the app]: ${said(text)}` : undefined;
   }
   return undefined;
 }

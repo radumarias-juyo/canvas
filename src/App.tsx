@@ -7,7 +7,7 @@ import { AccountMenu } from "./AccountMenu.tsx";
 import { BackToSite } from "./BackToSite.tsx";
 import { api, inSecondSeat, type ArtifactSummary, type FileInfo, type Me } from "./api.ts";
 import { ArtifactPanel } from "./artifact/ArtifactPanel.tsx";
-import { ChatFilterBar, ChatList, isShared, UnreadDot, useChatFilter, useChatList } from "./chat/ChatList.tsx";
+import { ChatFilterBar, ChatList, ChatsHeading, isShared, UnreadDot, useChatFilter, useChatList, useChatOrder } from "./chat/ChatList.tsx";
 import { ChatView } from "./chat/ChatView.tsx";
 import { MentionToasts, useMentionNotices } from "./chat/notify.tsx";
 import { DeleteChat } from "./chat/DeleteChat.tsx";
@@ -232,6 +232,7 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, naviga
   const [menuOpen, setMenuOpen] = useState(false);
   const rail = collapsed && !narrow;
   const chatFilter = useChatFilter(chats, chatId);
+  const chatOrder = useChatOrder();
   const [artifactsOpen, setArtifactsOpen] = useStoredState("layout.artifactsOpen", false, isBoolean);
   const [sidebarWidth, setSidebarWidth] = useStoredState("layout.sidebarWidth", SIDEBAR_DEFAULT);
   // The chat column's width beside an open preview; null splits the space 40/60.
@@ -394,9 +395,9 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, naviga
           </div>
           {/* Chats scroll here; artifacts, skills and the files panel stay below them. */}
           <div className="sidebar-scroll">
-            <h3>Chats</h3>
+            <ChatsHeading order={chatOrder} />
             {chatFilter.bar && <ChatFilterBar {...chatFilter} />}
-            <ChatList chats={chatFilter.shown} openId={chatId} navigate={navigate} onDelete={setDeleting} empty={chatFilter.empty} />
+            <ChatList chats={chatFilter.shown} openId={chatId} uid={uid} order={chatOrder} navigate={navigate} onDelete={setDeleting} empty={chatFilter.empty} />
           </div>
           <section className="sidebar-pinned">
             <SectionHead name="Artifacts" count={artifacts.length + chatArtifacts.length} open={artifactsOpen} onToggle={setArtifactsOpen}>
@@ -498,6 +499,7 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, naviga
               onArtifact={onArtifact}
               onActivity={onActivity}
               onLeft={() => navigate("/")}
+              onOpenChat={(id) => navigate(`/c/${id}`)}
             />
           </ErrorBoundary>
         ) : (

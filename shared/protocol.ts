@@ -8,6 +8,7 @@ import type { EntryReactions, Reactions } from "./reactions.ts";
 import type { Attachment, AttachmentInput } from "./attachments.ts";
 import type { Mention, MentionInput } from "./mentions.ts";
 import type { ChatAgentView } from "./agents.ts";
+import type { BranchedFrom, ChatKind, ChatPage } from "./chat-kinds.ts";
 
 export type McpErrorCode =
   | "server_not_connected"
@@ -304,6 +305,12 @@ export interface ChatSummary {
   unread?: true;
   /** Set when someone tagged this user ("@name") in a message they have not seen yet. */
   mentioned?: true;
+  /** Who sees it, when its agents answer, what may leave it (shared/chat-kinds.ts). */
+  kind: ChatKind;
+  /** When this user pinned it to the top of their list. */
+  pinnedAt?: number;
+  /** This user closed it: hidden from their list until someone tags them in it again. */
+  closed?: true;
 }
 
 /**
@@ -324,6 +331,8 @@ export interface MentionNotice {
   text: string;
   /** When it was sent: one message's notices share it, so windows can show it once. */
   at: number;
+  /** Not a tag: `from` added this user to the chat, which shows them everything said in it so far. */
+  added?: true;
 }
 
 /** Someone in a chat: a verified uid, and the name the others see (their email, or the demo name). */
@@ -374,8 +383,11 @@ export interface ChatInvite {
   expiresAt: number;
 }
 
-/** What one person's app is told about a chat's people: everyone in it, and for its owner the invites still open. */
-export type ChatPeopleView = ChatPeople & { invites?: ChatInvite[] };
+/**
+ * What one person's app is told about a chat's people: everyone in it, and for its owner the invites still open; the
+ * chat's kind, the page it discusses, and the chat it branched off from, if any.
+ */
+export type ChatPeopleView = ChatPeople & { invites?: ChatInvite[]; kind?: ChatKind; page?: ChatPage; branchedFrom?: BranchedFrom };
 
 /** POST /api/chats/:id/invites: a single-use link to the chat. */
 export interface CreatedInvite extends ChatInvite {
@@ -497,7 +509,9 @@ export interface ChatPeopleData extends Person {
    * `rejoined`: someone already in the chat opened an invite link to it, in another window or on another device.
    * `stopped`: they stopped the agent mid-run.
    */
-  event: "joined" | "rejoined" | "left" | "removed" | "stopped" | "agent-added" | "agent-removed";
+  event: "joined" | "rejoined" | "left" | "removed" | "stopped" | "agent-added" | "agent-removed" | "added";
+  /** For `added`: who added them (the owner). */
+  by?: string;
   /** For agent-added and agent-removed, and a stopped that stopped one agent only: the agent's handle. */
   agent?: string;
 }
