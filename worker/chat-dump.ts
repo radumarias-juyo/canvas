@@ -81,7 +81,9 @@ export function dumpChat(
     part.tables.push(entry);
     const filter = FINISHED[name] ? ` AND ${FINISHED[name]}` : "";
     for (;;) {
-      const rows = sql.exec(`SELECT rowid AS ${ROWID}, * FROM "${name}" WHERE rowid > ?${filter} ORDER BY rowid LIMIT ${ROWS_AT_ONCE}`, after).toArray();
+      const rows = sql
+        .exec(`SELECT rowid AS ${ROWID}, * FROM "${name}" WHERE rowid > ?${filter} ORDER BY rowid LIMIT ${ROWS_AT_ONCE}`, after)
+        .toArray();
       for (const row of rows) {
         after = Number(row[ROWID]);
         const cells: SqlRow = {};
@@ -151,7 +153,10 @@ export function restorePart(sql: DumpSql, kv: DumpKv, kvKeys: readonly string[],
       const unknown = names.find((column) => !columns.has(column));
       if (unknown !== undefined || !names.length) throw new DumpError(`${name} has no column ${JSON.stringify(unknown ?? "")}.`);
       const values = names.map((column) => fromCell(row[column], remap));
-      sql.exec(`INSERT OR REPLACE INTO "${name}" (${names.map((column) => `"${column}"`).join(", ")}) VALUES (${names.map(() => "?").join(", ")})`, ...values);
+      sql.exec(
+        `INSERT OR REPLACE INTO "${name}" (${names.map((column) => `"${column}"`).join(", ")}) VALUES (${names.map(() => "?").join(", ")})`,
+        ...values,
+      );
     }
     if (FINISHED[name]) sql.exec(`DELETE FROM "${name}" WHERE NOT (${FINISHED[name]})`);
   }
@@ -200,7 +205,8 @@ export function importedRoster(sql: DumpSql, uid: string, kept: readonly string[
   if (!has("chat_agents")) return { agents: [], through: -1 };
   sql.exec("DELETE FROM chat_agents WHERE agent_id NOT IN (SELECT value FROM json_each(?))", JSON.stringify(kept));
   // A member's agent ran in its owner's object, who is not in the new chat.
-  if (sql.exec("SELECT 1 FROM pragma_table_info('chat_agents') WHERE name = 'seat'").toArray().length) sql.exec("DELETE FROM chat_agents WHERE seat IS NOT NULL");
+  if (sql.exec("SELECT 1 FROM pragma_table_info('chat_agents') WHERE name = 'seat'").toArray().length)
+    sql.exec("DELETE FROM chat_agents WHERE seat IS NOT NULL");
   sql.exec("UPDATE chat_agents SET owner_uid = ?, shared = 0", uid);
   const agents = sql
     .exec("SELECT agent_id FROM chat_agents ORDER BY agent_id")

@@ -64,7 +64,18 @@ const SHOWN_WITH: Record<string, string> = { effort: "model", sharedServers: "se
 
 function formOf(subject: AgentSubject): Form {
   if (subject.kind === "new")
-    return { name: "", job: "", instructions: "", avatar: "", color: "", model: AUTO_MODEL, servers: null, sharedServers: null, review: false, assumed: [] };
+    return {
+      name: "",
+      job: "",
+      instructions: "",
+      avatar: "",
+      color: "",
+      model: AUTO_MODEL,
+      servers: null,
+      sharedServers: null,
+      review: false,
+      assumed: [],
+    };
   const { agent } = subject;
   return {
     name: agent.name,

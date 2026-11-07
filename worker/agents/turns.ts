@@ -123,12 +123,20 @@ export class CatchUp {
   result(): { text: string; through: number } {
     if (!this.#lines.length) return { text: "", through: this.#through };
     const skipped = this.#full ? "(Earlier messages are left out.)\n\n" : "";
-    return { text: `What was said in the chat since your last turn:\n\n${skipped}${[...this.#lines].reverse().join("\n\n")}`, through: this.#through };
+    return {
+      text: `What was said in the chat since your last turn:\n\n${skipped}${[...this.#lines].reverse().join("\n\n")}`,
+      through: this.#through,
+    };
   }
 }
 
 /** CatchUp over `entries`, oldest first. */
-export function mirrorText(entries: readonly EntryRecord[], self: string, ownerUid: string, skip?: ReadonlySet<string>): { text: string; through: number } {
+export function mirrorText(
+  entries: readonly EntryRecord[],
+  self: string,
+  ownerUid: string,
+  skip?: ReadonlySet<string>,
+): { text: string; through: number } {
   const catchUp = new CatchUp(self, ownerUid, skip);
   catchUp.add([...entries].reverse());
   return catchUp.result();
@@ -175,7 +183,8 @@ export function askLine(entry: EntryRecord, self: string, ownerUid: string): str
     const data = entry.data as unknown as ChatAgentReplyData;
     if (!data.text) return undefined;
     // Its own replies are in its session already, but for one from a fork, which only the chat has.
-    if (data.agentId === self) return data.forked ? `${speakerLabel({ name: data.name, kind: "agent" })} (your reply, as posted): ${said(data.text)}` : undefined;
+    if (data.agentId === self)
+      return data.forked ? `${speakerLabel({ name: data.name, kind: "agent" })} (your reply, as posted): ${said(data.text)}` : undefined;
     return askOf({ name: data.name, kind: "agent" }, data.text);
   }
   const message = entry.model?.[0];
@@ -248,7 +257,10 @@ export function ownServer(agent: Pick<AgentDefinition, "servers">): (server: str
  * Whether anyone in a shared chat may make an agent use `server`: one of its own on its list for shared chats, or when
  * it has none, one that does not sign in each user (`signsIn`).
  */
-export function sharedServer(agent: Pick<AgentDefinition, "servers" | "sharedServers">, signsIn: (server: string) => boolean): (server: string) => boolean {
+export function sharedServer(
+  agent: Pick<AgentDefinition, "servers" | "sharedServers">,
+  signsIn: (server: string) => boolean,
+): (server: string) => boolean {
   const own = ownServer(agent);
   return (server) => own(server) && (agent.sharedServers ? agent.sharedServers.includes(server) : !signsIn(server));
 }

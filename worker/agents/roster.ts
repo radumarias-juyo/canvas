@@ -189,7 +189,8 @@ export class ChatRoster {
     `);
     // Columns added later: a roster or turn table made before them lacks them.
     const added = (table: string, column: string, type: string) => {
-      if (!sql.exec(`SELECT 1 FROM pragma_table_info('${table}') WHERE name = ?`, column).toArray().length) sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+      if (!sql.exec(`SELECT 1 FROM pragma_table_info('${table}') WHERE name = ?`, column).toArray().length)
+        sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
     };
     added("chat_agents", "shared", "INTEGER NOT NULL DEFAULT 0");
     added("chat_agents", "seat", "TEXT");
@@ -475,14 +476,20 @@ export class ChatRoster {
    */
   release(id: number, reply: ChatAgentReplyData, toPi: boolean): boolean {
     return (
-      this.#sql.exec(`UPDATE chat_agent_turns SET held = 0, reply = ?, to_pi = ? WHERE id = ? AND ${PENDING}`, JSON.stringify(reply), toPi ? 1 : 0, id)
-        .rowsWritten > 0
+      this.#sql.exec(
+        `UPDATE chat_agent_turns SET held = 0, reply = ?, to_pi = ? WHERE id = ? AND ${PENDING}`,
+        JSON.stringify(reply),
+        toPi ? 1 : 0,
+        id,
+      ).rowsWritten > 0
     );
   }
 
   /** Drop a held reply, as its owner discards it: it never reaches the chat. False when it is not held. */
   discard(id: number): boolean {
-    return this.#sql.exec(`UPDATE chat_agent_turns SET held = 0, reply = NULL, delivered_at = ? WHERE id = ? AND ${HELD}`, this.#now(), id).rowsWritten > 0;
+    return (
+      this.#sql.exec(`UPDATE chat_agent_turns SET held = 0, reply = NULL, delivered_at = ? WHERE id = ? AND ${HELD}`, this.#now(), id).rowsWritten > 0
+    );
   }
 
   /** The ended turns whose replies are not delivered yet, oldest first: what a restart delivers. */
@@ -571,7 +578,9 @@ export class ChatRoster {
     return running.flatMap((turn) => {
       const entry = entries.get(turn.agentId);
       if (!entry || entry.seat !== undefined) return [];
-      return [{ agentId: turn.agentId, session: turn.session ?? entry.session, turn: turn.id, ...(turn.session !== undefined && { only: entry.ownerUid }) }];
+      return [
+        { agentId: turn.agentId, session: turn.session ?? entry.session, turn: turn.id, ...(turn.session !== undefined && { only: entry.ownerUid }) },
+      ];
     });
   }
 

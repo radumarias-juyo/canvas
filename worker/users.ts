@@ -579,10 +579,8 @@ export class UserDirectory extends DurableObject<Env> {
 
   /** The title of a chat of `ownerUid`'s the user is in; null when they are not. */
   #sharedChatTitle(id: string, ownerUid: string): string | null {
-    return (
-      this.ctx.storage.sql.exec<{ title: string }>("SELECT title FROM shared_chats WHERE id = ? AND owner_uid = ?", id, ownerUid).toArray()[0]?.title ??
-      null
-    );
+    const [row] = this.ctx.storage.sql.exec<{ title: string }>("SELECT title FROM shared_chats WHERE id = ? AND owner_uid = ?", id, ownerUid).toArray();
+    return row?.title ?? null;
   }
 
   /** Delete one of the user's skills. Built-in ones can only be turned off. */

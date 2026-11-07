@@ -244,7 +244,11 @@ export class AgentStore {
     return this.#sql
       .exec("SELECT chat_id, shared, owner_uid FROM agent_chats WHERE agent_id = ? ORDER BY chat_id", agentId)
       .toArray()
-      .map((row) => ({ chatId: row.chat_id as string, shared: row.shared === 1, ...(row.owner_uid !== null && { ownerUid: row.owner_uid as string }) }));
+      .map((row) => ({
+        chatId: row.chat_id as string,
+        shared: row.shared === 1,
+        ...(row.owner_uid !== null && { ownerUid: row.owner_uid as string }),
+      }));
   }
 
   /** A deleted chat holds no agent any more. */

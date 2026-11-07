@@ -139,6 +139,7 @@ import { isTurnEntry, TurnFilter } from "./agents/live.ts";
 import { ChatRoster, type AgentTurn, type RosterEntry, type RunningTurn } from "./agents/roster.ts";
 import type { RoomLink, RoomRef, SeatBatch, SeatLink, SeatResult, SeatTurn } from "./agents/seats/link.ts";
 import { memberAgentName, seatChatId } from "./agents/seats/names.ts";
+import { addRefusal, mayRemove, mayShare, seatedEntry, type ChatRules } from "./agents/seats/rules.ts";
 import { AgentSeats, type SeatHost } from "./agents/seats/seat.ts";
 import { agentsExtension } from "./agents/tools.ts";
 import {
@@ -1847,7 +1848,11 @@ export class ChatAgent extends DurableObject<Env> {
       // Members' agents run in their owners' objects: their seats for this chat go, and their indexes forget it.
       const seated = this.roster.list().filter((entry) => entry.seat !== undefined);
       await Promise.all([
-        ...seated.map((entry) => this.#seatLink(entry).drop().catch((error: unknown) => console.error("delete, seat:", errorMessage(error)))),
+        ...seated.map((entry) =>
+          this.#seatLink(entry)
+            .drop()
+            .catch((error: unknown) => console.error("delete, seat:", errorMessage(error))),
+        ),
         ...seated.map((entry) => this.#noteAgentChat(entry, false)),
         ...members.map((member) => this.#index(member.uid).removeSharedChat(this.chatId, this.uid)),
         // The store checks each is this chat's: the transcript's ids come from tool results.
@@ -2053,9 +2058,8 @@ export class ChatAgent extends DurableObject<Env> {
    */
   async addAgent(by: Person, agentId: unknown): Promise<ChatAgentView[] | ChatRefusal> {
     if (this.#gone) return refuse(404, DELETED);
-    if (!this.isInChat(by.uid)) return refuse(403, "You are not in this chat.");
-    // The owner's second seat has no agents of its own: the owner adds theirs as the owner.
-    if (!this.#hasSidebar(by.uid)) return refuse(403, "Add agents as the chat's owner.");
+    const refusal = addRefusal(this.#rules, by.uid);
+    if (refusal) return refuse(403, refusal);
     if (typeof agentId !== "string" || !AGENT_ID_PATTERN.test(agentId)) return refuse(400, "Expected {agentId}.");
     const here = this.roster.get(agentId);
     if (here) return here.ownerUid === by.uid ? this.agentViews() : refuse(409, "Another agent with this id is in the chat.");
@@ -2107,8 +2111,8 @@ export class ChatAgent extends DurableObject<Env> {
    */
   async removeAgent(by: Person, agentId: string): Promise<ChatAgentView[] | ChatRefusal> {
     const entry = this.roster.get(agentId);
-    if (by.uid !== this.uid && entry?.ownerUid !== by.uid) return refuse(403, "Only the chat's owner, or the agent's, can take it out of the chat.");
     if (!entry) return refuse(404, "No such agent in this chat.");
+    if (!mayRemove(this.#rules, by.uid, entry)) return refuse(403, "Only the chat's owner, or the agent's, can take it out of the chat.");
     await this.#dropAgent(entry);
     this.#notePeople(by, "agent-removed", entry.name);
     return this.agentViews();
@@ -2121,7 +2125,10 @@ export class ChatAgent extends DurableObject<Env> {
     this.#broadcastAgents();
     this.#tellDrafts(entry.ownerUid);
     await Promise.all([
-      entry.seat !== undefined && this.#seatLink(entry).drop().catch((error: unknown) => console.error("agent seat:", errorMessage(error))),
+      entry.seat !== undefined &&
+        this.#seatLink(entry)
+          .drop()
+          .catch((error: unknown) => console.error("agent seat:", errorMessage(error))),
       index && this.#noteAgentChat(entry, false),
     ]);
   }
@@ -2144,7 +2151,7 @@ export class ChatAgent extends DurableObject<Env> {
   async setAgentShared(by: Person, agentId: string, shared: unknown): Promise<ChatAgentView[] | ChatRefusal> {
     const entry = this.roster.get(agentId);
     if (!entry) return refuse(404, "No such agent in this chat.");
-    if (by.uid !== entry.ownerUid) return refuse(403, "Only the agent's owner can share it.");
+    if (!mayShare(this.#rules, by.uid, entry)) return refuse(403, "Only the agent's owner can share it.");
     if (typeof shared !== "boolean") return refuse(400, "Expected {shared: true | false}.");
     this.roster.setShared(agentId, shared);
     this.#broadcastAgents();
@@ -2167,7 +2174,11 @@ export class ChatAgent extends DurableObject<Env> {
    * (the agent's owner) Post a reply held for review to the chat, as they edited it (`text`), or discard it. A reply
    * posted is theirs: it shows "posted by" them.
    */
-  async reviewDraft(by: Person, agentId: string, input: { turn?: unknown; action?: unknown; text?: unknown } | null): Promise<AgentDraftView[] | ChatRefusal> {
+  async reviewDraft(
+    by: Person,
+    agentId: string,
+    input: { turn?: unknown; action?: unknown; text?: unknown } | null,
+  ): Promise<AgentDraftView[] | ChatRefusal> {
     this.#requireInChat(by);
     const { turn, action, text } = input ?? {};
     if (typeof turn !== "number" || (action !== "post" && action !== "discard") || (text !== undefined && typeof text !== "string")) {
@@ -2295,7 +2306,8 @@ export class ChatAgent extends DurableObject<Env> {
   /** A passive write into one of this object's agent sessions: context, no run. */
   async #writeTo(session: string, text: string, requestId: string): Promise<void> {
     const message: UserMessage = { role: "user", content: text, timestamp: Date.now() };
-    await (await this.#conversation(session)).submit({ type: "write", requestId, entry: { kind: CHAT_ASIDE_KIND, model: [message] } }, BACKGROUND_CONTEXT);
+    const conversation = await this.#conversation(session);
+    await conversation.submit({ type: "write", requestId, entry: { kind: CHAT_ASIDE_KIND, model: [message] } }, BACKGROUND_CONTEXT);
   }
 
   /** A new session that sees `session`'s history so far (an agent's private turn runs in one). */
@@ -2414,10 +2426,14 @@ export class ChatAgent extends DurableObject<Env> {
     };
   }
 
+  /** The chat as the agents' rules read it (worker/agents/seats/rules.ts). */
+  get #rules(): ChatRules {
+    return { ownerUid: this.uid, isInChat: (uid) => this.isInChat(uid), hasAccount: (uid) => this.#hasSidebar(uid) };
+  }
+
   /** The room's side of a seat's call: the roster entry of a member's agent that `uid` owns and brought in; null for anything else. */
   #seated(uid: string, agentId: string): RosterEntry | null {
-    const entry = this.roster.get(agentId);
-    return entry?.seat !== undefined && entry.ownerUid === uid && uid !== this.uid && this.isInChat(uid) ? entry : null;
+    return seatedEntry(this.#rules, this.roster.get(agentId), uid);
   }
 
   /** (RPC, from a seat) The lines of the log after `after` for a member's agent's next turn: what fills its gap. */

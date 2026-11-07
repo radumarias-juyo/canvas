@@ -258,10 +258,14 @@ export class AgentSeats {
   /** The agent left the room (removed, or its owner left): its seat goes, and what it runs there stops. */
   async drop(ref: RoomRef, agentId: string): Promise<void> {
     const where = "room_owner = ? AND room_chat = ? AND agent_id = ?";
-    const running = this.#sql.exec(`SELECT * FROM agent_seat_turns WHERE ${where} AND status = 'running'`, ref.ownerUid, ref.chatId, agentId).toArray() as SeatTurnRow[];
+    const running = this.#sql
+      .exec(`SELECT * FROM agent_seat_turns WHERE ${where} AND status = 'running'`, ref.ownerUid, ref.chatId, agentId)
+      .toArray() as SeatTurnRow[];
     this.#sql.exec(`DELETE FROM agent_seat_turns WHERE ${where}`, ref.ownerUid, ref.chatId, agentId);
     this.#sql.exec(`DELETE FROM agent_seats WHERE ${where}`, ref.ownerUid, ref.chatId, agentId);
-    await Promise.all(running.map((row) => this.#host.abort(row.session).catch((error: unknown) => console.error("agent seat, stop:", errorMessage(error)))));
+    await Promise.all(
+      running.map((row) => this.#host.abort(row.session).catch((error: unknown) => console.error("agent seat, stop:", errorMessage(error)))),
+    );
   }
 
   /** The newest log entry a room's seat took; -1 before any. For the tests and the room's view. */

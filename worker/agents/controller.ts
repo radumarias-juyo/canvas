@@ -165,7 +165,10 @@ export class AgentTurns {
       if (entry.seat !== undefined) {
         // Its owner's own object runs it: the turn ends when the seat says so (seatEnded).
         await this.#giveSeat(entry, turn);
-        if (!live()) await this.#host.seat!(entry).abort(turn.id).catch((error: unknown) => console.error("agent stop:", errorMessage(error)));
+        if (!live())
+          await this.#host.seat!(entry)
+            .abort(turn.id)
+            .catch((error: unknown) => console.error("agent stop:", errorMessage(error)));
         return;
       }
       const forks = turn.byOwner && this.#host.forks && this.#host.fork ? await this.#host.forks(entry, agent, turn) : false;
@@ -179,7 +182,11 @@ export class AgentTurns {
         await this.#host.configure(entry, agent, turn);
       } else await Promise.all([this.#catchUp(entry, turn.id), this.#host.configure(entry, agent, turn)]);
       if (!live()) return;
-      await this.#host.submit(sessionOf(entry, turn), turnInput(turn), operationId(turn.id), { turn: turn.id, calledBy: turn.calledBy, hop: turn.hop });
+      await this.#host.submit(sessionOf(entry, turn), turnInput(turn), operationId(turn.id), {
+        turn: turn.id,
+        calledBy: turn.calledBy,
+        hop: turn.hop,
+      });
       roster.markSubmitted(turn.id);
       if (!live()) {
         // Stopped while its input went in: the stop's abort may have come first, so the run it started stops too.
@@ -420,8 +427,7 @@ export class AgentTurns {
     for (const agentId of seats) {
       const entry = roster.get(agentId)!;
       this.#host.waitUntil(
-        this.#host
-          .seat!(entry)
+        this.#host.seat!(entry)
           .wake()
           .catch((error: unknown) => console.error("agent seat:", errorMessage(error))),
       );

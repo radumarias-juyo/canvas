@@ -17,6 +17,7 @@ export function memberAgentName(name: string, ownerName: string, taken: (name: s
   const first =
     ownerName
       .normalize("NFKD")
+      .replace(/\p{M}/gu, "")
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, " ")
       .trim()

@@ -89,7 +89,8 @@ const GROWS_ITSELF = CSS.supports("field-sizing", "content");
 const atBottom = (el: HTMLElement) => el.scrollHeight - el.scrollTop - el.clientHeight < 80;
 
 export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity, onLeft, onMenu }: Props) {
-  const { state, connected, people, online, prompt, abort, setModel, auto, reactions, react, hints, dropHint, agents, live, drafts, setDrafts } = useChat(chatId);
+  const { state, connected, people, online, prompt, abort, setModel, auto, reactions, react, hints, dropHint, agents, live, drafts, setDrafts } =
+    useChat(chatId);
   // pi, or an agent of the chat, is working or has turns waiting: Stop stops them all.
   const working = state.busy || agents.some((agent) => agent.busy || agent.queued);
   const chatReactions = useMemo(() => ({ uid, react }), [uid, react]);
