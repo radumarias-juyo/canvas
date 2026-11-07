@@ -353,6 +353,97 @@ export interface ChatAgentView {
   queued?: number;
   /** Its owner turned it off since it was added: it does not answer until they turn it on again. */
   off?: true;
+  /** Its owner shares it with the people of this chat: they can open it read-only, and copy it (SharedAgentView). */
+  shared?: true;
+}
+
+/** An MCP server of the deployment, as the agent editor lists it: whether it signs in each user, and this one now. */
+export interface AgentServerInfo {
+  name: string;
+  /** It signs in each user (MCP OAuth): an agent reads it as its owner, so a shared chat would see what the owner sees. */
+  signsIn: boolean;
+  /** This user has signed in to it. */
+  signedIn?: true;
+}
+
+/** One chat an agent is in, as its owner's directory keeps it (the chats tell it when they add or remove the agent). */
+export interface AgentChatUse {
+  chatId: string;
+  /** The chat's title in the owner's list. */
+  title: string;
+  /** Whether its owner shares the agent with the people of that chat. */
+  shared: boolean;
+}
+
+/**
+ * An agent its owner shares with a chat, as the people in that chat may open it: what it does and how, never who it
+ * is signed in as. It keeps running as its owner; a change someone else makes is saved as their own copy.
+ */
+export type SharedAgentView = Pick<AgentDefinition, CopiedField | "id" | "version"> & {
+  ownerUid: string;
+  ownerName: string;
+  /** Its latest turns in this chat, newest first. */
+  turns: AgentTurnView[];
+};
+
+/** The fields of a definition a copy takes from the one it copies: what it does, never its state or who made it. */
+export const COPIED_FIELDS = [
+  "name",
+  "avatar",
+  "color",
+  "job",
+  "instructions",
+  "model",
+  "effort",
+  "servers",
+  "sharedServers",
+  "trigger",
+  "scope",
+  "workflow",
+] as const satisfies readonly (keyof AgentInput)[];
+export type CopiedField = (typeof COPIED_FIELDS)[number];
+
+/** Changes to a definition's fields, as a request carries them: null clears an optional one (checkAgent reads it as none). */
+export type AgentChanges = { [K in keyof AgentInput]?: AgentInput[K] | null };
+
+/**
+ * A definition the model drafted, without the servers that sign in each user (`signsIn`) among those it shares: a
+ * shared chat could make it read what its owner sees there. Only its owner adds one, in Setup, under its warning.
+ */
+export function withoutSignInShares(input: unknown, signsIn: (server: string) => boolean): unknown {
+  if (!isObject(input) || !Array.isArray(input.sharedServers)) return input;
+  return { ...input, sharedServers: input.sharedServers.filter((server) => typeof server !== "string" || !signsIn(server)) };
+}
+
+/** The fields a copy takes of `agent`, those it has. */
+export function copiedFields(agent: Pick<AgentInput, CopiedField>): Pick<AgentInput, CopiedField> {
+  const fields: AgentChanges = {};
+  for (const field of COPIED_FIELDS) if (agent[field] !== undefined) Object.assign(fields, { [field]: agent[field] });
+  return fields as Pick<AgentInput, CopiedField>;
+}
+
+/**
+ * The fields of someone's copy of `original`: what they changed (`changes`, a request's body, checked by checkAgent when
+ * saved), else the original's. Only the fields a copy takes: never its state, its guesses or where it came from.
+ */
+export function copyInput(original: Pick<AgentInput, CopiedField>, changes: AgentChanges): AgentChanges {
+  const fields: AgentChanges = {};
+  for (const field of COPIED_FIELDS) {
+    const value = Object.hasOwn(changes, field) ? changes[field] : original[field];
+    if (value !== undefined) Object.assign(fields, { [field]: value });
+  }
+  return fields;
+}
+
+/** A free handle for a copy of `name` among `taken`: the name itself, else "name-2", "name-3"… within the pattern's length. */
+export function copyName(name: string, taken: (name: string) => boolean): string | null {
+  if (!taken(name)) return name;
+  for (let n = 2; n < 100; n++) {
+    const suffix = `-${n}`;
+    const candidate = `${name.slice(0, 24 - suffix.length).replace(/-+$/, "")}${suffix}`;
+    if (!taken(candidate)) return candidate;
+  }
+  return null;
 }
 
 /**
@@ -429,3 +520,14 @@ export function speakerLabel(speaker: { name: string; kind: "person" | "agent"; 
 export const AGENT_PROPOSE_TOOL = "agent_propose";
 /** What agent_propose's result carries, for the app to show the draft card. A type, so pi can store it. */
 export type AgentProposedDetails = { agentId: string; name: string; version: number; assumed?: string[] };
+
+/** The agent a proposal's result drafted, which shows as a draft card; undefined for any other entry. */
+export function proposedBy(entry: { kind: string; model?: readonly unknown[] }): AgentProposedDetails | undefined {
+  if (entry.kind !== "pi.tool-result") return undefined;
+  const message = entry.model?.[0] as { toolName?: string; isError?: boolean; details?: unknown } | undefined;
+  if (message?.toolName !== AGENT_PROPOSE_TOOL || message.isError) return undefined;
+  const details = message.details as Partial<AgentProposedDetails> | undefined;
+  return typeof details?.agentId === "string" && AGENT_ID_PATTERN.test(details.agentId) && typeof details.name === "string"
+    ? (details as AgentProposedDetails)
+    : undefined;
+}

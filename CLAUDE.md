@@ -52,6 +52,10 @@ with `@cloudflare/vite-plugin`, pnpm; configured and deployed with the `cf` CLI 
   together with the hand-offs it queues; the reply is then posted as a `chat.agent` entry. `@name` hands off (MAX_HOPS
   per person's message, a hand-off to pi counted on the handing turn); pi's own answers are read from its log for the
   agents they name (`#piScan`, from a cursor).
+  The editor is `src/agents/` (sidebar section, agent page with its `TABS`, the draft card an `agent_propose` result
+  shows); `AgentStore`'s `agent_chats` is the used-in index the chats keep. A chat's owner can share a roster agent
+  there: members see it read-only and saving makes their own copy (`copiedFrom`, off). With `DEV_TOOLS=true`,
+  `POST /api/dev/agents/propose` saves a proposal as the model would.
   A DO method's return type must not contain `unknown` (the RPC type turns `never`) or recursive JSON types (too deep).
 - Before a page becomes a version it is checked in a headless browser (`BROWSER` binding, `worker/artifacts/check.ts`):
   the agent saves a page with `artifact_write` (then changes it only by edits), and `artifact_check` and `artifact_publish` take it by draft id and report console errors, failed calls, a screenshot and the agent's tests, and

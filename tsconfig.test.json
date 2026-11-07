@@ -104,6 +104,8 @@
     "worker/artifacts/page-calls.ts",
     "worker/artifacts/page-features.ts",
     "worker/dictation.ts",
-    "src/chat/dictation-engine.ts"
+    "src/chat/dictation-engine.ts",
+    "src/agents/glance.ts",
+    "src/agents/nav.ts"
   ]
 }
