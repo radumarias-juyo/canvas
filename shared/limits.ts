@@ -298,16 +298,19 @@ export function matchesValue(pattern: string | number, value: unknown): boolean 
     .some(matches);
 }
 
-/** What one entry of a list may be matched by: itself, its <address> and the name before it, and each of its words. */
+/**
+ * What one entry of a list may be matched by: itself, each <…> in it and what follows its last "<" (the address a mail
+ * server takes, also behind a quoted name holding brackets of its own: "a<b>"<x@y>), the name before it, and each word.
+ */
 function namesOf(entry: string): string[] {
   const trimmed = entry.trim();
   if (!trimmed) return [];
-  // The address in <…> on its own: it need not be a word of its own ("Name<address>" has no space before it).
-  const bracketed = /<([^<>]*)>/.exec(trimmed);
-  const address = bracketed?.[1]?.trim() ?? "";
-  const name = bracketed ? trimmed.replace(bracketed[0], "").trim().replace(/^"(.*)"$/, "$1").trim() : "";
+  // An address need not be a word of its own ("Name<address>" has no space before it).
+  const bracketed = [...trimmed.matchAll(/<([^<>]*)>/g)].map((match) => match[1].trim());
+  const last = trimmed.includes("<") ? trimmed.slice(trimmed.lastIndexOf("<") + 1).replace(/>\s*$/, "").trim() : "";
+  const name = bracketed.length ? trimmed.replace(/<[^<>]*>\s*$/, "").trim().replace(/^"(.*)"$/, "$1").trim() : "";
   const words = trimmed.split(/\s+/).map((word) => word.replace(/^[<"'(]+|[>"'),]+$/g, ""));
-  return [trimmed, address, name, ...words].filter(Boolean);
+  return [trimmed, ...bracketed, last, name, ...words].filter(Boolean);
 }
 
 /** The day `at` falls on in `tz`, as "YYYY-MM-DD". */

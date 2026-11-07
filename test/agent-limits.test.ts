@@ -131,6 +131,9 @@ describe("guardrail rules", () => {
     expect(matchesValue("leak@blocked.com", '"Leak, Inc" <LEAK@blocked.com>')).toBe(true);
     expect(matchesValue("sam lee", "Ana <ana@ok.com>; Sam Lee <sam@ok.com>")).toBe(true);
     expect(matchesValue("*@rival.example", "Sam Lee <sam@ok.com>")).toBe(false);
+    // A quoted name with brackets of its own: the address is the last one.
+    expect(matchesValue("ceo@company.com", '"x<y>"<ceo@company.com>')).toBe(true);
+    expect(matchesValue("ceo@company.com", '"<ok@good.com>"<ceo@company.com>')).toBe(true);
     // With no space before the <address>: it is matched on its own all the same.
     expect(matchesValue("sam@rival.example", "Sam<sam@rival.example>")).toBe(true);
   });
