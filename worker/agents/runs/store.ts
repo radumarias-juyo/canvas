@@ -69,10 +69,10 @@ export interface RunDetail {
    */
   acted?: Record<string, ActedStep>;
   /**
-   * Its scope's elements as first listed, when small enough to keep: a run that goes on (after a restart, or once its
-   * owner decided a held call) goes through the same items, not a list read again hours later.
+   * Its scope's list was read, and its elements kept (`agent_run_elements`, keepElements): a run that goes on (after a
+   * restart, or once its owner decided a held call) goes through those, never a list read again hours later.
    */
-  elements?: { key: string; label: string; value?: unknown }[];
+  listed?: true;
   /** Its agent's workflow and scope as it started (canonical JSON): a run going on after they changed stops instead. */
   shape?: string;
 }
@@ -113,11 +113,6 @@ interface ItemDetail {
   looked?: Record<string, unknown>;
   /** How its conditions (if, only if) came out, by step key: going through again, it takes the same way. */
   conditions?: Record<string, boolean>;
-  /**
-   * Its element of the scope's list, when the run could not keep the whole list (RunDetail.elements) and this one is
-   * small enough: a run going on goes over the items it has, never a list read again.
-   */
-  element?: { value: unknown };
 }
 
 /** An item of a run as a run going on goes over it again: its element, unless it was too large to keep. */
@@ -222,6 +217,10 @@ export class AgentRuns {
         PRIMARY KEY (agent_id, due_at, item)
       );
       CREATE INDEX IF NOT EXISTS agent_runs_by_status ON agent_runs (status, item);
+      CREATE TABLE IF NOT EXISTS agent_run_elements (
+        agent_id TEXT NOT NULL, due_at INTEGER NOT NULL, idx INTEGER NOT NULL, key TEXT NOT NULL, label TEXT NOT NULL, value TEXT,
+        PRIMARY KEY (agent_id, due_at, idx)
+      );
     `);
   }
 
@@ -270,6 +269,12 @@ export class AgentRuns {
         agentId,
       )
       .toArray() as RunRow[];
+    if (gone.length)
+      this.#sql.exec(
+        "DELETE FROM agent_run_elements WHERE agent_id = ? AND due_at NOT IN (SELECT due_at FROM agent_runs WHERE agent_id = ? AND item = '')",
+        agentId,
+        agentId,
+      );
     for (const row of gone) {
       if (row.item !== RUN || row.test || row.status !== "needs_sign_in") continue;
       this.#onEnded?.({ ...recordOf(row), status: "not_today", summary: "Skipped: too old to go on." });
@@ -397,7 +402,6 @@ export class AgentRuns {
     item: string,
     label: string,
     session: () => Promise<string>,
-    element?: ItemDetail["element"],
   ): Promise<{ view: RunItemView; started: boolean }> {
     const found = this.item(agentId, dueAt, item);
     if (found && found.session) return { view: found, started: false };
@@ -413,20 +417,40 @@ export class AgentRuns {
       label,
       id,
       this.#now(),
-      JSON.stringify({ steps: [], ...(element && { element }) } satisfies ItemDetail),
+      JSON.stringify({ steps: [] } satisfies ItemDetail),
       agentId,
       dueAt,
     );
     return { view: this.item(agentId, dueAt, item)!, started: true };
   }
 
-  /** The items a run has, in the order they started, each with the element it kept (ItemDetail.element). */
-  keptElements(agentId: string, dueAt: number): KeptElement[] {
-    return this.#rows("agent_id = ? AND due_at = ? AND item != '' ORDER BY started_at, item", agentId, dueAt).map((row) => {
-      const { element } = parse<ItemDetail>(row.detail, { steps: [] });
-      const key = row.item === "*" ? "" : row.item;
-      return { key, label: row.label ?? key, ...(element ? { value: element.value } : { missing: true as const }) };
+  /**
+   * Keep a run's scope's elements as first listed, in order, each without its value when that is over `maxChars`
+   * (going on, its item cannot read it): a run going on goes through these (keptElements), never a list read again.
+   */
+  keepElements(agentId: string, dueAt: number, elements: readonly KeptElement[], maxChars: number): void {
+    elements.forEach((element, idx) => {
+      const json = element.missing ? null : JSON.stringify(element.value ?? null);
+      this.#sql.exec(
+        "INSERT OR REPLACE INTO agent_run_elements (agent_id, due_at, idx, key, label, value) VALUES (?, ?, ?, ?, ?, ?)",
+        agentId,
+        dueAt,
+        idx,
+        element.key,
+        element.label,
+        json !== null && json.length <= maxChars ? json : null,
+      );
     });
+    this.update(agentId, dueAt, { detail: { listed: true } });
+  }
+
+  /** The elements a run kept of its scope's list (keepElements), in order; null when it has not listed it yet. */
+  keptElements(agentId: string, dueAt: number): KeptElement[] | null {
+    if (!this.get(agentId, dueAt)?.detail.listed) return null;
+    const rows = this.#sql
+      .exec("SELECT key, label, value FROM agent_run_elements WHERE agent_id = ? AND due_at = ? ORDER BY idx", agentId, dueAt)
+      .toArray() as { key: string; label: string; value: string | null }[];
+    return rows.map(({ key, label, value }) => ({ key, label, ...(value === null ? { missing: true as const } : { value: JSON.parse(value) as unknown }) }));
   }
 
   /** An item of a run; "" names the item of a run with no scope. */
@@ -475,8 +499,8 @@ export class AgentRuns {
   endItem(agentId: string, dueAt: number, item: string, end: { status: RunItemStatus; cost: number } & ItemDetail): void {
     const { status, cost, ...rest } = end;
     // Undefined ones are left out of the JSON.
-    const { looked, conditions, element } = this.#itemDetail(agentId, dueAt, item);
-    const detail: ItemDetail = { ...rest, looked, conditions, element };
+    const { looked, conditions } = this.#itemDetail(agentId, dueAt, item);
+    const detail: ItemDetail = { ...rest, looked, conditions };
     this.#sql.exec(
       "UPDATE agent_runs SET status = ?, ended_at = ?, cost = ?, detail = ? WHERE agent_id = ? AND due_at = ? AND item = ?",
       status,
@@ -533,12 +557,12 @@ export class AgentRuns {
     return runs.map((run) => this.view(run, counts.get(run.dueAt) ?? NO_ITEMS));
   }
 
-  /** The runs that did not end: cut off by a restart, or waiting for a sign-in. */
   /** Whether any run waits for its owner to decide a held call. */
   anyWaiting(): boolean {
     return this.#sql.exec("SELECT 1 FROM agent_runs WHERE item = '' AND status = 'waiting' LIMIT 1").toArray().length > 0;
   }
 
+  /** The runs that did not end: cut off by a restart, or waiting for a sign-in. */
   unfinished(): RunRecord[] {
     return this.#rows("item = '' AND status IN ('running', 'needs_sign_in') ORDER BY due_at").map(recordOf);
   }
@@ -570,5 +594,6 @@ export class AgentRuns {
   /** Forget an agent's runs (it was deleted). */
   forget(agentId: string): void {
     this.#sql.exec("DELETE FROM agent_runs WHERE agent_id = ?", agentId);
+    this.#sql.exec("DELETE FROM agent_run_elements WHERE agent_id = ?", agentId);
   }
 }

@@ -3,7 +3,7 @@ import type { AgentDefinition, AgentStep, LookStep, StepInput } from "../shared/
 import type { Value } from "../shared/conditions.ts";
 import type { PendingActionView } from "../shared/limits.ts";
 import type { ArtifactMeta } from "../shared/protocol.ts";
-import { KEPT_RUNS, type RunDelivery } from "../shared/runs.ts";
+import { KEPT_RUNS, RUN_CONCURRENCY, type RunDelivery } from "../shared/runs.ts";
 import { actedOf, fillInput, missedDecisions, itemKey, itemsOf, reportOf, SignInNeeded, type ActContext, type ActResult, type DeliveryRequest, type WorkResult } from "../worker/agents/runs/executor.ts";
 import { publishedAlready, publishFindings, publishRebuilt, readOnlyDeclaration, runMark } from "../worker/agents/runs/page.ts";
 import { answeredIn, findingsEdit, FINDINGS_END, FINDINGS_START, reportHtml, workSpend } from "../worker/agents/runs/report.ts";
@@ -741,6 +741,32 @@ describe("scheduled runs", () => {
         await approveSecond(setup);
         expect(setup.host.runs.items(scoped.id, T0).map((item) => item.item)).toEqual(["#1", "#2", "#3", "#4", "#5"]);
         expect(setup.host.acts.some((act) => act.input.to === "o6")).toBe(false);
+      });
+
+      it("goes on after a restart over every element, also those whose items had not started", async () => {
+        const worked = agent({
+          workflow: [{ kind: "work", prompt: "Draft." }, { kind: "do", server: "crm", tool: "mail", input: { to: "{{item.to}}" } }],
+          scope: { list: { kind: "look", server: "crm", tool: "rows", input: {} }, each: true },
+          autonomy: 4,
+        });
+        const { host, runner } = home(worked);
+        host.values.set("crm.rows", listed);
+        // The work steps never answer in the first object: four items started, the fifth had not.
+        host.answer = () => new Promise<WorkResult>(() => {});
+        void runner.now(worked.id, false);
+        for (let i = 0; i < 5; i++) await tick();
+        expect(host.runs.items(worked.id, T0)).toHaveLength(RUN_CONCURRENCY);
+        const restarted = new FakeHome();
+        Object.assign(restarted, { sql: host.sql });
+        const runs = new AgentRuns(host.sql, () => restarted.clock.now);
+        Object.defineProperty(restarted, "runs", { value: runs });
+        restarted.definitions.set(worked.id, { ...worked });
+        restarted.actAnswer = () => ({ status: "ran", value: "ok" });
+        new AgentRunner(restarted, host.sql).resume();
+        await restarted.settled();
+        expect(restarted.acts.map((act) => act.input.to)).toEqual(["o1", "o2", "o3", "o4", "o5"]);
+        expect(restarted.reads.filter((read) => read.call === "crm.rows")).toHaveLength(0);
+        expect(runs.list(worked.id)[0].status).toBe("sent");
       });
 
       it("stops an item whose own element was too large to keep, saying why", async () => {

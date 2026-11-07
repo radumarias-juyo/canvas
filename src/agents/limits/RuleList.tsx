@@ -143,7 +143,7 @@ export function RuleList({
 function RuleLineWarning({ rule }: { rule: GuardrailRule }) {
   const { tools } = useServerTools(rule.tool === "*" ? "" : rule.server);
   const warning = ruleWarning(rule, tools);
-  return warning ? <small className="rule-warn">{warning}</small> : null;
+  return warning ? <small className="rule-warn">{warning.text}</small> : null;
 }
 
 /** The argument a rule reads, as its tool's schema has it. */
@@ -251,8 +251,8 @@ function RuleEditor({
             </select>
             {toolsError && <small className="form-error">Could not read its tools: {toolsError}</small>}
             {tools && !writes.length && <small>It has no tools that change data.</small>}
-            {tools && !tool && warning ? (
-              <small className="rule-hint rule-warn">{warning}</small>
+            {warning?.on === "tool" ? (
+              <small className="rule-hint rule-warn">{warning.text}</small>
             ) : (
               tool?.description && <small className="rule-hint">{tool.description}</small>
             )}
@@ -275,8 +275,8 @@ function RuleEditor({
                 );
               })}
             </select>
-            {tool && warning ? (
-              <small className="rule-hint rule-warn">{warning}</small>
+            {warning?.on === "arg" ? (
+              <small className="rule-hint rule-warn">{warning.text}</small>
             ) : (
               arg?.description && <small className="rule-hint">{arg.description}</small>
             )}

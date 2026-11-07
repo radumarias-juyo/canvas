@@ -6,7 +6,7 @@ import { canonicalJson } from "../../../shared/canonical.ts";
 import type { Value } from "../../../shared/conditions.ts";
 import { mayUseServer, type AgentDefinition, type AgentTrigger, type LookStep } from "../../../shared/agents.ts";
 import { errorMessage, sha256Hex } from "../../../shared/util.ts";
-import { readFor, resultName, RunExecutor, startOf, watchFires, type RunEnd, type RunHost, type RunStart } from "./executor.ts";
+import { readFor, resultName, RunExecutor, startOf, watchFires, type ActionRunRef, type RunEnd, type RunHost, type RunStart } from "./executor.ts";
 import { turnedOff, type ActedStep, type RunRecord } from "./store.ts";
 import { nextRunAt } from "./schedule.ts";
 import { sourceName } from "./source.ts";
@@ -394,7 +394,7 @@ export class AgentRunner {
    * The owner decided a do step a run's item waited at (approved and ran, failed, declined or expired): the item goes on
    * from that step with its outcome, and the run then sends what its items reached. Nothing when it no longer waited.
    */
-  async decided(ref: { agentId: string; dueAt: number; item: string; step: string }, acted: ActedStep): Promise<void> {
+  async decided(ref: ActionRunRef, acted: ActedStep): Promise<void> {
     if (!(await this.executor.decided(ref.agentId, ref.dueAt, ref.item, ref.step, acted))) return;
     this.#host.changed(ref.agentId);
     await this.#goOn(this.#host.runs.get(ref.agentId, ref.dueAt)!, (start) => this.executor.again(start));

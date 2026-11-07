@@ -972,15 +972,13 @@ export class UserDirectory extends DurableObject<Env> {
   }
 
   /** An action ended (approved, declined, expired): its feed item waits no more, and keeps how it ended. */
-  removeNeedsYou(chatId: string, id: string, ended: FeedActionEnd = { status: "expired" }): void {
+  removeNeedsYou(chatId: string, id: string, ended: FeedActionEnd): void {
     this.#limits.removeNeedsYou(chatId, id);
     this.#endApproval(chatId, id, ended);
   }
 
   #endApproval(chatId: string, id: string, ended: FeedActionEnd): void {
-    const ref = approvalRef(chatId, id);
-    if (this.#feed.endAction(ref, ended)) this.#changed("feed");
-    else this.resolveFeed(ref);
+    if (this.#feed.endAction(approvalRef(chatId, id), ended)) this.#changed("feed");
   }
 
   listArtifacts(): ArtifactSummary[] {

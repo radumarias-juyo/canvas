@@ -32,12 +32,14 @@ describe("rule lines", () => {
     expect(ruleWarning(rule, tools)).toBeNull();
     expect(ruleWarning(rule, null)).toBeNull();
     expect(ruleWarning({ ...rule, tool: "*" }, tools)).toBeNull();
-    expect(ruleWarning({ ...rule, tool: "change_deal" }, tools)).toBe(
-      "crm lists no tool change_deal now, so this rule checks no call. If it was renamed, pick its new name.",
-    );
-    expect(ruleWarning({ ...rule, arg: "discount" }, tools)).toBe(
-      "update_deal has no argument discount now, so this rule fires on every call to it.",
-    );
+    expect(ruleWarning({ ...rule, tool: "change_deal" }, tools)).toEqual({
+      on: "tool",
+      text: "crm lists no tool change_deal now, so this rule checks no call. If it was renamed, pick its new name.",
+    });
+    expect(ruleWarning({ ...rule, arg: "discount" }, tools)).toEqual({
+      on: "arg",
+      text: "update_deal has no argument discount now, so this rule fires on every call to it.",
+    });
   });
 
   it("make new ids that checkRule takes, and none already in the list", () => {

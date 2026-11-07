@@ -40,7 +40,7 @@ export function approvalFeed(view: PendingActionView, chatTitle: string, chatKin
 }
 
 /** How an action ended, as its feed item keeps it: its status, when, and its result's start. */
-export function approvalEnd(view: Pick<PendingActionView, "status" | "result" | "decidedAt">): FeedActionEnd {
+export function approvalEnd(view: FeedActionEnd): FeedActionEnd {
   return {
     status: view.status,
     ...(view.result && { result: excerpt(view.result, MAX_FEED_RESULT) }),

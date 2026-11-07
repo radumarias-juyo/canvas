@@ -3735,7 +3735,9 @@ export class ChatAgent extends DurableObject<Env> {
   #tellRunsDecided(): void {
     // Cheap on a wake with no run waiting.
     if (!this.runs.anyWaiting()) return;
-    const actions = this.actions.list().map((view) => ({ view, run: this.actions.origin(view.id)?.run }));
+    // Only an action that ended can have been missed: its origin read for those alone.
+    const ended = this.actions.list().filter((view) => view.status !== "pending" && view.status !== "running");
+    const actions = ended.map((view) => ({ view, run: this.actions.origin(view.id)?.run }));
     for (const { ref, acted } of missedDecisions(this.runs, actions)) {
       this.ctx.waitUntil(this.runner.decided(ref, acted).catch((error: unknown) => console.error("run:", errorMessage(error))));
     }

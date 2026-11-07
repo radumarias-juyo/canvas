@@ -357,7 +357,7 @@ export class RunExecutor {
         missing = missing.filter((server) => !again.includes(server) || still.has(server));
       }
       if (missing.length) return this.#waitForSignIn(agent, run, missing);
-      const { elements, keepEach } = await this.#elements(agent, run, started);
+      const elements = await this.#elements(agent, run);
       let outcomes: RunItemView[];
       // An item decided while the others ran is running again: it goes through again before the run ends. The read
       // and the update after it have no await between them, so a decision is never lost between them.
@@ -367,10 +367,10 @@ export class RunExecutor {
         // off or its workflow changed meanwhile.
         if (pass++ > 0) {
           const now = await this.#host.definition(agent.id).catch(() => agent);
-          const changed = now ? this.#stopIfChanged(now, run) : this.#stopIfChanged({ ...agent, enabled: false }, run);
+          const changed = this.#stopIfChanged(now ?? { ...agent, enabled: false }, run);
           if (changed) return { status: changed, started };
         }
-        await mapLimit(elements, RUN_CONCURRENCY, (element) => this.#item(agent, run, element, when, keepEach));
+        await mapLimit(elements, RUN_CONCURRENCY, (element) => this.#item(agent, run, element, when));
         outcomes = this.#outcomes(agent.id, dueAt, elements);
       } while (outcomes.some((item) => item.status === "running"));
       const held = outcomes.filter((item) => item.status === "waiting");
@@ -462,18 +462,15 @@ export class RunExecutor {
   }
 
   /**
-   * The run's items: each element of its scope's list (read once), or the run itself; `keepEach` when the list was too
-   * large to keep, so each item keeps its own element.
+   * The run's items: each element of its scope's list (read once, and kept: an element too large to keep is `missing`
+   * going on), or the run itself.
    */
-  async #elements(agent: AgentDefinition, run: RunRecord, started: boolean): Promise<{ elements: KeptElement[]; keepEach: boolean }> {
-    if (!agent.scope) return { elements: [{ key: "", label: "" }], keepEach: false };
-    // A run that goes on goes through the list it kept, or else the items it has: never a list read again (hours
-    // later), whose rows may have moved, gone or come since (index keys would match other rows).
-    if (run.detail.elements) return { elements: run.detail.elements, keepEach: false };
-    if (!started) {
-      const had = this.#host.runs.keptElements(agent.id, run.dueAt);
-      if (had.length) return { elements: had, keepEach: false };
-    }
+  async #elements(agent: AgentDefinition, run: RunRecord): Promise<KeptElement[]> {
+    if (!agent.scope) return [{ key: "", label: "" }];
+    // A run that goes on goes through the elements it kept: never a list read again (hours later), whose rows may have
+    // moved, gone or come since (index keys would match other rows).
+    const kept = this.#host.runs.keptElements(agent.id, run.dueAt);
+    if (kept) return kept;
     const list = agent.scope.list;
     const result = await readFor(this.#host, agent, list, list.input);
     const seen = new Set<string>();
@@ -485,16 +482,14 @@ export class RunExecutor {
         seen.add(key);
         return { key, label, value };
       });
-    const kept = jsonOf(elements).length <= MAX_KEPT_CHARS * 4;
-    if (kept) this.#host.runs.update(agent.id, run.dueAt, { detail: { elements } });
-    return { elements, keepEach: !kept };
+    this.#host.runs.keepElements(agent.id, run.dueAt, elements, MAX_KEPT_CHARS);
+    return elements;
   }
 
   /** One item through the workflow, in a session of its own; an item that ended already is read back as it was. */
-  async #item(agent: AgentDefinition, run: RunRecord, element: KeptElement, when: string, keepEach: boolean): Promise<void> {
+  async #item(agent: AgentDefinition, run: RunRecord, element: KeptElement, when: string): Promise<void> {
     const runs = this.#host.runs;
-    const own = keepEach && jsonOf(element.value ?? null).length <= MAX_KEPT_CHARS ? { value: element.value ?? null } : undefined;
-    const { view, started } = await runs.beginItem(agent.id, run.dueAt, element.key, element.label, () => this.#host.newSession(), own);
+    const { view, started } = await runs.beginItem(agent.id, run.dueAt, element.key, element.label, () => this.#host.newSession());
     if (!started && view.status !== "running") return;
     if (element.missing) {
       // Its element was too large to keep: going on, it cannot read it, so it stops (as at a do result too large).
@@ -879,10 +874,14 @@ export function missedDecisions(
   runs: Pick<AgentRuns, "get">,
   actions: readonly { view: PendingActionView; run?: ActionRunRef }[],
 ): { ref: ActionRunRef; acted: ActedStep }[] {
+  // Each run read once, however many of its actions ended.
+  const read = new Map<string, RunRecord | null>();
   return actions.flatMap(({ view, run }) => {
-    if (!run || runs.get(run.agentId, run.dueAt)?.detail.acted?.[actedMark(run.item, run.step)]?.end !== "waiting") return [];
-    const acted = actedOf(view);
-    return acted ? [{ ref: run, acted }] : [];
+    const acted = run && actedOf(view);
+    if (!run || !acted) return [];
+    const key = `${run.agentId}:${run.dueAt}`;
+    if (!read.has(key)) read.set(key, runs.get(run.agentId, run.dueAt));
+    return read.get(key)?.detail.acted?.[actedMark(run.item, run.step)]?.end === "waiting" ? [{ ref: run, acted }] : [];
   });
 }
 

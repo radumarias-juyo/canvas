@@ -69,12 +69,16 @@ export function ruleLine(rule: GuardrailRule): string {
  * by its tool's name, so one on a tool the server no longer lists checks no call, and (as `hitsFor` reads it) one on an
  * argument its tool no longer has fires on every call to it. Null when nothing is.
  */
-export function ruleWarning(rule: Pick<GuardrailRule, "server" | "tool" | "arg">, tools: readonly ToolInfo[] | null): string | null {
+export function ruleWarning(
+  rule: Pick<GuardrailRule, "server" | "tool" | "arg">,
+  tools: readonly ToolInfo[] | null,
+): { on: "tool" | "arg"; text: string } | null {
   if (!tools || rule.server === "*" || !rule.tool || rule.tool === "*") return null;
   const tool = tools.find((each) => each.name === rule.tool);
-  if (!tool) return `${rule.server} lists no tool ${rule.tool} now, so this rule checks no call. If it was renamed, pick its new name.`;
+  if (!tool)
+    return { on: "tool", text: `${rule.server} lists no tool ${rule.tool} now, so this rule checks no call. If it was renamed, pick its new name.` };
   if (rule.arg && schemaHasPath(tool.inputSchema, rule.arg) === false)
-    return `${rule.tool} has no argument ${rule.arg} now, so this rule fires on every call to it.`;
+    return { on: "arg", text: `${rule.tool} has no argument ${rule.arg} now, so this rule fires on every call to it.` };
   return null;
 }
 

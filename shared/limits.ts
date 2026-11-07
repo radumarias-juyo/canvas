@@ -249,12 +249,11 @@ function hasPath(schema: unknown, parts: readonly string[]): boolean | undefined
   if (!isObject(node)) return undefined;
   const choices = [node.anyOf, node.oneOf, node.allOf].flatMap((list) => (Array.isArray(list) ? list : []));
   let own: boolean | undefined;
-  // A node of plain types only (text, numbers, yes or no, null) has nothing under it.
-  if (!isObject(node.properties) && !choices.length && plainTypes(node)) return false;
   if (isObject(node.properties)) {
     if (Object.hasOwn(node.properties, part)) own = hasPath(node.properties[part], rest);
     else own = node.additionalProperties === true || isObject(node.additionalProperties) ? undefined : false;
-  } else own = choices.length ? false : undefined;
+    // A node of plain types only (text, numbers, yes or no, null) has nothing under it either.
+  } else own = choices.length || plainTypes(node) ? false : undefined;
   if (own === true) return true;
   let unknown = own === undefined;
   for (const choice of choices) {
@@ -286,24 +285,50 @@ export function asNumber(value: unknown): number | undefined {
  * matches when any one of them does; and one written "Name <address>" by its address or its name, and by each word.
  */
 export function matchesValue(pattern: string | number, value: unknown): boolean {
-  if (typeof pattern === "number") return asNumber(value) === pattern;
-  if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") return false;
-  const text = String(value).trim().toLowerCase();
+  return neverMatcher([pattern])(value) !== undefined;
+}
+
+/** A never rule's values as one check, made once (matchesValue): the first of them a value matches, else undefined. */
+export function neverMatcher(patterns: readonly (string | number)[]): (value: unknown) => string | number | undefined {
+  const tests = patterns.map((pattern) => ({ pattern, test: typeof pattern === "number" ? null : textTest(pattern) }));
+  return (value) => {
+    let names: string[] | null | undefined;
+    for (const { pattern, test } of tests) {
+      if (test === null) {
+        if (asNumber(value) === pattern) return pattern;
+        continue;
+      }
+      names ??= namesIn(value);
+      if (names?.some(test)) return pattern;
+    }
+    return undefined;
+  };
+}
+
+/** A never rule's text value as a test of one name: the same, ignoring case, with * for any characters. */
+function textTest(pattern: string): (name: string) => boolean {
   const wanted = pattern.trim().toLowerCase();
-  const regex = wanted.includes("*")
-    ? new RegExp(
-        `^${wanted
-          .split("*")
-          .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
-          .join(".*")}$`,
-        "s",
-      )
-    : null;
-  const matches = (one: string) => (regex ? regex.test(one) : one === wanted);
-  if (matches(text)) return true;
-  if (typeof value !== "string") return false;
-  const entries = [...text.split(LIST_SPLIT), ...normalAddresses(text).split(LIST_SPLIT)];
-  return entries.flatMap((entry) => [...namesOf(entry), ...namesOf(normalAddresses(entry))]).some(matches);
+  if (!wanted.includes("*")) return (name) => name === wanted;
+  const regex = new RegExp(
+    `^${wanted
+      .split("*")
+      .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
+      .join(".*")}$`,
+    "s",
+  );
+  return (name) => regex.test(name);
+}
+
+/**
+ * What a value may be matched by, lowercased: itself; and for text each entry of the list it may be, as written and as
+ * mail libraries read it (normalAddresses), by namesOf. Null for a value that is not text, a number or a boolean.
+ */
+function namesIn(value: unknown): string[] | null {
+  if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") return null;
+  const text = String(value).trim().toLowerCase();
+  if (typeof value !== "string") return [text];
+  const entries = [text, normalAddresses(text)].flatMap((one) => one.split(LIST_SPLIT)).flatMap((entry) => [entry, normalAddresses(entry)]);
+  return [text, ...entries.flatMap(namesOf)];
 }
 
 /** What joins the entries of a list of recipients. */
@@ -411,13 +436,12 @@ export function violation(rule: GuardrailRule, call: GuardedCall, facts: RuleFac
     case "never": {
       // An object or a list (a recipient as {email}, a field a server turned from text into objects) is checked by
       // each text, number and yes-or-no in it; one nested too deep to read through fails closed.
+      const match = neverMatcher(rule.value as (string | number)[]);
       for (const value of argValues(call.input, rule.arg!)) {
         const leaves = leavesOf(value);
         if (leaves === null) return `${where} is ${excerptJson(value)}, nested too deep for a never rule to check`;
-        for (const leaf of leaves) {
-          const hit = (rule.value as (string | number)[]).find((pattern) => matchesValue(pattern, leaf));
-          if (hit !== undefined) return `${where} is ${excerptJson(leaf)}, which is never allowed`;
-        }
+        const hit = leaves.find((leaf) => match(leaf) !== undefined);
+        if (hit !== undefined) return `${where} is ${excerptJson(hit)}, which is never allowed`;
       }
       return null;
     }
