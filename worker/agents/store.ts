@@ -54,6 +54,8 @@ export interface AgentSave {
   /** The version the writer read: a save over a newer one is refused, so two editors never undo each other. */
   version?: number;
   copiedFrom?: AgentDefinition["copiedFrom"];
+  /** From an export: it keeps what the export says (no `learns`: off, as an agent made before it existed). */
+  imported?: true;
 }
 
 /**
@@ -105,7 +107,7 @@ export class AgentStore {
    * off, never over one of the user's own, and at most MAX_AGENT_PROPOSALS wait at once. A change the user saves
    * keeps the agent on or off as it was, unless `enabled` says otherwise; one by the model turns it off again for review.
    */
-  save(input: unknown, origin: AgentOrigin, enabled: boolean | undefined, { id, version, copiedFrom }: AgentSave = {}): AgentResult {
+  save(input: unknown, origin: AgentOrigin, enabled: boolean | undefined, { id, version, copiedFrom, imported }: AgentSave = {}): AgentResult {
     let agent: AgentInput;
     try {
       agent = checkAgent(input);
@@ -120,6 +122,8 @@ export class AgentStore {
     }
     if (existing && origin === "agent" && existing.origin === "user")
       return { error: `"${existing.name}" is one of the user's own agents; the model cannot change it.` };
+    // Learning overnight is on for a new agent, and kept as it was by a change that does not say.
+    if (agent.learns === undefined && (existing ? existing.learns !== undefined : !imported)) agent = { ...agent, learns: existing?.learns ?? true };
     const named = this.byName(agent.name);
     if (named && named.id !== id) return { error: `There is already an agent named "${agent.name}"; pick another name.` };
     if (!existing) {
@@ -214,7 +218,7 @@ export class AgentStore {
       isObject(from) && typeof from.owner === "string" && typeof from.id === "string" && typeof from.version === "number"
         ? { owner: from.owner, id: from.id, version: from.version }
         : undefined;
-    const fresh = this.save(agent, agent.origin === "agent" ? "agent" : "user", agent.enabled === true, { copiedFrom });
+    const fresh = this.save(agent, agent.origin === "agent" ? "agent" : "user", agent.enabled === true, { copiedFrom, imported: true });
     if ("error" in fresh) return fresh;
     const id = typeof agent.id === "string" && AGENT_ID_PATTERN.test(agent.id) && !this.get(agent.id) ? agent.id : fresh.id;
     if (id !== fresh.id) this.#sql.exec("UPDATE agents SET id = ? WHERE id = ?", id, fresh.id);

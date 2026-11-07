@@ -129,6 +129,11 @@ export interface AgentInput {
    * offer to pick up a question nobody answered (worker/agents/funnel.ts). Off when absent.
    */
   speaksUp?: boolean;
+  /**
+   * It learns overnight: a nightly dream reads how people worked with it that day and saves what is worth keeping as
+   * memory notes (shared/dream.ts). On for an agent made since it exists, off when absent (one made before).
+   */
+  learns?: boolean;
 }
 
 /** Who made an agent: its owner, or the model in a chat (saved off until the owner turns it on, as skills are). */
@@ -427,6 +432,8 @@ export function checkAgent(input: unknown): AgentInput {
   if (review !== undefined && typeof review !== "boolean") fail("An agent's review before posting is true or false.");
   const speaksUp = input.speaksUp ?? undefined;
   if (speaksUp !== undefined && typeof speaksUp !== "boolean") fail("An agent's speaksUp is true or false.");
+  const learns = input.learns ?? undefined;
+  if (learns !== undefined && typeof learns !== "boolean") fail("An agent's learns is true or false.");
   return {
     name,
     ...(avatar && { avatar }),
@@ -446,6 +453,7 @@ export function checkAgent(input: unknown): AgentInput {
     ...(assumed?.length && { assumed }),
     ...(review && { reviewBeforePosting: true }),
     ...(speaksUp && { speaksUp: true }),
+    ...(learns !== undefined && { learns }),
   };
 }
 

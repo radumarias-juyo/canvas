@@ -12,6 +12,7 @@ import {
   type MemorySource,
   type NoteChange,
 } from "../../shared/memory.ts";
+import { checkNoteWhy, type NoteWhy } from "../../shared/dream.ts";
 import { randomHex } from "../../shared/util.ts";
 import { addColumns, type Sql } from "../members.ts";
 
@@ -33,7 +34,19 @@ type NoteRow = {
   forgotten_at: number | null;
   created_at: number;
   updated_at: number;
+  why: string | null;
+  confidence: number | null;
 };
+
+/** A row's why, as JSON (NoteWhy); undefined for none, or one that does not read. */
+function whyOf(json: string | null): NoteWhy | undefined {
+  if (json === null) return undefined;
+  try {
+    return checkNoteWhy(JSON.parse(json));
+  } catch {
+    return undefined;
+  }
+}
 
 function noteOf(row: NoteRow): MemoryNote {
   return {
@@ -51,12 +64,14 @@ function noteOf(row: NoteRow): MemoryNote {
     ...(row.forgotten_at !== null && { forgottenAt: row.forgotten_at }),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    ...(whyOf(row.why) && { why: whyOf(row.why) }),
+    ...(row.confidence !== null && { confidence: row.confidence }),
   };
 }
 
 /** A note to keep: where it goes, what it says, and how it came. */
 export type NoteFields = Pick<MemoryNote, "scope" | "text" | "source" | "kind" | "confirmed"> &
-  Partial<Pick<MemoryNote, "agentId" | "chatId" | "learnedBy" | "pinned">> & {
+  Partial<Pick<MemoryNote, "agentId" | "chatId" | "learnedBy" | "pinned" | "why" | "confidence">> & {
     /** False for a save in a turn the owner did not ask for (MemoryWriter.byOwner): see add. */
     byOwner?: boolean;
   };
@@ -84,6 +99,8 @@ export class MemoryStore {
     `);
     // Whether the save was in a turn the owner asked for (see add).
     addColumns(sql, "memory", { by_owner: "INTEGER NOT NULL DEFAULT 1" });
+    // A note learned overnight: why (NoteWhy, as JSON) and how sure its dream was.
+    addColumns(sql, "memory", { why: "TEXT", confidence: "REAL" });
   }
 
   #rows(where = "", ...params: (string | number)[]): MemoryNote[] {
@@ -121,8 +138,9 @@ export class MemoryStore {
   /** Write `note` as a new row. */
   #insert(note: MemoryNote & Pick<NoteFields, "byOwner">): void {
     this.#sql.exec(
-      `INSERT INTO memory (id, scope, agent_id, chat_id, text, source, kind, learned_by, uses, pinned, confirmed, forgotten_at, created_at, updated_at, by_owner)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO memory (id, scope, agent_id, chat_id, text, source, kind, learned_by, uses, pinned, confirmed, forgotten_at, created_at, updated_at, by_owner,
+         why, confidence)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       note.id,
       note.scope,
       note.agentId ?? null,
@@ -138,7 +156,35 @@ export class MemoryStore {
       note.createdAt,
       note.updatedAt,
       note.byOwner === false ? 0 : 1,
+      note.why ? JSON.stringify(note.why) : null,
+      note.confidence ?? null,
     );
+  }
+
+  /**
+   * A dream updates a note it wrote (or one learned in a conversation) instead of adding one: its text, kind, why and
+   * confidence, and whether it waits for a confirm, as the dream placed it. Refused when another note in use already
+   * says the new text for the same reader.
+   */
+  revise(id: string, fields: Pick<MemoryNote, "text" | "kind" | "confirmed"> & Pick<NoteFields, "why" | "confidence">): MemoryNote | { error: string } {
+    const note = this.get(id);
+    if (!note) return { error: "No such note." };
+    const same = this.#same({ ...note, text: fields.text });
+    if (same && same.id !== id) return { error: "Another note already says this, for the same reader." };
+    const set = "text = ?, kind = ?, confirmed = ?, source = ?, why = ?, confidence = ?, by_owner = ?, updated_at = ?";
+    this.#sql.exec(
+      `UPDATE memory SET ${set} WHERE id = ?`,
+      fields.text,
+      fields.kind,
+      fields.confirmed ? 1 : 0,
+      "overnight",
+      fields.why ? JSON.stringify(fields.why) : null,
+      fields.confidence ?? null,
+      fields.confirmed ? 1 : 0,
+      this.#at(note),
+      id,
+    );
+    return this.get(id)!;
   }
 
   /**
@@ -303,6 +349,8 @@ export class MemoryStore {
       createdAt,
       updatedAt,
       byOwner: !waits,
+      ...(checkNoteWhy(note.why) && { why: checkNoteWhy(note.why) }),
+      ...(typeof note.confidence === "number" && Number.isFinite(note.confidence) && { confidence: Math.min(1, Math.max(0, note.confidence)) }),
     });
     return { id };
   }

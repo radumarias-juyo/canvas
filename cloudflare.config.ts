@@ -177,6 +177,10 @@ export default defineConfig({
       // small, cheap model reads its source and lists bugs, security holes and simpler code; the agent fixes them before
       // publishing. A comma-separated list of the picker's model ids, tried in order, as PAGE_AI_MODEL. Empty: no review.
       REVIEW_MODEL: bindings.text(process.env.PI_OFFLINE === "1" ? "" : "@cf/openai/gpt-oss-120b,google-ai-studio/gemini-flash-lite-latest"),
+      // The nightly dream of agents and pi (worker/memory/dream.ts): one call a night per subject that learns overnight,
+      // on the first of these models (the picker's ids, a small cheap one first) this deployment can run, else the agent's
+      // own model at low effort. Empty: only the agent's own model.
+      DREAM_MODEL: bindings.text(process.env.PI_OFFLINE === "1" ? "" : "@cf/openai/gpt-oss-120b,google-ai-studio/gemini-flash-lite-latest"),
       // Agents' metrics in Workers Analytics Engine (worker/metrics.ts): turns, runs, router picks, the funnel of
       // unprompted posts, budgets, and the hub's read cache per agent. The dataset is made on the first write.
       METRICS: bindings.analyticsEngineDataset({ name: "pi_artifacts_metrics" }),
