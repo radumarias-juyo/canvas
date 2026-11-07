@@ -63,7 +63,7 @@ import { OrphanResult, StepRun, StepsProvider, stepLabel } from "./Steps.tsx";
 import { endedEarly, stepRuns, streamingSteps, type MessageSteps, type StepRuns, type StreamingSteps } from "./stepRuns.ts";
 import { Thinking } from "./Thinking.tsx";
 import { useRevealedText } from "./reveal.ts";
-import { blocks, firstNew, isAgent, openHints, published, replyItems, sentAt, shown, userText } from "./entries.ts";
+import { blocks, firstNew, isAgent, openHints, published, replyItems, sentAt, shown, showsAsCard, userText } from "./entries.ts";
 
 interface Props {
   chatId: string;
@@ -1041,7 +1041,7 @@ function AgentTurnLive({ live, onStop, onGrow }: { live: AgentLive & { agent: Ch
             const steps = streamed?.grown?.entry === entry.id ? streamed.grown.steps : runs.byEntry.get(entry.id as number);
             return <Assistant key={entry.id} message={message} steps={steps} bare />;
           }
-          if (entry.kind === "pi.tool-result" && message?.role === "toolResult" && !published(entry)) return <OrphanResult key={entry.id} message={message} />;
+          if (entry.kind === "pi.tool-result" && message?.role === "toolResult" && !showsAsCard(entry)) return <OrphanResult key={entry.id} message={message} />;
           return null;
         })}
         {state.partial && <Assistant message={state.partial} steps={streamed?.steps} streaming onGrow={onGrow} bare />}
