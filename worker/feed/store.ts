@@ -90,11 +90,13 @@ export class FeedStore {
     const chatId = input.chat?.id ?? (input.open.to === "chat" ? input.open.chatId : null);
     // A reply answers the agent that asked: one with no agent, or in no chat, waits until resolved by its ref.
     const waitsOn = waits === "reply" && chatId ? (input.from?.agent?.id ?? null) : null;
-    const before = this.#sql.exec("SELECT data FROM feed WHERE ref = ?", input.ref).toArray()[0] as { data: string } | undefined;
-    if (before?.data === json) return "same";
+    const before = this.#sql.exec("SELECT data, needs FROM feed WHERE ref = ?", input.ref).toArray()[0] as Pick<FeedRow, "data" | "needs"> | undefined;
     // Asked before, answered since (a run's report, added when the run ends): it waits on nothing.
     const answered = waitsOn !== null && this.#answeredAt(chatId!, waitsOn) >= input.at;
     const needs = answered ? NEEDS.none : waitsOn !== null ? NEEDS.reply : waits ? NEEDS.resolve : NEEDS.none;
+    // The same again changes nothing, unless it waits again after it was resolved (a run that went on after a sign-in,
+    // runResumed, and waits for the same one again).
+    if (before?.data === json && (before.needs > 0 || needs === NEEDS.none)) return "same";
     const read = input.quiet || answered ? 1 : 0;
     this.#sql.exec(
       `INSERT INTO feed (kind, ref, at, read, needs, chat_id, about, waits_on, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)

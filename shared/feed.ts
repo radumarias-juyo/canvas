@@ -110,8 +110,14 @@ export interface FeedInput {
   /** The receiver's own agent it is about (its run, its draft): deleting that agent takes the item along. */
   aboutAgent?: string;
   /** An approval's action, as it was held: the feed decides it from there (Approve, Decline). */
-  action?: PendingActionView;
+  action?: FeedAction;
 }
+
+/**
+ * An approval's action as its feed item keeps it: what deciding it there takes. Not its call's input, which can be
+ * large and stays in the chat (the item's text has the call in one line).
+ */
+export type FeedAction = Pick<PendingActionView, "id" | "chatId" | "kind" | "status" | "expiresAt">;
 
 /** An item in the feed, as the app lists it. */
 export interface FeedItem {
@@ -126,7 +132,7 @@ export interface FeedItem {
   read?: true;
   needsYou?: true;
   /** An approval's action, as it was held: while the item needs the person, they decide it in the feed. */
-  action?: PendingActionView;
+  action?: FeedAction;
 }
 
 /** GET /api/feed: the newest items (filtered as asked), how many are unread, and how many still wait on the person. */

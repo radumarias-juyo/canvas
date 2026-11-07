@@ -465,8 +465,10 @@ function NeverValues({ draft, set, arg }: { draft: RuleDraft; set: (change: Part
     .map((line) => line.trim())
     .filter(Boolean);
   const toggle = (value: string) => set({ values: (lines.includes(value) ? lines.filter((line) => line !== value) : [...lines, value]).join("\n") });
-  const yesNo = arg?.type === "boolean";
-  const choices = yesNo ? ["true", "false"] : arg?.values;
+  const boolean = arg?.type === "boolean";
+  // A saved rule with other values (typed before, or the argument was text then) keeps its text to fix them in.
+  const yesNo = boolean && lines.every((line) => line === "true" || line === "false");
+  const choices = boolean ? ["true", "false"] : arg?.values;
   return (
     <div className="rule-field">
       {yesNo ? (

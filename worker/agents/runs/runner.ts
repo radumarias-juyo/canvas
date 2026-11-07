@@ -410,19 +410,13 @@ export class AgentRunner {
   }
 
   /**
-   * A run that did not end goes on from where its rows say: failed instead when its agent was deleted, and stopped
-   * when it was turned off (a test's apart). A call its owner approved ran all the same; nothing after it does.
+   * A run that did not end goes on from where its rows say: failed instead when its agent was deleted (one turned off
+   * stops there, RunExecutor).
    */
   async #goOn(run: RunRecord, start: (start: RunStart) => Promise<RunEnd> = (one) => this.executor.start(one)): Promise<RunEnd | null> {
     const agent = await this.#host.definition(run.agentId);
     if (!agent) {
       this.#host.runs.update(run.agentId, run.dueAt, { status: "failed", summary: "Failed: the agent was deleted." });
-      return null;
-    }
-    if (!run.test && !agent.enabled) {
-      const summary = `Stopped: @${agent.name} was turned off, so it did nothing more and sent nothing.`;
-      this.#host.runs.stop(run.agentId, run.dueAt, { item: `@${agent.name} was turned off: it stopped there.`, status: "not_today", summary });
-      this.#host.changed(run.agentId);
       return null;
     }
     return start(startOf(agent, run));

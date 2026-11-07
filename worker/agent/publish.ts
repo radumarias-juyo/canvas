@@ -476,9 +476,13 @@ export async function publishDraft(scope: PublishScope, input: PublishInput, sig
   // open it, with whatever arguments this version's code passes (a tool the page had already, called anew, too). Nor a
   // new version of a page that makes them now: taking the owner's calls out of it is a change too.
   if (input.session !== undefined && scope.mayPublishWrites && !(await scope.mayPublishWrites(input.session))) {
-    const current = target.id === undefined ? null : await scope.artifacts.readMeta(target.id);
-    const before = current ? manifestOf(current, current.latest) : undefined;
-    const writes = [...new Set([...(await declaredWrites(scope.hub, draft.manifest)), ...(before ? await declaredWrites(scope.hub, before) : [])])];
+    const beforeWrites = async (id: string) => {
+      const current = await scope.artifacts.readMeta(id);
+      const before = current ? manifestOf(current, current.latest) : undefined;
+      return before ? declaredWrites(scope.hub, before) : [];
+    };
+    const [now, then] = await Promise.all([declaredWrites(scope.hub, draft.manifest), target.id === undefined ? [] : beforeWrites(target.id)]);
+    const writes = [...new Set([...now, ...then])];
     if (writes.length) {
       throw new Error(
         `Not published: the page calls ${writes.join(", ")}, which change data, so only the owner's own message can publish a version of it. ` +

@@ -35,6 +35,16 @@ describe("feed: keeping items", () => {
     expect(feed.counts()).toEqual({ unread: 1, needsYou: 0 });
   });
 
+  it("waits again for the same item added again after it was resolved (a run that went on after a sign-in waits for it again)", () => {
+    const feed = new FeedStore(memorySql());
+    const run: FeedInput = { kind: "run", ref: "run:a1:5", at: T0, title: "@signups is waiting for you to sign in", status: "needs_sign_in", needsYou: true, open: { to: "agent", agentId: "a1" } };
+    feed.add(run);
+    expect(feed.add(run)).toBe("same");
+    expect(feed.resolve("run:a1:5")).toBe(1);
+    expect(feed.add(run)).toBe("updated");
+    expect(feed.counts()).toEqual({ unread: 1, needsYou: 1 });
+  });
+
   it("refuses an item from an off-the-record chat, as the sender or this person's own row says", () => {
     const feed = new FeedStore(memorySql());
     expect(feed.add(tag(1, { id: "secret", kind: "off_record" }))).toBe("refused");

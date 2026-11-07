@@ -302,10 +302,12 @@ export function matchesValue(pattern: string | number, value: unknown): boolean 
 function namesOf(entry: string): string[] {
   const trimmed = entry.trim();
   if (!trimmed) return [];
-  // A word in <…> is the address, stripped as each word is; the name is what is left before it.
-  const name = /<[^<>]*>/.test(trimmed) ? trimmed.replace(/<[^<>]*>/, "").trim().replace(/^"(.*)"$/, "$1").trim() : "";
+  // The address in <…> on its own: it need not be a word of its own ("Name<address>" has no space before it).
+  const bracketed = /<([^<>]*)>/.exec(trimmed);
+  const address = bracketed?.[1]?.trim() ?? "";
+  const name = bracketed ? trimmed.replace(bracketed[0], "").trim().replace(/^"(.*)"$/, "$1").trim() : "";
   const words = trimmed.split(/\s+/).map((word) => word.replace(/^[<"'(]+|[>"'),]+$/g, ""));
-  return [trimmed, name, ...words].filter(Boolean);
+  return [trimmed, address, name, ...words].filter(Boolean);
 }
 
 /** The day `at` falls on in `tz`, as "YYYY-MM-DD". */

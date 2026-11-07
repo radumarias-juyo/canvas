@@ -27,7 +27,7 @@ export function approvalFeed(view: PendingActionView, chatTitle: string, chatKin
     at: view.createdAt,
     title: `${approvalAsk(view)} in ${chatTitle}`,
     text: excerpt(`${callLine(view)}: ${view.why}`, MAX_FEED_TEXT),
-    action: view,
+    action: { id: view.id, chatId: view.chatId, kind: view.kind, status: view.status, expiresAt: view.expiresAt },
     from:
       actor.agentId && actor.avatar && actor.color
         ? agentFrom({ id: actor.agentId, name: actor.name, avatar: actor.avatar, color: actor.color })

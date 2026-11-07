@@ -1,6 +1,7 @@
 import { createContext, useContext, useState } from "react";
 import { defaultAvatar } from "../../shared/agents.ts";
 import { actorName, type ActionActor, type ActionKind, type PendingActionView } from "../../shared/limits.ts";
+import type { FeedAction } from "../../shared/feed.ts";
 import { AGENT_NAME } from "../../shared/mentions.ts";
 import { errorMessage } from "../../shared/util.ts";
 import { decisionLabels, endedText, expiresText } from "../agents/limits/rules.ts";
@@ -35,7 +36,7 @@ const verbOf = (kind: ActionKind) => (kind === "proposal" ? "proposes" : "asks t
  * Run or approve an action, or decline it, as its owner: what it came to, until the chat's own state of it says more
  * (the feed's item follows once it is resolved), and the error when the request failed.
  */
-function useDecision(action: PendingActionView) {
+function useDecision<A extends FeedAction>(action: A) {
   const [after, setAfter] = useState<PendingActionView | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -51,7 +52,7 @@ function useDecision(action: PendingActionView) {
     }
   };
   // The live state wins once it moved on from waiting: it is the chat's, and newer than the answer kept here.
-  const view = after && action.status === "pending" ? after : action;
+  const view: A | PendingActionView = after && action.status === "pending" ? after : action;
   return { view, busy, error, decide };
 }
 
@@ -157,7 +158,7 @@ export function CallInput({ input }: { input: unknown }) {
  * An approval's Approve and Decline in the feed (Run and Dismiss for a proposal), while it waits, with when it expires; once decided
  * here, what came of it. One decided elsewhere (its card in the chat) or expired waits no more, and shows nothing.
  */
-export function ActionDecision({ action, waiting }: { action: PendingActionView; waiting: boolean }) {
+export function ActionDecision({ action, waiting }: { action: FeedAction; waiting: boolean }) {
   const { view, busy, error, decide } = useDecision(action);
   const decidedHere = view !== action;
   const now = useClock(view.status === "pending" && (waiting || decidedHere));

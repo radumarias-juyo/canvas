@@ -179,7 +179,7 @@ export function ruleInput(draft: RuleDraft, argType?: string): Record<string, un
         .split("\n")
         .map((line) => line.trim())
         .filter(Boolean)
-        .map((line) => (numeric && Number.isFinite(Number(line)) ? Number(line) : line));
+        .map((line) => (numeric && Number.isFinite(Number(line)) ? Number(line) : argType === "boolean" ? line.toLowerCase() : line));
       const odd = argType === "boolean" ? values.find((value) => value !== "true" && value !== "false") : undefined;
       if (odd !== undefined) throw new Error(`${draft.arg} is yes or no: pick true or false, not "${odd}".`);
       return { ...base, value: values };

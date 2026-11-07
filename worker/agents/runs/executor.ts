@@ -325,7 +325,16 @@ export class RunExecutor {
     try {
       // Its workflow or scope changed while it waited (or since a restart cut it off): going on would run steps it
       // never had, over a list it never read, and send through deliveries it never had. It stops instead.
-      if (!started && run.detail.shape !== undefined && run.detail.shape !== shapeOf(agent)) return { status: this.#stopChanged(agent, run), started };
+      if (!started && run.detail.shape !== undefined && run.detail.shape !== shapeOf(agent)) {
+        const why = `@${agent.name}'s workflow changed while this run waited, so it did nothing more and sent nothing`;
+        return { status: this.#stop(agent, run, "Its workflow changed while it waited: it stopped there.", why, "failed"), started };
+      }
+      // Turned off since (a test's apart): a call its owner approved ran all the same; nothing after it does. Here, not
+      // before the start, so it waits for a pass of the run still going (start), as the workflow check does.
+      if (!started && !run.test && !agent.enabled) {
+        const why = `@${agent.name} was turned off, so it did nothing more and sent nothing`;
+        return { status: this.#stop(agent, run, `@${agent.name} was turned off: it stopped there.`, why, "not_today"), started };
+      }
       const missing = await this.#host.needsSignIn(runServers(agent, await this.#host.signInServers()));
       if (missing.length) return this.#waitForSignIn(agent, run, missing);
       const elements = await this.#elements(agent, run);
@@ -359,17 +368,14 @@ export class RunExecutor {
     return elements.map((element) => rows.get(element.key)!);
   }
 
-  /** A run whose agent changed while it waited: its open items stop, nothing more is sent, and it says so. */
-  #stopChanged(agent: AgentDefinition, run: RunRecord): RunStatus {
-    // A restart may have cut it off while it sent: what went out went.
+  /**
+   * A run that goes on no more (its agent changed or was turned off while it waited): its open items stop, nothing more
+   * is sent, and it says why, ending as `otherwise`, or as sent when a restart cut it off while it sent (what went out went).
+   */
+  #stop(agent: AgentDefinition, run: RunRecord, item: string, why: string, otherwise: "failed" | "not_today"): RunStatus {
     const sent = run.detail.deliveries.some((delivery) => delivery.status === "sent");
-    const why = `@${agent.name}'s workflow changed while this run waited, so it did nothing more and sent nothing`;
-    const status = sent ? "sent" : "failed";
-    this.#host.runs.stop(agent.id, run.dueAt, {
-      item: "Its workflow changed while it waited: it stopped there.",
-      status,
-      summary: sent ? `Stopped part way: ${why} more.` : `Stopped: ${why}.`,
-    });
+    const status = sent ? "sent" : otherwise;
+    this.#host.runs.stop(agent.id, run.dueAt, { item, status, summary: sent ? `Stopped part way: ${why} more.` : `Stopped: ${why}.` });
     return status;
   }
 

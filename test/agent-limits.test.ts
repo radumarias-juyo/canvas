@@ -131,6 +131,8 @@ describe("guardrail rules", () => {
     expect(matchesValue("leak@blocked.com", '"Leak, Inc" <LEAK@blocked.com>')).toBe(true);
     expect(matchesValue("sam lee", "Ana <ana@ok.com>; Sam Lee <sam@ok.com>")).toBe(true);
     expect(matchesValue("*@rival.example", "Sam Lee <sam@ok.com>")).toBe(false);
+    // With no space before the <address>: it is matched on its own all the same.
+    expect(matchesValue("sam@rival.example", "Sam<sam@rival.example>")).toBe(true);
   });
 
   it("reads a field of each object in a list", () => {
