@@ -6,7 +6,7 @@ self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim(
 
 /** A path in this app, never another site: a push says where to go, and only the app's own paths are followed. */
 function appPath(url) {
-  return typeof url === "string" && /^\/(?![/\\])/.test(url) && !url.includes("\\") ? url : "/";
+  return typeof url === "string" && /^\/(?![/\\])/.test(url) && !/[\\\x00-\x20]/.test(url) ? url : "/";
 }
 
 self.addEventListener("push", (event) => {

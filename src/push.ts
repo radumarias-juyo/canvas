@@ -123,7 +123,8 @@ export function onPushOpen(navigate: (path: string) => void): () => void {
       data?.type === "open" &&
       typeof data.url === "string" &&
       /^\/(?![/\\])/.test(data.url) &&
-      !data.url.includes("\\") &&
+      // No backslash, space or control character: URL parsing drops some ("/\t/x" is "//x", another site).
+      !/[\\\x00-\x20]/.test(data.url) &&
       !data.url.startsWith("/api/")
     )
       navigate(data.url);
