@@ -1281,6 +1281,10 @@ a.mention-chip:hover { text-decoration: underline; }
 .agent-servers tbody th small { display: block; color: var(--muted); font-size: 12px; }
 .agent-servers .agent-server-name { font-weight: 600; overflow-wrap: anywhere; }
 .agent-servers small.agent-server-warn { margin-top: 4px; color: var(--working); }
+.agent-servers caption { padding-bottom: 6px; text-align: left; }
+.agent-servers .agent-server-files > * { border-top-style: dashed; background: color-mix(in srgb, var(--surface-2) 55%, transparent); }
+.agent-servers .agent-server-files small + small { margin-top: 4px; }
+.agent-servers .agent-server-files .agent-switch { cursor: default; }
 .agent-switch { justify-content: center; }
 .agent-form-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .agent-foot { padding-top: 14px; border-top: 1px solid var(--border); color: var(--muted); font-size: 13px; }
