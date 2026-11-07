@@ -9,7 +9,7 @@ import type { McpAuthRecord } from "./oauth.ts";
  *
  * Stored as `{"sealed":"v1.<base64 of iv | ciphertext>"}`: JSON, so code from before encryption (a rollback) reads it as
  * a record with no sign-in, and the user can sign in again. A record written before encryption is plain JSON and still
- * opens (`plain` says so, so the caller writes it again sealed).
+ * opens, as does one sealed as a bare `v1.…` string (`plain` says so for both, so the caller writes it again sealed).
  */
 const PREFIX = "v1.";
 const IV_BYTES = 12;
@@ -25,9 +25,15 @@ export async function sealAuthRecord(key: CryptoKey, server: string, record: Mcp
 }
 
 export async function openAuthRecord(key: CryptoKey, server: string, stored: string): Promise<{ record: McpAuthRecord; plain: boolean }> {
+  // `v1.…` alone, not in JSON: sealed before records were wrapped. It opens, and is written again in the JSON form.
+  if (stored.startsWith(PREFIX)) return { record: await open(key, server, stored), plain: true };
   const { sealed, ...rest } = JSON.parse(stored) as McpAuthRecord & { sealed?: unknown };
   // Fields beside `sealed` are a plain record that code from before encryption wrote over it: those are the newer.
   if (typeof sealed !== "string" || Object.keys(rest).length > 0) return { record: rest, plain: true };
+  return { record: await open(key, server, sealed), plain: false };
+}
+
+async function open(key: CryptoKey, server: string, sealed: string): Promise<McpAuthRecord> {
   if (!sealed.startsWith(PREFIX)) throw new Error("Unknown sealed record version.");
   const bytes = fromBase64(sealed.slice(PREFIX.length));
   const data = await crypto.subtle.decrypt(
@@ -35,7 +41,7 @@ export async function openAuthRecord(key: CryptoKey, server: string, stored: str
     key,
     bytes.subarray(IV_BYTES),
   );
-  return { record: JSON.parse(new TextDecoder().decode(data)) as McpAuthRecord, plain: false };
+  return JSON.parse(new TextDecoder().decode(data)) as McpAuthRecord;
 }
 
 const aad = (server: string) => new TextEncoder().encode(`pi-artifacts/mcp-auth/${server}`);

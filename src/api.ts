@@ -211,7 +211,10 @@ export const api = {
   /** The key to subscribe to push with, or null when this deployment sends none. */
   pushKey: async (): Promise<string | null> => {
     const { response, body } = await fetchJson("/api/push/key");
-    return response.ok ? ((body as { publicKey?: string } | null)?.publicKey ?? null) : null;
+    // 404: this deployment sends none. Any other failure throws, so the next call asks again instead of keeping null.
+    if (response.status === 404) return null;
+    if (!response.ok) throw responseError(response, body);
+    return (body as { publicKey?: string } | null)?.publicKey ?? null;
   },
   subscribePush: (subscription: PushSubscriptionJSON) => request<object>("/api/push/subscribe", post(subscription)),
   unsubscribePush: (endpoint: string) => request<object>("/api/push/unsubscribe", post({ endpoint })),

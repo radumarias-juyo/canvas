@@ -90,7 +90,9 @@ export class McpSignIns {
   update(server: string, change: McpAuthChange): Promise<void> {
     return this.#serially(async () => {
       const before = await this.#read(server);
-      await this.#write(server, before, applyAuthChange(before, change));
+      const after = applyAuthChange(before, change);
+      // A change that changed nothing (a refresh or a clear about tokens replaced since) is not sealed and written again.
+      if (after !== before) await this.#write(server, before, after);
     }) as Promise<void>;
   }
 
@@ -249,7 +251,8 @@ export class McpSignIns {
       const config = configs.get(row.server);
       if (!config || row.keep_at > now) return;
       const result = await this.#check(config);
-      if (result === "needs_sign_in") await this.needed(row.server);
+      // A Disconnect while it ran (the row gone) is the user's choice, not a sign-in to ask for.
+      if (result === "needs_sign_in" && this.#rows().some((r) => r.server === row.server)) await this.needed(row.server);
       // An ok refresh saved new tokens, which set the next one; `unavailable` tries again soon (`needs_sign_in` ended
       // the grant). It always moves on, or the next alarm is due at once, forever.
       this.#host.sql.exec(

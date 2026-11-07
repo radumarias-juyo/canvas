@@ -132,6 +132,16 @@ describe("sealed sign-in records", () => {
     });
   });
 
+  it("opens a record sealed as a bare v1 string, and writes it again as JSON", async () => {
+    const sql = memorySql();
+    const s = setup({ sql });
+    const bare = JSON.parse(await sealAuthRecord(await key(), "Portal", { client: CLIENT, tokens: TOKENS })).sealed as string;
+    sql.exec("INSERT INTO mcp_auth (server, data, signed_in_at) VALUES (?, ?, ?)", "Portal", bare, T0);
+    expect(await s.signIns.record("Portal")).toEqual({ client: CLIENT, tokens: TOKENS });
+    expect(String(s.row()!.data)).toMatch(/^\{"sealed":"v1\./);
+    expect(s.row()).toMatchObject({ signed_in_at: T0 });
+  });
+
   it("does not trust a recent refresh of a record that no longer opens", async () => {
     const sql = memorySql();
     const s = setup({ sql, check: "needs_sign_in" });
