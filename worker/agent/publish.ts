@@ -312,6 +312,11 @@ export async function draftNamed(drafts: ChatDrafts, id: string, what = "", rule
   return draft;
 }
 
+/** The drafts of the chat a conversation lists, newest first: none `rules` hide (SessionRules.hiddenDraft). */
+export async function draftsListed(drafts: ChatDrafts, rules?: SessionRules): Promise<DraftSummary[]> {
+  return (await drafts.list()).filter((draft) => !rules?.hiddenDraft(draft.id));
+}
+
 /**
  * Save a page as a draft of the chat, unchecked: what checkDraft and publishDraft then take by its id. A page made by
  * edits keeps what its draft or version declared, and a draft the artifact it was for, unless the input says otherwise.

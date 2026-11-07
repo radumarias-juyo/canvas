@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ComponentType } from "react";
 import {
-  COPIED_FIELDS,
   type AgentChatUse,
   type AgentChanges,
   type AgentDefinition,
@@ -19,6 +18,7 @@ import { agentPath, NEW_AGENT, type AgentPlace } from "./nav.ts";
 import { LimitsTab } from "./LimitsTab.tsx";
 import { RunsTab } from "./RunsTab.tsx";
 import { SetupTab } from "./SetupTab.tsx";
+import { keptBy, SETUP_FIELDS } from "./tab-fields.ts";
 import { KnowsTab } from "../memory/KnowsTab.tsx";
 import { WorkflowTab } from "./WorkflowTab.tsx";
 import { dropAgent, putAgent, reloadAgents, useAgents } from "./store.ts";
@@ -59,12 +59,6 @@ export interface PageNotice {
   error?: boolean;
 }
 
-/**
- * What a tab saves without editing: the rest of the definition (its trigger, scope, workflow, limits) stays as it is.
- * Every field some tab edits is here, or saving another tab would drop it.
- */
-const KEPT = [...COPIED_FIELDS, ...LIMIT_FIELDS, "assumed", "reviewBeforePosting"] as const satisfies readonly (keyof AgentInput)[];
-
 /** A tab of the agent page. Later tabs (workflow and runs, what it knows) add themselves here. */
 export interface AgentTab {
   id: string;
@@ -78,8 +72,7 @@ export const TABS: AgentTab[] = [
   {
     id: "setup",
     label: "Setup",
-    // Setup also confirms the model's guesses (assumed), which a save of another tab keeps.
-    fields: ["name", "job", "instructions", "avatar", "color", "model", "effort", "servers", "sharedServers", "assumed", "reviewBeforePosting"],
+    fields: SETUP_FIELDS,
     Component: SetupTab,
   },
   { id: "workflow", label: "Workflow", fields: ["trigger", "scope", "workflow"], Component: WorkflowTab },
@@ -147,7 +140,7 @@ export function AgentPage({
       let saved: AgentDefinition;
       if (subject.kind === "own") {
         const { agent } = subject;
-        const kept = Object.fromEntries(KEPT.filter((key) => !tab.fields.includes(key)).map((key) => [key, agent[key]]));
+        const kept = keptBy(tab.fields, agent);
         // The version the tab started from: a change made since is refused, rather than undone.
         saved = await api.saveAgent(agent.id, { ...kept, ...fields, version: version ?? agent.version });
       } else if (subject.kind === "new") saved = await api.createAgent(fields);

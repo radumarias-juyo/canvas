@@ -1275,6 +1275,33 @@ describe("Member agents: what the review of private turns found", () => {
     expect(chat.roster.withheldVersion("r1", 2)).toBe(true);
   });
 
+  it("keeps what a stopped reply to a run's report made withheld, and shows what a later reply in its session posts", async () => {
+    const chat = room();
+    const helper = chat.add(RADU, "helper", { servers: ["db", "calendar"] });
+    const reply = (text: string) => chat.turns.call([helper.agentId], { ...chat.say(RADU, text), session: "run-reply" });
+    chat.newestEntries.set("run-reply", 3);
+    const [first] = reply("@helper and next week?");
+    await settle();
+    chat.roster.recordPage("run-reply", "r1", 2);
+    // A member presses Stop while it runs: it never posts.
+    expect(await chat.turns.stop(helper.agentId)).toBe(true);
+    expect(chat.roster.turn(first.id)?.status).toBe("stopped");
+    chat.newestEntries.set("run-reply", 9);
+    const [second] = reply("@helper then week 43?");
+    await settle();
+    chat.roster.recordPage("run-reply", "r2", 1);
+    chat.sessions.finish(second.id, "Week 43.", [tool(PUBLISH_TOOL, { artifactId: "r2", version: 1, title: "Week 43" })]);
+    await settle();
+    // The later reply's page is the chat's and its chip shows; the stopped turn's version stays withheld, and holds back nothing else.
+    expect(chat.posts.at(-1)).toMatchObject({ turn: second.id, published: [{ artifactId: "r2", version: 1, title: "Week 43" }] });
+    expect([chat.roster.withheldVersion("r1", 2), chat.roster.withheldVersion("r2", 1)]).toEqual([true, false]);
+    expect(chat.roster.windows("run-reply").map((window) => [window.turn, window.posted])).toEqual([
+      [first.id, false],
+      [second.id, true],
+    ]);
+    expect(chat.announced).toEqual([{ artifactId: "r2", version: 1 }]);
+  });
+
   it("gives a seat its turn again when the call was cut off, and stops it there when giving fails", async () => {
     const chat = room();
     const planner = chat.add(ANA, "planner");
@@ -1400,8 +1427,11 @@ describe("Member agents: a seat's turn given again while it is set up, or after 
     readonly configures: string[] = [];
     readonly runs = new Map<string, Deferred<TurnResult>>();
     readonly kept: Promise<unknown>[] = [];
+    readonly aborts: string[] = [];
     /** The next configure waits on this (a slow refresh before the turn). */
     gate: Deferred<void> | undefined;
+    /** The next submit waits on this, its input already in (a slow answer from the session). */
+    submitGate: Deferred<void> | undefined;
     #made = 0;
     async definition() {
       return definition("p", "planner");
@@ -1430,6 +1460,9 @@ describe("Member agents: a seat's turn given again while it is set up, or after 
     }
     async submit(session: string, _input: string, op: string) {
       if (!this.submits.includes(`${session}|${op}`)) this.submits.push(`${session}|${op}`);
+      const gate = this.submitGate;
+      this.submitGate = undefined;
+      if (gate) await gate.promise;
     }
     run(session: string, op: string): Deferred<TurnResult> {
       const key = `${session}|${op}`;
@@ -1441,7 +1474,9 @@ describe("Member agents: a seat's turn given again while it is set up, or after 
       if (!this.submits.includes(`${session}|${op}`)) return { status: "unanswered", reason: "not_found" };
       return this.run(session, op).promise;
     }
-    async abort() {}
+    async abort(session: string) {
+      this.aborts.push(session);
+    }
     async turnEntries(): Promise<readonly EntryRecord[]> {
       return [];
     }
@@ -1452,6 +1487,47 @@ describe("Member agents: a seat's turn given again while it is set up, or after 
       this.kept.push(promise);
     }
     later() {}
+  }
+
+  /**
+   * A seat object the room's call reached while it was down: its first call into pi's sessions starts it, and starting
+   * wakes its seats (ChatAgent.onStart), in the middle of the give that made that call.
+   */
+  class ColdSeat extends SlowSeat {
+    seats!: AgentSeats;
+    #started = false;
+    #start() {
+      if (this.#started) return;
+      this.#started = true;
+      this.seats.wake();
+    }
+    override async create() {
+      this.#start();
+      return super.create();
+    }
+    override async fork(session: string) {
+      this.#start();
+      return super.fork(session);
+    }
+    override async write() {
+      this.#start();
+    }
+    override async configure(session: string) {
+      this.#start();
+      await super.configure(session);
+    }
+    override async submit(session: string, input: string, op: string) {
+      this.#start();
+      await super.submit(session, input, op);
+    }
+    override async wait(session: string, op: string) {
+      this.#start();
+      return super.wait(session, op);
+    }
+    override async abort(session: string) {
+      this.#start();
+      await super.abort(session);
+    }
   }
   const turn = (id: number, byOwner = false): SeatTurn => ({
     turn: id,
@@ -1478,6 +1554,7 @@ describe("Member agents: a seat's turn given again while it is set up, or after 
       gate.resolve();
       await first;
       await settle();
+      expect(host.configures).toEqual(["s1"]);
       expect(host.submits).toEqual(["s1|turn:1"]);
       host.run("s1", "turn:1").resolve({ status: "done", text: "The real answer." });
       await settle();
@@ -1538,6 +1615,74 @@ describe("Member agents: a seat's turn given again while it is set up, or after 
     await settle();
     expect(later.submits).toEqual([]);
     expect(later.configures).toHaveLength(1);
+  });
+
+  it("stops the run of a turn stopped while its input went in", async () => {
+    const host = new SlowSeat();
+    const seats = new AgentSeats(memorySql(), host);
+    const gate = (host.submitGate = deferred());
+    const first = seats.give(ROOM, "p", turn(1));
+    await settle();
+    expect(host.submits).toEqual(["s1|turn:1"]);
+    // The stop comes before the seat knows its input is in: it ends the turn, and its own abort may come before the run.
+    await seats.abort(ROOM, 1);
+    expect(host.aborts).toEqual(["s1"]);
+    gate.resolve();
+    await first;
+    await settle();
+    expect(host.aborts).toEqual(["s1", "s1"]);
+  });
+
+  it("runs a turn given to a cold seat object once, though the give's own first call wakes its seats", async () => {
+    for (const byOwner of [false, true]) {
+      const sql = memorySql();
+      // An earlier turn made the seat; then its object went away.
+      const warm = new SlowSeat();
+      const before = new AgentSeats(sql, warm);
+      await before.give(ROOM, "p", turn(1), { from: 0, through: 3, text: "hello", turn: 1 });
+      await settle();
+      warm.run("s1", "turn:1").resolve({ status: "done", text: "One." });
+      await settle();
+      expect(warm.ended).toHaveLength(1);
+      // The room's give reaches a new object, with nothing new to write: its first call is the fork, or the set-up.
+      const cold = new ColdSeat();
+      cold.seats = new AgentSeats(sql, cold);
+      const gate = (cold.gate = deferred());
+      const given = cold.seats.give(ROOM, "p", turn(2, byOwner), { from: 4, through: 5, text: "", turn: 2 });
+      await settle();
+      gate.resolve();
+      await given;
+      await settle();
+      // Set up once: the wake left the turn to the give that was setting it up.
+      expect(cold.ended).toEqual([]);
+      expect(cold.configures).toHaveLength(1);
+      expect(cold.submits).toHaveLength(1);
+      const [session, op] = cold.submits[0].split("|");
+      expect(session === "s1").toBe(!byOwner);
+      cold.run(session, op).resolve({ status: "done", text: "The real answer." });
+      await settle();
+      expect(cold.ended).toEqual([{ turn: 2, result: expect.objectContaining({ status: "done", text: "The real answer." }) }]);
+    }
+  });
+
+  it("never puts in a turn whose give died when a later give to the cold seat wakes it", async () => {
+    const sql = memorySql();
+    const dead = new SlowSeat();
+    dead.gate = deferred();
+    void new AgentSeats(sql, dead).give(ROOM, "p", turn(1, true));
+    await settle();
+    // The room gave up on turn 1 and gives turn 2; stopping turn 1 is the new object's first call, which wakes its seats.
+    const cold = new ColdSeat();
+    cold.seats = new AgentSeats(sql, cold);
+    const slow = (cold.gate = deferred());
+    const given = cold.seats.give(ROOM, "p", turn(2));
+    await settle();
+    // Turn 1 is set up again by the wake, in its fork, while turn 2's give ends it.
+    expect(cold.configures).toEqual(dead.configures);
+    slow.resolve();
+    await given;
+    await settle();
+    expect(cold.submits).toEqual(["s1|turn:2"]);
   });
 
   it("runs nothing for a late give of a turn the room took already", async () => {

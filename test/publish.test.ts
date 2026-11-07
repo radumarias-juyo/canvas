@@ -4,6 +4,7 @@ import {
   applyEdits,
   artifactByTitle,
   checkInBrowser,
+  draftsListed,
   FailedChecks,
   MAX_FAILED_CHECKS,
   publishDraft,
@@ -273,7 +274,7 @@ describe("publishing from a conversation apart from the chat", () => {
     expect((await publish({ title: "Week", newArtifact: true }, "fork")).meta.id).toBe("new0000000000001");
   });
 
-  it("keeps the drafts a conversation apart saved from every other one: none edited from, checked or published", async () => {
+  it("keeps the drafts a conversation apart saved from every other one: none listed, edited from, checked or published", async () => {
     // "fork" runs apart with its reply not posted (turn 1); "1" is the chat's own conversation. The roster keeps whose
     // each draft is, as the chat object's does.
     const roster = new ChatRoster(memorySql(), () => 0);
@@ -289,6 +290,10 @@ describe("publishing from a conversation apart from the chat", () => {
     await expect(checkDraft(scope, secret.id, {}, undefined, "1")).rejects.toThrow(hidden);
     await expect(publishDraft(scope, { title: "Pay", draftId: secret.id }, undefined, "1")).rejects.toThrow(hidden);
     expect(versions).toEqual([]);
+    // Nor lists it (artifact_drafts, whose output members see in pi's steps); the fork lists both.
+    const listed = async (session: string) => (await draftsListed(await scope.drafts(), await scope.rulesFor!(session))).map((draft) => draft.id);
+    expect(await listed("1")).toEqual([shared.id]);
+    expect((await listed("fork")).sort()).toEqual([secret.id, shared.id].sort());
     // The fork goes on from its own draft, and the chat's from its own.
     const edited = await writeDraft(scope, { draftId: secret.id, edits: [{ old: "salaries", new: "pay" }], session: "fork" });
     expect(roster.withheldDrafts("1")).toEqual(new Set([secret.id, edited.id]));
