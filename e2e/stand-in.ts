@@ -74,4 +74,9 @@ const vault = new FakePortal((server) => {
 vault.origin = `http://127.0.0.1:${port + 1}`;
 // Whoever signs in approves at once: the app keeps the tokens per person, and the tool reads the same for all.
 vault.autoApprove = "e2e";
-createServer((req, res) => void vault.handle(req, res)).listen(port + 1, "127.0.0.1", () => console.log(`stand-in vault on ${vault.origin}/mcp`));
+// A request it cannot read answers 500 rather than rejecting unhandled, which would end this process for every later flow.
+createServer((req, res) =>
+  vault.handle(req, res).catch((error: unknown) => {
+    if (!res.headersSent) send(res, 500, { error: String(error) });
+  }),
+).listen(port + 1, "127.0.0.1", () => console.log(`stand-in vault on ${vault.origin}/mcp`));

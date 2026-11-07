@@ -457,7 +457,8 @@ export class ChatAgent extends DurableObject<Env> {
         // A new chat starts on its user's last pick, else on Auto (startingSetting); PiHarness then finds the root and
         // leaves it as it is.
         if (!(await pi.conversation(ROOT_CONVERSATION_ID, context))) {
-          const setting = startingSetting(await this.#savedModel(), this.env.ROUTER_MODEL);
+          // The scripted dev model is the picker's only choice: nothing for Auto to pick among.
+          const setting = startingSetting(await this.#savedModel(), scriptOn(this.env) ? "" : this.env.ROUTER_MODEL);
           if (isAuto(setting)) this.ctx.storage.kv.put(AUTO_KEY, true);
           else if (setting) await pi.root(context, { agent: this.#agentChange(setting) });
         }

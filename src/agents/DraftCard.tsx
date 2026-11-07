@@ -15,8 +15,8 @@ import { putAgent, reloadAgents, useAgents } from "./store.ts";
  * on, the instructions as numbered steps, and the "at a glance" rows (scope, runs, reads, tells, knows), each with a
  * Change that opens the agent's page at that field and an Assumed badge where the model guessed. Test it runs it on
  * today's data, nothing sent; Turn on turns it on as the owner read it, and brings it into this chat. Only whose
- * directory it was saved in has the draft (the chat's owner for pi's, the agent's owner for an agent's, `by`): anyone
- * else sees who drafted it for them.
+ * directory it was saved in has the draft: the chat's owner for pi's, the agent's owner for a roster agent's (`by`).
+ * Anyone else sees who drafted it, for whom.
  */
 export function DraftCard({ details, chatId, mine, by }: { details: AgentProposedDetails; chatId: string; mine: boolean; by?: string }) {
   const { agents } = useAgents();

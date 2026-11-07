@@ -1,6 +1,7 @@
 // The scripted model of local development: with DEV_MODEL=script and DEV_TOOLS=true (pnpm dev only, never deployed;
-// cloudflare.config.ts leaves DEV_MODEL empty unless it is set), it is the picker's only model and every chat's, agent's
-// and run's, so turns, hand-offs, offers and runs work with no model at all, and the e2e suite (e2e/) can drive them.
+// cloudflare.config.ts leaves DEV_MODEL empty unless it is set), it is the picker's only model and what every chat,
+// agent and run starts on (a chat or agent that picked a model earlier keeps it, so start from an empty local state),
+// so turns, hand-offs, offers and runs work with no model at all, and the e2e suite (e2e/) can drive them.
 // It follows a tiny script written in the conversation:
 //   /say <text>          reply with exactly <text>, which may take several lines: up to the next script line or a blank line
 //   /tool <name> <json>  call one tool with the input on the rest of the line (`server.tool` names an MCP tool, as
@@ -12,9 +13,11 @@
 // cut to 80 characters>". Each model call of a turn takes the next step: those done are its assistant messages so far.
 
 import {
+  contentText,
   fauxAssistantMessage,
   fauxProvider,
   fauxToolCall,
+  getSystemMessageText,
   type AssistantMessage,
   type JsonObject,
   type Message,
@@ -44,7 +47,16 @@ const marker = (lineStart: boolean) => new RegExp(`${lineStart ? "(?:^|\\n)[ \\t
 
 /** The steps of the script in `text`, in order; none when it has no script. */
 export function scriptSteps(text: string, lineStart = false): Step[] {
-  const found = [...text.matchAll(marker(lineStart))];
+  const found: RegExpExecArray[] = [];
+  let toolLineEnd = 0;
+  for (const match of text.matchAll(marker(lineStart))) {
+    // A /tool step is its whole line: a marker inside its JSON is part of the input.
+    if (match.index < toolLineEnd) continue;
+    found.push(match);
+    if (match[1] !== "tool") continue;
+    const end = text.indexOf("\n", match.index + match[0].length);
+    toolLineEnd = end < 0 ? text.length : end;
+  }
   return found.map((match, i) => {
     const rest = text.slice(match.index + match[0].length, found[i + 1]?.index ?? text.length);
     // A turn's ask indents a message's further lines: the reply has them as written.
@@ -68,8 +80,7 @@ type Said = Extract<Message, { role: "user" | "system" }>;
 
 /** A user message's text, or a system message's with its sections (an agent's instructions may sit in one). */
 function messageText(message: Said): string {
-  const text = typeof message.content === "string" ? message.content : textOf(message.content);
-  return message.role === "system" ? [text, ...Object.values(message.sections ?? {})].join("\n") : text;
+  return message.role === "system" ? getSystemMessageText(message) : contentText(message.content);
 }
 
 /** The scripted model's answer to a conversation, as a model message. */

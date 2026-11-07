@@ -28,6 +28,8 @@ describe("the scripted dev model", () => {
     expect(scriptSteps('/tool crm.list_deals {"stage":"won"}\n/say done')).toEqual([{ tool: "crm__list_deals", input: { stage: "won" } }, { say: "done" }]);
     expect(scriptSteps("/tool checklist")).toEqual([{ tool: "checklist", input: {} }]);
     expect(scriptSteps("/tool crm.update_deal {oops")[0]).toEqual({ say: expect.stringContaining("the input is not JSON") });
+    // A marker inside a /tool line's JSON is part of its input.
+    expect(scriptSteps('/tool crm.note {"text":"see /say this"}\n/say done')).toEqual([{ tool: "crm__note", input: { text: "see /say this" } }, { say: "done" }]);
     expect(scriptSteps("a path like x/say is no script")).toEqual([]);
     // A turn's ask indents a message's further lines: the reply has them as written.
     expect(scriptSteps("[ada · person · your owner]: /say Summary ready.\n  Next step: Send this every Monday?")).toEqual([

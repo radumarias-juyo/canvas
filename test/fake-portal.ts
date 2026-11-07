@@ -21,6 +21,8 @@ export function readBody(req: IncomingMessage): Promise<string> {
 /** One stateless MCP request on `server` (made for this request): JSON answers, no session. */
 export async function serveMcp(server: McpServer, req: IncomingMessage, res: ServerResponse, body: string): Promise<void> {
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+  // Both are this request's alone: closed with it, as the SDK's stateless servers do.
+  res.on("close", () => void Promise.all([transport.close(), server.close()]).catch(() => {}));
   await server.connect(transport);
   await transport.handleRequest(req, res, body ? JSON.parse(body) : undefined);
 }

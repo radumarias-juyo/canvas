@@ -68,7 +68,8 @@ export function AgentReply({
       {data.published?.map((artifact) => (
         <ArtifactCard key={`${artifact.artifactId}:${artifact.version}`} artifact={artifact} onOpen={onOpen} />
       ))}
-      {/* Saved in its owner's directory: only they have the draft to review. */}
+      {/* Saved in the directory of the object that runs the agent's session: the chat's (its owner's) for the owner's
+          agents, a member's own seat for theirs. Either way the agent's owner: only they have the draft to review. */}
       {data.drafted?.map((draft) => (
         <DraftCard key={`${draft.agentId}:${draft.version}`} details={draft} chatId={chatId} mine={viewerUid === data.ownerUid} by={data.name} />
       ))}
