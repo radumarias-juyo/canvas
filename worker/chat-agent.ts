@@ -2854,6 +2854,15 @@ export class ChatAgent extends DurableObject<Env> {
     };
   }
 
+  /**
+   * The roster entry of one of the chat owner's own agents, run here; null for anyone else's, a member's seat with the
+   * same id among them (agent ids are unique per user only). What the owner's runs and home agent go by.
+   */
+  #ownersEntry(agentId: string): RosterEntry | null {
+    const entry = this.roster.get(agentId);
+    return entry?.ownerUid === this.uid && entry.seat === undefined ? entry : null;
+  }
+
   /** The chat as the agents' rules read it (worker/agents/seats/rules.ts). */
   get #rules(): ChatRules {
     return { ownerUid: this.uid, isInChat: (uid) => this.isInChat(uid), hasAccount: (uid) => this.#hasSidebar(uid) };
@@ -3012,7 +3021,7 @@ export class ChatAgent extends DurableObject<Env> {
   /** The agent whose home this chat is, when it is on the roster and on: who answers a message that calls nobody. */
   #homeSpeaker(): string | undefined {
     const id = this.ctx.storage.kv.get<string>(HOME_AGENT_KEY);
-    const entry = id === undefined ? null : this.roster.get(id);
+    const entry = id === undefined ? null : this.#ownersEntry(id);
     return entry && !entry.off ? entry.agentId : undefined;
   }
 
@@ -3048,7 +3057,7 @@ export class ChatAgent extends DurableObject<Env> {
     if (agent) {
       this.ctx.storage.kv.put(HOME_AGENT_KEY, agentId);
       this.ctx.storage.kv.put(HOME_RUNS_KEY, Boolean(agent.enabled && agent.trigger));
-      if (this.roster.get(agentId)) {
+      if (this.#ownersEntry(agentId)) {
         // Turned on or off, renamed: the roster follows now, so a message that calls nobody goes to it (or to pi) at once.
         const view = { name: agent.name, avatar: agent.avatar, color: agent.color, job: agent.job, off: !agent.enabled };
         if (this.roster.refresh(agentId, view)?.changed) this.#broadcastAgents();
@@ -3222,7 +3231,7 @@ export class ChatAgent extends DurableObject<Env> {
    */
   async postRun(reply: ChatAgentReplyData, context: string, requestId: string): Promise<ChatRefusal | null> {
     if (this.#gone) return refuse(404, DELETED);
-    const entry = this.roster.get(reply.agentId);
+    const entry = this.#ownersEntry(reply.agentId);
     if (reply.ownerUid !== this.uid || !entry) return refuse(403, `@${reply.name} is not in this chat.`);
     await this.#placeRun(reply, context, requestId, entry);
     return null;
@@ -3398,7 +3407,7 @@ export class ChatAgent extends DurableObject<Env> {
       if (others.length === step.to.length)
         return { kind: "notify", to: step.to.join(", "), status: "refused", detail: "at Inform, an agent notifies only its owner" };
       // Posted here, tagging the owner: their sidebar's notice, and a browser notification when they allow one.
-      await this.#placeRun(this.#runReply(request), context, `run-post:${agent.id}:${request.run.dueAt}:${request.key}`, this.roster.get(agent.id), [this.uid]);
+      await this.#placeRun(this.#runReply(request), context, `run-post:${agent.id}:${request.run.dueAt}:${request.key}`, this.#ownersEntry(agent.id), [this.uid]);
       return {
         kind: "notify",
         to: "you",
@@ -3415,7 +3424,7 @@ export class ChatAgent extends DurableObject<Env> {
       targets.map(async (target): Promise<{ sent: string } | { refused: string }> => {
         const requestId = `run-post:${agent.id}:${request.run.dueAt}:${request.key}:${target}`;
         if (isOwner(target)) {
-          await this.#placeRun(this.#runReply(request), context, requestId, this.roster.get(agent.id));
+          await this.#placeRun(this.#runReply(request), context, requestId, this.#ownersEntry(agent.id));
           return { sent: "its chat" };
         }
         const chat = chats.find((one) => one.id === target) ?? chats.find((one) => one.title.toLowerCase() === target.toLowerCase());
@@ -3449,7 +3458,8 @@ export class ChatAgent extends DurableObject<Env> {
       if (!agent?.enabled) return { kind: "handOver", to, status: "refused", detail: agent ? `${to} is off` : `you have no agent ${to}` };
       const added = await this.#addToRoster(agent);
       if ("error" in added) return { kind: "handOver", to, status: "failed", detail: added.error };
-      entry = this.roster.get(agent.id)!;
+      entry = this.#ownersEntry(agent.id);
+      if (!entry) return { kind: "handOver", to, status: "failed", detail: `${to} could not join this chat` };
     }
     const { agent } = request;
     this.turns.call([entry.agentId], {

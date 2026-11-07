@@ -483,6 +483,15 @@ describe("Member agents: a seat in the member's own object", () => {
     expect(ana.sessions.configured.map((configured) => configured.byOwner)).toEqual([false, false, true, false]);
   });
 
+  it("keeps an agent id to whoever brought it first: another person's agent with the same id is refused", () => {
+    const chat = room();
+    const hers = chat.add(ANA, "helper");
+    const same = { agentId: hers.agentId, name: "analyst", session: "s", avatar: "", color: hers.color, job: "" };
+    expect(chat.roster.add({ ...same, ownerUid: RADU.uid })).toEqual({ error: expect.stringContaining("Another agent") });
+    expect(chat.roster.get(hers.agentId)).toMatchObject({ ownerUid: ANA.uid, seat: seatChatId(hers.agentId) });
+    expect(chat.roster.add({ ...same, ownerUid: ANA.uid })).toBeNull();
+  });
+
   it("lets a requeued turn keep a run's session, and drop only a fork made for it", () => {
     const chat = room();
     const mine = chat.add(RADU, "planner");

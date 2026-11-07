@@ -246,7 +246,9 @@ export class ChatRoster {
    * name here. Adding one already in the roster changes nothing.
    */
   add(entry: Pick<RosterEntry, "agentId" | "ownerUid" | "name" | "session" | "avatar" | "color" | "job" | "seat">): { error: string } | null {
-    if (this.get(entry.agentId)) return null;
+    const here = this.get(entry.agentId);
+    // Agent ids are unique per user only: another person's agent with this id keeps it.
+    if (here) return here.ownerUid === entry.ownerUid ? null : { error: "Another agent with this id is in the chat." };
     const refused = this.refusal(entry.name);
     if (refused) return refused;
     this.#sql.exec(
