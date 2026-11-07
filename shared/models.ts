@@ -26,6 +26,8 @@ export const PROVIDERS = {
   openrouter: { label: "OpenRouter", modelsDev: "openrouter" },
   huggingface: { label: "Hugging Face", modelsDev: "huggingface" },
   "workers-ai": { label: "Workers AI (free daily allowance)" },
+  // The scripted model of local development (worker/dev-model.ts), listed only with DEV_MODEL=script.
+  script: { label: "Scripted (local development)" },
 } satisfies Record<string, ProviderFacts>;
 
 export type ProviderId = keyof typeof PROVIDERS;

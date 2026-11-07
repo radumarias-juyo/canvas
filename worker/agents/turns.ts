@@ -10,6 +10,7 @@ import {
   CHAT_TURN_KIND,
   MAX_HOPS,
   mayUseServer,
+  proposedBy,
   speakerLabel,
   type AgentDefinition,
   type ChatAgentReplyData,
@@ -359,4 +360,9 @@ export function publishedIn(entries: readonly EntryRecord[]): NonNullable<ChatAg
     const page = publishedBy(entry);
     return page ? [{ artifactId: page.artifactId, title: page.title ?? "", version: page.version }] : [];
   });
+}
+
+/** The agents a turn drafted: the results of agent_propose among `entries` (its session's, from the turn on). */
+export function draftedIn(entries: readonly EntryRecord[]): NonNullable<ChatAgentReplyData["drafted"]> {
+  return entries.flatMap((entry) => proposedBy(entry) ?? []);
 }
