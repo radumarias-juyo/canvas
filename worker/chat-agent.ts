@@ -199,6 +199,7 @@ import { SeatActions } from "./agents/seats/actions.ts";
 import { addRefusal, mayRemove, mayShare, seatedEntry, type ChatRules } from "./agents/seats/rules.ts";
 import { AgentSeats, type SeatHost } from "./agents/seats/seat.ts";
 import { agentsExtension } from "./agents/tools.ts";
+import { historyExtension, HISTORY_SCAN_ENTRIES, searchHistory, type HistoryQuery } from "./agents/history.ts";
 import { ChatMemory, runAskedByOwner, type Whose } from "./memory/chat.ts";
 import { freshPrompt, withoutNoteResults } from "./memory/fresh.ts";
 import { memoryExtension } from "./memory/tools.ts";
@@ -759,6 +760,8 @@ export class ChatAgent extends DurableObject<Env> {
     // The read cache's hits and evictions, per agent.
     this.hub.observe(this.metrics);
     this.registry.install(memoryExtension(this.memory.host()));
+    // The chat's whole log, for its agents to search (worker/agents/history.ts); a seat's goes to its room.
+    this.registry.install(historyExtension({ history: (session, query) => this.#history(session, query) }));
   }
 
   /**
@@ -2641,7 +2644,8 @@ export class ChatAgent extends DurableObject<Env> {
   get #published(): PublishedHost {
     return {
       chatId: this.chatId,
-      kind: () => this.kinds.kind(),
+      // A seat object's pages go out as its room's kind (AgentSeats.publishKind): an off-the-record room's never leave it.
+      kind: () => this.seats.publishKind() ?? this.kinds.kind(),
       directory: this.#directory,
       chat: (chatId) => exports.ChatAgent.getByName(chatAgentName(this.uid, chatId)),
       later: (work) => void work.catch((error: unknown) => console.error("page chat:", errorMessage(error))),
@@ -3796,9 +3800,10 @@ export class ChatAgent extends DurableObject<Env> {
     return { ownerUid: this.uid, chatId: this.chatId };
   }
 
-  /** The seat of a member's agent: its owner's object for it (seatChatId), reached by RPC. */
+  /** The seat of a member's agent: its owner's object for it in this room (seatChatId), reached by RPC. */
   #seatLink(entry: RosterEntry): SeatLink & { drop(): Promise<void> } {
-    const seat = exports.ChatAgent.getByName(chatAgentName(entry.ownerUid, entry.seat ?? seatChatId(entry.agentId)));
+    if (entry.seat === undefined) throw new Error(`@${entry.name} has no seat: it runs here.`);
+    const seat = exports.ChatAgent.getByName(chatAgentName(entry.ownerUid, entry.seat));
     const room = this.#room;
     return {
       give: (batch, turn) => seat.seatGive(room, entry.agentId, { ...turn, ownerName: this.#nameOf(entry.ownerUid), kind: this.kinds.kind() }, batch),
@@ -3857,6 +3862,38 @@ export class ChatAgent extends DurableObject<Env> {
     const entry = this.#seated(uid, agentId);
     if (!entry) throw new Error("This agent is not in the chat.");
     return this.turns.batchFor(entry, after, turn);
+  }
+
+  /**
+   * (RPC, from a seat) A member's agent searches this chat's log (chat_history): as it reads the log, with only its
+   * owner's lines, from where it joined, marked as theirs.
+   */
+  async seatHistory(uid: string, agentId: string, query: HistoryQuery): Promise<string> {
+    const entry = this.#seated(uid, agentId);
+    if (!entry) throw new Error("This agent is not in the chat.");
+    const owner = { uid, chatOwner: this.uid, ...(entry.ownerFrom !== undefined && { from: entry.ownerFrom }) };
+    return searchHistory(this.#historyPages(query), query, { self: agentId, owner });
+  }
+
+  /**
+   * chat_history for conversation `session`: pi's, or a turn of one of the owner's agents (its own session or a fork),
+   * reads this chat's log; a seat's turn reads its room's (seatHistory). Any other conversation (a run's) reads none.
+   */
+  async #history(session: string, query: HistoryQuery): Promise<string> {
+    const seated = this.seats.turnIn(session);
+    if (seated) return exports.ChatAgent.getByName(chatAgentName(seated.room.ownerUid, seated.room.chatId)).seatHistory(this.uid, seated.agentId, query);
+    const self = session === ROOT_SESSION ? AGENT_NAME : this.roster.runningSessions().find((one) => one.session === session)?.agentId;
+    if (self === undefined) throw new Error("The chat's history is read only in a turn in the chat.");
+    return searchHistory(this.#historyPages(query), query, { self, owner: this.uid });
+  }
+
+  /** The log within a history query's range, newest first, as far back as one search looks (HISTORY_SCAN_ENTRIES). */
+  #historyPages(query: HistoryQuery): AsyncGenerator<readonly EntryRecord[]> {
+    const range = {
+      ...(query.before !== undefined && { maxEntryId: (query.before - 1) as EntryId }),
+      ...(query.after !== undefined && { minEntryId: (query.after + 1) as EntryId }),
+    };
+    return this.#log({ order: "descending", ...range }, 100, Math.ceil(HISTORY_SCAN_ENTRIES / 100) + 1);
   }
 
   /** (RPC, from a seat) A member's agent's turn ended there. True once taken: the seat lets it go. */
@@ -4249,12 +4286,13 @@ export class ChatAgent extends DurableObject<Env> {
     // Before its session is made: a session made for an agent the roster refuses would stay, read by every traces read.
     const early = this.roster.refusal(name);
     if (early) return early;
-    const [session, newest] = await Promise.all([
-      // A member's runs in their own object: no session here.
+    const [session, newest, seat] = await Promise.all([
+      // A member's runs in their own object, in a seat for this room alone: no session here.
       member ? "" : this.harness.sessions.create().then((made) => made.id as string),
       // Read for every add (one entry): whether it is the first is known only after the awaits, as agents added at once
       // must not both start pi's scan over.
       this.#root().then((root) => root.entries({ order: "descending" }, 1, undefined, BACKGROUND_CONTEXT)),
+      member ? seatChatId(agent.id, this.#room) : undefined,
     ]);
     const first = !this.roster.hasAny();
     const newestId = (newest?.items[0]?.id as number | undefined) ?? -1;
@@ -4267,7 +4305,7 @@ export class ChatAgent extends DurableObject<Env> {
       color: agent.color,
       job: agent.job,
       // A member's agent reads its owner's messages as theirs only from here on (OwnerMarks in turns.ts).
-      ...(member && { seat: seatChatId(agent.id), ownerFrom: newestId + 1, ...(name !== agent.name && { aliasOf: agent.name }) }),
+      ...(member && seat && { seat, ownerFrom: newestId + 1, ...(name !== agent.name && { aliasOf: agent.name }) }),
     });
     if (refused) return refused;
     // The first agent: pi's answers from now on are read for the agents they name, none before.
