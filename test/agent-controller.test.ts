@@ -4,7 +4,7 @@ import { CHAT_AGENT_KIND, MAX_HOPS, type AgentDefinition, type ChatAgentReplyDat
 import { AGENT_NAME } from "../shared/mentions.ts";
 import { CHAT_MESSAGE_KIND, PUBLISH_TOOL } from "../shared/protocol.ts";
 import { AgentTurns, operationId, type Caller, type TurnHost, type TurnResult } from "../worker/agents/controller.ts";
-import { ChatRoster, type AgentTurn, type RosterEntry } from "../worker/agents/roster.ts";
+import { ChatRoster, PI_TURN, type AgentTurn, type RosterEntry } from "../worker/agents/roster.ts";
 import { askOf, itemsIn, messageAskKey, turnInput } from "../worker/agents/turns.ts";
 import { memorySql } from "./fakes.ts";
 
@@ -718,11 +718,14 @@ describe("AgentTurns: hand-offs", () => {
     expect(chat.toPi).toEqual([
       {
         input: turnInput({ calledBy, hop: 1, ask: `[atlas · agent]: ${text}` }),
-        data: { turn: turn.id, calledBy, hop: 1, root: turn.id, by: OWNER.uid },
+        data: { turn: turn.id, calledBy, hop: 1, root: turn.id, by: OWNER.uid, piTurn: chat.roster.recentTurns(PI_TURN)[0].id },
       },
     ]);
     expect(chat.asides).toEqual([]);
     expect(chat.calls.slice(-2)).toEqual([`post ${A}`, "hand to pi"]);
+    // pi's place in the chain, running until its answer is in the log; not a hop of its own.
+    expect(chat.roster.recentTurns(PI_TURN)).toEqual([expect.objectContaining({ status: "running", hop: 1, root: turn.id })]);
+    expect(chat.roster.handOffsFrom(turn.id)).toBe(1);
     expect(chat.roster.recentTurns(idOf(A))).toHaveLength(1);
     expect(chat.submits).toHaveLength(1);
   });
@@ -752,7 +755,12 @@ describe("AgentTurns: hand-offs", () => {
     await chat.flush();
 
     expect(chat.posts[0].forPi).toBe(false);
-    expect(chat.latest(B)).toMatchObject({ hop: 1, root: turn.id, status: "running" });
+    const tb = chat.latest(B);
+    expect(tb).toMatchObject({ hop: 1, root: turn.id, status: "running" });
+    // pi after bard, as named: its turn comes once bard's reply is in.
+    expect(chat.toPi).toEqual([]);
+    chat.finish(tb.id, done("Drawn."));
+    await chat.flush();
     expect(chat.toPi).toEqual([expect.objectContaining({ data: expect.objectContaining({ hop: 1, root: turn.id }) })]);
   });
 
@@ -763,7 +771,8 @@ describe("AgentTurns: hand-offs", () => {
     // Given turns in the order named, one after another: bard runs, cora waits for it.
     expect(given(first.chat)).toEqual([idOf(B), idOf(C)]);
     expect(first.chat.runningOf(B)).not.toBeNull();
-    expect(first.chat.toPi).toHaveLength(1);
+    // pi's place comes after cora's.
+    expect(first.chat.roster.recentTurns(PI_TURN)).toEqual([expect.objectContaining({ status: "queued", hop: 1 })]);
     expect(first.chat.roster.recentTurns(idOf(D))).toEqual([]);
     expect(first.chat.roster.recentTurns(idOf(E))).toEqual([]);
 
@@ -984,7 +993,8 @@ describe("AgentTurns: errors", () => {
     chat.finish(turn.id, done("@pi your turn"));
     await chat.flush();
 
-    expect(error).toHaveBeenCalledWith("agent reply:", "pi is busy");
+    expect(error).toHaveBeenCalledWith("pi's turn:", "pi is busy");
+    expect(chat.roster.recentTurns(PI_TURN)).toEqual([expect.objectContaining({ status: "failed" })]);
     expect(chat.roster.outbox(turn.id)).toBeNull();
     expect(chat.posts).toEqual([{ forPi: false, reply: expect.objectContaining({ turn: turn.id }) }]);
     expect(chat.runningOf(A)?.id).toBe(next.id);
@@ -1195,12 +1205,16 @@ describe("AgentTurns: resume", () => {
       startedAt: T0,
       endedAt: T0,
     };
+    // Ended with its hand-offs queued, pi's place among them, as one step (#release).
     chat.roster.end(root.id, "done", { reply, toPi: true });
+    const calledBy = { name: A, agentId: idOf(A) };
+    const handOff = { agentId: PI_TURN, hop: 1, calledBy, byOwner: false, ask: "[atlas · agent]: @pi go", askKey: `turn:${root.id}`, root: root.id };
+    const place = chat.roster.enqueue(handOff);
     new AgentTurns(chat).resume();
     await chat.flush();
 
     expect(chat.posts).toEqual([{ reply, forPi: false }]);
-    expect(chat.toPi).toEqual([expect.objectContaining({ data: { turn: root.id, calledBy: { name: A, agentId: idOf(A) }, hop: 1, root: root.id } })]);
+    expect(chat.toPi).toEqual([expect.objectContaining({ data: { turn: root.id, calledBy, hop: 1, root: root.id, piTurn: place.id } })]);
     expect(chat.roster.outbox(root.id)).toBeNull();
     new AgentTurns(chat).resume();
     await chat.flush();
@@ -1274,6 +1288,78 @@ describe("AgentTurns: resume", () => {
   });
 });
 
+describe("AgentTurns: pi takes its place in a chain's order", () => {
+  it("holds the chain at a hand-off to pi until pi's answer is in the log; the agent after it reads that answer", async () => {
+    const { chat, turn } = await called([A, B]);
+    chat.finish(turn.id, done("Plan ready. @pi build it, then @bard check it."));
+    await chat.flush();
+    // pi first, as named; bard waits for pi's answer.
+    expect(chat.toPi).toHaveLength(1);
+    const place = chat.toPi[0].data.piTurn!;
+    expect(chat.runningOf(B)).toBeNull();
+    expect(chat.latest(B).status).toBe("queued");
+    chat.piSays("Built the page: v1 is up.");
+    chat.turns.piAnswered([place]);
+    await chat.flush();
+    expect(chat.roster.turn(place)?.status).toBe("done");
+    expect(chat.runningOf(B)).not.toBeNull();
+    const bardRead = chat.writes.filter((write) => write.session === sessionOf(B)).map((write) => write.text);
+    expect(bardRead.join("\n")).toContain("Built the page: v1 is up.");
+  });
+
+  it("starts pi's turn after the agents named before it, once their replies are in the log, so pi reads them first", async () => {
+    const chat = new FakeChat([A]);
+    const caller = chat.say(OWNER, "@atlas find it, then @pi build it");
+    const [ta, place] = chat.turns.call([idOf(A), PI_TURN], caller);
+    expect(place).toMatchObject({ agentId: PI_TURN, status: "queued", root: ta.id, byOwner: true });
+    await chat.flush();
+    expect(chat.toPi).toEqual([]);
+    chat.finish(ta.id, done("Found: 42."));
+    await chat.flush();
+    // Atlas's reply reached pi as context before pi's turn.
+    expect(chat.calls.indexOf(`tell pi ${A}`)).toBeLessThan(chat.calls.indexOf("hand to pi"));
+    expect(chat.asides).toEqual([ta.id]);
+    // A message's place is its own turn: pi goes as far as the message lets it (inputLevel).
+    expect(chat.toPi).toEqual([
+      { input: turnInput(place), data: { turn: place.id, calledBy: caller.calledBy, hop: 0, root: ta.id, by: OWNER.uid, piTurn: place.id } },
+    ]);
+    expect(chat.roster.turn(place.id)).toMatchObject({ status: "running", submitted: true });
+  });
+
+  it("holds the agents named after pi until pi answered the message it was given first", async () => {
+    const chat = new FakeChat([A]);
+    const [place, ta] = chat.turns.call([PI_TURN, idOf(A)], chat.say(OWNER, "@pi build it, then @atlas check it"), { piPlaced: true });
+    await chat.flush();
+    // pi has the message already: its place runs, and nothing is handed to it again.
+    expect(place).toMatchObject({ status: "running", submitted: true });
+    expect(chat.toPi).toEqual([]);
+    expect(chat.runningOf(A)).toBeNull();
+    chat.piSays("Built it.");
+    chat.turns.piAnswered([place.id]);
+    await chat.flush();
+    expect(chat.runningOf(A)?.id).toBe(ta.id);
+    expect(chat.writes.map((write) => write.text).join("\n")).toContain("Built it.");
+  });
+
+  it("goes on when pi cannot be given its turn, and stops pi's place with the chain when someone leaves", async () => {
+    const chat = new FakeChat([A, B]);
+    chat.handToPi = async () => {
+      throw new Error("pi is gone");
+    };
+    const [ta, place, tb] = chat.turns.call([idOf(A), PI_TURN, idOf(B)], chat.say(OWNER, "@atlas @pi @bard"));
+    await chat.flush();
+    chat.finish(ta.id, done("Found."));
+    await chat.flush();
+    expect(chat.roster.turn(place.id)?.status).toBe("failed");
+    expect(chat.runningOf(B)?.id).toBe(tb.id);
+
+    const [, hers] = chat.turns.call([idOf(A), PI_TURN], chat.say(MIA, "@atlas @pi"));
+    await chat.flush();
+    expect(await chat.turns.leave(MIA.uid)).toBe(true);
+    expect(chat.roster.turn(hers.id)?.status).toBe("stopped");
+  });
+});
+
 describe("AgentTurns: pi's replies", () => {
   it("gives the agents pi's reply names turns in a chain of their own, as hand-offs that only read", async () => {
     const chat = new FakeChat([A, B]);
@@ -1340,9 +1426,11 @@ describe("AgentTurns: pi's replies", () => {
 
     const text = "Looked. @bard take it from here.";
     chat.turns.fromPi(text, chat.piSays(text), { hop: handed.data.hop, root: handed.data.root });
+    // pi's answer is in: its place in the chain ends, and bard's turn starts.
+    chat.turns.piAnswered([handed.data.piTurn!]);
     await chat.flush();
     const tb = chat.latest(B);
-    expect(tb).toMatchObject({ hop: 2, root: turn.id, calledBy: { name: AGENT_NAME, agentId: AGENT_NAME } });
+    expect(tb).toMatchObject({ hop: 2, root: turn.id, calledBy: { name: AGENT_NAME, agentId: AGENT_NAME }, status: "running" });
 
     chat.finish(tb.id, done("@atlas over to you"));
     await chat.flush();
