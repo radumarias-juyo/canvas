@@ -1,6 +1,6 @@
 import { DurableObject, exports } from "cloudflare:workers";
 import type { ModelSetting } from "../shared/models.ts";
-import { PAGE_STORAGE_LIMITS, SOCKET_PING, MAX_CHAT_TITLE, type ArtifactSummary, type ChatStatus, type ChatSummary, type ChatRowChange, type MentionNotice, type Person, type SidebarList } from "../shared/protocol.ts";
+import { PAGE_STORAGE_LIMITS, SOCKET_PING, MAX_CHAT_TITLE, type ArtifactSummary, type ChatStatus, type ChatSummary, type ChatRowChange, type MentionNotice, type Person, type RunsNotice, type SidebarList } from "../shared/protocol.ts";
 import type { ExportedAgent, ExportedChat, ExportedPageValues, ExportedSkill, ExportStart, ImportedSettings } from "../shared/data-export.ts";
 import type { SkillFileInfo } from "../shared/skill-files.ts";
 import { checkSystemPrompt, type ChatSystemPrompt } from "../shared/system-prompt.ts";
@@ -9,8 +9,8 @@ import { BUILTIN_SKILLS, builtinSkill, parseSkillFile } from "./skills/index.ts"
 import { titleFromMessage, UNNAMED_CHAT } from "./agent/title.ts";
 import type { McpAuthChange, McpAuthRecord, McpAuthStore } from "./mcp/oauth.ts";
 import type { SignInCheck } from "./mcp/background.ts";
-import { McpSignIns } from "./mcp/sign-ins.ts";
-import { oauthServers } from "./mcp/servers.ts";
+import { McpSignIns, type SignInNeededContext } from "./mcp/sign-ins.ts";
+import { oauthServerNames } from "./mcp/servers.ts";
 import { chatAgentName } from "./chat-name.ts";
 import { PushSubscriptions, vapidKeys, type PushMessage } from "./push/subscriptions.ts";
 import type { PushSubscriptionKeys } from "./push/web-push.ts";
@@ -198,7 +198,7 @@ export class UserDirectory extends DurableObject<Env> {
    * A run needs a new sign-in to `server`: a notice with the sign-in link in the sidebar, the browser, and a push when no
    * app is open, once until they sign in. With `chatId`, that chat hears `ChatAgent.signedIn(server)` when they do.
    */
-  notifySignInNeeded(server: string, context: { chatId?: string; what?: string } = {}): Promise<void> {
+  notifySignInNeeded(server: string, context: SignInNeededContext = {}): Promise<void> {
     return this.#signIns.needed(server, context);
   }
 
@@ -264,7 +264,7 @@ export class UserDirectory extends DurableObject<Env> {
   }
 
   /** Tell the open sidebars that a list changed, or that someone tagged this user. */
-  #changed(message: SidebarList | MentionNotice | SignInNotice): void {
+  #changed(message: SidebarList | MentionNotice | RunsNotice | SignInNotice): void {
     const sent = typeof message === "string" ? message : JSON.stringify(message);
     for (const ws of this.ctx.getWebSockets()) {
       try {
@@ -385,6 +385,11 @@ export class UserDirectory extends DurableObject<Env> {
     this.#tellHome(home, agentId, agent);
     // A deleted agent's conversation stays, as an ordinary chat.
     if (!agent && this.ctx.storage.sql.exec("UPDATE chats SET agent_id = NULL WHERE agent_id = ?", agentId).rowsWritten) this.#changed("chats");
+  }
+
+  /** A run of agent `agentId` started, moved on or ended (its home chat says so): an open Runs tab reads it again. */
+  runsChanged(agentId: string): void {
+    this.#changed({ type: "runs", agentId });
   }
 
   /**
@@ -785,7 +790,7 @@ export class UserDirectory extends DurableObject<Env> {
    */
   saveAgent(input: unknown, origin: AgentOrigin, enabled?: boolean, save?: AgentSave): AgentResult {
     if (origin === "agent") {
-      const signIn = new Set(oauthServers(this.env).map((server) => server.name));
+      const signIn = new Set(oauthServerNames(this.env));
       input = withoutSignInShares(input, (server) => signIn.has(server));
       // An agent's limits (how far it goes on its own, its rules, its wait) are its owner's to set, on its Limits tab:
       // the model's draft keeps the ones it has (the defaults for a new one), whatever it asks for.

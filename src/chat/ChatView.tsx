@@ -657,7 +657,7 @@ const Entry = memo(function Entry({
     return <Assistant message={copied} reactions={reactions} onReply={answer} />;
   }
   if (entry.kind === CHAT_AGENT_KIND) {
-    return <AgentReply data={entry.data as unknown as ChatAgentReplyData} reactions={reactions} onReply={answer} onOpen={onOpen} />;
+    return <AgentReply data={entry.data as unknown as ChatAgentReplyData} chatId={chatId} reactions={reactions} onReply={answer} onOpen={onOpen} />;
   }
   if (entry.kind === CHAT_ACTION_KIND) return <ActionCard action={(entry.data as unknown as ChatActionData).action} />;
   if (entry.kind === "pi.assistant" && message?.role === "assistant") {
