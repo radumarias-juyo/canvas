@@ -311,10 +311,14 @@ export const api = {
   serverTools: (server: string) => request<ToolInfo[]>(`/api/limits/tools?server=${encodeURIComponent(server)}`),
   /** A dry run of an agent on today's data, nothing sent or changed: the due time of the run it started. */
   testAgent: (id: string) => request<{ dueAt: number }>(`/api/agents/${id}/test`, post({})),
-  /** An agent's runs, newest first, when it runs next, and its own chat (null before its first run). */
-  agentRuns: (id: string) => request<AgentRunList>(`/api/agents/${id}/runs`),
-  /** One run of an agent in full: its items and their steps, what it sent, what it used. */
-  agentRun: (id: string, dueAt: number) => request<AgentRunDetail>(`/api/agents/${id}/runs/${dueAt}`),
+  /**
+   * An agent's runs, newest first, when it runs next, and its own chat (null before its first run). Someone else's agent
+   * shared in chat `from`: only the runs that posted there.
+   */
+  agentRuns: (id: string, from?: string) => request<AgentRunList>(`/api/agents/${id}/runs${from ? `?${new URLSearchParams({ chat: from })}` : ""}`),
+  /** One run of an agent in full: its items and their steps, what it sent, what it used; from a chat, only its post there. */
+  agentRun: (id: string, dueAt: number, from?: string) =>
+    request<AgentRunDetail>(`/api/agents/${id}/runs/${dueAt}${from ? `?${new URLSearchParams({ chat: from })}` : ""}`),
   /** The entries of one item's session in a run, oldest first: the full trace. */
   agentRunTrace: (id: string, dueAt: number, item: string) =>
     request<{ entries: EntryRecord[] }>(`/api/agents/${id}/runs/${dueAt}/trace?${new URLSearchParams({ item })}`),
