@@ -20,6 +20,10 @@ import { isPicked, type Picks } from "./files/picks.ts";
 import { isBoolean, MenuButton, ResizeHandle, SectionHead, useMediaQuery, useStoredState } from "./layout.tsx";
 import { useLatest, useSidebarSocket } from "./sidebar.ts";
 import { SkillsView } from "./skills/SkillsView.tsx";
+import { AgentPage } from "./agents/AgentPage.tsx";
+import { AgentsNav } from "./agents/AgentsNav.tsx";
+import { agentPlace, type AgentPlace } from "./agents/nav.ts";
+import { reloadAgents } from "./agents/store.ts";
 
 /** The app's location, path and query, and a way to go elsewhere in it without loading the page again. */
 function usePath(): [URL, (path: string) => void] {
@@ -77,6 +81,7 @@ export function App() {
       secondSeat={chatId !== undefined && inSecondSeat(url.search)}
       opening={chatId && opening && ID_PATTERN.test(opening) ? opening : undefined}
       showSkills={path === "/skills"}
+      agentPage={agentPlace(url) ?? undefined}
       navigate={navigate}
       onSignOut={async () => {
         if (me.auth === "access") {
@@ -188,6 +193,8 @@ interface WorkspaceProps {
   opening: string | undefined;
   /** The skills page in place of a chat. */
   showSkills: boolean;
+  /** An agent's page in place of a chat. */
+  agentPage: AgentPlace | undefined;
   navigate: (path: string) => void;
   onSignOut: () => void;
 }
@@ -210,7 +217,7 @@ const PREVIEW_MIN = 360;
 /** Phones and narrow windows: one column, the sidebar a menu that slides in over it (styles.css, the same width). */
 const NARROW = "(max-width: 900px)";
 
-function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, navigate, onSignOut }: WorkspaceProps) {
+function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, agentPage, navigate, onSignOut }: WorkspaceProps) {
   const { chats, load: loadChats, newSince } = useChatList(chatId);
   const [artifacts, loadArtifacts] = useLatest<ArtifactSummary[]>(api.artifacts, []);
   const [files, loadFiles] = useLatest<FileInfo[]>(api.files, []);
@@ -257,7 +264,7 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, naviga
   // may have saved some (run_python), so they are read again after each one.
   // Someone tagging the user shows in the app, and in the browser while it is in the background.
   const notices = useMentionNotices(chatId, navigate);
-  useSidebarSocket({ chats: loadChats, artifacts: loadArtifacts, skills: loadSkills }, notices.onMention);
+  useSidebarSocket({ chats: loadChats, artifacts: loadArtifacts, skills: loadSkills, agents: reloadAgents }, notices.onMention);
   // Another chat shows its own artifacts: the one asked for at once, else the newest it published once it loads.
   // Going to the same chat without one asked for (its sidebar link, Back) keeps what it shows: the chat does not load
   // again, so it would not offer its newest artifact.
@@ -278,7 +285,7 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, naviga
 
   // The menu closes once the user picked something in it: a chat, the skills, a file or an artifact to preview; and when
   // the window widens past NARROW, so it does not open again by itself when it narrows.
-  useEffect(() => setMenuOpen(false), [chatId, showSkills, preview, narrow]);
+  useEffect(() => setMenuOpen(false), [chatId, showSkills, agentPage?.id, preview, narrow]);
   useEffect(() => {
     if (!menuOpen) return;
     const onKey = (event: KeyboardEvent) => event.key === "Escape" && setMenuOpen(false);
@@ -426,6 +433,7 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, naviga
                 )}
               </>
             )}
+            <AgentsNav openId={agentPage?.id} navigate={navigate} />
             <h3>Skills</h3>
             <nav>
               <a
@@ -467,13 +475,18 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, naviga
       {narrow && menuOpen && <div className="drawer-backdrop" onClick={() => setMenuOpen(false)} aria-hidden="true" />}
       <main className="main" ref={chatRef}>
         {/* A chat has its own header, with the menu button in it. */}
-        {narrow && (showSkills || !chatId) && (
+        {narrow && (showSkills || !chatId) && !agentPage && (
           <header className="chat-header">
             <MenuButton onClick={openMenu} />
             <h1 className="chat-title">{showSkills ? "Skills" : "Chats"}</h1>
           </header>
         )}
-        {showSkills ? (
+        {agentPage ? (
+          // One page for every agent, so a notice of a save that made another (a new agent, a copy) shows on that one.
+          <ErrorBoundary key="agent" what="this agent">
+            <AgentPage place={agentPage} chats={chats} navigate={navigate} onMenu={narrow ? openMenu : undefined} />
+          </ErrorBoundary>
+        ) : showSkills ? (
           <ErrorBoundary what="skills">
             <SkillsView skills={skills} loadError={skillsError} reload={loadSkills} />
           </ErrorBoundary>

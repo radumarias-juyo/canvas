@@ -1,7 +1,8 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode, type RefObject } from "react";
-import { CHAT_AGENT_KIND, type ChatAgentReplyData } from "../../shared/agents.ts";
+import { CHAT_AGENT_KIND, proposedBy, type ChatAgentReplyData } from "../../shared/agents.ts";
+import { DraftCard } from "../agents/DraftCard.tsx";
 import { baseName, imageBudget, MAX_ATTACHMENTS, type Attachment } from "../../shared/attachments.ts";
 import { MAX_FILE_BYTES } from "../../shared/uploads.ts";
 import { errorMessage, formatBytes } from "../../shared/util.ts";
@@ -235,6 +236,18 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
     void submit();
   };
 
+  // "Make an agent" in the composer's menu: the ask starts the message, and the viewer says what the agent is for. pi
+  // drafts it (agent_propose), and its card shows here.
+  const makeAgent = useCallback(() => {
+    const start = `${shared ? `${AGENT_TOKEN} ` : ""}Make me an agent that `;
+    setDraft((current) => (current.trim() ? `${start}${current.trim()}` : start));
+    requestAnimationFrame(() => {
+      const el = input.current;
+      el?.focus();
+      el?.setSelectionRange(el.value.length, el.value.length);
+    });
+  }, [shared]);
+
   // Dictated words join the draft with a space between them.
   // Stable, so the memoized Dictation skips the re-render on every streamed token.
   const dictated = useCallback((text: string) => setDraft((current) => (current && !/\s$/.test(current) ? `${current} ${text}` : current + text)), []);
@@ -341,6 +354,7 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
                             onAskAgent={askAgent}
                             onNoHint={dropHint}
                             onOpenChat={onOpenChat}
+                            chatId={chatId}
                           />
                         </EntryOf.Provider>
                         {spend && <PromptCost spend={spend} />}
@@ -497,6 +511,7 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
                 history={history}
                 onRecall={recalling.recall}
                 compact={compact}
+                onMakeAgent={makeAgent}
               />
               {/* The model and the context ring at the right. Stop and the transcript show a run; only an upload needs the spinner. */}
               <div className="composer-model">
@@ -533,6 +548,7 @@ const Entry = memo(function Entry({
   onAskAgent,
   onNoHint,
   onOpenChat,
+  chatId,
 }: {
   entry: EntryRecord;
   /** Where an agent message's steps show (stepRuns.ts). */
@@ -549,6 +565,8 @@ const Entry = memo(function Entry({
   onAskAgent: (entry: number) => void;
   onNoHint: (entry: number) => void;
   onOpenChat?: (chatId: string) => void;
+  /** The chat it is in: where an agent pi drafted is brought when its owner turns it on from its card. */
+  chatId: string;
 }) {
   const people = useSharedChat();
   const reactions = useMessageReactions(isReactable(entry) ? entry.id : undefined, byEmoji);
@@ -604,6 +622,9 @@ const Entry = memo(function Entry({
   if (entry.kind === "pi.tool-result" && message?.role === "toolResult") {
     const artifact = published(entry);
     if (artifact) return <ArtifactCard artifact={artifact} onOpen={onOpen} />;
+    const drafted = proposedBy(entry);
+    // Only the owner has the draft: pi saves it in their directory. A chat nobody else is in is the viewer's own.
+    if (drafted) return <DraftCard details={drafted} chatId={chatId} mine={!people || people.owner.uid === uid} />;
     return <OrphanResult message={message} />;
   }
   return null;

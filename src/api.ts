@@ -1,8 +1,9 @@
-import type { AgentDefinition, AgentInput, ChatAgents, ChatAgentView } from "../shared/agents.ts";
+import type { AgentChanges, AgentChatUse, AgentDefinition, AgentInput, AgentServerInfo, ChatAgents, ChatAgentView, SharedAgentView } from "../shared/agents.ts";
 import type {
   ArtifactVersionImport,
   ChatDumpCursor,
   ChatImportStart,
+  ExportedAgent,
   ExportedChat,
   ExportedPageValues,
   ExportedSkill,
@@ -233,6 +234,18 @@ export const api = {
   /** (owner) Bring one of their agents into the chat. */
   addChatAgent: (chatId: string, agentId: string) => request<ChatAgentView[]>(chatPath(chatId, "/agents"), post({ agentId })),
   removeChatAgent: (chatId: string, agentId: string) => request<ChatAgentView[]>(chatPath(chatId, `/agents/${agentId}`), { method: "DELETE" }),
+  /** The MCP servers an agent may use, and which this user signed in to. */
+  agentServers: () => request<AgentServerInfo[]>("/api/agents/servers"),
+  /** The chats one of the user's agents is in, with whether it is shared in each. */
+  agentChats: (id: string) => request<AgentChatUse[]>(`/api/agents/${id}/chats`),
+  /** One agent of a chat, read-only: the owner's own, or one its owner shares with the chat. */
+  sharedAgent: (chatId: string, agentId: string) => request<SharedAgentView>(chatPath(chatId, `/agents/${agentId}`)),
+  /** (owner) Share one of the chat's agents with its people, or stop. */
+  shareChatAgent: (chatId: string, agentId: string, shared: boolean) => request<ChatAgentView[]>(chatPath(chatId, `/agents/${agentId}`), send("PATCH", { shared })),
+  /** The user's own copy of an agent shared in a chat, with their changes: saved off, with where it came from. */
+  copyAgent: (chatId: string, agentId: string, changes: AgentChanges & { version: number }) => request<AgentDefinition>(chatPath(chatId, `/agents/${agentId}/copy`), post(changes)),
+  /** A dry run of an agent on today's data, nothing sent or changed. Throws with status 404 where testing is not there yet. */
+  testAgent: (id: string) => request<unknown>(`/api/agents/${id}/test`, post({})),
   skills: () => request<SkillInfo[]>("/api/skills"),
   /** Save one of the user's skills, from its fields or from a SKILL.md file's text. */
   saveSkill: (skill: (SkillInput | { markdown: string }) & { enabled?: boolean }) => request<SkillInfo>("/api/skills", post(skill)),
@@ -305,6 +318,8 @@ export const dataApi = {
   plan: (body: ImportPlanRequest) => request<ImportPlan>("/api/me/import/plan", post(body)),
   importSettings: (settings: ImportedSettings) => request<{ applied: string[] }>("/api/me/import/account", post(settings)),
   importSkill: (skill: ExportedSkill, files: ExportedSkillFiles["files"]) => request<{ skipped?: string }>("/api/me/import/skills", post({ skill, files })),
+  /** One agent; the id it has here, `skipped` when the user has one of its name (which a chat's roster then points at). */
+  importAgent: (agent: ExportedAgent) => request<{ id: string; skipped?: true }>("/api/me/import/agents", post({ agent })),
   /** One file at its own path; `skipped` when there is one there already. */
   importFile: (path: string, body: Blob) => request<{ skipped?: true }>(`/api/me/import/files/${encodePath(path)}`, { method: "PUT", body }),
   importChatBegin: (chatId: string, start: ChatImportStart) => request<object>(`/api/me/import/chats/${chatId}/begin`, post(start)),
