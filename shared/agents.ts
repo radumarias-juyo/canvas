@@ -622,7 +622,11 @@ export interface ChatAgents {
  * then the turn that named pi, and `root` the chain it is in, which pi's answer carries on.
  */
 export const CHAT_TURN_KIND = "chat.turn";
-export type ChatTurnData = { turn: number; calledBy: ChatAgentReplyData["calledBy"]; hop: number; root?: number };
+/**
+ * What a turn's input entry says of it: its turn, who called it, its hop, and for a turn handed to pi the chain it is
+ * in (`root`) and the person who started that chain (`by`, whom the turns pi's answer hands on count for).
+ */
+export type ChatTurnData = { turn: number; calledBy: ChatAgentReplyData["calledBy"]; hop: number; root?: number; by?: string };
 
 /** How an agent is labelled in the lines its sessions read: "[research · agent]", "[Ana · person · your owner]". */
 export function speakerLabel(speaker: { name: string; kind: "person" | "agent"; owner?: boolean }): string {

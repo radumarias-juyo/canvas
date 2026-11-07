@@ -908,8 +908,11 @@ describe("Member agents: what the review of private turns found", () => {
     await settle();
     // Held for review: still withheld, until its owner posts it.
     expect(chat.roster.withheld()).toEqual(new Set([first]));
+    expect(chat.roster.forks().get(first)).toEqual({ posted: false, ended: true });
     expect(await chat.turns.post(RADU.uid, planner.agentId, kept.id)).toBeNull();
     expect(chat.roster.withheld()).toEqual(new Set());
+    // Kept as a fork, ended: its session is read once more, as the chat's, and then no more.
+    expect(chat.roster.forks().get(first)).toEqual({ posted: true, ended: true });
 
     const [dropped] = chat.turns.call([planner.agentId], chat.say(RADU, "@planner again"));
     await settle();

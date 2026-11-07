@@ -71,6 +71,8 @@ export class AgentSeats {
   readonly #host: SeatHost;
   /** The turns this object waits on, so a wake does not wait on one twice. */
   readonly #waiting = new Set<string>();
+  /** Whether a wake for the results no room took is set already (#report): one alarm wakes them all. */
+  #later = false;
 
   constructor(sql: Sql, host: SeatHost) {
     this.#sql = sql;
@@ -291,8 +293,12 @@ export class AgentSeats {
         console.error("agent seat, reply:", errorMessage(error));
         const delay = REPORT_RETRIES[attempt];
         if (delay === undefined) {
-          // The room's turn runs until it hears: try again later, also when nothing wakes this object.
-          this.#host.later(REPORT_LATER);
+          // The room's turn runs until it hears: try again later, also when nothing wakes this object. One alarm for
+          // all of them, as its wake posts every result again: one each would set as many again on every wake.
+          if (!this.#later) {
+            this.#later = true;
+            this.#host.later(REPORT_LATER);
+          }
           return;
         }
         await new Promise((resolve) => setTimeout(resolve, delay));
@@ -311,6 +317,8 @@ export class AgentSeats {
    * run. Only `ref`'s, or every room's.
    */
   wake(ref?: RoomRef): void {
+    // Every room's: the alarm's wake (or a restart's), after which a failed post sets another.
+    if (!ref) this.#later = false;
     const rows = (
       ref
         ? this.#sql.exec("SELECT * FROM agent_seat_turns WHERE room_owner = ? AND room_chat = ?", ref.ownerUid, ref.chatId)

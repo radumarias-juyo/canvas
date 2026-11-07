@@ -291,6 +291,9 @@ const PI_SCAN_KEY = "piScan";
  * named (`withheld`), and of those what is in no other session (`hidden`): not the chat's for anyone but its owner.
  */
 type SessionTraces = { shared: ChatTraces; withheld: ChatTraces; hidden: ChatTraces };
+/** What some of the chat's sessions name (#readTraces): how far each was read, and those read to their end for good. */
+type SeenTraces = { through: Map<string, number>; settled: Set<string>; traces: ChatTraces };
+const seenTraces = (): SeenTraces => ({ through: new Map(), settled: new Set(), traces: chatTraces([]) });
 /** How far #piScan read pi's log, the chain pi's next answer is in, and the person who started it (`by`, whom its turns count for). */
 type PiScan = { through: number; chain?: { hop: number; root: number }; by?: string };
 /**
@@ -480,9 +483,9 @@ export class ChatAgent extends DurableObject<Env> {
   /** The last read of the queue, by the inbox ids it was for: every socket asks after the same commit. */
   #queuedRead: { key: string; read: Promise<QueuedMessage[]> } | undefined;
   /** What the transcript names, and how far each of pi's sessions was read for it (see #readTraces). */
-  #seen: { through: Map<string, number>; traces: ChatTraces } = { through: new Map(), traces: chatTraces([]) };
+  #seen: SeenTraces = seenTraces();
   /** The same, of the forks whose replies were not posted (ChatRoster.withheld): only the owner's (see #readTraces). */
-  #seenWithheld: { through: Map<string, number>; traces: ChatTraces } = { through: new Map(), traces: chatTraces([]) };
+  #seenWithheld: SeenTraces = seenTraces();
   /** The pages only forks whose replies were not posted published, as last read with no fork running (#withheldPage). */
   #hiddenPages: Set<string> | undefined;
   /** How often the roster's turns changed (#broadcastAgents): what keeps #hiddenPages from a read that raced one. */
@@ -1627,8 +1630,17 @@ export class ChatAgent extends DurableObject<Env> {
 
   /** The owner's files that belong to this chat (#isChatFile) and are still there, as the people it is shared with see them. */
   async chatFiles(): Promise<FileEntry[]> {
+    return (await this.#chatFiles(false)).files;
+  }
+
+  /**
+   * The chat's files that are still there (chatFiles), with the traces they were read by; `forOwner`: also those only a
+   * fork whose reply was not posted saved, which are the chat's for its owner.
+   */
+  async #chatFiles(forOwner: boolean): Promise<{ files: FileEntry[]; traces: SessionTraces }> {
     const [traces, listed] = await Promise.all([this.#readTraces(), this.scope.files().then((files) => files.list())]);
-    return listed.filter((file) => this.#inChat(file.path, traces));
+    const inChat = (path: string) => this.#inChat(path, traces) || (forOwner && traces.withheld.files.has(path));
+    return { files: listed.filter((file) => inChat(file.path)), traces };
   }
 
   /**
@@ -1654,9 +1666,10 @@ export class ChatAgent extends DurableObject<Env> {
    */
   async contents(uid: string): Promise<ChatContents | null> {
     if (!this.isInChat(uid)) return null;
-    const [files, artifacts, { hidden }] = await Promise.all([this.chatFiles(), this.#directory.listChatArtifacts(this.chatId), this.#readTraces()]);
-    if (uid === this.uid) return { files: newestFirst(files), artifacts };
-    const visible = artifacts.filter((artifact) => !hidden.artifacts.has(artifact.id));
+    const owner = uid === this.uid;
+    const [{ files, traces }, artifacts] = await Promise.all([this.#chatFiles(owner), this.#directory.listChatArtifacts(this.chatId)]);
+    if (owner) return { files: newestFirst(files), artifacts };
+    const visible = artifacts.filter((artifact) => !traces.hidden.artifacts.has(artifact.id));
     return { files: newestFirst(files), artifacts: visible.map(({ unread: _, ...artifact }) => artifact) };
   }
 
@@ -2464,15 +2477,19 @@ export class ChatAgent extends DurableObject<Env> {
    * fork's reply posted, its session is read again into `shared`.
    */
   readonly #readTraces = singleFlight(async (): Promise<SessionTraces> => {
-    const withheld = this.roster.withheld();
     for (const { id } of await this.harness.sessions.list()) {
-      const seen = withheld.has(id) ? this.#seenWithheld : this.#seen;
+      // Asked per session, as a fork may be made while the read goes on (it holds only what it inherited until then).
+      const fork = this.roster.forks().get(id);
+      const seen = fork && !fork.posted ? this.#seenWithheld : this.#seen;
+      // A fork whose turn ended takes no more entries: read to its end once, it is not read again.
+      if (seen.settled.has(id)) continue;
       const query = { order: "ascending", minEntryId: ((seen.through.get(id) ?? -1) + 1) as EntryId } as const;
       for await (const page of entryPages(await this.harness.conversation(id), query, 500)) {
         chatTraces(page, seen.traces);
         const last = page.at(-1);
         if (last) seen.through.set(id, last.id as number);
       }
+      if (fork?.ended) seen.settled.add(id);
     }
     const [shared, held] = [this.#seen.traces, this.#seenWithheld.traces];
     const only = (of: Set<string>, but: Set<string>) => new Set([...of].filter((value) => !but.has(value)));
@@ -2718,7 +2735,7 @@ export class ChatAgent extends DurableObject<Env> {
         if (entry.kind === CHAT_TURN_KIND) {
           const data = entry.data as Partial<ChatTurnData> | undefined;
           chain = typeof data?.hop === "number" && typeof data.root === "number" ? { hop: data.hop, root: data.root } : undefined;
-          by = typeof data?.turn === "number" ? this.roster.turn(data.turn)?.by : undefined;
+          by = typeof data?.by === "string" ? data.by : undefined;
         } else if (entry.kind === "pi.user") {
           chain = undefined;
           by = this.uid;
@@ -3140,12 +3157,14 @@ export class ChatAgent extends DurableObject<Env> {
     // Before its session is made: a session made for an agent the roster refuses would stay, read by every traces read.
     const early = this.roster.refusal(name);
     if (early) return early;
-    const first = !this.roster.hasAny();
     const [session, newest] = await Promise.all([
       // A member's runs in their own object: no session here.
       member ? "" : this.harness.sessions.create().then((made) => made.id as string),
-      first || member ? this.#root().then((root) => root.entries({ order: "descending" }, 1, undefined, BACKGROUND_CONTEXT)) : undefined,
+      // Read for every add (one entry): whether it is the first is known only after the awaits, as agents added at once
+      // must not both start pi's scan over.
+      this.#root().then((root) => root.entries({ order: "descending" }, 1, undefined, BACKGROUND_CONTEXT)),
     ]);
+    const first = !this.roster.hasAny();
     const newestId = (newest?.items[0]?.id as number | undefined) ?? -1;
     const refused = this.roster.add({
       agentId: agent.id,

@@ -459,7 +459,13 @@ export class AgentTurns {
       if (roster.outbox(id)?.toPi) {
         const calledBy = { name: reply.name, agentId: reply.agentId };
         const handed = { calledBy, hop: turn.hop + 1, ask: askOf({ name: reply.name, kind: "agent" }, reply.text, MAX_ASK_CHARS) };
-        await this.#host.handToPi(turnInput(handed), { turn: id, calledBy, hop: handed.hop, root: turn.root });
+        await this.#host.handToPi(turnInput(handed), {
+          turn: id,
+          calledBy,
+          hop: handed.hop,
+          root: turn.root,
+          ...(turn.by !== undefined && { by: turn.by }),
+        });
       } else await this.#host.tellPi(reply);
     } catch (error) {
       console.error("agent reply:", errorMessage(error));

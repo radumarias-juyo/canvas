@@ -641,7 +641,10 @@ describe("AgentTurns: hand-offs", () => {
     expect(chat.posts).toEqual([{ forPi: false, reply: expect.objectContaining({ text }) }]);
     const calledBy = { name: A, agentId: idOf(A) };
     expect(chat.toPi).toEqual([
-      { input: turnInput({ calledBy, hop: 1, ask: `[atlas · agent]: ${text}` }), data: { turn: turn.id, calledBy, hop: 1, root: turn.id } },
+      {
+        input: turnInput({ calledBy, hop: 1, ask: `[atlas · agent]: ${text}` }),
+        data: { turn: turn.id, calledBy, hop: 1, root: turn.id, by: OWNER.uid },
+      },
     ]);
     expect(chat.asides).toEqual([]);
     expect(chat.calls.slice(-2)).toEqual([`post ${A}`, "hand to pi"]);

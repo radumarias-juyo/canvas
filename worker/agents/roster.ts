@@ -215,7 +215,7 @@ export class ChatRoster {
       CREATE INDEX IF NOT EXISTS chat_agent_turns_by_agent ON chat_agent_turns (agent_id, status, id);
       CREATE INDEX IF NOT EXISTS chat_agent_turns_by_status ON chat_agent_turns (status);
       CREATE INDEX IF NOT EXISTS chat_agent_turns_by_root ON chat_agent_turns (root);
-      CREATE TABLE IF NOT EXISTS chat_agent_withheld (session TEXT PRIMARY KEY);
+      CREATE TABLE IF NOT EXISTS chat_agent_forks (session TEXT PRIMARY KEY, posted INTEGER NOT NULL DEFAULT 0);
     `);
     // Columns added later: a roster or turn table made before them lacks them.
     addColumns(sql, "chat_agents", {
@@ -424,25 +424,32 @@ export class ChatRoster {
 
   /**
    * A turn runs in a session of its own (a fork of its agent's): set before its input goes in. What the fork publishes
-   * or saves is withheld from the chat's listings until its reply is posted (`withheld`).
+   * or saves is withheld from the chat's listings until its reply is posted (`forks`).
    */
   setFork(id: number, session: string): void {
     if (this.#sql.exec("UPDATE chat_agent_turns SET session = ?, forked = 1 WHERE id = ? AND status = 'running'", session, id).rowsWritten) {
-      this.#sql.exec("INSERT INTO chat_agent_withheld (session) VALUES (?) ON CONFLICT DO NOTHING", session);
+      this.#sql.exec("INSERT INTO chat_agent_forks (session) VALUES (?) ON CONFLICT DO NOTHING", session);
     }
   }
 
   /**
-   * The forks whose turns' replies were not posted (yet): running, held for review, discarded, stopped. What they
-   * published or saved is not the chat's for anyone but its owner.
+   * Every fork made for a turn, kept for good (a turn row is not): whether its reply was `posted` (until then what it
+   * published or saved is not the chat's for anyone but its owner: it runs, is held for review, was discarded or
+   * stopped), and whether it `ended`, after which its session takes no more entries.
    */
+  forks(): Map<string, { posted: boolean; ended: boolean }> {
+    const rows = this.#sql
+      .exec(
+        `SELECT f.session, f.posted, t.status FROM chat_agent_forks f
+         LEFT JOIN chat_agent_turns t ON t.session = f.session AND t.forked = 1`,
+      )
+      .toArray() as { session: string; posted: number; status: AgentTurnStatus | null }[];
+    return new Map(rows.map((row) => [row.session, { posted: row.posted === 1, ended: row.status !== "queued" && row.status !== "running" }]));
+  }
+
+  /** The forks whose replies were not posted: forks() of those. */
   withheld(): Set<string> {
-    return new Set(
-      this.#sql
-        .exec("SELECT session FROM chat_agent_withheld")
-        .toArray()
-        .map((row) => row.session as string),
-    );
+    return new Set([...this.forks()].flatMap(([session, fork]) => (fork.posted ? [] : [session])));
   }
 
   /** A running turn's input reached its session: a restart waits on it, where one not submitted yet starts again. */
@@ -550,7 +557,7 @@ export class ChatRoster {
       )
       .toArray()[0] as Pick<TurnRow, "session" | "forked"> | undefined;
     // Its fork's pages and files are the chat's now, as its reply is.
-    if (row?.forked === 1 && row.session !== null) this.#sql.exec("DELETE FROM chat_agent_withheld WHERE session = ?", row.session);
+    if (row?.forked === 1 && row.session !== null) this.#sql.exec("UPDATE chat_agent_forks SET posted = 1 WHERE session = ?", row.session);
   }
 
   /** Drop a held reply, as its owner discards it: it never reaches the chat. */
