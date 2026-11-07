@@ -5,7 +5,14 @@ import { AGENT_NAME_PATTERN, copyName, RESERVED_AGENT_NAMES } from "../../../sha
  * chats (no route reaches a chat id with a hyphen). The agent's own home conversation can take this over.
  */
 export function seatChatId(agentId: string): string {
-  return `seat-${agentId}`;
+  return `${SEAT_PREFIX}${agentId}`;
+}
+
+const SEAT_PREFIX = "seat-";
+
+/** The agent whose seats an object of `chatId` holds (seatChatId); null for any other chat. */
+export function seatAgentOf(chatId: string): string | null {
+  return chatId.startsWith(SEAT_PREFIX) ? chatId.slice(SEAT_PREFIX.length) || null : null;
 }
 
 /**

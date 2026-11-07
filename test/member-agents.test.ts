@@ -6,10 +6,11 @@ import type { McpToolInfo } from "../worker/agent/mcp.ts";
 import { AgentTurns, operationId, type Caller, type TurnHost, type TurnResult } from "../worker/agents/controller.ts";
 import { ChatRoster, type RosterEntry, type RunningTurn } from "../worker/agents/roster.ts";
 import type { RoomLink, RoomRef, SeatBatch, SeatLink, SeatResult, SeatTurn } from "../worker/agents/seats/link.ts";
-import { memberAgentName, seatChatId } from "../worker/agents/seats/names.ts";
+import { memberAgentName, seatAgentOf, seatChatId } from "../worker/agents/seats/names.ts";
 import { addRefusal, mayRemove, mayShare, seatedEntry, type ChatRules } from "../worker/agents/seats/rules.ts";
 import { AgentSeats, type SeatHost } from "../worker/agents/seats/seat.ts";
 import { allowedTools, askLine, askOf, messageAskKey, sharedServer, turnSources, UNKNOWN_SOURCE } from "../worker/agents/turns.ts";
+import type { MemoryAgent } from "../worker/memory/chat.ts";
 import { memorySql } from "./fakes.ts";
 
 const T0 = 1_000_000;
@@ -72,7 +73,8 @@ function result(toolName: string, records: { id: string; title: string }[]): Ent
 class Sessions {
   readonly writes: { session: string; text: string; requestId: string }[] = [];
   readonly submits: { session: string; input: string; operationId: string; data: ChatTurnData }[] = [];
-  readonly configured: { session: string; byOwner: boolean }[] = [];
+  /** Each turn's set-up, with what its memory notes read as then (AgentSeats.memoryAgent, as ChatMemory asks it). */
+  readonly configured: { session: string; byOwner: boolean; memory?: MemoryAgent | null }[] = [];
   readonly aborts: string[] = [];
   readonly forks = new Map<string, string>();
   /** Per session and turn, what turnEntries returns. */
@@ -164,7 +166,7 @@ class MemberObject implements SeatHost {
     this.sessions.write(session, text, requestId);
   }
   async configure(session: string, _agent: AgentDefinition, turn: SeatTurn) {
-    this.sessions.configured.push({ session, byOwner: turn.byOwner });
+    this.sessions.configured.push({ session, byOwner: turn.byOwner, memory: this.seats.memoryAgent(session) });
   }
   async submit(session: string, input: string, op: string, data: ChatTurnData) {
     this.sessions.submit(session, input, op, data);
@@ -330,7 +332,7 @@ class Room implements TurnHost {
       give: async (batch, turn) => {
         const error = this.giveErrors.shift();
         if (error) throw error;
-        return object.seats.give(ROOM, entry.agentId, { ...turn, ownerName: entry.ownerUid }, batch);
+        return object.seats.give(ROOM, entry.agentId, { ...turn, ownerName: entry.ownerUid, kind: "group" }, batch);
       },
       abort: (turn) => {
         this.seatAborts.push(turn);
@@ -467,7 +469,7 @@ describe("Member agents: a seat in the member's own object", () => {
     const [seatSession] = ana.sessions.submits.map((submit) => submit.session);
     expect(ana.sessions.textOf(seatSession)).toContain("[Mia · person]: Lunch at noon?");
     // Radu is the chat's owner, not the agent's: the turn only reads, and is labelled as anyone's.
-    expect(ana.sessions.configured).toEqual([{ session: seatSession, byOwner: false }]);
+    expect(ana.sessions.configured).toEqual([{ session: seatSession, byOwner: false, memory: expect.objectContaining({ byOwner: false }) }]);
     expect(ana.sessions.submits[0].input).not.toContain("your owner");
 
     ana.sessions.finish(byRadu.id, "We know the Q3 numbers.", [result("db_query", [{ id: "r1", title: "Q3" }])]);
@@ -483,7 +485,7 @@ describe("Member agents: a seat in the member's own object", () => {
     await settle();
     const fork = ana.sessions.sessionOf(byAna.id);
     expect(ana.sessions.forks.get(fork)).toBe(seatSession);
-    expect(ana.sessions.configured.at(-1)).toEqual({ session: fork, byOwner: true });
+    expect(ana.sessions.configured.at(-1)).toMatchObject({ session: fork, byOwner: true });
     // The seat's own session reads her ask, which went into the fork only.
     expect(ana.sessions.textOf(seatSession)).toContain("@planner and mine?");
     expect(ana.sessions.submits.at(-1)!.input).toContain("your owner");
@@ -504,6 +506,7 @@ describe("Member agents: a seat in the member's own object", () => {
       ask: "[x · person]: hi",
       input: "Your turn",
       ownerName: "Ana",
+      kind: "group",
       byOwner: true,
       ...over,
     });
@@ -512,6 +515,43 @@ describe("Member agents: a seat in the member's own object", () => {
     await ana.seats.give(ROOM, "p", turn(ANA.uid, { turn: 9 }));
     await ana.seats.give(ROOM, "p", turn(ANA.uid, { turn: 10, unattended: true }));
     expect(ana.sessions.configured.map((configured) => configured.byOwner)).toEqual([false, false, true, false]);
+  });
+
+  it("reads a seat's sessions as its room for memory notes: its kind, never alone, the owner's only on a turn they asked for", async () => {
+    const ana = new MemberObject(ANA.uid);
+    ana.definitions.set("p", definition("p", "planner"));
+    ana.rooms.set(`${ROOM.ownerUid}:${ROOM.chatId}`, room());
+    const turn = (id: number, uid: string, over: Partial<SeatTurn> = {}): SeatTurn => ({
+      turn: id,
+      calledBy: { name: uid, uid },
+      hop: 0,
+      ask: "[x · person]: hi",
+      input: "Your turn",
+      ownerName: "Ana",
+      kind: "group",
+      byOwner: uid === ANA.uid,
+      ...over,
+    });
+    await ana.seats.give(ROOM, "p", turn(1, MIA.uid));
+    await ana.seats.give(ROOM, "p", turn(2, ANA.uid, { kind: "page" }));
+    // Said to be hers by the room, but a hand-off: not her turn.
+    await ana.seats.give(ROOM, "p", turn(3, ANA.uid, { hop: 1 }));
+    const inRoom = (kind: string | null) => ({ chatId: ROOM.chatId, kind });
+    expect(ana.sessions.configured.map((configured) => configured.memory)).toEqual([
+      { agentId: "p", ownerUid: ANA.uid, name: "planner", byOwner: false, room: inRoom("group") },
+      { agentId: "p", ownerUid: ANA.uid, name: "planner", byOwner: true, room: inRoom("page") },
+      { agentId: "p", ownerUid: ANA.uid, name: "planner", byOwner: false, room: inRoom("group") },
+    ]);
+    const [shared, fork] = [ana.sessions.sessionOf(1), ana.sessions.sessionOf(2)];
+    expect(fork).not.toBe(shared);
+    // Once its turns end the room's kind is not known: nothing is read there, and nothing saved as its owner's. A fork
+    // whose turn the room took is no seat's (the chat object reads it as a room of no kind: seatAgentOf).
+    for (const id of [1, 2, 3]) ana.sessions.finish(id, "Done.");
+    await settle();
+    expect(ana.seats.memoryAgent(shared)).toMatchObject({ byOwner: false, room: inRoom(null) });
+    expect(ana.seats.memoryAgent(fork)).toBeNull();
+    expect(seatAgentOf(seatChatId("p"))).toBe("p");
+    expect([seatAgentOf("c1"), seatAgentOf("seat-")]).toEqual([null, null]);
   });
 
   it("keeps an agent id to whoever brought it first: another person's agent with the same id is refused", () => {
@@ -646,6 +686,7 @@ describe("Member agents: a seat in the member's own object", () => {
       ask: "[Ana · person · your owner]: @planner hi",
       input: given.input,
       ownerName: "Ana",
+      kind: "group",
       byOwner: true,
     });
     expect(ana.sessions.submits).toHaveLength(1);
@@ -954,6 +995,7 @@ describe("Member agents: what the review of private turns found", () => {
       ask: "[Mia · person]: hi",
       input: "Your turn",
       ownerName: "Ana",
+      kind: "group",
       byOwner: false,
     });
     await ana.seats.give(ROOM, "p", turn(1));

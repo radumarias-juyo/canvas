@@ -4,6 +4,7 @@
 // in, and only a turn's reply (with what the app recorded of its calls) comes back.
 
 import type { ChatTurnData } from "../../../shared/agents.ts";
+import type { ChatKind } from "../../../shared/chat-kinds.ts";
 import type { Outputs, TurnResult } from "../controller.ts";
 
 /** Which room a seat is for: the chat's owner and id, from which its object's name is built. */
@@ -35,6 +36,8 @@ export interface SeatTurn extends ChatTurnData {
   input: string;
   /** The agent's owner's name as the room shows it: its instructions name them. */
   ownerName: string;
+  /** The room's kind as the turn starts: the seat's memory notes read as that chat's (ChatMemory, MemoryAgent.room). */
+  kind: ChatKind;
   /** Its owner asked for it: the seat checks this against the asker itself before it offers any private server. */
   byOwner: boolean;
   /** In a chain no person started (a run's hand-over): it only reads, whatever `byOwner` says. */
@@ -49,9 +52,9 @@ export interface SeatLink {
   /**
    * Give the agent a turn, after the lines of the log said since it last read (`batch`, none when nothing new); returns
    * once its input is in, with the newest log entry the seat has taken (its delivered seq). Giving one twice places it
-   * once. The link adds its owner's name.
+   * once. The link adds its owner's name and the room's kind.
    */
-  give(batch: SeatBatch | null, turn: Omit<SeatTurn, "ownerName">): Promise<number>;
+  give(batch: SeatBatch | null, turn: Omit<SeatTurn, "ownerName" | "kind">): Promise<number>;
   /** Stop a turn the seat runs. */
   abort(turn: number): Promise<void>;
   /** Have the seat send again the results of the turns it ended that the room has not taken (after a restart of either). */

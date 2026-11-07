@@ -5,8 +5,10 @@
 
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import type { AgentDefinition, ChatTurnData } from "../../../shared/agents.ts";
+import type { ChatKind } from "../../../shared/chat-kinds.ts";
 import { errorMessage } from "../../../shared/util.ts";
-import type { Sql } from "../../members.ts";
+import { addColumns, type Sql } from "../../members.ts";
+import type { MemoryAgent } from "../../memory/chat.ts";
 import { operationId, outputsOf, unreadOutputs, type Outputs, type TurnResult } from "../controller.ts";
 import { askedApart } from "../turns.ts";
 import type { RoomLink, RoomRef, SeatBatch, SeatResult, SeatTurn } from "./link.ts";
@@ -52,6 +54,9 @@ type SeatTurnRow = {
   forked: number;
   status: "running" | "ended";
   result: string | null;
+  /** The room's kind and the agent's name as the turn started: what its memory notes go by (memoryAgent). */
+  kind: string | null;
+  name: string | null;
 };
 
 /** How long a seat waits before it posts a turn's result again, after each failed post (#report); then REPORT_LATER. */
@@ -87,6 +92,29 @@ export class AgentSeats {
         forked INTEGER NOT NULL, status TEXT NOT NULL, result TEXT, PRIMARY KEY (room_owner, room_chat, turn)
       );
     `);
+    addColumns(sql, "agent_seat_turns", { kind: "TEXT", name: "TEXT" });
+  }
+
+  /**
+   * The seated agent whose session `session` is, for its memory notes (ChatMemory): it reads as its room, never as
+   * this object's chat, and its turn is its owner's only while one they asked for runs in it (a fork of the seat's
+   * session: give checks who asked). Between turns the room's kind is not known, so nothing is read. Null for a session
+   * no seat has.
+   */
+  memoryAgent(session: string): MemoryAgent | null {
+    const [turn] = this.#sql
+      .exec("SELECT * FROM agent_seat_turns WHERE session = ? ORDER BY status = 'running' DESC, turn DESC LIMIT 1", session)
+      .toArray() as SeatTurnRow[];
+    const running = turn?.status === "running";
+    const seat = turn ?? (this.#sql.exec("SELECT * FROM agent_seats WHERE session = ? LIMIT 1", session).toArray()[0] as SeatRow | undefined);
+    if (!seat) return null;
+    return {
+      agentId: seat.agent_id,
+      ownerUid: this.#host.uid,
+      name: turn?.name ?? "agent",
+      byOwner: running && turn.forked === 1,
+      room: { chatId: seat.room_chat, kind: running ? ((turn.kind as ChatKind | null) ?? null) : null },
+    };
   }
 
   #seat(ref: RoomRef, agentId: string): SeatRow | undefined {
@@ -177,13 +205,15 @@ export class AgentSeats {
     // Given meanwhile by a retry: that one runs.
     if (this.#turn(ref, turn.turn)) return delivered;
     this.#sql.exec(
-      "INSERT INTO agent_seat_turns (room_owner, room_chat, agent_id, turn, session, forked, status) VALUES (?, ?, ?, ?, ?, ?, 'running')",
+      "INSERT INTO agent_seat_turns (room_owner, room_chat, agent_id, turn, session, forked, status, kind, name) VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?)",
       ref.ownerUid,
       ref.chatId,
       agentId,
       turn.turn,
       session,
       forked ? 1 : 0,
+      turn.kind,
+      agent.name,
     );
     try {
       // Its input goes only into the fork: the seat's session reads the ask as context (the batch left it out).
