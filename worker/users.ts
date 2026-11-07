@@ -279,7 +279,8 @@ export class UserDirectory extends DurableObject<Env> {
     this.ctx.storage.sql.exec(
       `INSERT INTO shared_chats (id, owner_uid, owner_name, title, joined_at, updated_at, status, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET owner_name = excluded.owner_name, title = excluded.title, updated_at = excluded.updated_at, status = excluded.status,
-         kind = COALESCE(excluded.kind, kind), closed_at = 0`,
+         kind = COALESCE(excluded.kind, kind), closed_at = 0
+       WHERE owner_uid = excluded.owner_uid`,
       chat.id,
       chat.ownerUid,
       chat.ownerName,

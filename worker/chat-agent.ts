@@ -1829,7 +1829,9 @@ export class ChatAgent extends DurableObject<Env> {
    * others, whom "@" then offers to add to their other chats (ChatRows.knowPeople). Second seats are the owner. Only a view.
    */
   #meet(newcomers: readonly Person[]): void {
-    const everybody = everyone(this.people()).filter((person) => this.#hasSidebar(person.uid));
+    // Someone in only because they opened the page met nobody: they could otherwise add its people to their own chats.
+    const fromPage = new Set(this.members.listVia().filter((member) => member.via === "page").map((member) => member.uid));
+    const everybody = everyone(this.people()).filter((person) => this.#hasSidebar(person.uid) && !fromPage.has(person.uid));
     const fresh = new Set(newcomers.map((person) => person.uid));
     const writes = everybody.map((person) =>
       this.#index(person.uid).knowPeople(fresh.has(person.uid) ? everybody : everybody.filter((other) => fresh.has(other.uid))),
