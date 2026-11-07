@@ -1266,3 +1266,13 @@ a.mention-chip:hover { text-decoration: underline; }
 .chip:hover { color: var(--text); background: var(--surface-2); }
 .chip:is(.active, [aria-pressed="true"]) { border-color: transparent; background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 .sidebar .chat-filter .nav-unread { position: absolute; top: -2px; right: -2px; width: 7px; height: 7px; margin: 0; }
+
+/* Members' agents and private turns: where a reply came from, and a draft only its agent's owner sees. */
+.source-chip { align-self: flex-start; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 9px; border: 1px dashed var(--border); border-radius: 999px; color: var(--muted); font-size: 12px; line-height: 20px; }
+.agent-draft { padding: 10px 12px 12px; border: 1px dashed var(--accent); border-radius: 12px; background: color-mix(in srgb, var(--accent) 5%, var(--surface)); }
+.draft-note { color: var(--muted); font-size: 12.5px; }
+.draft-edit { width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: var(--text); font: inherit; resize: vertical; }
+.draft-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.agent-review { align-items: flex-start; }
+.agent-review > span { display: flex; flex-direction: column; gap: 2px; font-weight: 500; }
+.agent-review small { color: var(--muted); font-weight: 400; }

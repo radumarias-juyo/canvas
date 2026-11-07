@@ -24,8 +24,9 @@ function agentState(agent: ChatAgentView): string {
  * Who is in the chat: its people first, each in their colour with a dot for those who have it open now; then, after a
  * divider, pi and the chat's other agents, each with its own badge colour, a dot on the one working and a faded badge
  * for one its owner turned off. Names, job lines and owners show on hover. Each agent opens a menu: what it does, its
- * latest turns, and for the owner Remove. The owner's Agents button adds agents. Without `bar` (a chat of the owner alone,
- * with no agents yet) only that button shows.
+ * latest turns, and Remove for the chat's owner and the agent's. Everyone's Agents button adds their own agents: a
+ * member's runs as them, from their own object. Without `bar` (a chat of the owner alone, with no agents yet) only that
+ * button shows.
  */
 export function PeopleBar({
   chatId,
@@ -52,7 +53,7 @@ export function PeopleBar({
   const all = everyone(people);
   const here = all.filter((person) => windows.has(person.uid)).length;
   const isOwner = people.owner.uid === uid;
-  // One popup at a time: an agent's menu (by its id), or the owner's list of agents to add.
+  // One popup at a time: an agent's menu (by its id), or the viewer's list of their agents to add.
   const [open, setOpen] = useState<string | null>(null);
   const close = useCallback(() => setOpen(null), []);
   const box = useDismiss<HTMLDivElement>(open !== null, close);
@@ -100,21 +101,19 @@ export function PeopleBar({
         ))}
       </div>
       )}
-      {isOwner && (
-        <button
-          type="button"
-          className="icon-button agents-button"
-          onClick={() => setOpen(open === ADDING ? null : ADDING)}
-          aria-expanded={open === ADDING}
-          title="Agents in this chat"
-          aria-label="Agents in this chat"
-        >
-          <Icon size={16} stroke={1.8}>
-            <rect x="5" y="7" width="14" height="11" rx="3" />
-            <path d="M12 4v3M9.5 12h.01M14.5 12h.01" />
-          </Icon>
-        </button>
-      )}
+      <button
+        type="button"
+        className="icon-button agents-button"
+        onClick={() => setOpen(open === ADDING ? null : ADDING)}
+        aria-expanded={open === ADDING}
+        title="Agents in this chat"
+        aria-label="Agents in this chat"
+      >
+        <Icon size={16} stroke={1.8}>
+          <rect x="5" y="7" width="14" height="11" rx="3" />
+          <path d="M12 4v3M9.5 12h.01M14.5 12h.01" />
+        </Icon>
+      </button>
       {agent && (
         <AgentMenu
           key={agent.id}
@@ -122,16 +121,16 @@ export function PeopleBar({
           agent={agent}
           startedAt={live[agent.id]?.turn === agent.running?.turn ? live[agent.id]?.startedAt : undefined}
           uid={uid}
-          isOwner={isOwner}
+          mayRemove={isOwner || agent.ownerUid === uid}
           onClose={close}
         />
       )}
-      {open === ADDING && <AddAgents chatId={chatId} roster={agents} onClose={close} />}
+      {open === ADDING && <AddAgents chatId={chatId} roster={agents} uid={uid} isOwner={isOwner} onClose={close} />}
     </div>
   );
 }
 
-/** The key of the owner's list of agents to add, among the bar's popups. */
+/** The key of the viewer's list of agents to add, among the bar's popups. */
 const ADDING = "+agents";
 
 /** How many of an agent's latest turns its menu lists. */
@@ -139,21 +138,21 @@ const RUNS_SHOWN = 8;
 
 /**
  * An agent's menu, from its badge in the people bar: its job line and owner, what it is doing, its latest turns (who
- * asked, when, how long, how it ended), read when the menu opens, and for the chat's owner, Remove.
+ * asked, when, how long, how it ended), read when the menu opens, and for the chat's owner and the agent's, Remove.
  */
 function AgentMenu({
   chatId,
   agent,
   startedAt,
   uid,
-  isOwner,
+  mayRemove,
   onClose,
 }: {
   chatId: string;
   agent: ChatAgentView;
   startedAt?: number;
   uid: string;
-  isOwner: boolean;
+  mayRemove: boolean;
   onClose: () => void;
 }) {
   const [turns, setTurns] = useState<AgentTurnView[] | null>(null);
@@ -208,7 +207,7 @@ function AgentMenu({
         </ul>
       )}
       {error && <div className="chat-error">{error}</div>}
-      {isOwner && (
+      {mayRemove && (
         <button type="button" className="danger" onClick={remove} disabled={removing}>
           {removing ? "Removing…" : "Remove from this chat"}
         </button>
@@ -237,10 +236,23 @@ function Working({ running, startedAt: heard }: { running: NonNullable<ChatAgent
 }
 
 /**
- * The owner's list of their agents that are on and not in the chat yet, each with Add: the agent joins the chat's roster
- * and answers when called. Drafts the model proposed wait for their owner in the agent editor, and do not show.
+ * The viewer's list of their agents that are on and not in the chat yet, each with Add: the agent joins the chat's
+ * roster and answers when called. Drafts the model proposed wait for their owner in the agent editor, and do not show.
+ * A member's agent works as them: others in the chat can make it use only the servers they share with chats.
  */
-function AddAgents({ chatId, roster, onClose }: { chatId: string; roster: readonly ChatAgentView[]; onClose: () => void }) {
+function AddAgents({
+  chatId,
+  roster,
+  uid,
+  isOwner,
+  onClose,
+}: {
+  chatId: string;
+  roster: readonly ChatAgentView[];
+  uid: string;
+  isOwner: boolean;
+  onClose: () => void;
+}) {
   const [mine, setMine] = useState<AgentDefinition[] | null>(null);
   const [error, setError] = useState<string>();
   const [adding, setAdding] = useState<string | null>(null);
@@ -254,7 +266,7 @@ function AddAgents({ chatId, roster, onClose }: { chatId: string; roster: readon
       live = false;
     };
   }, []);
-  const here = new Set(roster.map((agent) => agent.id));
+  const here = new Set(roster.filter((agent) => agent.ownerUid === uid).map((agent) => agent.id));
   const addable = mine?.filter((agent) => agent.enabled && !isDraftAgent(agent) && !here.has(agent.id)) ?? [];
   const full = roster.length >= MAX_CHAT_AGENTS;
   const add = async (agent: AgentDefinition) => {
@@ -277,7 +289,9 @@ function AddAgents({ chatId, roster, onClose }: { chatId: string; roster: readon
         </button>
       </div>
       <p className="agent-menu-job">
-        Agents answer when someone calls them with @name or replies to them, and work as you. Remove one from its badge in the bar.
+        {isOwner
+          ? "Agents answer when someone calls them with @name or replies to them, and work as you. Remove one from its badge in the bar."
+          : "Your agents answer when someone calls them with @name, and work as you, from your own account. When others call one, it uses only the servers you share with chats, and only reads."}
       </p>
       {mine === null && !error && <p className="agent-menu-empty">Loading…</p>}
       {mine && addable.length === 0 && (

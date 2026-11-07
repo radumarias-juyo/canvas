@@ -107,6 +107,11 @@ export interface AgentInput {
   autonomy?: AutonomyLevel;
   /** The fields the model guessed, shown as "Assumed" until a person confirms them. */
   assumed?: string[];
+  /**
+   * A reply built on a private server (one not shared with the chat) shows first as a draft only its owner sees, who
+   * posts it to the chat, edits it, or discards it.
+   */
+  reviewBeforePosting?: boolean;
 }
 
 /** Who made an agent: its owner, or the model in a chat (saved off until the owner turns it on, as skills are). */
@@ -309,6 +314,8 @@ export function checkAgent(input: unknown): AgentInput {
       : { list: checkLook(isObject(input.scope) ? input.scope.list : undefined, "A scope's list"), each: true as const };
   const workflow = input.workflow === undefined || input.workflow === null ? undefined : checkSteps(input.workflow);
   const assumed = names(input.assumed, "assumed fields");
+  const review = input.reviewBeforePosting ?? undefined;
+  if (review !== undefined && typeof review !== "boolean") fail("An agent's review before posting is true or false.");
   return {
     name,
     ...(avatar && { avatar }),
@@ -324,6 +331,7 @@ export function checkAgent(input: unknown): AgentInput {
     ...(workflow && { workflow }),
     ...(autonomy !== undefined && { autonomy: autonomy as AutonomyLevel }),
     ...(assumed?.length && { assumed }),
+    ...(review && { reviewBeforePosting: true }),
   };
 }
 
@@ -362,6 +370,18 @@ export interface ChatAgentView {
   ended?: { turn: number; status: Exclude<AgentTurnStatus, "queued" | "running"> };
   /** Its owner shares it with the people of this chat: they can open it read-only, and copy it (SharedAgentView). */
   shared?: true;
+  /** It runs in its owner's own agent object (a member's agent), as a seat: the chat sends it turns and reads its replies. */
+  seat?: true;
+}
+
+/**
+ * A reply that waits for its agent's owner to review it before it reaches the chat (reviewBeforePosting): only they see
+ * it, with the private servers it read, and Post to chat, Edit or Discard.
+ */
+export interface AgentDraftView {
+  turn: number;
+  agentId: string;
+  reply: ChatAgentReplyData;
 }
 
 /** An MCP server of the deployment, as the agent editor lists it: whether it signs in each user, and this one now. */
@@ -376,6 +396,8 @@ export interface AgentServerInfo {
 /** One chat an agent is in, as its owner's directory keeps it (the chats tell it when they add or remove the agent). */
 export interface AgentChatUse {
   chatId: string;
+  /** The chat's owner, for one of someone else's the agent's owner brought it into as a member. */
+  ownerUid?: string;
   /** The chat's title in the owner's list. */
   title: string;
   /** Whether its owner shares the agent with the people of that chat. */
@@ -479,8 +501,23 @@ export type ChatAgentReplyData = {
   failed?: string;
   /** Artifacts it published in this turn, for the app to show their cards. */
   published?: { artifactId: string; title: string; version: number }[];
-  /** The records its tool results held (shared/items.ts), as chips under the reply: from the servers, never its text. */
+  /**
+   * The records its tool results held (shared/items.ts), as chips under the reply: from the servers, never its text. A
+   * reply from a private turn has only those of the servers its agent shares with the chat.
+   */
   items?: ItemRef[];
+  /**
+   * The servers outside its shared-chat list the turn read (its owner asked it, in a fork of its session): the source
+   * chip, "from Ana's calendar · posted by Ana". As the app recorded the calls, never as the model says.
+   */
+  sources?: string[];
+  /**
+   * Its turn ran in a fork of its session (its owner asked it, and it may reach private servers): the agent's shared
+   * session never saw it, and reads the reply, as posted, in its next catch-up.
+   */
+  forked?: true;
+  /** Posted by its owner from a draft they reviewed (reviewBeforePosting): their uid. */
+  postedBy?: string;
 };
 
 export type AgentTurnStatus = "queued" | "running" | "done" | "failed" | "stopped";

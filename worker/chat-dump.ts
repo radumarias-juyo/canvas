@@ -199,6 +199,8 @@ export function importedRoster(sql: DumpSql, uid: string, kept: readonly string[
   const has = (table: string) => sql.exec("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", table).toArray().length > 0;
   if (!has("chat_agents")) return { agents: [], through: -1 };
   sql.exec("DELETE FROM chat_agents WHERE agent_id NOT IN (SELECT value FROM json_each(?))", JSON.stringify(kept));
+  // A member's agent ran in its owner's object, who is not in the new chat.
+  if (sql.exec("SELECT 1 FROM pragma_table_info('chat_agents') WHERE name = 'seat'").toArray().length) sql.exec("DELETE FROM chat_agents WHERE seat IS NOT NULL");
   sql.exec("UPDATE chat_agents SET owner_uid = ?, shared = 0", uid);
   const agents = sql
     .exec("SELECT agent_id FROM chat_agents ORDER BY agent_id")

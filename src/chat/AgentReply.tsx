@@ -16,6 +16,16 @@ function calledByLabel(calledBy: ChatAgentReplyData["calledBy"]): string {
 }
 
 /**
+ * Where a reply built on private servers came from, as the app recorded its calls: "from Ana's calendar · posted by
+ * Ana". `ownerName` is the agent's owner's, as the chat's people say it; none in a chat of the viewer's alone.
+ */
+export function sourceLine(data: Pick<ChatAgentReplyData, "sources" | "postedBy">, ownerName: string | undefined): string | null {
+  if (!data.sources?.length) return null;
+  const posted = data.postedBy ? ` · posted by ${ownerName ?? "you"}` : "";
+  return `from ${ownerName ? `${ownerName}'s` : "your"} ${data.sources.join(", ")}${posted}`;
+}
+
+/**
  * One reply of an agent besides pi (a `chat.agent` entry): its badge and name, whose it is and who asked, its text
  * (folded behind "Show more" when long), the records it is built on as chips, the artifacts it published and why it
  * ended early. Its steps show live while it works (AgentTurnLive), then stay in its own session.
@@ -35,6 +45,7 @@ export function AgentReply({
   const people = useSharedChat();
   // Whose agent it is: it works with their sign-ins and budget.
   const owner = people && everyone(people).find((person) => person.uid === data.ownerUid)?.name;
+  const source = sourceLine(data, owner ?? undefined);
   return (
     <div className="agent-reply" ref={content}>
       <AgentByline name={data.name} badge={data} note={["agent", owner && `${owner}'s`, calledByLabel(data.calledBy)].filter(Boolean).join(" · ")} />
@@ -46,6 +57,11 @@ export function AgentReply({
         </Fold>
       )}
       {data.items && <ItemChips items={data.items} />}
+      {source && (
+        <div className="source-chip" title="It read servers its owner does not share with the chat; only this reply was posted">
+          {source}
+        </div>
+      )}
       {data.published?.map((artifact) => (
         <ArtifactCard key={`${artifact.artifactId}:${artifact.version}`} artifact={artifact} onOpen={onOpen} />
       ))}

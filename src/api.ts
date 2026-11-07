@@ -1,4 +1,14 @@
-import type { AgentChanges, AgentChatUse, AgentDefinition, AgentInput, AgentServerInfo, ChatAgents, ChatAgentView, SharedAgentView } from "../shared/agents.ts";
+import type {
+  AgentChanges,
+  AgentChatUse,
+  AgentDefinition,
+  AgentDraftView,
+  AgentInput,
+  AgentServerInfo,
+  ChatAgents,
+  ChatAgentView,
+  SharedAgentView,
+} from "../shared/agents.ts";
 import type {
   ArtifactVersionImport,
   ChatDumpCursor,
@@ -202,6 +212,9 @@ export const api = {
   /** (owner) Bring one of their agents into the chat. */
   addChatAgent: (chatId: string, agentId: string) => request<ChatAgentView[]>(chatPath(chatId, "/agents"), post({ agentId })),
   removeChatAgent: (chatId: string, agentId: string) => request<ChatAgentView[]>(chatPath(chatId, `/agents/${agentId}`), { method: "DELETE" }),
+  /** (the agent's owner) Post a reply of theirs held for review, as edited (`text`), or discard it: the drafts left. */
+  reviewAgentDraft: (chatId: string, draft: Pick<AgentDraftView, "agentId" | "turn">, action: "post" | "discard", text?: string) =>
+    request<AgentDraftView[]>(chatPath(chatId, `/agents/${draft.agentId}/draft`), post({ turn: draft.turn, action, ...(text !== undefined && { text }) })),
   /** The MCP servers an agent may use, and which this user signed in to. */
   agentServers: () => request<AgentServerInfo[]>("/api/agents/servers"),
   /** The chats one of the user's agents is in, with whether it is shared in each. */

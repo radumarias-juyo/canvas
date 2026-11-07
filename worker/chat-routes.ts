@@ -42,11 +42,13 @@ import type { UserDirectory } from "./users.ts";
  *   GET    /api/chats/:id/system-prompt       the chat's system prompt, which adds to the owner's own, for the people in it
  *   PUT    /api/chats/:id/system-prompt       (owner) {text}: change it; empty clears it
  *   GET    /api/chats/:id/agents              the chat's agents and their latest turns, for the people in it
- *   POST   /api/chats/:id/agents              (owner) {agentId}: bring one of their agents (turned on) into the chat
- *   DELETE /api/chats/:id/agents/:agentId     (owner) take an agent out of the chat; its replies stay
+ *   POST   /api/chats/:id/agents              {agentId}: bring one of your agents (turned on) into the chat; a member's runs as a seat
+ *                                             in their own object (worker/agents/seats/)
+ *   DELETE /api/chats/:id/agents/:agentId     (owner, or the agent's) take an agent out of the chat; its replies stay
  *   GET    /api/chats/:id/agents/:agentId     one agent of the chat, read-only (SharedAgentView): its owner, or anyone
  *                                             in the chat while the owner shares it there
- *   PATCH  /api/chats/:id/agents/:agentId     (owner) {shared}: share it with the people of the chat, or stop
+ *   PATCH  /api/chats/:id/agents/:agentId     (the agent's owner) {shared}: share it with the people of the chat, or stop
+ *   POST   /api/chats/:id/agents/:agentId/draft  (the agent's owner) {turn, action: "post" | "discard", text?}: a reply held for review
  *   POST   /api/chats/:id/agents/:agentId/copy  {…fields, version}: someone's own copy of the version of a shared agent
  *                                             they read (a newer one refuses), with their changes,
  *                                             saved off in their directory with copiedFrom; it runs with their sign-ins
@@ -87,11 +89,11 @@ export async function chatRoute(
   }
 
   const match = url.pathname.match(
-    /^\/api\/chats\/([a-z0-9]+)(?:\/(ws|invites|members|attachments|mentions|contents|deletion|seen|seat|system-prompt|agents)(?:\/([a-z0-9-]+)(?:\/(copy))?)?)?$/,
+    /^\/api\/chats\/([a-z0-9]+)(?:\/(ws|invites|members|attachments|mentions|contents|deletion|seen|seat|system-prompt|agents)(?:\/([a-z0-9-]+)(?:\/(copy|draft))?)?)?$/,
   );
   if (!match || !ID_PATTERN.test(match[1])) return null;
   const [, chatId, what, item, sub] = match;
-  // Only an agent's copy has a part after its item.
+  // Only an agent has a part after its item: its copy, or its draft.
   if (sub && what !== "agents") return null;
   const isSocket = what === "ws" && !item;
   if (isSocket && request.headers.get("upgrade") !== "websocket") return json({ error: "Expected a WebSocket upgrade" }, 426);
@@ -177,6 +179,11 @@ export async function chatRoute(
     const result =
       method === "GET" ? await chat.chatSystemPrompt(person.uid) : await chat.setChatSystemPrompt(person, (await readJson<{ text?: unknown }>(request))?.text);
     return "status" in result ? answer(result) : json(result satisfies ChatSystemPrompt);
+  }
+  if (what === "agents" && sub === "draft") {
+    if (method !== "POST" || !item) return null;
+    const result = await chat.reviewDraft(person, item, await readJson<{ turn?: unknown; action?: unknown; text?: unknown }>(request));
+    return "status" in result ? answer(result) : json(result);
   }
   if (what === "agents" && sub === "copy") {
     if (method !== "POST" || !item) return null;

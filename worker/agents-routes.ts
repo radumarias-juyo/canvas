@@ -1,4 +1,4 @@
-import { AGENT_ID_PATTERN, type AgentResult, type AgentServerInfo } from "../shared/agents.ts";
+import { AGENT_ID_PATTERN, type AgentChatUse, type AgentResult, type AgentServerInfo } from "../shared/agents.ts";
 import { errorMessage } from "../shared/util.ts";
 import { json, readJson } from "./http.ts";
 import type { McpServerConfig } from "./mcp/servers.ts";
@@ -20,7 +20,7 @@ import type { UserDirectory } from "./users.ts";
 export async function agentsRoute(
   request: Request,
   directory: DurableObjectStub<UserDirectory>,
-  dropFromChat: (chatId: string, agentId: string) => Promise<void>,
+  dropFromChat: (chat: AgentChatUse, agentId: string) => Promise<void>,
   servers: readonly Pick<McpServerConfig, "name" | "auth">[],
 ): Promise<Response | null> {
   const path = new URL(request.url).pathname;
@@ -69,7 +69,7 @@ export async function agentsRoute(
     if (refused) return json(refused, 404);
     // Each chat's roster drops it at the agent's next turn anyway: a chat that cannot be told now is only logged.
     await Promise.all(
-      inChats.map(({ chatId }) => dropFromChat(chatId, id).catch((error: unknown) => console.error("agent delete:", errorMessage(error)))),
+      inChats.map((chat) => dropFromChat(chat, id).catch((error: unknown) => console.error("agent delete:", errorMessage(error)))),
     );
     return json({});
   }

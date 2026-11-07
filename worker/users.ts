@@ -560,18 +560,29 @@ export class UserDirectory extends DurableObject<Env> {
     return result;
   }
 
-  /** One of the user's chats added an agent of theirs, took it out, or changed whether it shares it (AgentStore.noteChat). */
-  noteAgentChat(agentId: string, chatId: string, inChat: boolean, shared = false): void {
+  /**
+   * A chat added an agent of the user's, took it out, or changed whether it shares it (AgentStore.noteChat): one of the
+   * user's own, or one of `ownerUid`'s they brought it into as a member.
+   */
+  noteAgentChat(agentId: string, chatId: string, inChat: boolean, shared = false, ownerUid?: string): void {
     // Only the index: the agents list the sidebars read is the same.
-    this.#agents.noteChat(agentId, chatId, inChat, shared);
+    this.#agents.noteChat(agentId, chatId, inChat, shared, ownerUid);
   }
 
-  /** The chats of the user's an agent is in, by title, with whether it is shared there. */
+  /** The chats an agent of the user's is in, by title, with whether it is shared there: theirs, and others' they are in. */
   agentChats(agentId: string): AgentChatUse[] {
-    return this.#agents.chatsOf(agentId).flatMap(({ chatId, shared }) => {
-      const title = this.chatTitle(chatId);
-      return title === null ? [] : [{ chatId, title, shared }];
+    return this.#agents.chatsOf(agentId).flatMap(({ chatId, shared, ownerUid }) => {
+      const title = ownerUid === undefined ? this.chatTitle(chatId) : this.#sharedChatTitle(chatId, ownerUid);
+      return title === null ? [] : [{ chatId, title, shared, ...(ownerUid !== undefined && { ownerUid }) }];
     });
+  }
+
+  /** The title of a chat of `ownerUid`'s the user is in; null when they are not. */
+  #sharedChatTitle(id: string, ownerUid: string): string | null {
+    return (
+      this.ctx.storage.sql.exec<{ title: string }>("SELECT title FROM shared_chats WHERE id = ? AND owner_uid = ?", id, ownerUid).toArray()[0]?.title ??
+      null
+    );
   }
 
   /** Delete one of the user's skills. Built-in ones can only be turned off. */

@@ -1,7 +1,7 @@
 import type { AssistantMessage, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { AgentEvent, AgentState, EntryRecord, JsonObject, UsageState } from "@earendil-works/pi-durable";
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
-import { CHAT_AGENT_KIND, type ChatAgentReplyData, type ChatAgentView } from "../../shared/agents.ts";
+import { CHAT_AGENT_KIND, type AgentDraftView, type ChatAgentReplyData, type ChatAgentView } from "../../shared/agents.ts";
 import type { AttachmentInput } from "../../shared/attachments.ts";
 import type { MentionInput } from "../../shared/mentions.ts";
 import { modelKey } from "../../shared/models.ts";
@@ -386,6 +386,8 @@ export function useChat(chatId: string) {
   const [hints, setHints] = useState<ReadonlySet<number>>(NO_HINTS);
   // The agents the owner brought into the chat besides pi, and whether each is working.
   const [agents, setAgents] = useState<ChatAgentView[]>(NO_AGENTS);
+  // The replies of the viewer's agents held for them to review (only their socket hears them).
+  const [drafts, setDrafts] = useState<AgentDraftView[]>(NO_DRAFTS);
   // What the agents working now do, each in its own session.
   const [live, dispatchAgents] = useReducer(reduceAgents, NO_LIVE);
   const ended = Object.values(live).reduce((first, agent) => Math.min(first, agent.endedAt ?? Infinity), Infinity);
@@ -411,6 +413,7 @@ export function useChat(chatId: string) {
     setAuto(false);
     setHints(NO_HINTS);
     setAgents(NO_AGENTS);
+    setDrafts(NO_DRAFTS);
     dispatchAgents({ type: "reset" });
     let closed = false;
     let attempt = 0;
@@ -447,7 +450,8 @@ export function useChat(chatId: string) {
         else if (message.type === "agents") {
           setAgents(message.agents);
           dispatchAgents({ type: "agents", agents: message.agents, at: Date.now() });
-        } else if (message.type === "agentEvents") dispatchAgents({ ...message, events: message.events as AgentEvent[], at: Date.now() });
+        } else if (message.type === "agentDrafts") setDrafts(message.drafts);
+        else if (message.type === "agentEvents") dispatchAgents({ ...message, events: message.events as AgentEvent[], at: Date.now() });
         else if (message.type === "removed" || message.type === "deleted") {
           stop(STOPPED[message.type]);
           ws.close();
@@ -516,6 +520,10 @@ export function useChat(chatId: string) {
     agents,
     /** The agents' turns followed live, by agent id (see shownLive). */
     live,
+    /** The replies of the viewer's agents held for them to review, oldest first. */
+    drafts,
+    /** Take drafts out of the list as the chat answered a review (the socket says so too). */
+    setDrafts,
     setModel,
     /** Whether the chat is on Auto: a router picks the model and effort for each message. */
     auto,
@@ -531,6 +539,7 @@ export function useChat(chatId: string) {
 
 const NO_HINTS: ReadonlySet<number> = new Set();
 const NO_AGENTS: ChatAgentView[] = [];
+const NO_DRAFTS: AgentDraftView[] = [];
 
 /**
  * `next`, keeping `known`'s object for each entry whose reactions are the same: a socket is sent all of them again on

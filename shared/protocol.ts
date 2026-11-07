@@ -7,7 +7,7 @@ import type { EntryRecord } from "@earendil-works/pi-durable";
 import type { EntryReactions, Reactions } from "./reactions.ts";
 import type { Attachment, AttachmentInput } from "./attachments.ts";
 import type { Mention, MentionInput } from "./mentions.ts";
-import type { ChatAgentView } from "./agents.ts";
+import type { AgentDraftView, ChatAgentView } from "./agents.ts";
 
 export type McpErrorCode =
   | "server_not_connected"
@@ -577,6 +577,8 @@ export type ChatServerMessage =
   | { type: "callHint"; entry: number }
   /** The chat's agents besides pi (shared/agents.ts): on connect, and whenever one is added, removed, starts or ends a turn. */
   | { type: "agents"; agents: ChatAgentView[] }
+  /** The replies of this person's agents held for them to review (reviewBeforePosting): only their sockets get it. */
+  | { type: "agentDrafts"; drafts: AgentDraftView[] }
   /**
    * One agent's session while it has a turn (`agent`, by its id; `turn`, the turn's id): pi-durable AgentEvents as for
    * pi's, only those of that turn. A snapshot first (its entries from the turn's input on), with how long each running

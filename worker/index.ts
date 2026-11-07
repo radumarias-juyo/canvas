@@ -189,7 +189,8 @@ async function route(request: Request, env: Env): Promise<Response> {
   const agents = await agentsRoute(
     request,
     directory,
-    (chatId, agentId) => exports.ChatAgent.getByName(chatAgentName(uid, chatId)).agentDeleted(agentId),
+    // A chat of someone else's the agent's owner brought it into as a member is named after that chat's owner.
+    ({ chatId, ownerUid }, agentId) => exports.ChatAgent.getByName(chatAgentName(ownerUid ?? uid, chatId)).agentDeleted(agentId, uid),
     mcpServers(env),
   );
   if (agents) return agents;
