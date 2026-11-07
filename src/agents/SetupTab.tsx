@@ -23,6 +23,7 @@ import type { AgentSubject, AgentTabProps } from "./AgentPage.tsx";
 import { AssumedBadge } from "./AssumedBadge.tsx";
 import { ASSUMED_FIELDS, CONFLICT_NOTICE, isAssumed, isConflict, withoutAssumed } from "./glance.ts";
 import { goTo } from "./nav.ts";
+import { ServersTable } from "./ServersTable.tsx";
 import { readServers, reloadAgents } from "./store.ts";
 
 /** What Auto means for an agent: the model of the chat it answers in. Stable, so the memoized picker keeps it. */
@@ -429,80 +430,6 @@ function Field({
       </label>
       {children}
     </div>
-  );
-}
-
-/**
- * The servers table: each of the deployment's MCP servers with whether it signs in each user, and two switches, for
- * the agent itself and for shared chats. A server that signs in as the owner and is on for shared chats says that the
- * chat sees what the agent reads from it.
- */
-function ServersTable({
-  servers,
-  error,
-  own,
-  shared,
-  name,
-  onToggle,
-}: {
-  servers: AgentServerInfo[] | null;
-  error: string | null;
-  own: Set<string>;
-  shared: Set<string>;
-  name: string;
-  onToggle: (column: "servers" | "sharedServers", server: string, on: boolean) => void;
-}) {
-  if (error) return <p className="form-error">Could not read the servers: {error}</p>;
-  if (!servers) return <p className="skills-note">Reading the servers…</p>;
-  if (!servers.length) return <p className="skills-note">This deployment has no MCP servers: the agent works with what it is told and its tools.</p>;
-  return (
-    <table className="agent-servers">
-      <thead>
-        <tr>
-          <th scope="col">Server</th>
-          <th scope="col">This agent</th>
-          <th scope="col">Shared chats</th>
-        </tr>
-      </thead>
-      <tbody>
-        {servers.map((server) => {
-          const mine = own.has(server.name);
-          const theirs = shared.has(server.name) && mine;
-          return (
-            <tr key={server.name}>
-              <th scope="row">
-                <span className="agent-server-name">{server.name}</span>
-                <small>{server.signsIn ? (server.signedIn ? "signed in as you" : "signs in as you · not yet") : "no sign-in"}</small>
-                {server.signsIn && theirs && (
-                  <small className="agent-server-warn">
-                    Anyone in a shared chat can make @{name || "it"} read this as you, and sees what it reads.
-                  </small>
-                )}
-              </th>
-              <td>
-                <Switch label={`${server.name} for this agent`} on={mine} onChange={(on) => onToggle("servers", server.name, on)} />
-              </td>
-              <td>
-                <Switch
-                  label={`${server.name} in shared chats`}
-                  on={theirs}
-                  disabled={!mine}
-                  onChange={(on) => onToggle("sharedServers", server.name, on)}
-                />
-              </td>
-            </tr>
-          );
-        })}
-      </tbody>
-    </table>
-  );
-}
-
-function Switch({ label, on, disabled, onChange }: { label: string; on: boolean; disabled?: boolean; onChange: (on: boolean) => void }) {
-  return (
-    <label className="skill-toggle agent-switch" title={label}>
-      <input type="checkbox" checked={on} disabled={disabled} onChange={(e) => onChange(e.target.checked)} aria-label={label} />
-    </label>
   );
 }
 

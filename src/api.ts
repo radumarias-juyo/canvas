@@ -1,5 +1,6 @@
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import type { ChatAgentSettings, ChatAgentSettingsView } from "../shared/agent-settings.ts";
+import type { AgentWindowView, SteerResult } from "../shared/agent-window.ts";
 import type {
   AgentChanges,
   AgentChatUse,
@@ -255,6 +256,11 @@ export const api = {
   /** (the agent's owner) Post a reply of theirs held for review, as edited (`text`), or discard it: the drafts left. */
   reviewAgentDraft: (chatId: string, draft: Pick<AgentDraftView, "agentId" | "turn">, action: "post" | "discard", text?: string) =>
     request<AgentDraftView[]>(chatPath(chatId, `/agents/${draft.agentId}/draft`), post({ turn: draft.turn, action, ...(text !== undefined && { text }) })),
+  /** (the agent's owner) Its window: its sessions in the chat, and one's transcript (`session`, else the busy one). */
+  agentWindow: (chatId: string, agentId: string, session?: string) =>
+    request<AgentWindowView>(chatPath(chatId, `/agents/${agentId}/window${session ? `?session=${encodeURIComponent(session)}` : ""}`)),
+  /** (the agent's owner) Their words to it from its window: a steer into their running turn, or a turn of their own. */
+  steerAgent: (chatId: string, agentId: string, text: string) => request<SteerResult>(chatPath(chatId, `/agents/${agentId}/steer`), post({ text })),
   /** Mute an agent in a chat (it posts nothing unprompted there), or unmute it (its owner, or the chat's). */
   muteChatAgent: (chatId: string, agentId: string, muted: boolean) => request<ChatAgentView[]>(chatPath(chatId, `/agents/${agentId}/mute`), post({ muted })),
   /** (owner) Change a chat's agent settings (router, speaking up, servers, daily budget): each field given replaces the stored one, null clears it. */

@@ -63,7 +63,8 @@ export interface RunDetail {
    */
   released?: string[];
   when?: string;
-  used?: { skills: string[]; servers: string[]; models: string[] };
+  /** What it used; `notes`: the ids of the memory notes its sessions read. */
+  used?: { skills: string[]; servers: string[]; models: string[]; notes?: string[] };
   /** The watch result that started it, for its steps to read as `watch`, and the one before it (`previous`). */
   watch?: unknown;
   previous?: unknown;
@@ -590,6 +591,18 @@ export class AgentRuns {
     const runs = this.#rows("agent_id = ? AND item = '' ORDER BY due_at DESC LIMIT ?", agentId, limit).map(recordOf);
     const counts = this.#counts(agentId, runs.map((run) => run.dueAt));
     return runs.map((run) => this.view(run, counts.get(run.dueAt) ?? NO_ITEMS));
+  }
+
+  /**
+   * The sessions an agent's newest runs here worked in (an item's), newest first, with whether the run still goes: what
+   * its owner's window lists (shared/agent-window.ts). A reply's session is listed by its turn.
+   */
+  sessionsOf(agentId: string, limit = 20): { session: string; dueAt: number; running: boolean }[] {
+    return this.#rows("agent_id = ? AND session IS NOT NULL ORDER BY started_at DESC LIMIT ?", agentId, limit).map((row) => ({
+      session: row.session!,
+      dueAt: row.due_at,
+      running: row.status === "running",
+    }));
   }
 
   /**

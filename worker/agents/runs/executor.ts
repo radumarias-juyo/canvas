@@ -139,6 +139,8 @@ export interface RunHost {
   spendCap?(): Promise<string | undefined>;
   /** A run went through its items and ended (not one stopped before, by the cap or a sign-in): for the metrics. */
   ended?(run: { agentId: string; dueAt: number; status: RunStatus; items: number; wallMs: number }): void;
+  /** The ids of the memory notes a session's prompt holds once it is configured: what the run detail counts as used. */
+  notesRead?(session: string): Promise<readonly string[]>;
 }
 
 /** A run to start. */
@@ -712,6 +714,8 @@ export class RunExecutor {
           if (state.configured !== (model ?? "")) {
             await this.#host.configure(state.session, state.agent, step.model, state.run.dueAt);
             state.configured = model ?? "";
+            // Only a record: a failed read leaves the count as it is.
+            if (this.#host.notesRead) this.#usedNotes(state, await this.#host.notesRead(state.session).catch(() => []));
           }
           const result = await this.#host.work(state.session, workPrompt(step, state.when, state.element), `${opId(state)}:work:${key}`);
           state.cost += result.cost;
@@ -868,6 +872,15 @@ export class RunExecutor {
     const run = this.#host.runs.get(state.agent.id, state.run.dueAt);
     const used = run?.detail.used ?? { skills: [], servers: [], models: [] };
     if (!used.models.includes(model)) this.#host.runs.update(state.agent.id, state.run.dueAt, { detail: { used: { ...used, models: [...used.models, model] } } });
+  }
+
+  /** The memory notes an item's session read, added to the run's (by id: the items read the same notes, counted once). */
+  #usedNotes(state: ItemRun, ids: readonly string[]): void {
+    const run = this.#host.runs.get(state.agent.id, state.run.dueAt);
+    const used = run?.detail.used ?? { skills: [], servers: [], models: [] };
+    const known = new Set(used.notes);
+    const added = ids.filter((id) => !known.has(id));
+    if (added.length) this.#host.runs.update(state.agent.id, state.run.dueAt, { detail: { used: { ...used, notes: [...known, ...added] } } });
   }
 
   /**

@@ -2,7 +2,17 @@ import { createAssistantMessageEventStream, type AssistantMessage, type Models, 
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { isRetryableAssistantError } from "@earendil-works/pi-ai/utils/retry";
 import { describe, expect, it } from "vitest";
-import { agentRouterOn, AgentSettingsError, budgetNotice, chatAllowsServer, checkAgentSettings, MIN_DAILY_TOKENS } from "../shared/agent-settings.ts";
+import {
+  agentRouterOn,
+  AgentSettingsError,
+  budgetNotice,
+  chatAllowsServer,
+  checkAgentSettings,
+  DEFAULT_MESSAGE_TOKENS,
+  messageBudget,
+  messageBudgetNotice,
+  MIN_DAILY_TOKENS,
+} from "../shared/agent-settings.ts";
 import { CHAT_AGENT_KIND, type AgentDefinition } from "../shared/agents.ts";
 import { CHAT_MESSAGE_KIND } from "../shared/protocol.ts";
 import {
@@ -633,6 +643,19 @@ describe("a chat's agent settings", () => {
     expect(() => checkAgentSettings({ dailyTokens: MIN_DAILY_TOKENS - 1 }, {})).toThrow(AgentSettingsError);
     expect(() => checkAgentSettings({ dailyTokens: 12_345.5 }, {})).toThrow(AgentSettingsError);
     expect(() => checkAgentSettings({ servers: [""] }, {})).toThrow(AgentSettingsError);
+    expect(() => checkAgentSettings({ messageTokens: MIN_DAILY_TOKENS - 1 }, {})).toThrow(/budget per message/);
+  });
+
+  it("keeps a budget per message, the default until the owner sets one", () => {
+    expect(messageBudget({})).toBe(DEFAULT_MESSAGE_TOKENS);
+    const set = checkAgentSettings({ messageTokens: 200_000 }, {});
+    expect(set).toEqual({ messageTokens: 200_000 });
+    expect(messageBudget(set)).toBe(200_000);
+    expect(checkAgentSettings({ messageTokens: null }, set)).toEqual({});
+    expect(messageBudgetNotice(200_000, 210_500, ["bard", "pi"])).toBe(
+      "The agents' turns for this message used 210,500 tokens, past its budget of 200,000, so @bard, @pi did not get their turns. " +
+        "The chat's owner can raise the budget per message in the chat's agent settings.",
+    );
   });
 
   it("routes by default only in a private chat, and allows every server until the chat names some", () => {

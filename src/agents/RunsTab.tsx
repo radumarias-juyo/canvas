@@ -18,7 +18,7 @@ import { RUNS_EVENT, useLatest, useVisible } from "../sidebar.ts";
 import type { AgentTabProps } from "./AgentPage.tsx";
 import { runsLabel } from "./glance.ts";
 import { agentPath } from "./nav.ts";
-import { deliveryLabel, deliveryStatusLabel, itemsLabel, itemStatusLabel, runStatusLabel, signInWayOut, whyLabel } from "./runs.ts";
+import { deliveryLabel, deliveryStatusLabel, itemGroups, itemsLabel, itemStatusLabel, runStatusLabel, signInWayOut, usedParts, whyLabel } from "./runs.ts";
 
 /** How often the tab reads again while a run is going. */
 const POLL_MS = 3_000;
@@ -176,14 +176,7 @@ function RunPage({ agent, dueAt, chat, navigate }: { agent: AgentDefinition; due
   );
   if (!run) return <section className="agent-runs">{back}<p className={error ? "form-error" : "skills-note"}>{error ? `Could not read this run: ${error}` : "Reading the run…"}</p></section>;
   const scoped = run.itemsList.length > 1 || Boolean(run.itemsList[0]?.label);
-  const items = itemsLabel(run.items);
-  const used = (
-    [
-      ["Read", run.used.servers],
-      ["Skills", run.used.skills],
-      ["Models", run.used.models],
-    ] as const
-  ).filter(([, names]) => names.length);
+  const used = usedParts(run.used);
   return (
     <section className="agent-runs run-detail">
       {back}
@@ -228,6 +221,8 @@ function RunPage({ agent, dueAt, chat, navigate }: { agent: AgentDefinition; due
       {/* Why nothing went: a condition, or a sign-in that let a newer run go instead. */}
       {run.status === "not_today" && run.summary && <p className="skills-note">{run.summary}</p>}
 
+      {scoped && <ItemGroups items={run.itemsList} />}
+
       <h4 className="run-section">What it sent</h4>
       {run.deliveries.length ? (
         <ul className="run-deliveries">
@@ -240,24 +235,65 @@ function RunPage({ agent, dueAt, chat, navigate }: { agent: AgentDefinition; due
       )}
 
       <h4 className="run-section">How it got there</h4>
-      {scoped && <p className="skills-note">{items || `${run.itemsList.length} item`}</p>}
       <ol className="run-items">
-        {run.itemsList.map((item) => (
-          <RunItem key={item.item} agentId={agent.id} dueAt={run.dueAt} item={item} scoped={scoped} />
+        {run.itemsList.map((item, index) => (
+          <RunItem key={item.item} id={scoped ? itemAnchor(index) : undefined} agentId={agent.id} dueAt={run.dueAt} item={item} scoped={scoped} />
         ))}
       </ol>
 
       {used.length > 0 && (
-        <dl className="run-used">
-          {used.map(([what, names]) => (
-            <div key={what}>
-              <dt>{what}</dt>
-              <dd>{names.join(", ")}</dd>
-            </div>
-          ))}
-        </dl>
+        <div className="run-used">
+          <strong id="run-used-head">Used</strong>
+          <dl aria-labelledby="run-used-head">
+            {used.map(({ what, text }) => (
+              <div key={what}>
+                <dt>{what}</dt>
+                <dd>{text}</dd>
+              </div>
+            ))}
+          </dl>
+        </div>
       )}
     </section>
+  );
+}
+
+/** An item's place in How it got there, for its line in the groups to scroll to. */
+function itemAnchor(index: number): string {
+  return `run-item-${index}`;
+}
+
+/**
+ * A scoped run's items at a glance, grouped by how they went (acted on, not today, …), each with its line; its name
+ * scrolls to its steps under How it got there.
+ */
+function ItemGroups({ items }: { items: readonly RunItemView[] }) {
+  const index = new Map(items.map((item, at) => [item.item, at]));
+  return (
+    <div className="run-groups">
+      {itemGroups(items).map((group) => (
+        <section key={group.status} className={`run-group ${group.status}`} aria-labelledby={`run-group-${group.status}`}>
+          <h4 id={`run-group-${group.status}`} className="run-group-head">
+            {group.title}
+            <span className="run-group-count">{group.count}</span>
+          </h4>
+          <ul>
+            {group.items.map(({ item, line }) => (
+              <li key={item.item}>
+                <button
+                  type="button"
+                  className="link-button run-group-name"
+                  onClick={() => document.getElementById(itemAnchor(index.get(item.item)!))?.scrollIntoView({ behavior: "smooth", block: "start" })}
+                >
+                  {item.label || "This run"}
+                </button>
+                {line && <span className="run-group-line">{line}</span>}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ))}
+    </div>
   );
 }
 
@@ -279,12 +315,12 @@ function Delivery({ delivery }: { delivery: RunDelivery }) {
   );
 }
 
-function RunItem({ agentId, dueAt, item, scoped }: { agentId: string; dueAt: number; item: RunItemView; scoped: boolean }) {
+function RunItem({ id, agentId, dueAt, item, scoped }: { id?: string; agentId: string; dueAt: number; item: RunItemView; scoped: boolean }) {
   const [trace, setTrace] = useState(false);
   // Read on the first Show, then kept: hiding it again only hides it.
   const [opened, setOpened] = useState(false);
   return (
-    <li className={`run-item ${item.status}`}>
+    <li id={id} className={`run-item ${item.status}`}>
       {scoped && (
         <div className="run-item-head">
           <strong>{item.label}</strong>

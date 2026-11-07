@@ -317,6 +317,22 @@ describe("scheduled runs", () => {
     expect(run.cost).toBeCloseTo(0.06);
   });
 
+  it("counts the memory notes its items' sessions read once each, as what it used", async () => {
+    const regions = ["North", "South", "East"].map((name, i) => ({ id: `r${i}`, name }));
+    const workflow: AgentStep[] = [{ kind: "work", prompt: "How is it going?" }, { kind: "tell", to: ["owner"], via: "chat" }];
+    const { host, runner, definition } = home(agent({ workflow, scope: { list: { kind: "look", server: "crm", tool: "regions", input: {} }, each: true } }));
+    host.values.set("crm.regions", { items: regions });
+    // Every session reads the agent's notes; the first one also a note saved meanwhile.
+    const read = new Map<string, string[]>();
+    Object.assign(host, {
+      configure: async (session: string) => void read.set(session, read.size ? ["n1", "n2"] : ["n1", "n2", "n3"]),
+      notesRead: async (session: string) => read.get(session) ?? [],
+    });
+    const { dueAt } = (await runner.now(definition.id, false)) as { dueAt: number };
+    await host.settled();
+    expect(host.runs.get(definition.id, dueAt)?.detail.used).toMatchObject({ notes: ["n1", "n2", "n3"] });
+  });
+
   it("waits for a sign-in, with no model call, and goes when it comes", async () => {
     const { host, runner, definition } = home();
     host.signIn.add("crm");
@@ -1889,6 +1905,7 @@ describe("a run's page step", () => {
       hub: { servers: () => [] } as unknown as McpHub,
       artifacts: {
         readHtml: async () => page,
+        readMeta: async () => null,
         publishVersion: async (input: { html: string; title: string; message?: string }) => {
           published.push(input.html);
           messages.push(input.message ?? "");

@@ -1,9 +1,11 @@
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { MAX_HOPS, type AgentDefinition, type AgentDraftView, type ChatAgentReplyData, type ChatTurnData } from "../../shared/agents.ts";
+import { messageBudgetNotice } from "../../shared/agent-settings.ts";
 import { AGENT_NAME } from "../../shared/mentions.ts";
 import { errorMessage, isObject, serial } from "../../shared/util.ts";
+import { steerLine, type SteerResult } from "../../shared/agent-window.ts";
 import type { DaySpend } from "./spend.ts";
-import { sessionOf, type AgentTurn, type ChatRoster, type PostedPage, type RosterEntry, type TurnRequest } from "./roster.ts";
+import { PI_TURN, sessionOf, type AgentTurn, type ChatRoster, type PostedPage, type RosterEntry, type TurnRequest } from "./roster.ts";
 import { isPass } from "./funnel.ts";
 import type { SeatBatch, SeatLink, SeatResult } from "./seats/link.ts";
 import { chatTraces } from "../chat-traces.ts";
@@ -72,7 +74,10 @@ export interface TurnHost {
   post(reply: ChatAgentReplyData): Promise<void>;
   /** Write an agent's reply as context pi reads, placed once however often (not when pi is handed a turn for it). */
   tellPi(reply: ChatAgentReplyData): Promise<void>;
-  /** Give pi a turn an agent named it for (`data.turn`, that agent's turn): placed once however often it is handed. */
+  /**
+   * Give pi its turn in a chain (`data.piTurn`, its place; `data.turn`, the agent's turn that named it, or its place for a
+   * message's): placed once however often it is handed.
+   */
   handToPi(input: string, data: ChatTurnData): Promise<void>;
   /** The roster's view changed (an agent started or ended a turn, or was dropped): tell everyone. */
   changed(): void;
@@ -85,6 +90,14 @@ export interface TurnHost {
   newest(session: string): Promise<number | undefined>;
   /** Whether nobody but the chat's owner is in the chat now (no members): a turn then reads every server of its agent's. */
   alone(): boolean;
+  /** What a turn's model calls in this object came to so far, in tokens (a seat's come with its result). */
+  turnTokens?(entry: RosterEntry, turn: AgentTurn): number;
+  /** How many tokens one person's message's chain of turns may use (ChatAgentSettings.messageTokens); no cap when absent. */
+  messageBudget?(): number | undefined;
+  /** What pi's model calls came to since this was last asked, in tokens: what its place in a chain counts. */
+  piTokens?(): number;
+  /** A chain stopped at its budget: the chat's line saying so (`text`), placed once per chain however often it is told. */
+  chainStopped?(root: number, text: string): Promise<void>;
   /**
    * What a forked turn's reply shows of its sources (turnSources), from its session's entries: only the shared servers'
    * records, the private servers it called, and whether its owner reviews it first.
@@ -141,18 +154,23 @@ export class AgentTurns {
   }
 
   /** Queue a turn for each agent, in order, and start them. */
-  call(agentIds: readonly string[], caller: Caller): AgentTurn[] {
+  call(agentIds: readonly string[], caller: Caller, { piPlaced = false }: { piPlaced?: boolean } = {}): AgentTurn[] {
     // The turns one message gives share one chain, so its hand-offs stay within MAX_HOPS however many agents it names:
     // without one of their own, the first turn starts it for the rest.
     let root = caller.root;
     const turns = agentIds.flatMap((agentId) => {
-      const entry = this.#host.roster.get(agentId);
-      if (!entry) return [];
+      // pi (PI_TURN) takes its place in the chain too: the chat's owner is its owner. `piPlaced`: its input is in already.
+      const pi = agentId === PI_TURN;
+      const ownerUid = pi ? this.#host.chatOwner : this.#host.roster.get(agentId)?.ownerUid;
+      if (ownerUid === undefined) return [];
       // Never in a chain no person started (a run's hand-over), whatever it says.
-      const byOwner = caller.byOwner && !caller.unattended && (caller.calledBy.uid === undefined || caller.calledBy.uid === entry.ownerUid);
+      const byOwner = caller.byOwner && !caller.unattended && (caller.calledBy.uid === undefined || caller.calledBy.uid === ownerUid);
       const ask = typeof caller.ask === "function" ? caller.ask(byOwner) : caller.ask;
       const by = caller.by ?? caller.calledBy.uid;
-      const turn = this.#host.roster.enqueue({ ...caller, agentId, byOwner, ask, hop: caller.hop ?? 0, root, ...(by !== undefined && { by }) });
+      const request = { ...caller, agentId, byOwner, ask, hop: caller.hop ?? 0, root, ...(by !== undefined && { by }) };
+      const turn = this.#host.roster.enqueue(request, pi && piPlaced);
+      // What pi's answer to it costs counts from now (its tokens are read as it ends).
+      if (pi && piPlaced) this.#host.piTokens?.();
       root ??= turn.id;
       return [turn];
     });
@@ -174,6 +192,7 @@ export class AgentTurns {
   }
 
   async #startNext(agentId: string): Promise<void> {
+    if (agentId === PI_TURN) return this.#startPi();
     const roster = this.#host.roster;
     let entry = roster.get(agentId);
     if (!entry) return;
@@ -187,9 +206,10 @@ export class AgentTurns {
       const agent = await this.#host.definition(entry);
       if (!live()) return;
       if (!agent) {
-        // Its owner deleted it: it leaves the roster, and what waited for it with it.
+        // Its owner deleted it: it leaves the roster, and what waited for it with it. The next speakers go on.
         roster.remove(agentId);
         this.#host.changed();
+        this.#pumpAfter();
         return;
       }
       const refreshed = roster.refresh(agentId, { name: agent.name, avatar: agent.avatar, color: agent.color, job: agent.job, off: !agent.enabled });
@@ -209,6 +229,16 @@ export class AgentTurns {
       const refused = this.#host.refusal?.();
       if (refused) {
         await this.#ended(entry, turn, { status: "unanswered", reason: refused });
+        return;
+      }
+      // Its chain used up the budget per person's message before it came up: it and the rest of the chain stop.
+      const over = this.#overBudget(turn.root);
+      if (over) {
+        const notice = roster.end(turn.id, "stopped") ? this.#stopChain(turn.root, over, [entry.name]) : null;
+        this.#host.changed();
+        // Its next turn, of another chain, may go.
+        this.#pumpAfter(agentId);
+        if (notice) await this.#host.chainStopped?.(turn.root, notice);
         return;
       }
       if (!live()) return;
@@ -278,6 +308,8 @@ export class AgentTurns {
    * the catch-up before it left the ask out (the input carries it). Later turns read it there, with the reply as posted.
    */
   async #tellApart(entry: RosterEntry, turn: AgentTurn): Promise<void> {
+    // What its owner told it from its window is theirs alone: it never reaches the session the chat's turns read.
+    if (turn.calledBy.window) return;
     await this.#host.write(entry.session, askedApart(turn.ask), `apart:${entry.agentId}:${turn.id}`);
   }
 
@@ -369,6 +401,8 @@ export class AgentTurns {
     if (now?.status === "running" || now?.status === "queued") {
       const done = result.status === "done";
       const text = (result.text ?? "").trim();
+      // What its model calls came to, here or in a seat's object: its chain's budget counts it.
+      const tokens = result.spent?.tokens ?? this.#host.turnTokens?.(entry, now) ?? 0;
       // How it ended, for the metrics and the chat's budget (with what it spent in another object, a seat's).
       const outcome = (status: TurnOutcome["status"], startedAt: number, endedAt: number): TurnOutcome => ({
         status,
@@ -379,11 +413,11 @@ export class AgentTurns {
       // A turn nobody asked for posts only an answer worth posting: none when it passed, or failed (nobody is waiting
       // for it), and it hands nothing on.
       if (turn.calledBy.unprompted && (!done || !text || isPass(text))) {
-        if (roster.end(turn.id, done ? "done" : "failed")) {
+        if (roster.end(turn.id, done ? "done" : "failed", undefined, tokens)) {
           this.#host.ended?.(turn, outcome(done ? "passed" : "failed", now.startedAt ?? now.createdAt, roster.now()));
         }
         this.#host.changed();
-        this.pump(entry.agentId);
+        this.#pumpAfter(entry.agentId);
         return;
       }
       // Only a turn whose input went in has outputs in its session.
@@ -422,17 +456,18 @@ export class AgentTurns {
       if (held) {
         // Its owner sees it first: nothing of it reaches the chat, pi or other agents until they post it. A failed or
         // empty one too: what its fork published or saved stays withheld until they post or discard it.
-        if (roster.end(turn.id, done ? "done" : "failed", { reply, toPi: false, held: true, ...(joined && { heldWhy: JOINED_WHILE_APART }) })) {
+        const outbox = { reply, toPi: false, held: true, ...(joined && { heldWhy: JOINED_WHILE_APART }) };
+        if (roster.end(turn.id, done ? "done" : "failed", outbox, tokens)) {
           this.#host.ended?.(turn, ended);
           this.#host.drafted(current.ownerUid);
         }
-      } else if (roster.end(turn.id, done ? "done" : "failed", { reply, toPi: false })) {
+      } else if (roster.end(turn.id, done ? "done" : "failed", { reply, toPi: false }, tokens)) {
         this.#host.ended?.(turn, ended);
         delivering = this.#release(turn.id, reply, done);
       }
     }
     this.#host.changed();
-    this.pump(entry.agentId);
+    this.#pumpAfter(entry.agentId);
     await delivering;
   }
 
@@ -447,11 +482,17 @@ export class AgentTurns {
     const turn = roster.turn(id)!;
     const left = MAX_HOPS - roster.handOffsFrom(turn.root);
     // A turn nobody asked for hands nothing on.
-    const next = done && left > 0 && !turn.calledBy.unprompted ? handOffs(reply.text, reply.agentId, turn.hop, roster.list()).slice(0, left) : [];
+    let next = done && left > 0 && !turn.calledBy.unprompted ? handOffs(reply.text, reply.agentId, turn.hop, roster.list()).slice(0, left) : [];
+    // Its chain used up the budget per person's message: it hands nothing on, and what waits of the chain stops.
+    const over = this.#overBudget(turn.root);
+    const notice = over && this.#stopChain(turn.root, over, next.map((agentId) => roster.get(agentId)?.name ?? AGENT_NAME));
+    if (over) next = [];
     // A chain no person started never hands pi a turn: pi has the owner's full tools. It reads the reply instead.
-    const posted = roster.release(id, reply, !turn.unattended && next.includes(AGENT_NAME));
+    const toPi = !turn.unattended && next.includes(AGENT_NAME);
+    const posted = roster.release(id, reply, toPi);
     if (posted.length) this.#host.posted?.(posted);
-    const agents = next.filter((agentId) => agentId !== AGENT_NAME);
+    // pi takes its place among them, in the order named: its turn starts once this reply is in the log (#startPi).
+    const agents = next.filter((agentId) => agentId !== AGENT_NAME || toPi);
     // A hand-off can only read, whoever started the chain: agents cannot give each other permission.
     const ask = askOf({ name: reply.name, kind: "agent" }, reply.text, MAX_ASK_CHARS);
     const calledBy = { name: reply.name, agentId: reply.agentId };
@@ -466,7 +507,84 @@ export class AgentTurns {
       ...(turn.by !== undefined && { by: turn.by }),
     };
     if (agents.length) this.call(agents, hop);
-    return this.#deliver(id);
+    // The chain's last line, after its reply.
+    return notice ? this.#deliver(id).then(() => this.#host.chainStopped?.(turn.root, notice)) : this.#deliver(id);
+  }
+
+  /**
+   * What the chain that `root` started used, with the chat's budget per person's message, once it used that up (past
+   * it, or at it); null while it may go on, or when the chat has no budget.
+   */
+  #overBudget(root: number): { budget: number; spent: number } | null {
+    const budget = this.#host.messageBudget?.();
+    if (budget === undefined) return null;
+    const spent = this.#host.roster.chainTokens(root);
+    return spent >= budget ? { budget, spent } : null;
+  }
+
+  /**
+   * A chain used up its budget: what waits of it stops, and what the chat is told (the agents given no turn: `given`,
+   * those it would have handed on to, and those stopped), or null when no agent was left out.
+   */
+  #stopChain(root: number, over: { budget: number; spent: number }, given: readonly string[]): string | null {
+    const roster = this.#host.roster;
+    const stopped = roster.stopQueued(root).map((turn) => roster.get(turn.agentId)?.name ?? turn.agentId);
+    const left = [...new Set([...given, ...stopped])];
+    if (stopped.length) {
+      this.#host.changed();
+      this.#pumpAfter();
+    }
+    return left.length ? messageBudgetNotice(over.budget, over.spent, left) : null;
+  }
+
+  /**
+   * pi's place in a chain came up (ChatRoster.startNext, after every earlier turn of its chain is in the log): pi is
+   * given its turn, which ends once its answer is in the log (`piAnswered`). One a message that named it first gave
+   * started with that message (enqueue's `placed`) and never comes up here.
+   */
+  async #startPi(): Promise<void> {
+    const roster = this.#host.roster;
+    const turn = roster.startNext(PI_TURN);
+    if (!turn) return;
+    this.#host.changed();
+    const over = this.#overBudget(turn.root);
+    if (over) {
+      const notice = roster.end(turn.id, "stopped") ? this.#stopChain(turn.root, over, [AGENT_NAME]) : null;
+      this.#pumpAfter(PI_TURN);
+      if (notice) await this.#host.chainStopped?.(turn.root, notice);
+      return;
+    }
+    try {
+      // A hand-off is the handing turn's (pi goes as far as it does, inputLevel); a message's place is its own.
+      const handing = roster.handedBy(turn.id) ?? turn.id;
+      this.#host.piTokens?.();
+      await this.#host.handToPi(turnInput(turn), {
+        turn: handing,
+        calledBy: turn.calledBy,
+        hop: turn.hop,
+        root: turn.root,
+        piTurn: turn.id,
+        ...(turn.by !== undefined && { by: turn.by }),
+      });
+      roster.markSubmitted(turn.id);
+    } catch (error) {
+      console.error("pi's turn:", errorMessage(error));
+      // Not given: the chain goes on without it.
+      if (roster.end(turn.id, "failed")) this.#host.changed();
+      this.#pumpAfter(PI_TURN);
+    }
+  }
+
+  /**
+   * pi's answer to the inputs of these places in their chains is in the log (ChatAgent's #piScan): they end, with what
+   * pi's run came to, and the next speakers of their chains go.
+   */
+  piAnswered(ids: readonly number[]): void {
+    if (!ids.length) return;
+    const tokens = this.#host.piTokens?.() ?? 0;
+    for (const [at, id] of ids.entries()) this.#host.roster.end(id, "done", undefined, at === 0 ? tokens : 0);
+    this.#host.changed();
+    this.#pumpAfter(PI_TURN);
   }
 
   /** A reply of `uid`'s agent `agentId` held for their review, as turn `id`; refused for anyone else's, or one no longer held. */
@@ -543,22 +661,24 @@ export class AgentTurns {
     try {
       await this.#host.post(reply);
       // Read again: a Stop meanwhile hands pi nothing, and pi reads the reply as context instead. A turn handed to pi
-      // carries the reply in its input.
-      if (roster.outbox(id)?.toPi) {
-        const calledBy = { name: reply.name, agentId: reply.agentId };
-        const handed = { calledBy, hop: turn.hop + 1, ask: askOf({ name: reply.name, kind: "agent" }, reply.text, MAX_ASK_CHARS) };
-        await this.#host.handToPi(turnInput(handed), {
-          turn: id,
-          calledBy,
-          hop: handed.hop,
-          root: turn.root,
-          ...(turn.by !== undefined && { by: turn.by }),
-        });
-      } else await this.#host.tellPi(reply);
+      // carries the reply in its input: its place in the chain gives it to pi once this is in the log (#startPi).
+      if (!roster.outbox(id)?.toPi) await this.#host.tellPi(reply);
     } catch (error) {
       console.error("agent reply:", errorMessage(error));
     }
     roster.markDelivered(id);
+    // The next speaker of its chain reads it in the log now (ChatRoster.startNext).
+    this.#pumpAfter();
+  }
+
+  /**
+   * A turn ended, its reply reached the log, or turns stopped: the agent's next turn may start (`agentId`), and so may
+   * the next speaker of a chain that waited for it, whichever agent's (ChatRoster.startNext decides which may).
+   */
+  #pumpAfter(agentId?: string): void {
+    const waiting = new Set(this.#host.roster.waitingAgents());
+    if (agentId !== undefined) waiting.add(agentId);
+    for (const each of waiting) this.pump(each);
   }
 
   /**
@@ -591,6 +711,35 @@ export class AgentTurns {
     for (const agentId of roster.waitingAgents()) this.pump(agentId);
   }
 
+  /**
+   * Its owner's words to an agent from its window (shared/agent-window.ts): into the turn of theirs it runs apart now
+   * (a steer, read at its next step, in its fork, so nothing of it reaches the session the chat's turns read), or else
+   * as a turn of their own, at their level, apart (it forks, as any turn its owner gives does), queued after any other
+   * turn it runs. Its ask is in no log: others see only the reply it posts. Refused for anyone but the agent's owner.
+   */
+  async instruct(agentId: string, by: { uid: string; name: string }, text: string): Promise<SteerResult | { error: string; status: 403 }> {
+    const roster = this.#host.roster;
+    const entry = roster.get(agentId);
+    if (!entry || entry.ownerUid !== by.uid) return { error: "Only the agent's owner can steer it.", status: 403 };
+    const running = roster.allRunning().find((turn) => turn.agentId === agentId);
+    const line = steerLine(by.name, text);
+    if (running?.byOwner && running.calledBy.uid === by.uid) {
+      // A seat says itself whether the turn runs apart there (its own fork, for its owner's own turn).
+      const steered =
+        entry.seat !== undefined
+          ? await this.#host.seat(entry).steer(running.id, line)
+          : running.session !== undefined &&
+            (await this.#host.write(running.session, line, `steer:${entry.agentId}:${running.id}:${roster.now()}:${text.length}`), true);
+      if (steered) return { mode: "steered", turn: running.id };
+    }
+    const [turn] = this.call([agentId], {
+      calledBy: { name: by.name, uid: by.uid, window: true },
+      ask: askOf({ name: by.name, kind: "person", owner: true }, text),
+      byOwner: true,
+    });
+    return { mode: running ? "queued" : "started", turn: turn.id };
+  }
+
   /** Stop every agent's turns, or one agent's: running ones are aborted, waiting ones dropped. True when one was stopped. */
   async stop(agentId?: string): Promise<boolean> {
     return this.#stopped(this.#host.roster.stopAll(agentId));
@@ -614,7 +763,10 @@ export class AgentTurns {
     }
     aborts.push(...[...sessions].map((session) => this.#host.abort(session)));
     await Promise.all(aborts.map((abort) => abort.catch((error: unknown) => console.error("agent stop:", errorMessage(error)))));
-    if (stopped.length) this.#host.changed();
+    if (stopped.length) {
+      this.#host.changed();
+      this.#pumpAfter();
+    }
     return stopped.length > 0;
   }
 

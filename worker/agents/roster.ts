@@ -7,6 +7,7 @@ import {
   type ChatAgentReplyData,
   type ChatAgentView,
 } from "../../shared/agents.ts";
+import { AGENT_NAME } from "../../shared/mentions.ts";
 import type { ArtifactMeta } from "../../shared/protocol.ts";
 import type { RunRef } from "../../shared/runs.ts";
 import { addColumns, type Sql } from "../members.ts";
@@ -261,6 +262,12 @@ function turnOf(row: TurnRow): AgentTurn {
   };
 }
 
+/**
+ * The agent id of pi's place in a chain (a turn row of its own, which no roster entry has): it holds the chain's later
+ * speakers until pi's answer is in the log, as an agent's turn does (AgentTurns, ChatAgent's #piScan).
+ */
+export const PI_TURN = AGENT_NAME;
+
 /** Turns kept per agent once ended: the newest, for the runs list; older ones go. */
 const KEPT_TURNS = 200;
 /** A turn not ended yet. */
@@ -271,6 +278,14 @@ const PENDING = "reply IS NOT NULL AND delivered_at IS NULL";
 const UNDELIVERED = `${PENDING} AND held = 0`;
 /** A turn's reply held for its owner's review. */
 const HELD = `${PENDING} AND held = 1`;
+/**
+ * A queued turn (`t`) whose chain has no earlier turn still going: queued, running, or ended with its reply not in the
+ * log yet. One held for its owner's review is not waited for: nobody sees it until they post it.
+ */
+const IN_TURN = `NOT EXISTS (
+  SELECT 1 FROM chat_agent_turns e WHERE (e.root = COALESCE(t.root, t.id) OR e.id = COALESCE(t.root, t.id)) AND e.id < t.id
+    AND (e.status IN ('queued', 'running') OR (e.reply IS NOT NULL AND e.delivered_at IS NULL AND e.held = 0))
+)`;
 
 /**
  * One chat's agents and their turns, in the chat object's own SQLite. The roster points at definitions in their
@@ -345,6 +360,8 @@ export class ChatRoster {
       by_uid: "TEXT",
       alone: "INTEGER NOT NULL DEFAULT 0",
       held_why: "TEXT",
+      // What its model calls came to, a seat's in its owner's object too: its chain's budget counts it (chainTokens).
+      tokens: "INTEGER NOT NULL DEFAULT 0",
     });
     // A fork's view (FORKS) asks whether a turn still runs in its session, for every session every trace read.
     sql.exec("CREATE INDEX IF NOT EXISTS chat_agent_turns_by_session ON chat_agent_turns (session)");
@@ -495,13 +512,19 @@ export class ChatRoster {
     this.#sql.exec("UPDATE chat_agents SET mirrored = MAX(mirrored, ?) WHERE agent_id = ?", through, agentId);
   }
 
-  /** Queue a turn for an agent. */
-  enqueue(turn: TurnRequest): AgentTurn {
+  /**
+   * Queue a turn for an agent, or for pi (`PI_TURN`: its place in a chain). `placed`: its input is in already (pi's for
+   * a message that named it first): it runs from now on.
+   */
+  enqueue(turn: TurnRequest, placed = false): AgentTurn {
+    const now = placed ? this.#now() : null;
     const row = this.#sql
       .exec(
-        `INSERT INTO chat_agent_turns (agent_id, status, hop, called_by, by_owner, root, ask, ask_key, created_at, session, run, unattended, by_uid)
-         VALUES (?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
+        `INSERT INTO chat_agent_turns (agent_id, status, hop, called_by, by_owner, root, ask, ask_key, created_at, session, run, unattended, by_uid,
+           started_at, submitted_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
         turn.agentId,
+        placed ? "running" : "queued",
         turn.hop,
         JSON.stringify(turn.calledBy),
         turn.byOwner ? 1 : 0,
@@ -513,9 +536,23 @@ export class ChatRoster {
         turn.run ? JSON.stringify(turn.run) : null,
         turn.unattended ? 1 : 0,
         turn.by ?? null,
+        now,
+        now,
       )
       .toArray()[0] as TurnRow;
     return turnOf(row);
+  }
+
+  /** pi's place, not ended, in the chain of the message whose ask key is `askKey` (enqueue's `placed`); null for none. */
+  piTurnFor(askKey: string): AgentTurn | null {
+    return this.#turns(`agent_id = ? AND ask_key = ? AND ${OPEN} ORDER BY id LIMIT 1`, PI_TURN, askKey)[0] ?? null;
+  }
+
+  /** The turn that handed pi its place `id` (a hand-off's ask key names it); null for one a person's message gave. */
+  handedBy(id: number): number | null {
+    const key = this.#sql.exec("SELECT ask_key FROM chat_agent_turns WHERE id = ?", id).toArray()[0]?.ask_key;
+    const handing = typeof key === "string" ? /^turn:(\d+)$/.exec(key) : null;
+    return handing ? Number(handing[1]) : null;
   }
 
   /**
@@ -538,8 +575,27 @@ export class ChatRoster {
    * within MAX_HOPS, however they branch.
    */
   handOffsFrom(root: number): number {
-    return this.#sql.exec("SELECT COALESCE(SUM((hop > 0) + to_pi), 0) AS n FROM chat_agent_turns WHERE root = ? OR id = ?", root, root).toArray()[0]
-      .n as number;
+    // pi's place in the chain is counted on the turn that handed it (to_pi), not again as a hop of its own.
+    const sum = "SELECT COALESCE(SUM((hop > 0 AND agent_id != ?) + to_pi), 0) AS n FROM chat_agent_turns WHERE root = ? OR id = ?";
+    return this.#sql.exec(sum, PI_TURN, root, root).toArray()[0].n as number;
+  }
+
+  /** How many tokens the turns of the chain that `root` started used, as each ended (`end`). */
+  chainTokens(root: number): number {
+    return this.#sql.exec("SELECT COALESCE(SUM(tokens), 0) AS n FROM chat_agent_turns WHERE root = ? OR id = ?", root, root).toArray()[0].n as number;
+  }
+
+  /** Stop the turns of the chain that `root` started that wait: those stopped, oldest first. */
+  stopQueued(root: number): AgentTurn[] {
+    const rows = this.#sql
+      .exec(
+        "UPDATE chat_agent_turns SET status = 'stopped', ended_at = ? WHERE status = 'queued' AND (root = ? OR id = ?) RETURNING *",
+        this.#now(),
+        root,
+        root,
+      )
+      .toArray() as TurnRow[];
+    return rows.map(turnOf).sort((one, other) => one.id - other.id);
   }
 
   /**
@@ -818,15 +874,17 @@ export class ChatRoster {
   }
 
   /**
-   * Start an agent's next waiting turn, oldest first, unless one is running: at most one at a time per agent. Null
-   * when nothing starts.
+   * Start an agent's next waiting turn, oldest first, unless one is running: at most one at a time per agent. Speakers
+   * go one after another: a turn waits for every earlier turn of its chain (one person's message, the agents it names in
+   * order, then their hand-offs) to end and its reply to reach the log (IN_TURN), so it reads the replies before it. An
+   * agent's turn of another chain may go meanwhile. Null when nothing starts.
    */
   startNext(agentId: string): AgentTurn | null {
     if (this.#turns("agent_id = ? AND status = 'running' LIMIT 1", agentId).length) return null;
     const row = this.#sql
       .exec(
         `UPDATE chat_agent_turns SET status = 'running', started_at = ?
-         WHERE id = (SELECT id FROM chat_agent_turns WHERE agent_id = ? AND status = 'queued' ORDER BY id LIMIT 1) RETURNING *`,
+         WHERE id = (SELECT id FROM chat_agent_turns t WHERE agent_id = ? AND status = 'queued' AND ${IN_TURN} ORDER BY id LIMIT 1) RETURNING *`,
         this.#now(),
         agentId,
       )
@@ -836,18 +894,21 @@ export class ChatRoster {
 
   /**
    * End a turn not ended yet, with what it still has to deliver. Only once: a turn that ended already (a second wait on
-   * it, a stop meanwhile) stays as it ended, and null says so, so its reply is delivered once.
+   * it, a stop meanwhile) stays as it ended, and null says so, so its reply is delivered once. `tokens`: what its model
+   * calls came to (chainTokens).
    */
-  end(id: number, status: Exclude<AgentTurnStatus, "queued" | "running">, outbox?: Outbox): AgentTurn | null {
+  end(id: number, status: Exclude<AgentTurnStatus, "queued" | "running">, outbox?: Outbox, tokens = 0): AgentTurn | null {
     const row = this.#sql
       .exec(
-        `UPDATE chat_agent_turns SET status = ?, ended_at = ?, reply = ?, to_pi = ?, held = ?, held_why = ? WHERE id = ? AND ${OPEN} RETURNING *`,
+        `UPDATE chat_agent_turns SET status = ?, ended_at = ?, reply = ?, to_pi = ?, held = ?, held_why = ?, tokens = ?
+         WHERE id = ? AND ${OPEN} RETURNING *`,
         status,
         this.#now(),
         outbox ? JSON.stringify(outbox.reply) : null,
         outbox?.toPi ? 1 : 0,
         outbox?.held ? 1 : 0,
         (outbox?.held && outbox.heldWhy) || null,
+        Math.max(0, Math.round(tokens)),
         id,
       )
       .toArray()[0] as TurnRow | undefined;
