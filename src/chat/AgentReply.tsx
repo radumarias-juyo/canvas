@@ -18,7 +18,7 @@ function calledByLabel(calledBy: ChatAgentReplyData["calledBy"]): string {
 /**
  * One reply of an agent besides pi (a `chat.agent` entry): its badge and name, whose it is and who asked, its text
  * (folded behind "Show more" when long), the records it is built on as chips, the artifacts it published and why it
- * ended early. Its steps stay in its own session.
+ * ended early. Its steps show live while it works (AgentTurnLive), then stay in its own session.
  */
 export function AgentReply({
   data,
