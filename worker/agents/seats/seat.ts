@@ -225,6 +225,18 @@ export class AgentSeats {
     return isChatKind(row?.kind) ? row.kind : "off_record";
   }
 
+  /**
+   * The kind what this object's seats make (their pages) goes out as, to its owner's sidebar and to followers: none when
+   * it has no seats; else off the record when any room is, or has not said its kind yet (nothing then leaves), else the
+   * room's (a seat object serves one room: seatChatId).
+   */
+  publishKind(): ChatKind | null {
+    const rows = this.#sql.exec("SELECT DISTINCT kind FROM agent_seats").toArray() as Pick<SeatRow, "kind">[];
+    if (!rows.length) return null;
+    const kinds = rows.map((row) => (isChatKind(row.kind) ? row.kind : "off_record"));
+    return kinds.includes("off_record") ? "off_record" : kinds[0];
+  }
+
   #seat(ref: RoomRef, agentId: string): SeatRow | undefined {
     return this.#sql
       .exec("SELECT * FROM agent_seats WHERE room_owner = ? AND room_chat = ? AND agent_id = ?", ref.ownerUid, ref.chatId, agentId)
