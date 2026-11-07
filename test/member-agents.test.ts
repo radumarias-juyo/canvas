@@ -1213,6 +1213,7 @@ describe("Member agents: what the review of private turns found", () => {
     const [first] = reply("@planner and the week after?");
     await settle();
     chat.roster.recordPage("run-reply", "r1", 2);
+    chat.roster.recordDraft("run-reply", "d1");
     chat.sessions.finish(first.id, "Week 42 too.", calendar);
     await settle();
     expect(chat.turns.discard(RADU.uid, planner.agentId, first.id)).toBeNull();
@@ -1224,6 +1225,8 @@ describe("Member agents: what the review of private turns found", () => {
       [second.id, false],
     ]);
     chat.roster.recordPage("run-reply", "r2", 1);
+    chat.roster.recordDraft("run-reply", "d2");
+    expect(chat.roster.withheldDrafts("pi")).toEqual(new Set(["d1", "d2"]));
     chat.sessions.finish(second.id, "Week 41.", [...calendar, tool(PUBLISH_TOOL, { artifactId: "r2", version: 1, title: "Next" })]);
     await settle();
     expect(await chat.turns.post(RADU.uid, planner.agentId, second.id)).toBeNull();
@@ -1233,8 +1236,9 @@ describe("Member agents: what the review of private turns found", () => {
       false,
       true,
     ]);
-    // The discarded window stays withheld for good, so the session's drafts stay out of other conversations' sight.
+    // The discarded window stays withheld for good, and so do its drafts; the posted turn's are the chat's.
     expect([chat.roster.anyWithheld(), chat.roster.withheld()]).toEqual([true, new Set(["run-reply"])]);
+    expect(chat.roster.withheldDrafts("pi")).toEqual(new Set(["d1"]));
     expect(chat.announced).toEqual([{ artifactId: "r2", version: 1 }]);
   });
 

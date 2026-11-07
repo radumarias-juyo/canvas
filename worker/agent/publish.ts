@@ -82,6 +82,8 @@ export interface PublishScope {
    * (agents' private turns, in forks of their sessions): unset, or for a chat with none, nothing is withheld.
    */
   rulesFor?(session: string): Promise<SessionRules>;
+  /** Conversation `session` is about to save draft `draftId` (writeDraft): whose draft it is (SessionRules.hiddenDraft). */
+  onDrafted?(session: string, draftId: string): void;
   /**
    * Render a page in a headless browser and report on it (worker/artifacts/check.ts), for at most CHECK_MS and until
    * `signal` aborts. Throws BrowserUnavailable without a browser, CheckTimedOut when the page held it too long.
@@ -122,10 +124,10 @@ export interface SessionRules {
   /** Whether a file is the chat's (not one only a conversation apart from it saved). */
   chatFile(path: string): boolean;
   /**
-   * Whether `session` is another conversation apart from the chat with its reply not posted: the drafts it saved
-   * (DraftPage.session) are not the chat's, so this one neither lists, reads, checks nor publishes them.
+   * Whether a draft is one only other conversations apart from the chat saved, with their replies not posted
+   * (PublishScope.onDrafted): not the chat's yet, so this one neither lists, reads, checks nor publishes it.
    */
-  hiddenSession(session: string | undefined): boolean;
+  hiddenDraft(draftId: string): boolean;
 }
 
 /** Why a reviewed turn apart from the chat may not change a page or file the chat already has, and what to do instead. */
@@ -274,15 +276,19 @@ export interface WriteInput {
   mcp?: McpDeclaration;
   artifact?: ArtifactMeta;
   version?: number;
-  /** The conversation saving it (DraftPage.session), and what it may see: not a draft of another one apart from the chat. */
+  /** The conversation saving it, when a model's turn does: it builds on no draft another one apart from the chat saved. */
   session?: string;
-  rules?: SessionRules;
 }
 
-/** A draft of the chat by its id, but none another conversation apart from the chat saved (`rules`); else throws, starting with `what`. */
+/** What conversation `session` may see (PublishScope.rulesFor); undefined, not a model's turn, or a chat with no rules: everything. */
+function rulesOf(scope: PublishScope, session: string | undefined): Promise<SessionRules> | undefined {
+  return session === undefined ? undefined : scope.rulesFor?.(session);
+}
+
+/** A draft of the chat by its id, but none `rules` hide (SessionRules.hiddenDraft); else throws, starting with `what`. */
 export async function draftNamed(drafts: ChatDrafts, id: string, what = "", rules?: SessionRules): Promise<Draft> {
-  const draft = await drafts.get(id);
-  if (!draft || rules?.hiddenSession(draft.session))
+  const draft = rules?.hiddenDraft(id) ? null : await drafts.get(id);
+  if (!draft)
     throw new Error(`${what && `${what} `}No draft "${id}" in this chat: it was published, or dropped as one of the oldest. List them with ${DRAFTS_TOOL}.`);
   return draft;
 }
@@ -293,7 +299,7 @@ export async function draftNamed(drafts: ChatDrafts, id: string, what = "", rule
  * Saving a page that is already a draft keeps how its check went.
  */
 export async function writeDraft(scope: PublishScope, input: WriteInput): Promise<Draft & { bytes: number }> {
-  const { draftId: from, edits = [], artifact, version, session, rules } = input;
+  const { draftId: from, edits = [], artifact, version, session } = input;
   if (input.html !== undefined && (from !== undefined || edits.length))
     throw new Error("Pass a new page as html, or edits with the draft_id or artifact_id they change: not both.");
   if (version !== undefined && (input.html !== undefined || from !== undefined))
@@ -304,7 +310,7 @@ export async function writeDraft(scope: PublishScope, input: WriteInput): Promis
   let reviewed: true | undefined;
   if (html === undefined) {
     if (from !== undefined) {
-      const draft = await draftNamed(drafts, from, "Not saved.", rules);
+      const draft = await draftNamed(drafts, from, "Not saved.", await rulesOf(scope, session));
       html = applyEdits(draft.html, edits);
       mcp ??= draft.manifest.mcp?.servers;
       artifactId ??= draft.artifactId;
@@ -320,18 +326,9 @@ export async function writeDraft(scope: PublishScope, input: WriteInput): Promis
   const manifest = await validPage(scope, html, mcp, "Not saved.");
   const skillSets = await pinSkillFiles(scope, html, "Not saved.");
   const id = await draftId(html, manifest, skillSets);
-  return drafts.save(
-    {
-      id,
-      html,
-      manifest,
-      artifactId,
-      ...(Object.keys(skillSets).length && { skillSets }),
-      ...(reviewed && { reviewed }),
-      ...(session !== undefined && { session }),
-    },
-    null,
-  );
+  // Whose it is, before it is there to list.
+  if (session !== undefined) scope.onDrafted?.(session, id);
+  return drafts.save({ id, html, manifest, artifactId, ...(Object.keys(skillSets).length && { skillSets }), ...(reviewed && { reviewed }) }, null);
 }
 
 /** What checking a draft came to: the draft, and the check's report, or why no browser checked it; what the look cost. */
@@ -356,9 +353,9 @@ export async function checkDraft(
   id: string,
   { review: reviewIt = true, ...options }: Pick<CheckInput, "tests" | "viewport"> & { review?: boolean },
   signal?: AbortSignal,
-  rules?: SessionRules,
+  session?: string,
 ): Promise<CheckedDraft> {
-  const drafts = await scope.drafts();
+  const [drafts, rules] = await Promise.all([scope.drafts(), rulesOf(scope, session)]);
   const draft = await draftNamed(drafts, id, "Not checked.", rules);
   const { html, pageLine } = await pageToRun(scope, draft, "Not checked.");
   // Stops the review when the check fails or could not run: it is no longer waited for, and a review costs.
@@ -518,7 +515,7 @@ async function artifactFor(scope: PublishScope, target: PublishTarget, writtenFo
  * with errors is never published. A published draft goes: its version holds it now.
  */
 export async function publishDraft(scope: PublishScope, input: PublishInput, signal?: AbortSignal, session?: string): Promise<Published> {
-  const [drafts, rules] = await Promise.all([scope.drafts(), session === undefined ? undefined : scope.rulesFor?.(session)]);
+  const [drafts, rules] = await Promise.all([scope.drafts(), rulesOf(scope, session)]);
   let draft = await draftNamed(drafts, input.draftId, "Not published.", rules);
   // Without the code review: its findings would stop the publish unseen, and the draft would then be reviewed already.
   if (draft.errors === null && scope.publishUnchecked) draft = (await checkDraft(scope, draft.id, { review: false }, signal)).draft;

@@ -135,6 +135,9 @@ type ForkRow = { session: string; posted: number; from_entry: number | null; rev
  */
 export type ApartWindow = { turn: number; from: number; through?: number; posted: boolean };
 
+/** The sessions apart from the chat with a turn's reply not posted (ChatRoster.withheld). */
+const WITHHELD = "SELECT session FROM chat_agent_forks WHERE posted = 0 UNION SELECT session FROM chat_agent_apart_windows WHERE posted = 0";
+
 const FORKS = `SELECT f.session, f.posted, f.from_entry, f.review, f.reused,
   EXISTS (SELECT 1 FROM chat_agent_turns t WHERE t.session = f.session AND t.status IN ('queued', 'running')) AS open
   FROM chat_agent_forks f`;
@@ -146,10 +149,14 @@ const forkOf = (row: ForkRow): Fork => ({
   reused: row.reused === 1,
 });
 
-/** The newest of versions 1 to `latest` not in `withheld` (ChatRoster.withheldVersions): 0 when there is none. */
-export function newestShown(latest: number, withheld: ReadonlySet<number>): number {
+/**
+ * The newest of versions `floor` to `latest` not `withheld` (ChatRoster.withheldVersions, SessionRules.hiddenVersion):
+ * `floor - 1` when there is none.
+ */
+export function newestShown(latest: number, withheld: ReadonlySet<number> | ((version: number) => boolean), floor = 1): number {
+  const hidden = typeof withheld === "function" ? withheld : (version: number) => withheld.has(version);
   let version = latest;
-  while (version > 0 && withheld.has(version)) version--;
+  while (version >= floor && hidden(version)) version--;
   return version;
 }
 
@@ -269,6 +276,9 @@ export class ChatRoster {
       CREATE INDEX IF NOT EXISTS chat_agent_fork_pages_by_page ON chat_agent_fork_pages (artifact_id, version);
       CREATE TABLE IF NOT EXISTS chat_agent_fork_files (
         session TEXT NOT NULL, path TEXT NOT NULL, posted INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (session, path)
+      );
+      CREATE TABLE IF NOT EXISTS chat_agent_fork_drafts (
+        session TEXT NOT NULL, draft_id TEXT NOT NULL, turn INTEGER, posted INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (session, draft_id)
       );
       CREATE TABLE IF NOT EXISTS chat_agent_apart_windows (
         session TEXT NOT NULL, turn INTEGER NOT NULL, from_entry INTEGER NOT NULL, through_entry INTEGER, posted INTEGER NOT NULL DEFAULT 0,
@@ -594,6 +604,35 @@ export class ChatRoster {
     }
   }
 
+  /**
+   * A draft `session` saved (worker/storage/drafts.ts, by its id, a hash of the page): one a session apart from the chat
+   * saved with its reply not posted is that turn's, which no other conversation lists or uses until it is posted
+   * (withheldDrafts). Saved from a conversation the chat sees, the page is the chat's, whoever else saved it too.
+   */
+  recordDraft(session: string, draftId: string): void {
+    const apart = this.#sql.exec(
+      `INSERT INTO chat_agent_fork_drafts (session, draft_id, turn)
+       SELECT session, ?, apart_turn FROM chat_agent_forks WHERE session = ? AND posted = 0
+       ON CONFLICT DO UPDATE SET turn = excluded.turn, posted = 0`,
+      draftId,
+      session,
+    ).rowsWritten;
+    if (!apart) this.#sql.exec("DELETE FROM chat_agent_fork_drafts WHERE draft_id = ?", draftId);
+  }
+
+  /** The drafts sessions apart from the chat other than `except` saved, with their replies not posted, and `except` did not save too. */
+  withheldDrafts(except: string): Set<string> {
+    const rows = this.#sql
+      .exec(
+        `SELECT DISTINCT draft_id FROM chat_agent_fork_drafts WHERE posted = 0 AND session IS NOT ?
+         AND draft_id NOT IN (SELECT draft_id FROM chat_agent_fork_drafts WHERE session = ?)`,
+        except,
+        except,
+      )
+      .toArray();
+    return new Set(rows.map((row) => row.draft_id as string));
+  }
+
   /** The files sessions apart from the chat saved (recordFiles), with their replies not posted: not the chat's yet. */
   withheldFiles(): Set<string> {
     const rows = this.#sql.exec("SELECT DISTINCT path FROM chat_agent_fork_files WHERE posted = 0").toArray();
@@ -628,11 +667,7 @@ export class ChatRoster {
 
   /** Whether any session apart from the chat has a turn's reply not posted: until one does, nothing is withheld. */
   anyWithheld(): boolean {
-    return (
-      this.#sql
-        .exec("SELECT 1 FROM chat_agent_forks WHERE posted = 0 UNION ALL SELECT 1 FROM chat_agent_apart_windows WHERE posted = 0 LIMIT 1")
-        .toArray().length > 0
-    );
+    return this.#sql.exec(`${WITHHELD} LIMIT 1`).toArray().length > 0;
   }
 
   /** The pages a session apart from the chat made (their first version), with its reply not posted: not the chat's yet. */
@@ -665,11 +700,12 @@ export class ChatRoster {
 
   /** The sessions apart from the chat with a turn's reply not posted: forks() not posted, and reused ones with such a window. */
   withheld(): Set<string> {
-    const windows = this.#sql.exec("SELECT DISTINCT session FROM chat_agent_apart_windows WHERE posted = 0").toArray();
-    return new Set([
-      ...[...this.forks()].flatMap(([session, fork]) => (fork.posted ? [] : [session])),
-      ...windows.map((row) => row.session as string),
-    ]);
+    return new Set(
+      this.#sql
+        .exec(WITHHELD)
+        .toArray()
+        .map((row) => row.session as string),
+    );
   }
 
   /** A running turn's input reached its session: a restart waits on it, where one not submitted yet starts again. */
@@ -785,6 +821,7 @@ export class ChatRoster {
     this.#sql.exec("UPDATE chat_agent_forks SET posted = 1 WHERE session = ? AND apart_turn = ?", session, id);
     this.#sql.exec("UPDATE chat_agent_apart_windows SET posted = 1 WHERE session = ? AND turn = ?", session, id);
     this.#sql.exec("UPDATE chat_agent_fork_files SET posted = 1 WHERE session = ? AND turn = ?", session, id);
+    this.#sql.exec("UPDATE chat_agent_fork_drafts SET posted = 1 WHERE session = ? AND turn = ?", session, id);
     const pages = this.#sql
       .exec("UPDATE chat_agent_fork_pages SET posted = 1 WHERE session = ? AND turn = ? AND posted = 0 RETURNING artifact_id, version", session, id)
       .toArray();

@@ -19,7 +19,7 @@ export interface DumpKv {
  * What of a chat object's storage an export carries: its conversation (pi's tables, `pi_…`), its reactions, its
  * owner's name, its agents' roster (their sessions are pi's), and which of their forks' pages and files are not the
  * chat's (chat_agent_forks: their replies were never posted, so they stay out of what members see), with the versions they
- * published and the files they saved (chat_agent_fork_pages, chat_agent_fork_files), and which turns' entries of a
+ * published, the files and drafts they saved (chat_agent_fork_pages, chat_agent_fork_files, chat_agent_fork_drafts), and which turns' entries of a
  * session later turns ran in again are not (chat_agent_apart_windows). Not its members and invites: they are people of the
  * deployment it was made on, whose ids mean nothing on another, so an imported chat starts with nobody in it but its
  * owner. Nor the Lifecycle's jobs (`cf_agents_…`), nor the agents' turns (chat_agent_turns): work still to do, which
@@ -32,6 +32,7 @@ const APP_TABLES = [
   "chat_agent_forks",
   "chat_agent_fork_pages",
   "chat_agent_fork_files",
+  "chat_agent_fork_drafts",
   "chat_agent_apart_windows",
 ];
 const PI_TABLE = /^pi_[a-z0-9_]+$/;

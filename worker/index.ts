@@ -157,13 +157,15 @@ async function route(request: Request, env: Env): Promise<Response> {
       const chat = exports.ChatAgent.getByName(chatAgentName(meta.ownerUid, chatId));
       // Not what turns apart from the chat published with their replies not posted: someone else sees the newest
       // version that is the chat's.
-      const withheld = isOwner ? undefined : await chat.withheldFrom(id, uid);
+      const [withheld, inChat] = await Promise.all([
+        isOwner ? undefined : chat.withheldFrom(id, uid),
+        url.searchParams.has("chat") && chat.isInChat(uid),
+      ]);
       if (withheld?.page) return json({ error: "No such artifact" }, 404);
       const hidden = new Set(withheld?.versions);
       const latest = newestShown(visible.latest, hidden);
       if (!latest) return json({ error: "No such artifact" }, 404);
       const versions = visible.versions.filter((version) => !hidden.has(version.version));
-      const inChat = url.searchParams.has("chat") && (await chat.isInChat(uid));
       return json({ ...visible, latest, versions, isOwner, ...(inChat && { chatId }) } satisfies ArtifactView);
     }
     // A read-only Git token for the artifact's repo, for `git clone`. Only the owner gets one:
@@ -278,15 +280,16 @@ async function artifactPage(request: Request, storage: Storage, uid: string, id:
   const [etag, respond] = source ? [sourceETag(id, version), sourceResponse] : [artifactETag(id, version), artifactResponse];
   const cached = notModified(request, etag);
   if (cached) return cached;
-  // Not a version a turn apart from the chat published with its reply not posted, but for the owner.
-  const home = await artifactHome(storage, id);
-  if (!home) return new Response("Not found", { status: 404 });
-  if (home.ownerUid !== uid) {
+  // Not a version a turn apart from the chat published with its reply not posted, but for the owner. Asked while the
+  // page is read: what it holds is not sent unless the viewer may see it.
+  const shown = artifactHome(storage, id).then(async (home) => {
+    if (!home) return false;
+    if (home.ownerUid === uid) return true;
     const withheld = await exports.ChatAgent.getByName(home.chat).withheldFrom(id, uid);
-    if (withheld.page || withheld.versions.includes(version)) return new Response("Not found", { status: 404 });
-  }
-  const html = await storage.artifacts.readHtml(id, version);
-  return html === null ? new Response("Not found", { status: 404 }) : respond(html, etag);
+    return !withheld.page && !withheld.versions.includes(version);
+  });
+  const [html, may] = await Promise.all([storage.artifacts.readHtml(id, version), shown]);
+  return html === null || !may ? new Response("Not found", { status: 404 }) : respond(html, etag);
 }
 
 function demoCookie(url: URL, value: string, maxAge: number): string {

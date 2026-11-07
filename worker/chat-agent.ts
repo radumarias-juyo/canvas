@@ -674,6 +674,7 @@ export class ChatAgent extends DurableObject<Env> {
       },
       rulesFor: (session) => this.#rulesFor(session),
       onSaving: (session, paths) => this.roster.recordFiles(session, paths),
+      onDrafted: (session, id) => this.roster.recordDraft(session, id),
       broughtIn: (id) => this.#broughtIn().includes(id),
       proposeSkill: (skill) => this.#directory.saveSkill(skill, "agent", false),
       proposeAgent: (input) => this.#directory.saveAgent(input, "agent", false),
@@ -1977,13 +1978,13 @@ export class ChatAgent extends DurableObject<Env> {
   async #rulesFor(session: string): Promise<SessionRules> {
     // With no turn apart from the chat waiting to be posted, nothing is withheld (and nothing is reviewed).
     if (!this.roster.anyWithheld())
-      return { hidden: new Set(), hiddenVersion: () => false, own: new Set(), reviewed: false, chatFile: () => true, hiddenSession: () => false };
+      return { hidden: new Set(), hiddenVersion: () => false, own: new Set(), reviewed: false, chatFile: () => true, hiddenDraft: () => false };
     const fork = this.roster.fork(session);
     const reviewed = !!fork && !fork.posted && fork.review;
     // The chat's files matter only to a reviewed session (which may change none): only it waits for the whole read.
     const [pages, traces] = await Promise.all([this.#hiddenTracePages(), reviewed ? this.#readTraces() : undefined]);
     const own = this.roster.pagesOf(session);
-    const apart = this.roster.withheld();
+    const drafts = this.roster.withheldDrafts(session);
     const versions = new Map<string, Set<number>>();
     const withheldOf = (artifactId: string) =>
       versions.get(artifactId) ?? versions.set(artifactId, this.roster.withheldVersions(artifactId, session)).get(artifactId)!;
@@ -1993,7 +1994,7 @@ export class ChatAgent extends DurableObject<Env> {
       own,
       reviewed,
       chatFile: (path) => !traces || this.#inChat(path, traces),
-      hiddenSession: (other) => other !== undefined && other !== session && apart.has(other),
+      hiddenDraft: (id) => drafts.has(id),
     };
   }
 
@@ -2008,8 +2009,13 @@ export class ChatAgent extends DurableObject<Env> {
     if (owner) return { files: newestFirst(files), artifacts };
     const hidden = this.#hiddenArtifacts(traces.hidden.artifacts);
     // A page's newest version they may see: not one a turn apart from the chat published with its reply not posted.
+    const withheld = this.roster.anyWithheld();
     const visible = artifacts.flatMap(({ unread: _, ...artifact }) => {
-      const latest = hidden.has(artifact.id) ? 0 : newestShown(artifact.latest, this.roster.withheldVersions(artifact.id));
+      const latest = hidden.has(artifact.id)
+        ? 0
+        : withheld
+          ? newestShown(artifact.latest, this.roster.withheldVersions(artifact.id))
+          : artifact.latest;
       return latest ? [{ ...artifact, latest }] : [];
     });
     return { files: newestFirst(files), artifacts: visible };
@@ -2550,8 +2556,11 @@ export class ChatAgent extends DurableObject<Env> {
 
   /** Versions a turn apart published are the chat's now (its reply was posted): what afterPublish held is announced. */
   async #announceVersions(pages: readonly PostedPage[]): Promise<void> {
+    // Each page's newest only: its followers and its chat hear once of a reply that posted several versions of it.
+    const newest = new Map<string, number>();
+    for (const { artifactId, version } of pages) newest.set(artifactId, Math.max(version, newest.get(artifactId) ?? 0));
     await Promise.all(
-      pages.map(async ({ artifactId, version }) => {
+      [...newest].map(async ([artifactId, version]) => {
         const meta = await this.storage.artifacts.readMeta(artifactId);
         if (!meta || !isOwnedBy(meta, this.uid, this.chatId)) return;
         const summary = {
@@ -3222,6 +3231,8 @@ export class ChatAgent extends DurableObject<Env> {
     recent: RecentEntries,
   ): Promise<string[]> {
     const speaksUp = async (entry: RosterEntry) => (await this.#index(entry.ownerUid).getAgent(entry.agentId))?.speaksUp === true;
+    // The conversation is read while the members' definitions are (memoised: the other pickers share it).
+    void recent().catch(() => {});
     const may = await routableAgents(roster, this.uid, this.#account(author), speaksUp);
     if (!may.length) return [];
     const agents = may.map(({ agentId, name, job }) => ({ id: agentId, name, job }));
@@ -4523,10 +4534,8 @@ export class ChatAgent extends DurableObject<Env> {
     // Built on the newest version that is the chat's: not one a turn apart from it published with its reply not posted,
     // which the new version would carry to everyone.
     const held =
-      meta.chatId === this.chatId
-        ? this.heldVersions(meta.id)
-        : await exports.ChatAgent.getByName(chatAgentName(this.uid, meta.chatId)).heldVersions(meta.id);
-    const latest = newestShown(meta.latest, new Set(held));
+      meta.chatId === this.chatId ? await this.held(meta.id) : await exports.ChatAgent.getByName(chatAgentName(this.uid, meta.chatId)).held(meta.id);
+    const latest = held.page ? 0 : newestShown(meta.latest, new Set(held.versions));
     if (!latest) return { kind: "page", to, status: "failed", detail: "page not updated: it is not the chat's yet" };
     const base = { ...meta, latest };
     if (step.edit === "rebuild") return this.#rebuildPage(request, base, scope, mark);
@@ -4735,15 +4744,18 @@ export class ChatAgent extends DurableObject<Env> {
    * versions such turns published with their replies not posted. Nothing for the owner. What the artifact's view and its
    * pages leave out (worker/index.ts).
    */
-  async withheldFrom(artifactId: string, viewer: string): Promise<{ page: boolean; versions: number[] }> {
-    if (viewer === this.uid || !this.roster.anyWithheld()) return { page: false, versions: [] };
-    if (await this.#withheldPage(artifactId)) return { page: true, versions: [] };
-    return { page: false, versions: this.heldVersions(artifactId) };
+  async withheldFrom(artifactId: string, viewer: string): Promise<HeldPage> {
+    return viewer === this.uid ? NOTHING_HELD : this.held(artifactId);
   }
 
-  /** The versions of a page turns apart from the chat published with their replies not posted (ChatRoster.withheldVersions). */
-  heldVersions(artifactId: string): number[] {
-    return [...this.roster.withheldVersions(artifactId)];
+  /**
+   * What of a page is not the chat's yet: all of it (#withheldPage), or the versions turns apart from the chat published
+   * with their replies not posted (ChatRoster.withheldVersions). What a run's page step builds on leaves it out too.
+   */
+  async held(artifactId: string): Promise<HeldPage> {
+    if (!this.roster.anyWithheld()) return NOTHING_HELD;
+    if (await this.#withheldPage(artifactId)) return { page: true, versions: [] };
+    return { page: false, versions: [...this.roster.withheldVersions(artifactId)] };
   }
 
   /** Versions never change once published, so their manifests cache for the object's lifetime. */
@@ -4769,6 +4781,10 @@ interface ChatNow {
 }
 
 /** What #route found: a router's pick and the model choice it names, or why the chat keeps its model, and how long that took. */
+/** What of a page is not the chat's yet (ChatAgent.held): the page itself, or these versions. */
+type HeldPage = { page: boolean; versions: number[] };
+const NOTHING_HELD: HeldPage = { page: false, versions: [] };
+
 type Routing = { pick: AutoPick; choice: ModelChoice } | { kept: Pick<AutoPick, "running" | "missed" | "ms"> & { failed: string } };
 
 /** What the chat's sockets need from the chat. */

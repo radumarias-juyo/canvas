@@ -18,7 +18,8 @@ import type { CheckReport } from "../worker/artifacts/check.ts";
 import type { McpHub } from "../worker/mcp/hub.ts";
 import type { ArtifactStore } from "../worker/storage/artifacts.ts";
 import { ChatDrafts, draftId } from "../worker/storage/drafts.ts";
-import { FakeBucket } from "./fakes.ts";
+import { ChatRoster } from "../worker/agents/roster.ts";
+import { FakeBucket, memorySql } from "./fakes.ts";
 
 const artifact = (id: string, title: string, updatedAt: number) => ({ id, title, chatId: "c", latest: 1, updatedAt });
 
@@ -192,7 +193,7 @@ describe("publishing from a conversation apart from the chat", () => {
       own: new Set(),
       reviewed: false,
       chatFile: () => true,
-      hiddenSession: () => false,
+      hiddenDraft: () => false,
       ...rules(session),
     });
     const publish = async (target: { title: string; artifactId?: string; newArtifact?: boolean }, session: string) => {
@@ -227,27 +228,29 @@ describe("publishing from a conversation apart from the chat", () => {
   });
 
   it("keeps the drafts a conversation apart saved from every other one: none edited from, checked or published", async () => {
-    // "fork" runs apart with its reply not posted; "1" is the chat's own conversation.
-    const { scope, drafts, versions } = apart((session) => ({ hiddenSession: (other) => other === "fork" && session !== "fork" }));
-    const rules = (session: string) => scope.rulesFor!(session);
+    // "fork" runs apart with its reply not posted (turn 1); "1" is the chat's own conversation. The roster keeps whose
+    // each draft is, as the chat object's does.
+    const roster = new ChatRoster(memorySql(), () => 0);
+    roster.setApart("fork", false, -1, 1);
+    const { scope, versions } = apart((session) => ({ hiddenDraft: (id) => roster.withheldDrafts(session).has(id) }));
+    scope.onDrafted = (session, id) => roster.recordDraft(session, id);
     const secret = await writeDraft(scope, { html: "<p>salaries</p>", session: "fork" });
-    await checkDraft(scope, secret.id, {}, undefined, await rules("fork"));
-    expect(await drafts.get(secret.id)).toMatchObject({ session: "fork", errors: 0 });
+    await checkDraft(scope, secret.id, {}, undefined, "fork");
     const shared = await writeDraft(scope, { html: "<p>week</p>", session: "1" });
     // The chat's conversation reads none of it: no edits from it, no check, no publish, whatever its id.
     const hidden = `No draft "${secret.id}"`;
-    await expect(writeDraft(scope, { draftId: secret.id, edits: [], session: "1", rules: await rules("1") })).rejects.toThrow(hidden);
-    await expect(checkDraft(scope, secret.id, {}, undefined, await rules("1"))).rejects.toThrow(hidden);
+    await expect(writeDraft(scope, { draftId: secret.id, edits: [], session: "1" })).rejects.toThrow(hidden);
+    await expect(checkDraft(scope, secret.id, {}, undefined, "1")).rejects.toThrow(hidden);
     await expect(publishDraft(scope, { title: "Pay", draftId: secret.id }, undefined, "1")).rejects.toThrow(hidden);
     expect(versions).toEqual([]);
     // The fork goes on from its own draft, and the chat's from its own.
-    const forkRules = await rules("fork");
-    const edited = await writeDraft(scope, { draftId: secret.id, edits: [{ old: "salaries", new: "pay" }], session: "fork", rules: forkRules });
-    expect(edited).toMatchObject({ session: "fork" });
-    await checkDraft(scope, shared.id, {}, undefined, await rules("1"));
+    const edited = await writeDraft(scope, { draftId: secret.id, edits: [{ old: "salaries", new: "pay" }], session: "fork" });
+    expect(roster.withheldDrafts("1")).toEqual(new Set([secret.id, edited.id]));
+    await checkDraft(scope, shared.id, {}, undefined, "1");
     expect((await publishDraft(scope, { title: "Week", draftId: shared.id }, undefined, "1")).meta.id).toBe("w1");
-    // The same page saved from the chat's conversation too is no one's: both had it.
-    expect(await writeDraft(scope, { html: "<p>salaries</p>", session: "1" })).not.toHaveProperty("session");
+    // The same page saved from the chat's conversation too is the chat's: both had it.
+    await writeDraft(scope, { html: "<p>salaries</p>", session: "1" });
+    expect(roster.withheldDrafts("1")).toEqual(new Set([edited.id]));
   });
 });
 

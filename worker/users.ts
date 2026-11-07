@@ -925,7 +925,7 @@ export class UserDirectory extends DurableObject<Env> {
    * apart from the chat published it, so it reaches the page's followers only once its reply is posted (announceArtifact).
    */
   recordArtifact(artifact: ArtifactSummary, seen = false, chatKind?: ChatKind, held = false): void {
-    const before = this.ctx.storage.sql.exec<{ latest: number }>("SELECT latest FROM artifacts WHERE id = ?", artifact.id).toArray()[0]?.latest ?? 0;
+    const before = this.#latestOf(artifact.id) ?? 0;
     this.ctx.storage.sql.exec(
       `INSERT INTO artifacts (id, title, chat_id, latest, updated_at, seen) VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET title = excluded.title, latest = excluded.latest, updated_at = excluded.updated_at, seen = MAX(seen, excluded.seen)`,
@@ -945,9 +945,14 @@ export class UserDirectory extends DurableObject<Env> {
    * followers, unless a newer version is out already (which they heard of).
    */
   announceArtifact(artifact: ArtifactSummary, chatKind?: ChatKind): void {
-    const newest = this.ctx.storage.sql.exec<{ latest: number }>("SELECT latest FROM artifacts WHERE id = ?", artifact.id).toArray()[0]?.latest;
+    const newest = this.#latestOf(artifact.id);
     if (newest === undefined || artifact.latest < newest) return;
     this.#announce(artifact, chatKind);
+  }
+
+  /** The newest version of an artifact this user's list has; undefined for one it lacks. */
+  #latestOf(id: string): number | undefined {
+    return this.ctx.storage.sql.exec<{ latest: number }>("SELECT latest FROM artifacts WHERE id = ?", id).toArray()[0]?.latest;
   }
 
   /** A new version reaches the page's followers, unless the chat it was published from is off the record: as it says (when it told), and as this user's row of it says. */

@@ -2,6 +2,7 @@ import type { EntryRecord } from "@earendil-works/pi-durable";
 import { MAX_HOPS, type AgentDefinition, type AgentDraftView, type ChatAgentReplyData, type ChatTurnData } from "../../shared/agents.ts";
 import { AGENT_NAME } from "../../shared/mentions.ts";
 import { errorMessage, isObject, serial } from "../../shared/util.ts";
+import type { DaySpend } from "./spend.ts";
 import { sessionOf, type AgentTurn, type ChatRoster, type PostedPage, type RosterEntry, type TurnRequest } from "./roster.ts";
 import { isPass } from "./funnel.ts";
 import type { SeatBatch, SeatLink, SeatResult } from "./seats/link.ts";
@@ -29,8 +30,6 @@ export type Outputs = Required<Pick<ChatAgentReplyData, "published" | "items" | 
   Pick<ChatAgentReplyData, "saved"> & { forked?: boolean; review?: boolean };
 export const NO_OUTPUTS: Outputs = { published: [], items: [], sources: [] };
 
-/** A turn's spend in another object, for its outcome (TurnOutcome.spent): none when it has none. */
-const spentOf = (result: TurnResult): { spent?: TurnSpent } => (result.spent ? { spent: result.spent } : {});
 
 /** How one operation in an agent's session ended, as PiHarness.wait says. */
 export interface TurnResult {
@@ -42,7 +41,7 @@ export interface TurnResult {
 }
 
 /** What a turn's model calls came to. */
-export type TurnSpent = { tokens: number; costUsd: number };
+export type TurnSpent = DaySpend;
 
 /** What the turn controller needs from the chat object it runs in: pi's sessions, the log, and the owner's directory. */
 export interface TurnHost {
@@ -360,16 +359,18 @@ export class AgentTurns {
     if (now?.status === "running" || now?.status === "queued") {
       const done = result.status === "done";
       const text = (result.text ?? "").trim();
+      // How it ended, for the metrics and the chat's budget (with what it spent in another object, a seat's).
+      const outcome = (status: TurnOutcome["status"], startedAt: number, endedAt: number): TurnOutcome => ({
+        status,
+        startedAt,
+        endedAt,
+        ...(result.spent && { spent: result.spent }),
+      });
       // A turn nobody asked for posts only an answer worth posting: none when it passed, or failed (nobody is waiting
       // for it), and it hands nothing on.
       if (turn.calledBy.unprompted && (!done || !text || isPass(text))) {
         if (roster.end(turn.id, done ? "done" : "failed")) {
-          this.#host.ended?.(turn, {
-            status: done ? "passed" : "failed",
-            startedAt: now.startedAt ?? now.createdAt,
-            endedAt: roster.now(),
-            ...spentOf(result),
-          });
+          this.#host.ended?.(turn, outcome(done ? "passed" : "failed", now.startedAt ?? now.createdAt, roster.now()));
         }
         this.#host.changed();
         this.pump(entry.agentId);
@@ -404,15 +405,16 @@ export class AgentTurns {
         ...(forked && { forked: true as const }),
         ...(sources.length && { sources }),
       };
+      const ended = outcome(done ? "done" : "failed", reply.startedAt, reply.endedAt);
       if (held) {
         // Its owner sees it first: nothing of it reaches the chat, pi or other agents until they post it. A failed or
         // empty one too: what its fork published or saved stays withheld until they post or discard it.
         if (roster.end(turn.id, done ? "done" : "failed", { reply, toPi: false, held: true })) {
-          this.#host.ended?.(turn, { status: done ? "done" : "failed", startedAt: reply.startedAt, endedAt: reply.endedAt, ...spentOf(result) });
+          this.#host.ended?.(turn, ended);
           this.#host.drafted(current.ownerUid);
         }
       } else if (roster.end(turn.id, done ? "done" : "failed", { reply, toPi: false })) {
-        this.#host.ended?.(turn, { status: done ? "done" : "failed", startedAt: reply.startedAt, endedAt: reply.endedAt, ...spentOf(result) });
+        this.#host.ended?.(turn, ended);
         delivering = this.#release(turn.id, reply, done);
       }
     }

@@ -258,21 +258,29 @@ export class AgentSeats {
       agent.name,
       JSON.stringify(checked),
     );
-    await this.#start(this.#turn(ref, turn.turn)!, agent, checked, seat.session);
+    const row = this.#turn(ref, turn.turn)!;
+    await this.#claimed(row, () => this.#start(row, agent, checked, seat.session));
     return delivered;
   }
 
   /**
-   * Set a turn's session up and put its input in, then wait on its run; a failure ends it. While this runs, a resume
-   * of the turn (a give again, a wake) leaves it alone: there is no run to wait on before its input is in.
+   * Run `work` on a turn not being set up already, claimed before its first await: while it runs, a resume of the turn
+   * (a give again, a wake) leaves it alone, as there is no run to wait on before its input is in.
    */
-  async #start(row: SeatTurnRow, agent: AgentDefinition, turn: SeatTurn, seatSession: string, claimed = false): Promise<void> {
-    const ref = refOf(row);
-    const key = turnKey(ref, row.turn);
-    if (!claimed) {
-      if (this.#starting.has(key)) return;
-      this.#starting.add(key);
+  async #claimed(row: SeatTurnRow, work: () => Promise<void>): Promise<void> {
+    const key = turnKey(refOf(row), row.turn);
+    if (this.#starting.has(key)) return;
+    this.#starting.add(key);
+    try {
+      await work();
+    } finally {
+      this.#starting.delete(key);
     }
+  }
+
+  /** Set a claimed turn's session up and put its input in (#claimed), then wait on its run; a failure ends it. */
+  async #start(row: SeatTurnRow, agent: AgentDefinition, turn: SeatTurn, seatSession: string): Promise<void> {
+    const ref = refOf(row);
     const running = () => this.#turn(ref, row.turn)?.status === "running";
     try {
       // Its input goes only into the fork: the seat's session reads the ask as context (the batch left it out).
@@ -296,8 +304,6 @@ export class AgentSeats {
     } catch (error) {
       this.#host.waitUntil(this.#fail(ref, row.turn, error));
       return;
-    } finally {
-      this.#starting.delete(key);
     }
     const started = this.#turn(ref, row.turn);
     if (started) this.#host.waitUntil(this.#await(started));
@@ -306,19 +312,16 @@ export class AgentSeats {
   /** A turn kept from a give that died before its input was in: set it up again from the turn as it was given. */
   async #restart(row: SeatTurnRow): Promise<void> {
     const ref = refOf(row);
-    const key = turnKey(ref, row.turn);
     // Claimed before the first await: a wake or a give meanwhile leaves it to this one.
-    if (this.#starting.has(key)) return;
-    this.#starting.add(key);
-    try {
-      const seat = this.#seat(ref, row.agent_id);
-      if (!seat || !row.given) throw new Error("This turn's seat is gone.");
-      await this.#start(row, await this.#agent(row.agent_id), JSON.parse(row.given) as SeatTurn, seat.session, true);
-    } catch (error) {
-      await this.#fail(ref, row.turn, error);
-    } finally {
-      this.#starting.delete(key);
-    }
+    await this.#claimed(row, async () => {
+      try {
+        const seat = this.#seat(ref, row.agent_id);
+        if (!seat || !row.given) throw new Error("This turn's seat is gone.");
+        await this.#start(row, await this.#agent(row.agent_id), JSON.parse(row.given) as SeatTurn, seat.session);
+      } catch (error) {
+        await this.#fail(ref, row.turn, error);
+      }
+    });
   }
 
   /** A turn that could not be set up ends with the error, reported to its room. */

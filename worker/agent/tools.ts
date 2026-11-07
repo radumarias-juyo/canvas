@@ -31,6 +31,7 @@ import { checkFolders, FileRefError, MAX_SANDBOX_BYTES, outputPaths, resolveFile
 import { clip, MAX_TOOL_TEXT, text } from "./output.ts";
 import { pagePart } from "./page-part.ts";
 import type { AgentsScope } from "../agents/tools.ts";
+import { newestShown } from "../agents/roster.ts";
 
 /** What the tools need from the chat they run in. */
 export interface ChatScope extends PublishScope, AgentsScope {
@@ -352,9 +353,8 @@ function versionToRead(meta: ArtifactMeta, asked: number | undefined, rules?: Se
     if (hidden(asked)) throw new Error(`Artifact ${meta.id} has no version ${asked} in this chat yet.`);
     return asked;
   }
-  let version = newest;
-  while (version > 1 && hidden(version)) version--;
-  return version;
+  // Version 1 when it sees none newer.
+  return newestShown(newest, hidden, 2);
 }
 
 /** Whether writing `path` would change a file the chat already has (SessionRules.chatFile): one that is there. */
@@ -458,10 +458,8 @@ export function artifactExtension(scope: ChatScope): Extension {
                 `rather than writing the whole page again (${DRAFTS_TOOL} with its draft_id shows the page). Only a page that is not that one goes as html.`,
             );
           }
-          // Opening the drafts (memoised) while the artifact and the conversation's rules are read, rather than after. A
-          // new page needs no rules: it builds on nothing of the chat's.
-          const builds = args.artifact_id !== undefined || args.draft_id !== undefined;
-          const [rules] = await Promise.all([builds ? rulesOf(scope, api) : undefined, scope.drafts()]);
+          // Opening the drafts (memoised) while the artifact and the conversation's rules are read, rather than after.
+          const [rules] = await Promise.all([args.artifact_id === undefined ? undefined : rulesOf(scope, api), scope.drafts()]);
           const artifact = args.artifact_id === undefined ? undefined : await chatArtifact(scope, args.artifact_id, rules);
           // Edits change the newest version this conversation sees: one a turn apart from the chat published is not the chat's yet.
           const version = artifact && args.html === undefined && args.draft_id === undefined ? versionToRead(artifact, args.version, rules) : args.version;
@@ -474,7 +472,6 @@ export function artifactExtension(scope: ChatScope): Extension {
             artifact,
             version,
             session,
-            rules,
           });
           const next =
             draft.errors === null
@@ -518,7 +515,7 @@ export function artifactExtension(scope: ChatScope): Extension {
             args.draft_id,
             { tests: args.tests, viewport: args.viewport },
             context.abortSignal,
-            await rulesOf(scope, api),
+            String(api.conversationId),
           );
           const { id } = draft;
           const failed = report ? report.errors.length > 0 : undefined;
@@ -583,7 +580,7 @@ export function artifactExtension(scope: ChatScope): Extension {
           // Not the drafts another conversation apart from the chat saved: they are not the chat's yet.
           const [drafts, rules] = await Promise.all([scope.drafts(), rulesOf(scope, api)]);
           if (args.draft_id === undefined) {
-            const list = (await drafts.list()).filter((draft) => !rules?.hiddenSession(draft.session));
+            const list = (await drafts.list()).filter((draft) => !rules?.hiddenDraft(draft.id));
             const lines = list.length ? `${plural(list.length, "draft")}, newest first:\n${list.map(draftLine).join("\n")}` : "This chat has no drafts.";
             return { output: text(lines) };
           }
