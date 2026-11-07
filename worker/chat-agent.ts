@@ -580,6 +580,7 @@ export class ChatAgent extends DurableObject<Env> {
         return afterPublish(this.#published, artifact, chatId);
       },
       rulesFor: (session) => this.#rulesFor(session),
+      onSaving: (session, paths) => this.roster.recordFiles(session, paths),
       broughtIn: (id) => this.#broughtIn().includes(id),
       proposeSkill: (skill) => this.#directory.saveSkill(skill, "agent", false),
       proposeAgent: (input) => this.#directory.saveAgent(input, "agent", false),
@@ -2663,7 +2664,14 @@ export class ChatAgent extends DurableObject<Env> {
     });
     const [shared, held] = [this.#seen.traces, this.#seenWithheld.traces];
     const only = (of: Set<string>, but: Set<string>) => new Set([...of].filter((value) => !but.has(value)));
-    return { shared, withheld: held, hidden: { artifacts: only(held.artifacts, shared.artifacts), files: only(held.files, shared.files) } };
+    // Files recorded as a session apart saved them (recordFiles): withheld whatever the transcript says, also over a
+    // file the chat had (its content is the session's now).
+    const saved = this.roster.withheldFiles();
+    return {
+      shared,
+      withheld: { artifacts: held.artifacts, files: new Set([...held.files, ...saved]) },
+      hidden: { artifacts: only(held.artifacts, shared.artifacts), files: new Set([...only(held.files, shared.files), ...saved]) },
+    };
   });
 
   /**

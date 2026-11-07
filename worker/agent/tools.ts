@@ -27,7 +27,7 @@ import { chatOutFolder, FILES_WRITE_TOOL, RUN_BASH_TOOL, RUN_PYTHON_TOOL, savedR
 import { MAX_RUN_STDERR, MAX_RUN_STDOUT, type SandboxFile, type SandboxRun } from "../sandbox.ts";
 import { literalPath, MAX_DRAFTS, normalisePath, type FileEntry, type UserFiles } from "../storage/index.ts";
 import { checkDraft, draftLine, draftNamed, FailedChecks, publishDraft, readPageSource, reviewedRefusal, writeDraft, type PublishScope, type SessionRules } from "./publish.ts";
-import { FileRefError, MAX_SANDBOX_BYTES, outputPaths, resolveFile, resolveRef, sandboxLayout } from "./file-refs.ts";
+import { FileRefError, MAX_SANDBOX_BYTES, outputPaths, resolveFile, resolveRef, sandboxLayout, saveFiles } from "./file-refs.ts";
 import { clip, MAX_TOOL_TEXT, text } from "./output.ts";
 import { pagePart } from "./page-part.ts";
 import type { AgentsScope } from "../agents/tools.ts";
@@ -49,6 +49,11 @@ export interface ChatScope extends PublishScope, AgentsScope {
    * named <skill>/<path>. Throws naming a skill that is not one, and, before reading, when they hold over `maxBytes`.
    */
   skillFolders(names: readonly string[], maxBytes: number): Promise<SandboxFile[]>;
+  /**
+   * Conversation `session` is about to save these files: one apart from the chat records them first, so they stay
+   * withheld until its reply is posted even when the tool is stopped before its result names them.
+   */
+  onSaving?(session: string, paths: readonly string[]): void;
 }
 
 /**
@@ -121,11 +126,16 @@ export function filesExtension(scope: ChatScope): Extension {
           "Write a UTF-8 text file into the user's files, replacing any file at that path. " +
           "Keep files you make for this chat, such as notes or an intermediate CSV, in this chat's folder under out/ (named with the user's files): the user's other chats save to their own.",
         parameters: Type.Object({ path: Type.String(), content: Type.String() }),
-        execute: async (args, api) => {
+        execute: async (args, api, context) => {
           const files = await scope.files();
           const rules = await rulesOf(scope, api);
           if (rules?.reviewed && (await overwrites(files, rules, normalisePath(args.path)))) throw new Error(reviewedRefusal("file"));
-          const path = await files.put(args.path, args.content, "text/plain; charset=utf-8");
+          const [path] = await saveFiles(files, new Map([[args.path, args.content]]), {
+            session: String(api.conversationId),
+            signal: context.abortSignal,
+            onSaving: scope.onSaving,
+            contentType: "text/plain; charset=utf-8",
+          });
           return { output: text(wroteReport(path, args.content.length)), details: { saved: [path] } satisfies SavedFilesDetails };
         },
       }),
@@ -197,6 +207,7 @@ export function sandboxName(uid: string, chatId: string): string {
 async function runInSandbox(
   scope: ChatScope,
   api: { conversationId: unknown },
+  signal: AbortSignal | undefined,
   args: { files?: string[]; skills?: string[] },
   run: (sandbox: ReturnType<typeof exports.Sandbox.getByName>, inputs: SandboxFile[], skills: SandboxFile[]) => Promise<SandboxRun>,
 ) {
@@ -216,7 +227,7 @@ async function runInSandbox(
       skipped.push(`${path} (${reviewedRefusal("file")})`);
     }
   }
-  const saved = await Promise.all([...toSave].map(([path, bytes]) => files.put(path, bytes)));
+  const saved = await saveFiles(files, toSave, { session: String(api.conversationId), signal, onSaving: scope.onSaving });
   const report = [
     inputs.length && `copied in: ${listSome(inputs.map((input) => `./files/${input.name}`), 20)}`,
     skills.length && `skills copied in: ${[...new Set(args.skills)].map((name) => `./skills/${name}/`).join(", ")}`,
@@ -247,7 +258,8 @@ export function sandboxExtension(scope: ChatScope): Extension {
         name: RUN_PYTHON_TOOL,
         description: `Run a Python 3.13 script in this chat's isolated Linux sandbox (installed: pandas, numpy, pypdf, pdfplumber, reportlab, openpyxl, python-docx, python-pptx, pillow, matplotlib, pyyaml, jinja2, beautifulsoup4, lxml): no internet, 60 s limit. ${SANDBOX_FILES}`,
         parameters: Type.Object({ code: Type.String(), files: inputFiles, skills: inputSkills }),
-        execute: async (args, api) => runInSandbox(scope, api, args, (sandbox, inputs, skills) => sandbox.runPython(args.code, inputs, skills)),
+        execute: async (args, api, context) =>
+          runInSandbox(scope, api, context.abortSignal, args, (sandbox, inputs, skills) => sandbox.runPython(args.code, inputs, skills)),
       }),
       defineTool({
         name: RUN_BASH_TOOL,
@@ -255,7 +267,8 @@ export function sandboxExtension(scope: ChatScope): Extension {
           "Run a bash script in the same sandbox as run_python (Debian with coreutils, grep, sed, awk, tar, gzip, python3): no internet, so no package installs or downloads; 60 s limit. " +
           `Runs as written; start with set -e to stop at the first failing command. ${SANDBOX_FILES}`,
         parameters: Type.Object({ script: Type.String(), files: inputFiles, skills: inputSkills }),
-        execute: async (args, api) => runInSandbox(scope, api, args, (sandbox, inputs, skills) => sandbox.runBash(args.script, inputs, skills)),
+        execute: async (args, api, context) =>
+          runInSandbox(scope, api, context.abortSignal, args, (sandbox, inputs, skills) => sandbox.runBash(args.script, inputs, skills)),
       }),
     ],
   });

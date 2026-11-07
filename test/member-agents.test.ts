@@ -1037,6 +1037,32 @@ describe("Member agents: what the review of private turns found", () => {
     expect(chat.roster.withheld()).toEqual(new Set([emptyFork, openFork]));
   });
 
+  it("keeps the files a turn apart saves withheld from when it saves them until its reply is posted", async () => {
+    const chat = room();
+    const planner = chat.add(RADU, "planner", { servers: ["db", "calendar"], reviewBeforePosting: true });
+    const calendar = [result("calendar_events", [{ id: "e1", title: "x" }])];
+    const [kept] = chat.turns.call([planner.agentId], chat.say(RADU, "@planner total it"));
+    await settle();
+    const fork = chat.sessions.sessionOf(kept.id);
+    // Saved by a tool that was then stopped: no result names it, the record does. pi's session records nothing.
+    chat.roster.recordFiles(fork, ["out/c1/totals.csv"]);
+    chat.roster.recordFiles(planner.session, ["out/c1/pi.csv"]);
+    expect(chat.roster.withheldFiles()).toEqual(new Set(["out/c1/totals.csv"]));
+    chat.sessions.finish(kept.id, "Totals.", calendar);
+    await settle();
+    expect(chat.roster.withheldFiles()).toEqual(new Set(["out/c1/totals.csv"]));
+    expect(await chat.turns.post(RADU.uid, planner.agentId, kept.id)).toBeNull();
+    expect(chat.roster.withheldFiles()).toEqual(new Set());
+
+    const [dropped] = chat.turns.call([planner.agentId], chat.say(RADU, "@planner again"));
+    await settle();
+    chat.roster.recordFiles(chat.sessions.sessionOf(dropped.id), ["out/c1/again.csv"]);
+    chat.sessions.finish(dropped.id, "Again.", calendar);
+    await settle();
+    expect(chat.turns.discard(RADU.uid, planner.agentId, dropped.id)).toBeNull();
+    expect(chat.roster.withheldFiles()).toEqual(new Set(["out/c1/again.csv"]));
+  });
+
   it("keeps what a fork published by version until its reply is posted, and for good once it is discarded", async () => {
     const chat = room();
     const planner = chat.add(RADU, "planner", { servers: ["db", "calendar"], reviewBeforePosting: true });

@@ -248,6 +248,9 @@ export class ChatRoster {
         PRIMARY KEY (session, artifact_id, version)
       );
       CREATE INDEX IF NOT EXISTS chat_agent_fork_pages_by_page ON chat_agent_fork_pages (artifact_id, version);
+      CREATE TABLE IF NOT EXISTS chat_agent_fork_files (
+        session TEXT NOT NULL, path TEXT NOT NULL, posted INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (session, path)
+      );
     `);
     // From where a fork's own entries start (what it inherited is its parent's), whether its owner reviews its reply,
     // and whether later turns run in it again (a run's reply session, setApart): such a session never ends for good.
@@ -527,6 +530,28 @@ export class ChatRoster {
   }
 
   /**
+   * Files `session` is about to save while apart from the chat with its reply not posted: recorded before they are
+   * saved, so one saved by a tool that was stopped or cut off, which no result names, is withheld too (withheldFiles).
+   * Nothing for any other session.
+   */
+  recordFiles(session: string, paths: readonly string[]): void {
+    for (const path of paths) {
+      this.#sql.exec(
+        `INSERT INTO chat_agent_fork_files (session, path)
+         SELECT session, ? FROM chat_agent_forks WHERE session = ? AND posted = 0 ON CONFLICT DO NOTHING`,
+        path,
+        session,
+      );
+    }
+  }
+
+  /** The files sessions apart from the chat saved (recordFiles), with their replies not posted: not the chat's yet. */
+  withheldFiles(): Set<string> {
+    const rows = this.#sql.exec("SELECT DISTINCT path FROM chat_agent_fork_files WHERE posted = 0").toArray();
+    return new Set(rows.map((row) => row.path as string));
+  }
+
+  /**
    * Whether a session apart from the chat (other than `except`) published `version` of a page (any version, when
    * unset), with its reply not posted. Version 1: the page is one such a session made.
    */
@@ -699,7 +724,10 @@ export class ChatRoster {
     // Its fork's pages and files are the chat's now, as its reply is; never those of a session that keeps them (Fork.kept).
     if (!reply.failed && reply.text && row?.session) {
       const posted = this.#sql.exec("UPDATE chat_agent_forks SET posted = 1 WHERE session = ? AND kept = 0", row.session).rowsWritten > 0;
-      if (posted) this.#sql.exec("UPDATE chat_agent_fork_pages SET posted = 1 WHERE session = ?", row.session);
+      if (posted) {
+        this.#sql.exec("UPDATE chat_agent_fork_pages SET posted = 1 WHERE session = ?", row.session);
+        this.#sql.exec("UPDATE chat_agent_fork_files SET posted = 1 WHERE session = ?", row.session);
+      }
     }
   }
 
