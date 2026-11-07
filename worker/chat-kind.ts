@@ -26,12 +26,7 @@ const CONTEXT_PAGE_KEY = "contextPage";
 const SHUT_OUT_KEY = "shutOut";
 
 /** The chat storage keys an export carries (with the chat's other settings, worker/chat-dump.ts). */
-export const KIND_KV = [
-  KIND_KEY,
-  PAGE_KEY,
-  BRANCHED_FROM_KEY,
-  CONTEXT_PAGE_KEY,
-];
+export const KIND_KV = [KIND_KEY, PAGE_KEY, BRANCHED_FROM_KEY, CONTEXT_PAGE_KEY];
 
 /** The most people one chat remembers left it or were removed. */
 export const MAX_SHUT_OUT = 500;
@@ -99,12 +94,7 @@ export class ChatKindState {
    * (joinPage) lets them back in; an invite does (letBackIn). The newest MAX_SHUT_OUT are kept.
    */
   shutOut(uid: string): void {
-    this.#kv.put(
-      SHUT_OUT_KEY,
-      [...this.#shutOut().filter((other) => other !== uid), uid].slice(
-        -MAX_SHUT_OUT,
-      ),
-    );
+    this.#kv.put(SHUT_OUT_KEY, [...this.#shutOut().filter((other) => other !== uid), uid].slice(-MAX_SHUT_OUT));
   }
 
   isShutOut(uid: string): boolean {
@@ -113,11 +103,7 @@ export class ChatKindState {
 
   letBackIn(uid: string): void {
     const shut = this.#shutOut();
-    if (shut.includes(uid))
-      this.#kv.put(
-        SHUT_OUT_KEY,
-        shut.filter((other) => other !== uid),
-      );
+    if (shut.includes(uid)) this.#kv.put(SHUT_OUT_KEY, shut.filter((other) => other !== uid));
   }
 
   #shutOut(): string[] {
@@ -146,43 +132,22 @@ export function branchKind(from: ChatKind, withMember: boolean): ChatKind {
 }
 
 /** The owner's change of a chat's kind, checked: the members it removes, or why it cannot be made. */
-export type KindPlan =
-  | { removed: ChatMemberVia[] }
-  | { error: string; status: 400 | 409; loses?: ChatMemberVia[] };
+export type KindPlan = { removed: ChatMemberVia[] } | { error: string; status: 400 | 409; loses?: ChatMemberVia[] };
 
 /**
  * Plan changing a chat of `from` to `to`, for the owner who confirmed that `confirmed` (uids) lose access. Narrowing
  * lists who loses access first and then removes exactly them: if the list changed since it was shown (someone joined,
  * or left), nothing changes and the new list comes back, to confirm again.
  */
-export function planKindChange(
-  from: ChatKind,
-  to: unknown,
-  members: readonly ChatMemberVia[],
-  confirmed: readonly string[],
-  hasPage: boolean,
-): KindPlan {
+export function planKindChange(from: ChatKind, to: unknown, members: readonly ChatMemberVia[], confirmed: readonly string[], hasPage: boolean): KindPlan {
   if (!isChatKind(to) || !kindChoices(hasPage).includes(to)) {
-    return {
-      error:
-        to === "page"
-          ? "Only a chat made from a page with Discuss can be on a page."
-          : "Not a kind of chat.",
-      status: 400,
-    };
+    return { error: to === "page" ? "Only a chat made from a page with Discuss can be on a page." : "Not a kind of chat.", status: 400 };
   }
   const loses = losesAccess(to, members);
   if (from === to) return { removed: [] };
   const asked = new Set(confirmed);
-  if (
-    loses.length !== asked.size ||
-    loses.some((member) => !asked.has(member.uid))
-  ) {
-    return {
-      error: `Who loses access changed: check the list again before making the chat ${KIND_TEXT[to].label.toLowerCase()}.`,
-      status: 409,
-      loses,
-    };
+  if (loses.length !== asked.size || loses.some((member) => !asked.has(member.uid))) {
+    return { error: `Who loses access changed: check the list again before making the chat ${KIND_TEXT[to].label.toLowerCase()}.`, status: 409, loses };
   }
   return { removed: loses };
 }

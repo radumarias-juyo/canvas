@@ -12,70 +12,30 @@ import type { Person } from "./protocol.ts";
  */
 export type ChatKind = "private" | "group" | "page" | "off_record";
 
-export const CHAT_KINDS: readonly ChatKind[] = [
-  "private",
-  "group",
-  "page",
-  "off_record",
-];
+export const CHAT_KINDS: readonly ChatKind[] = ["private", "group", "page", "off_record"];
 
 export function isChatKind(value: unknown): value is ChatKind {
-  return (
-    typeof value === "string" &&
-    (CHAT_KINDS as readonly string[]).includes(value)
-  );
+  return typeof value === "string" && (CHAT_KINDS as readonly string[]).includes(value);
 }
 
 /** How someone came to be in a chat: an invite link, added directly by the owner, joined from the chat's page, or the owner's second seat. */
 export type JoinedVia = "invite" | "added" | "page" | "seat";
 
-export const JOINED_VIA: readonly JoinedVia[] = [
-  "invite",
-  "added",
-  "page",
-  "seat",
-];
+export const JOINED_VIA: readonly JoinedVia[] = ["invite", "added", "page", "seat"];
 
 export function isJoinedVia(value: unknown): value is JoinedVia {
-  return (
-    typeof value === "string" &&
-    (JOINED_VIA as readonly string[]).includes(value)
-  );
+  return typeof value === "string" && (JOINED_VIA as readonly string[]).includes(value);
 }
 
 /** A member and how they joined: what narrowing a chat reads to tell who loses access. */
 export type ChatMemberVia = Person & { via: JoinedVia };
 
 /** What the chip and the sidebar say of each kind. */
-export const KIND_TEXT: Record<
-  ChatKind,
-  { label: string; who: string; agents: string; leaves: string }
-> = {
-  private: {
-    label: "Private",
-    who: "Only you",
-    agents: "Agents answer every message",
-    leaves: "Memory notes, search and routines may use it",
-  },
-  group: {
-    label: "Group",
-    who: "The people added",
-    agents: "Agents answer only when called",
-    leaves: "Memory notes stay in this chat",
-  },
-  page: {
-    label: "On a page",
-    who: "Anyone who can open the page can join",
-    agents: "Agents answer only when called, with the page open",
-    leaves: "Memory notes stay in this chat",
-  },
-  off_record: {
-    label: "Off the record",
-    who: "Only people added by hand",
-    agents: "Agents answer only when called",
-    leaves:
-      "Nothing leaves: no memory notes, search, routines or feed previews",
-  },
+export const KIND_TEXT: Record<ChatKind, { label: string; who: string; agents: string; leaves: string }> = {
+  private: { label: "Private", who: "Only you", agents: "Agents answer every message", leaves: "Memory notes, search and routines may use it" },
+  group: { label: "Group", who: "The people added", agents: "Agents answer only when called", leaves: "Memory notes stay in this chat" },
+  page: { label: "On a page", who: "Anyone who can open the page can join", agents: "Agents answer only when called, with the page open", leaves: "Memory notes stay in this chat" },
+  off_record: { label: "Off the record", who: "Only people added by hand", agents: "Agents answer only when called", leaves: "Nothing leaves: no memory notes, search, routines or feed previews" },
 };
 
 /** Whether the chat's agents answer every message, or only those that call them. */
@@ -87,26 +47,18 @@ export function answersEveryMessage(kind: ChatKind): boolean {
  * What may take something out of a chat: a memory note (`scope` "chat" is one only this chat reads, "everywhere" one
  * the owner's other chats read too), a search across chats, a routine reading the chat, a preview in someone's feed.
  */
-export type Leaving =
-  | { what: "memory"; scope: "chat" | "everywhere" }
-  | { what: "search" }
-  | { what: "routine" }
-  | { what: "feed" };
+export type Leaving = { what: "memory"; scope: "chat" | "everywhere" } | { what: "search" } | { what: "routine" } | { what: "feed" };
 
 /**
  * Whether `leaving` may take something out of a chat of these kinds. Given more than one (the kind the chat says and the
  * kind a sidebar row last heard, which can lag behind a change), the strictest wins: a chat just made off the record
  * lets nothing out even where a copy still says otherwise. No kind given lets nothing out.
  */
-export function mayLeave(
-  leaving: Leaving,
-  ...kinds: (ChatKind | null | undefined)[]
-): boolean {
+export function mayLeave(leaving: Leaving, ...kinds: (ChatKind | null | undefined)[]): boolean {
   if (!kinds.length) return false;
   return kinds.every((kind) => {
     if (!kind || kind === "off_record") return false;
-    if (leaving.what === "memory")
-      return kind === "private" || leaving.scope === "chat";
+    if (leaving.what === "memory") return kind === "private" || leaving.scope === "chat";
     return true;
   });
 }
@@ -120,20 +72,12 @@ export function mayStay(kind: ChatKind, via: JoinedVia): boolean {
 }
 
 /** The members who lose access when the chat becomes `kind`, in the order given. */
-export function losesAccess(
-  kind: ChatKind,
-  members: readonly ChatMemberVia[],
-): ChatMemberVia[] {
+export function losesAccess(kind: ChatKind, members: readonly ChatMemberVia[]): ChatMemberVia[] {
   return members.filter((member) => !mayStay(kind, member.via));
 }
 
 /** How widely each kind lets people in: changing to a wider one shows everyone who joins the whole history. */
-const REACH: Record<ChatKind, number> = {
-  private: 0,
-  off_record: 1,
-  group: 2,
-  page: 3,
-};
+const REACH: Record<ChatKind, number> = { private: 0, off_record: 1, group: 2, page: 3 };
 
 /** Whether moving `from` → `to` lets more people in than before. */
 export function widens(from: ChatKind, to: ChatKind): boolean {
@@ -194,14 +138,7 @@ type Who = { uid: string; name: string };
  */
 export const CHAT_EVENT_KIND = "chat.event";
 export type ChatEventData =
-  | {
-      event: "kind";
-      kind: ChatKind;
-      from: ChatKind;
-      by?: Who;
-      auto?: true;
-      removed?: Who[];
-    }
+  | { event: "kind"; kind: ChatKind; from: ChatKind; by?: Who; auto?: true; removed?: Who[] }
   | { event: "page"; page: ChatPage }
   | { event: "branch"; chatId: string; title: string; entry: number; by: Who }
   | { event: "branched"; from: BranchedFrom; by: Who };
@@ -211,9 +148,7 @@ export type ChatEventData =
  * messages and other agents' replies are copied as the entries they were (chat.message, chat.agent).
  */
 export const CHAT_COPY_KIND = "chat.copy";
-export type ChatCopyData =
-  | { from: "pi"; text: string; sentAt?: number }
-  | { from: "artifact"; artifactId: string; title: string; version: number };
+export type ChatCopyData = { from: "pi"; text: string; sentAt?: number } | { from: "artifact"; artifactId: string; title: string; version: number };
 
 /** What the model reads that the app does not show: the page a chat discusses, or the conversation a branch carries. */
 export const CHAT_CONTEXT_KIND = "chat.context";

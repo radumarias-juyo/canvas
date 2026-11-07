@@ -4,31 +4,12 @@
 import type { AssistantMessage, UserMessage } from "@earendil-works/pi-ai";
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { TOOL_SEARCH_TOOL_NAME } from "@earendil-works/pi-durable/tool-search";
-import {
-  CHAT_AGENT_KIND,
-  MAX_HOPS,
-  speakerLabel,
-  type AgentDefinition,
-  type ChatAgentReplyData,
-} from "../../shared/agents.ts";
+import { CHAT_AGENT_KIND, MAX_HOPS, speakerLabel, type AgentDefinition, type ChatAgentReplyData } from "../../shared/agents.ts";
 import { textOf } from "../../shared/canonical.ts";
-import {
-  CHAT_CONTEXT_KIND,
-  CHAT_COPY_KIND,
-  type ChatCopyData,
-} from "../../shared/chat-kinds.ts";
+import { CHAT_CONTEXT_KIND, CHAT_COPY_KIND, type ChatCopyData } from "../../shared/chat-kinds.ts";
 import { entryItems, mergeItems, type ItemRef } from "../../shared/items.ts";
-import {
-  AGENT_NAME,
-  calledNames,
-  type Mention,
-} from "../../shared/mentions.ts";
-import {
-  CHAT_MESSAGE_KIND,
-  incomingKey,
-  publishedBy,
-  type ChatMessageData,
-} from "../../shared/protocol.ts";
+import { AGENT_NAME, calledNames, type Mention } from "../../shared/mentions.ts";
+import { CHAT_MESSAGE_KIND, incomingKey, publishedBy, type ChatMessageData } from "../../shared/protocol.ts";
 import type { McpToolInfo } from "../agent/mcp.ts";
 import type { AgentTurn, RosterEntry } from "./roster.ts";
 
@@ -55,15 +36,8 @@ export function speakersFor(
     roster.map((entry) => entry.name),
     mentions,
   );
-  const named = names.map(
-    (name) => roster.find((entry) => entry.name === name)!.agentId,
-  );
-  if (
-    replyToAgent &&
-    roster.some((entry) => entry.agentId === replyToAgent) &&
-    !named.includes(replyToAgent)
-  )
-    named.push(replyToAgent);
+  const named = names.map((name) => roster.find((entry) => entry.name === name)!.agentId);
+  if (replyToAgent && roster.some((entry) => entry.agentId === replyToAgent) && !named.includes(replyToAgent)) named.push(replyToAgent);
   return named;
 }
 
@@ -71,23 +45,11 @@ export function speakersFor(
  * The agents a reply hands work to: those of the roster it names (and pi, as `AGENT_NAME`), never the one replying,
  * while the hand-offs from the person's message stay within MAX_HOPS. `hop` is the replying turn's.
  */
-export function handOffs(
-  text: string,
-  from: string,
-  hop: number,
-  roster: readonly Pick<RosterEntry, "agentId" | "name">[],
-): string[] {
+export function handOffs(text: string, from: string, hop: number, roster: readonly Pick<RosterEntry, "agentId" | "name">[]): string[] {
   if (hop + 1 > MAX_HOPS || !text) return [];
   const on = roster.filter((entry) => entry.agentId !== from);
-  const names = [
-    ...on.map((entry) => entry.name),
-    ...(from === AGENT_NAME ? [] : [AGENT_NAME]),
-  ];
-  return calledNames(text, names).map((name) =>
-    name === AGENT_NAME
-      ? AGENT_NAME
-      : on.find((entry) => entry.name === name)!.agentId,
-  );
+  const names = [...on.map((entry) => entry.name), ...(from === AGENT_NAME ? [] : [AGENT_NAME])];
+  return calledNames(text, names).map((name) => (name === AGENT_NAME ? AGENT_NAME : on.find((entry) => entry.name === name)!.agentId));
 }
 
 /** The text of an assistant message: its text blocks, without its thinking or tool calls. */
@@ -96,29 +58,21 @@ export function assistantText(message: AssistantMessage): string {
 }
 
 export function userText(message: UserMessage): string {
-  return typeof message.content === "string"
-    ? message.content
-    : textOf(message.content, "");
+  return typeof message.content === "string" ? message.content : textOf(message.content, "");
 }
 
 /** Any line break, so a message's text can never start a line of its own. */
 const LINE_BREAK = /\r\n|[\n\r\u000b\u000c\u0085\u2028\u2029]/g;
 /** "your owner]" as a label ends, also with spaces, invisible characters or a full-width bracket between. */
-const OWNER_LABEL_END =
-  /your[\s\u200b-\u200f\u2060\ufeff]+owner[\s\u200b-\u200f\u2060\ufeff]*[\]\uff3d]/gi;
+const OWNER_LABEL_END = /your[\s\u200b-\u200f\u2060\ufeff]+owner[\s\u200b-\u200f\u2060\ufeff]*[\]\uff3d]/gi;
 
 /**
  * A message's text as it follows its label: cut to what a session reads of one, every line after the first indented,
  * so only a label starts a line, and anything in it shaped like an owner's label marked as quoted.
  */
 function said(text: string, max = MIRROR_CHARS): string {
-  const cut =
-    text.length > max
-      ? `${text.slice(0, max)}… (cut; the rest is in the chat)`
-      : text;
-  return cut
-    .replace(OWNER_LABEL_END, "your owner (quoted)]")
-    .replace(LINE_BREAK, "\n  ");
+  const cut = text.length > max ? `${text.slice(0, max)}… (cut; the rest is in the chat)` : text;
+  return cut.replace(OWNER_LABEL_END, "your owner (quoted)]").replace(LINE_BREAK, "\n  ");
 }
 
 /** What a message's line adds for the files attached to it. */
@@ -170,20 +124,12 @@ export class CatchUp {
   result(): { text: string; through: number } {
     if (!this.#lines.length) return { text: "", through: this.#through };
     const skipped = this.#full ? "(Earlier messages are left out.)\n\n" : "";
-    return {
-      text: `What was said in the chat since your last turn:\n\n${skipped}${[...this.#lines].reverse().join("\n\n")}`,
-      through: this.#through,
-    };
+    return { text: `What was said in the chat since your last turn:\n\n${skipped}${[...this.#lines].reverse().join("\n\n")}`, through: this.#through };
   }
 }
 
 /** CatchUp over `entries`, oldest first. */
-export function mirrorText(
-  entries: readonly EntryRecord[],
-  self: string,
-  ownerUid: string,
-  skip?: ReadonlySet<string>,
-): { text: string; through: number } {
+export function mirrorText(entries: readonly EntryRecord[], self: string, ownerUid: string, skip?: ReadonlySet<string>): { text: string; through: number } {
   const catchUp = new CatchUp(self, ownerUid, skip);
   catchUp.add([...entries].reverse());
   return catchUp.result();
@@ -200,9 +146,7 @@ export function entryAskKey(entry: number): string {
 }
 
 /** The ask key of a person's message from its author and sentAt, before it is in the log. */
-export function messageAskKey(
-  message: Parameters<typeof incomingKey>[0],
-): string {
+export function messageAskKey(message: Parameters<typeof incomingKey>[0]): string {
   return `message:${incomingKey(message)}`;
 }
 
@@ -210,13 +154,9 @@ export function messageAskKey(
  * Which log entry a turn answers, as a key its catch-up can leave out (the turn's input carries it already): a person's
  * message by its author and sentAt, another agent's reply by its turn, one of pi's replies by its entry.
  */
-export function askKey(
-  entry: Pick<EntryRecord, "id" | "kind" | "data">,
-): string | undefined {
-  if (entry.kind === CHAT_MESSAGE_KIND)
-    return messageAskKey(entry.data as unknown as ChatMessageData);
-  if (entry.kind === CHAT_AGENT_KIND)
-    return turnAskKey((entry.data as unknown as ChatAgentReplyData).turn);
+export function askKey(entry: Pick<EntryRecord, "id" | "kind" | "data">): string | undefined {
+  if (entry.kind === CHAT_MESSAGE_KIND) return messageAskKey(entry.data as unknown as ChatMessageData);
+  if (entry.kind === CHAT_AGENT_KIND) return turnAskKey((entry.data as unknown as ChatAgentReplyData).turn);
   if (entry.kind === "pi.assistant") return entryAskKey(entry.id as number);
   return undefined;
 }
@@ -225,23 +165,15 @@ export function askKey(
  * One log entry as an agent's session reads it: a labelled line, or nothing for what it does not read (its own replies,
  * asides, notices, tool calls). What a turn's input quotes of the message it answers, too.
  */
-export function askLine(
-  entry: EntryRecord,
-  self: string,
-  ownerUid: string,
-): string | undefined {
+export function askLine(entry: EntryRecord, self: string, ownerUid: string): string | undefined {
   if (entry.kind === CHAT_MESSAGE_KIND) {
     const data = entry.data as unknown as ChatMessageData;
-    const files = attachedNote(
-      data.attachments?.map((attachment) => attachment.path) ?? [],
-    );
+    const files = attachedNote(data.attachments?.map((attachment) => attachment.path) ?? []);
     if (!data.text && !files) return undefined;
     return `${speakerLabel({ name: data.name, kind: "person", owner: data.uid === ownerUid })}: ${said(data.text)}${files}`;
   }
   if (entry.kind === CHAT_AGENT_KIND) {
-    const data = entry.data as unknown as ChatAgentReplyData & {
-      copied?: true;
-    };
+    const data = entry.data as unknown as ChatAgentReplyData & { copied?: true };
     // Its own replies are in its session, unless copied into a branch, where its session started afresh.
     if ((data.agentId === self && !data.copied) || !data.text) return undefined;
     return askOf({ name: data.name, kind: "agent" }, data.text);
@@ -253,16 +185,12 @@ export function askLine(
   }
   if (entry.kind === "pi.user" && message?.role === "user") {
     const text = userText(message);
-    return text
-      ? askOf({ name: "the owner", kind: "person", owner: true }, text)
-      : undefined;
+    return text ? askOf({ name: "the owner", kind: "person", owner: true }, text) : undefined;
   }
   // One of pi's replies copied into a branch; the people's messages and agents' replies are copied as they were.
   if (entry.kind === CHAT_COPY_KIND) {
     const data = entry.data as unknown as ChatCopyData;
-    return data.from === "pi" && data.text
-      ? askOf({ name: AGENT_NAME, kind: "agent" }, data.text)
-      : undefined;
+    return data.from === "pi" && data.text ? askOf({ name: AGENT_NAME, kind: "agent" }, data.text) : undefined;
   }
   // What the app tells the agents: of the page the chat discusses, and of the conversation a branch carries. Never a
   // person's words.
@@ -274,28 +202,15 @@ export function askLine(
 }
 
 /** The input that gives an agent its turn: who asked, and what (the message's labelled line, `turn.ask`). */
-export function turnInput(
-  turn: Pick<AgentTurn, "calledBy" | "hop" | "ask">,
-): string {
-  const who = turn.calledBy.schedule
-    ? "Your schedule"
-    : turn.calledBy.agentId
-      ? `${turn.calledBy.name} (an agent)`
-      : turn.calledBy.name;
+export function turnInput(turn: Pick<AgentTurn, "calledBy" | "hop" | "ask">): string {
+  const who = turn.calledBy.schedule ? "Your schedule" : turn.calledBy.agentId ? `${turn.calledBy.name} (an agent)` : turn.calledBy.name;
   const what = turn.calledBy.schedule ? "started this run" : "asked you";
-  const handoff =
-    turn.hop > 0
-      ? ` This is hand-off ${turn.hop}; at most ${MAX_HOPS} follow one person's message.`
-      : "";
+  const handoff = turn.hop > 0 ? ` This is hand-off ${turn.hop}; at most ${MAX_HOPS} follow one person's message.` : "";
   return `Your turn: ${who} ${what}. Answer this, using the chat around it where it helps.${handoff}\n\n${turn.ask}`;
 }
 
 /** A message as a turn's `ask`: its labelled line, cut to `max` (what a catch-up reads of one, by default). */
-export function askOf(
-  speaker: Parameters<typeof speakerLabel>[0],
-  text: string,
-  max = MIRROR_CHARS,
-): string {
+export function askOf(speaker: Parameters<typeof speakerLabel>[0], text: string, max = MIRROR_CHARS): string {
   return `${speakerLabel(speaker)}: ${said(text, max)}`;
 }
 
@@ -306,14 +221,7 @@ const NEVER_FOR_AGENTS = ["react"];
  * loading a deferred tool it may use. Every other tool of the app writes, runs code, reads the owner's private files,
  * or lists the owner's servers and sign-ins, and a tool added later is left out until it is named here.
  */
-const READ_TOOLS = [
-  "artifact_read",
-  "artifact_history",
-  "artifact_diff",
-  "activate_skill",
-  "read_skill_resource",
-  TOOL_SEARCH_TOOL_NAME,
-];
+const READ_TOOLS = ["artifact_read", "artifact_history", "artifact_diff", "activate_skill", "read_skill_resource", TOOL_SEARCH_TOOL_NAME];
 
 /**
  * The tools a turn may use, by name, of `tools` (every tool installed), as an allow-list: a tool installed after the
@@ -332,20 +240,13 @@ export function allowedTools(
   byOwner: boolean,
   signsIn: (server: string) => boolean,
 ): string[] {
-  const own = (server: string) =>
-    !agent.servers || agent.servers.includes(server);
-  const shared = (server: string) =>
-    own(server) &&
-    (agent.sharedServers
-      ? agent.sharedServers.includes(server)
-      : !signsIn(server));
+  const own = (server: string) => !agent.servers || agent.servers.includes(server);
+  const shared = (server: string) => own(server) && (agent.sharedServers ? agent.sharedServers.includes(server) : !signsIn(server));
   return tools.filter((name) => {
     if (NEVER_FOR_AGENTS.includes(name)) return false;
     const info = mcp.get(name);
     if (byOwner) return !info || own(info.server);
-    return info
-      ? info.readOnly && shared(info.server)
-      : READ_TOOLS.includes(name);
+    return info ? info.readOnly && shared(info.server) : READ_TOOLS.includes(name);
   });
 }
 
@@ -354,10 +255,7 @@ export function allowedTools(
  * job, what its owner wrote, and the rules every agent follows. Changes only with its definition, so the prompt cache
  * holds between its turns.
  */
-export function agentInstructions(
-  agent: Pick<AgentDefinition, "name" | "job" | "instructions">,
-  ownerName: string,
-): string {
+export function agentInstructions(agent: Pick<AgentDefinition, "name" | "job" | "instructions">, ownerName: string): string {
   return [
     `In this chat you are @${agent.name}, one of its agents besides ${AGENT_NAME}, the chat's main assistant. Your job: ${agent.job}`,
     `Your owner, ${ownerName}, wrote these instructions for you:\n${agent.instructions}`,
@@ -376,19 +274,9 @@ export function itemsIn(entries: readonly EntryRecord[]): ItemRef[] {
 }
 
 /** The artifacts a turn published: the results of artifact_publish among `entries` (its session's, from the turn on). */
-export function publishedIn(
-  entries: readonly EntryRecord[],
-): NonNullable<ChatAgentReplyData["published"]> {
+export function publishedIn(entries: readonly EntryRecord[]): NonNullable<ChatAgentReplyData["published"]> {
   return entries.flatMap((entry) => {
     const page = publishedBy(entry);
-    return page
-      ? [
-          {
-            artifactId: page.artifactId,
-            title: page.title ?? "",
-            version: page.version,
-          },
-        ]
-      : [];
+    return page ? [{ artifactId: page.artifactId, title: page.title ?? "", version: page.version }] : [];
   });
 }

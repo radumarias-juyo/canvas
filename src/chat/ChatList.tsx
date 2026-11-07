@@ -5,13 +5,7 @@ import { api } from "../api.ts";
 import { Icon } from "../Icon.tsx";
 import { isBoolean, useDismiss, useStoredState } from "../layout.tsx";
 import { useLatest, useVisible } from "../sidebar.ts";
-import {
-  GROUPINGS,
-  hasUnread,
-  isGrouping,
-  orderChats,
-  type ChatGrouping,
-} from "./chat-order.ts";
+import { GROUPINGS, hasUnread, isGrouping, orderChats, type ChatGrouping } from "./chat-order.ts";
 
 /**
  * The user's chats, and a `load` that reads them again (the sidebar's socket calls it when they changed). The open
@@ -23,10 +17,7 @@ export function useChatList(openId: string | undefined) {
   const visible = useVisible();
   useEffect(load, [load]);
 
-  const [newSince, setNewSince] = useState<{
-    chatId: string;
-    at: number;
-  } | null>(null);
+  const [newSince, setNewSince] = useState<{ chatId: string; at: number } | null>(null);
   // Whether the next look at the open chat starts a new visit, which may move the "New" line: true when another chat
   // opens or the window is hidden. Something that comes in while the user is looking is not new to them.
   const visiting = useRef(true);
@@ -54,61 +45,29 @@ export function useChatList(openId: string | undefined) {
     // On arriving, ask even when the list shows nothing unread: it can be behind (its socket reconnects only after the
     // window shows again, and loads lag), and the server knows whether something came in.
     if (!unseen && !arrived) return;
-    if (unseen)
-      setChats((list) =>
-        list.map((chat) =>
-          chat.id === openId
-            ? { ...chat, unread: undefined, mentioned: undefined }
-            : chat,
-        ),
-      );
+    if (unseen) setChats((list) => list.map((chat) => (chat.id === openId ? { ...chat, unread: undefined, mentioned: undefined } : chat)));
     api
       .markSeen(openId)
-      .then(
-        ({ seenAt }) =>
-          arrived && seenAt && setNewSince({ chatId: openId, at: seenAt }),
-      )
+      .then(({ seenAt }) => arrived && seenAt && setNewSince({ chatId: openId, at: seenAt }))
       .catch(() => {});
   }, [openId, listed, unseen, visible]);
 
-  return {
-    chats,
-    load,
-    newSince: newSince && newSince.chatId === openId ? newSince.at : undefined,
-  };
+  return { chats, load, newSince: newSince && newSince.chatId === openId ? newSince.at : undefined };
 }
 
 /** On the right of a chat's name: a tag of the user, its agent working, waiting for an answer, or a reply nobody here has read. */
 function ChatStatusIcon({ chat, open }: { chat: ChatSummary; open: boolean }) {
   if (chat.mentioned && !open) {
     return (
-      <span
-        className="nav-status chat-mentioned"
-        role="img"
-        aria-label="You were mentioned"
-        title="You were mentioned"
-      >
+      <span className="nav-status chat-mentioned" role="img" aria-label="You were mentioned" title="You were mentioned">
         @
       </span>
     );
   }
-  if (chat.status === "running")
-    return (
-      <span
-        className="spinner nav-status"
-        role="img"
-        aria-label="Working"
-        title="Working"
-      />
-    );
+  if (chat.status === "running") return <span className="spinner nav-status" role="img" aria-label="Working" title="Working" />;
   if (chat.status === "waiting") {
     return (
-      <span
-        className="nav-status chat-waiting"
-        role="img"
-        aria-label="Waiting for your answer"
-        title="Waiting for your answer"
-      >
+      <span className="nav-status chat-waiting" role="img" aria-label="Waiting for your answer" title="Waiting for your answer">
         ?
       </span>
     );
@@ -119,79 +78,35 @@ function ChatStatusIcon({ chat, open }: { chat: ChatSummary; open: boolean }) {
 
 /** Something new in a sidebar entry that the user has not looked at yet. */
 export function UnreadDot({ label }: { label: string }) {
-  return (
-    <span
-      className="nav-status nav-unread"
-      role="img"
-      aria-label={label}
-      title={label}
-    />
-  );
+  return <span className="nav-status nav-unread" role="img" aria-label={label} title={label} />;
 }
 
 /** Which chats the list shows: all, only the user's own nobody else is in, or shared ones (by them, with them, or both). */
-type ChatFilter =
-  | "all"
-  | "private"
-  | "shared"
-  | "shared-by-me"
-  | "shared-with-me";
+type ChatFilter = "all" | "private" | "shared" | "shared-by-me" | "shared-with-me";
 
 /** Whether other people are in the chat: the user shared it, or someone shared it with them. */
-export const isShared = (chat: ChatSummary) =>
-  Boolean(chat.sharedBy || chat.shared);
+export const isShared = (chat: ChatSummary) => Boolean(chat.sharedBy || chat.shared);
 
-const FILTERS: Record<
-  ChatFilter,
-  { label: string; title: string; keep: (chat: ChatSummary) => boolean }
-> = {
+const FILTERS: Record<ChatFilter, { label: string; title: string; keep: (chat: ChatSummary) => boolean }> = {
   all: { label: "All", title: "All chats", keep: () => true },
-  private: {
-    label: "Private",
-    title: "Your chats nobody else is in",
-    keep: (chat) => !isShared(chat),
-  },
-  shared: {
-    label: "Shared",
-    title: "Chats with other people in them",
-    keep: isShared,
-  },
-  "shared-by-me": {
-    label: "By me",
-    title: "Your chats you shared with others",
-    keep: (chat) => Boolean(chat.shared),
-  },
-  "shared-with-me": {
-    label: "With me",
-    title: "Chats others shared with you",
-    keep: (chat) => Boolean(chat.sharedBy),
-  },
+  private: { label: "Private", title: "Your chats nobody else is in", keep: (chat) => !isShared(chat) },
+  shared: { label: "Shared", title: "Chats with other people in them", keep: isShared },
+  "shared-by-me": { label: "By me", title: "Your chats you shared with others", keep: (chat) => Boolean(chat.shared) },
+  "shared-with-me": { label: "With me", title: "Chats others shared with you", keep: (chat) => Boolean(chat.sharedBy) },
 };
 const CHOICES = Object.keys(FILTERS) as ChatFilter[];
 const TOP: readonly ChatFilter[] = ["all", "private", "shared"];
-const SHARED: readonly ChatFilter[] = [
-  "shared",
-  "shared-by-me",
-  "shared-with-me",
-];
+const SHARED: readonly ChatFilter[] = ["shared", "shared-by-me", "shared-with-me"];
 
-const isChatFilter = (value: unknown): value is ChatFilter =>
-  typeof value === "string" && Object.hasOwn(FILTERS, value);
+const isChatFilter = (value: unknown): value is ChatFilter => typeof value === "string" && Object.hasOwn(FILTERS, value);
 
 /**
  * The chat list's filter, remembered in this browser. Until a chat is shared there is nothing to filter: then `bar` is
  * false and every chat shows. The open chat (`openId`) always shows, so the list says where the user is. `waiting` names the choices that would show a chat the current one hides where someone
  * tagged the user, or with something unread.
  */
-export function useChatFilter(
-  chats: readonly ChatSummary[],
-  openId: string | undefined,
-) {
-  const [stored, setFilter] = useStoredState<ChatFilter>(
-    "layout.chatFilter",
-    "all",
-    isChatFilter,
-  );
+export function useChatFilter(chats: readonly ChatSummary[], openId: string | undefined) {
+  const [stored, setFilter] = useStoredState<ChatFilter>("layout.chatFilter", "all", isChatFilter);
   return {
     setFilter,
     ...useMemo(() => {
@@ -199,42 +114,22 @@ export function useChatFilter(
       const filter = bar ? stored : "all";
       const { keep } = FILTERS[filter];
       // A closed chat waits for nothing until someone tags the user in it, which opens it again.
-      const hidden = chats.filter(
-        (chat) =>
-          (chat.mentioned || chat.unread) &&
-          !chat.closed &&
-          !keep(chat) &&
-          chat.id !== openId,
-      );
+      const hidden = chats.filter((chat) => (chat.mentioned || chat.unread) && !chat.closed && !keep(chat) && chat.id !== openId);
       return {
         bar,
         filter,
         shown: chats.filter((chat) => keep(chat) || chat.id === openId),
-        empty: !bar
-          ? undefined
-          : filter === "private"
-            ? "No private chats."
-            : "No shared chats here.",
-        waiting: new Set(
-          CHOICES.filter((choice) => hidden.some(FILTERS[choice].keep)),
-        ),
+        empty: !bar ? undefined : filter === "private" ? "No private chats." : "No shared chats here.",
+        waiting: new Set(CHOICES.filter((choice) => hidden.some(FILTERS[choice].keep))),
       };
     }, [chats, stored, openId]),
   };
 }
 
 /** Above the chat list: All, Private or Shared, and within Shared, both, by the user or with them. */
-export function ChatFilterBar({
-  filter,
-  setFilter,
-  waiting,
-}: ReturnType<typeof useChatFilter>) {
+export function ChatFilterBar({ filter, setFilter, waiting }: ReturnType<typeof useChatFilter>) {
   const inShared = SHARED.includes(filter);
-  const chip = (
-    choice: ChatFilter,
-    active: boolean,
-    label = FILTERS[choice].label,
-  ) => (
+  const chip = (choice: ChatFilter, active: boolean, label = FILTERS[choice].label) => (
     <button
       key={choice}
       type="button"
@@ -244,27 +139,17 @@ export function ChatFilterBar({
       onClick={() => setFilter(choice)}
     >
       {label}
-      {!active && waiting.has(choice) && (
-        <UnreadDot label="Has something new" />
-      )}
+      {!active && waiting.has(choice) && <UnreadDot label="Has something new" />}
     </button>
   );
   return (
     <div className="chat-filter">
       <div className="chips" role="group" aria-label="Show chats">
-        {TOP.map((choice) =>
-          chip(choice, choice === "shared" ? inShared : choice === filter),
-        )}
+        {TOP.map((choice) => chip(choice, choice === "shared" ? inShared : choice === filter))}
       </div>
       {inShared && (
         <div className="chips sub" role="group" aria-label="Shared chats">
-          {SHARED.map((choice) =>
-            chip(
-              choice,
-              choice === filter,
-              choice === "shared" ? "Both" : undefined,
-            ),
-          )}
+          {SHARED.map((choice) => chip(choice, choice === filter, choice === "shared" ? "Both" : undefined))}
         </div>
       )}
     </div>
@@ -273,38 +158,19 @@ export function ChatFilterBar({
 
 /** How the list is ordered, remembered in this browser: unread chats on top, and how the rest are grouped. */
 export function useChatOrder() {
-  const [unreadFirst, setUnreadFirst] = useStoredState(
-    "layout.unreadFirst",
-    true,
-    isBoolean,
-  );
-  const [groupBy, setGroupBy] = useStoredState<ChatGrouping>(
-    "layout.chatGrouping",
-    "none",
-    isGrouping,
-  );
+  const [unreadFirst, setUnreadFirst] = useStoredState("layout.unreadFirst", true, isBoolean);
+  const [groupBy, setGroupBy] = useStoredState<ChatGrouping>("layout.chatGrouping", "none", isGrouping);
   return { unreadFirst, setUnreadFirst, groupBy, setGroupBy };
 }
 
 /** The "Chats" heading, with what orders the list beside it. */
-export function ChatsHeading({
-  order,
-}: {
-  order: ReturnType<typeof useChatOrder>;
-}) {
+export function ChatsHeading({ order }: { order: ReturnType<typeof useChatOrder> }) {
   const [open, setOpen] = useState(false);
   const box = useDismiss<HTMLDivElement>(open, setOpen);
   return (
     <div className="chats-heading" ref={box}>
       <h3>Chats</h3>
-      <button
-        type="button"
-        className="icon-button chats-order"
-        aria-expanded={open}
-        title="Order the chats"
-        aria-label="Order the chats"
-        onClick={() => setOpen(!open)}
-      >
+      <button type="button" className="icon-button chats-order" aria-expanded={open} title="Order the chats" aria-label="Order the chats" onClick={() => setOpen(!open)}>
         <Icon size={14} box={16} stroke={1.6}>
           <path d="M3 4.5h10M5 8h6M7 11.5h2" />
         </Icon>
@@ -312,22 +178,11 @@ export function ChatsHeading({
       {open && (
         <div className="row-menu" role="group" aria-label="Order the chats">
           <label>
-            <input
-              type="checkbox"
-              checked={order.unreadFirst}
-              onChange={(e) => order.setUnreadFirst(e.target.checked)}
-            />{" "}
-            Unread first
+            <input type="checkbox" checked={order.unreadFirst} onChange={(e) => order.setUnreadFirst(e.target.checked)} /> Unread first
           </label>
           {(Object.keys(GROUPINGS) as ChatGrouping[]).map((grouping) => (
             <label key={grouping}>
-              <input
-                type="radio"
-                name="chat-grouping"
-                checked={order.groupBy === grouping}
-                onChange={() => order.setGroupBy(grouping)}
-              />{" "}
-              {GROUPINGS[grouping]}
+              <input type="radio" name="chat-grouping" checked={order.groupBy === grouping} onChange={() => order.setGroupBy(grouping)} /> {GROUPINGS[grouping]}
             </label>
           ))}
         </div>
@@ -354,32 +209,12 @@ interface ChatListProps {
  * picked (chat-order.ts). Each has its own menu of what the user changes for themselves: pin, rename, copy its link,
  * mark it unread, close it, and leave a chat someone shared, or delete one of their own. Closed chats wait at the end.
  */
-export function ChatList({
-  chats,
-  openId,
-  uid,
-  order,
-  navigate,
-  onDelete,
-  empty,
-}: ChatListProps) {
+export function ChatList({ chats, openId, uid, order, navigate, onDelete, empty }: ChatListProps) {
   const [showClosed, setShowClosed] = useState(false);
   const { unreadFirst, groupBy } = order;
-  const { groups, closed } = useMemo(
-    () => orderChats(chats, { unreadFirst, groupBy }, openId),
-    [chats, unreadFirst, groupBy, openId],
-  );
+  const { groups, closed } = useMemo(() => orderChats(chats, { unreadFirst, groupBy }, openId), [chats, unreadFirst, groupBy, openId]);
   if (chats.length === 0 && empty) return <p className="nav-empty">{empty}</p>;
-  const row = (chat: ChatSummary) => (
-    <ChatRow
-      key={chat.id}
-      chat={chat}
-      open={chat.id === openId}
-      uid={uid}
-      navigate={navigate}
-      onDelete={onDelete}
-    />
-  );
+  const row = (chat: ChatSummary) => <ChatRow key={chat.id} chat={chat} open={chat.id === openId} uid={uid} navigate={navigate} onDelete={onDelete} />;
   return (
     <nav>
       {groups.map((group) => (
@@ -390,35 +225,17 @@ export function ChatList({
       ))}
       {closed.length > 0 && (
         <>
-          <button
-            type="button"
-            className="closed-toggle"
-            aria-expanded={showClosed}
-            onClick={() => setShowClosed(!showClosed)}
-          >
-            {showClosed
-              ? "Hide closed chats"
-              : `Closed chats (${closed.length})`}
+          <button type="button" className="closed-toggle" aria-expanded={showClosed} onClick={() => setShowClosed(!showClosed)}>
+            {showClosed ? "Hide closed chats" : `Closed chats (${closed.length})`}
           </button>
-          {showClosed && (
-            <div className="chat-group closed">{closed.map(row)}</div>
-          )}
+          {showClosed && <div className="chat-group closed">{closed.map(row)}</div>}
         </>
       )}
     </nav>
   );
 }
 
-function ChatRow({
-  chat,
-  open,
-  uid,
-  navigate,
-  onDelete,
-}: { chat: ChatSummary; open: boolean; uid: string } & Pick<
-  ChatListProps,
-  "navigate" | "onDelete"
->) {
+function ChatRow({ chat, open, uid, navigate, onDelete }: { chat: ChatSummary; open: boolean; uid: string } & Pick<ChatListProps, "navigate" | "onDelete">) {
   const [menu, setMenu] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -426,29 +243,18 @@ function ChatRow({
   const change = (patch: Parameters<typeof api.changeChatRow>[1]) => {
     setMenu(false);
     // The sidebar's socket brings the list back changed.
-    api
-      .changeChatRow(chat.id, patch)
-      .catch((e: unknown) =>
-        alert(`Could not change the chat: ${errorMessage(e)}`),
-      );
+    api.changeChatRow(chat.id, patch).catch((e: unknown) => alert(`Could not change the chat: ${errorMessage(e)}`));
   };
   const copyLink = () => {
-    navigator.clipboard
-      .writeText(`${location.origin}/c/${chat.id}`)
-      .then(() => {
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1_500);
-      });
+    navigator.clipboard.writeText(`${location.origin}/c/${chat.id}`).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1_500);
+    });
     setMenu(false);
   };
   const leave = async () => {
     setMenu(false);
-    if (
-      !confirm(
-        `Leave "${chat.title}"? You lose it until someone adds you again.`,
-      )
-    )
-      return;
+    if (!confirm(`Leave "${chat.title}"? You lose it until someone adds you again.`)) return;
     try {
       await api.removeMember(chat.id, uid);
       if (open) navigate("/");
@@ -458,20 +264,9 @@ function ChatRow({
   };
   const unread = hasUnread(chat) && !open;
   return (
-    <div
-      ref={box}
-      className={["chat-link", open && "active", menu && "menu-open"]
-        .filter(Boolean)
-        .join(" ")}
-    >
+    <div ref={box} className={["chat-link", open && "active", menu && "menu-open"].filter(Boolean).join(" ")}>
       {renaming ? (
-        <RenameChat
-          chat={chat}
-          onDone={(title) => (
-            setRenaming(false),
-            title !== undefined && change({ title })
-          )}
-        />
+        <RenameChat chat={chat} onDone={(title) => (setRenaming(false), title !== undefined && change({ title }))} />
       ) : (
         <a
           href={`/c/${chat.id}`}
@@ -482,29 +277,16 @@ function ChatRow({
             navigate(`/c/${chat.id}`);
           }}
         >
-          {chat.pinnedAt && (
-            <span className="nav-pin" aria-label="Pinned" title="Pinned" />
-          )}
+          {chat.pinnedAt && <span className="nav-pin" aria-label="Pinned" title="Pinned" />}
           <span className="nav-title">
             {chat.title}
             {chat.sharedBy && <small> · {chat.sharedBy}</small>}
           </span>
-          {copied ? (
-            <small className="nav-copied">Copied</small>
-          ) : (
-            <ChatStatusIcon chat={chat} open={open} />
-          )}
+          {copied ? <small className="nav-copied">Copied</small> : <ChatStatusIcon chat={chat} open={open} />}
         </a>
       )}
       {!renaming && (
-        <button
-          type="button"
-          className="chat-more"
-          title="More"
-          aria-label={`More for ${chat.title}`}
-          aria-expanded={menu}
-          onClick={() => setMenu(!menu)}
-        >
+        <button type="button" className="chat-more" title="More" aria-label={`More for ${chat.title}`} aria-expanded={menu} onClick={() => setMenu(!menu)}>
           <Icon size={15} box={16} stroke={2.4}>
             <path d="M3.5 8h.01M8 8h.01M12.5 8h.01" />
           </Icon>
@@ -512,58 +294,29 @@ function ChatRow({
       )}
       {menu && (
         <div className="row-menu" role="menu">
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() => change({ pinned: !chat.pinnedAt })}
-          >
+          <button type="button" role="menuitem" onClick={() => change({ pinned: !chat.pinnedAt })}>
             {chat.pinnedAt ? "Unpin" : "Pin"}
           </button>
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() => (setMenu(false), setRenaming(true))}
-          >
+          <button type="button" role="menuitem" onClick={() => (setMenu(false), setRenaming(true))}>
             Rename
           </button>
           <button type="button" role="menuitem" onClick={copyLink}>
             Copy link
           </button>
           {!unread && !open && (
-            <button
-              type="button"
-              role="menuitem"
-              onClick={() => change({ unread: true })}
-            >
+            <button type="button" role="menuitem" onClick={() => change({ unread: true })}>
               Mark unread
             </button>
           )}
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() => change({ closed: !chat.closed })}
-            title={
-              chat.closed ? undefined : "Hide it until someone tags you in it"
-            }
-          >
+          <button type="button" role="menuitem" onClick={() => change({ closed: !chat.closed })} title={chat.closed ? undefined : "Hide it until someone tags you in it"}>
             {chat.closed ? "Reopen" : "Close"}
           </button>
           {chat.sharedBy ? (
-            <button
-              type="button"
-              role="menuitem"
-              className="danger-item"
-              onClick={() => void leave()}
-            >
+            <button type="button" role="menuitem" className="danger-item" onClick={() => void leave()}>
               Leave
             </button>
           ) : (
-            <button
-              type="button"
-              role="menuitem"
-              className="danger-item"
-              onClick={() => (setMenu(false), onDelete(chat.id))}
-            >
+            <button type="button" role="menuitem" className="danger-item" onClick={() => (setMenu(false), onDelete(chat.id))}>
               Delete
             </button>
           )}
@@ -574,18 +327,11 @@ function ChatRow({
 }
 
 /** The chat's name as an input, for the user's own name for it: Enter keeps it (empty goes back to the chat's own), Escape lets go. */
-function RenameChat({
-  chat,
-  onDone,
-}: {
-  chat: ChatSummary;
-  onDone: (title?: string) => void;
-}) {
+function RenameChat({ chat, onDone }: { chat: ChatSummary; onDone: (title?: string) => void }) {
   const [title, setTitle] = useState(chat.title);
   const input = useRef<HTMLInputElement>(null);
   useEffect(() => input.current?.select(), []);
-  const save = () =>
-    onDone(title.trim() === chat.title ? undefined : title.trim());
+  const save = () => onDone(title.trim() === chat.title ? undefined : title.trim());
   return (
     <input
       ref={input}

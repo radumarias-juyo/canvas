@@ -1,11 +1,5 @@
 import { isChatKind, legacyKind, type ChatKind } from "../shared/chat-kinds.ts";
-import {
-  MAX_CHAT_TITLE,
-  type ChatRowChange,
-  type ChatStatus,
-  type ChatSummary,
-  type Person,
-} from "../shared/protocol.ts";
+import { MAX_CHAT_TITLE, type ChatRowChange, type ChatStatus, type ChatSummary, type Person } from "../shared/protocol.ts";
 import { isObject } from "../shared/util.ts";
 import { addColumns, type Sql } from "./members.ts";
 
@@ -16,10 +10,8 @@ export const MAX_KNOWN_PAIRS = 5000;
 export function parseRowChange(given: unknown): ChatRowChange | null {
   if (!isObject(given)) return null;
   const change: ChatRowChange = {};
-  for (const key of ["pinned", "closed", "unread"] as const)
-    if (typeof given[key] === "boolean") change[key] = given[key];
-  if (typeof given.title === "string")
-    change.title = given.title.trim().slice(0, MAX_CHAT_TITLE);
+  for (const key of ["pinned", "closed", "unread"] as const) if (typeof given[key] === "boolean") change[key] = given[key];
+  if (typeof given.title === "string") change.title = given.title.trim().slice(0, MAX_CHAT_TITLE);
   return Object.keys(change).length ? change : null;
 }
 
@@ -83,9 +75,7 @@ export class ChatRows {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       kind: rowKind(row.kind, row.shared_by !== null || row.shared === 1),
-      ...(row.shared_by !== null
-        ? { sharedBy: row.shared_by }
-        : row.shared === 1 && { shared: true as const }),
+      ...(row.shared_by !== null ? { sharedBy: row.shared_by } : row.shared === 1 && { shared: true as const }),
       ...(row.status && { status: row.status }),
       ...(row.unread === 1 && { unread: true as const }),
       ...(row.mentioned === 1 && { mentioned: true as const }),
@@ -102,9 +92,7 @@ export class ChatRows {
     const sets: string[] = [];
     const values: (string | number | null)[] = [];
     if (change.pinned !== undefined) {
-      sets.push(
-        "pinned_at = CASE WHEN ? THEN CASE WHEN pinned_at > 0 THEN pinned_at ELSE ? END ELSE 0 END",
-      );
+      sets.push("pinned_at = CASE WHEN ? THEN CASE WHEN pinned_at > 0 THEN pinned_at ELSE ? END ELSE 0 END");
       values.push(change.pinned ? 1 : 0, now);
     }
     if (change.closed !== undefined) {
@@ -122,32 +110,19 @@ export class ChatRows {
     if (!sets.length) return false;
     const set = sets.join(", ");
     let written = 0;
-    for (const table of ["chats", "shared_chats"])
-      written += this.#sql.exec(
-        `UPDATE ${table} SET ${set} WHERE id = ?`,
-        ...values,
-        id,
-      ).rowsWritten;
+    for (const table of ["chats", "shared_chats"]) written += this.#sql.exec(`UPDATE ${table} SET ${set} WHERE id = ?`, ...values, id).rowsWritten;
     return written > 0;
   }
 
   /** Someone tagged this user in chat `id` (or added them to it again): a chat they closed is in their list again. */
   reopen(id: string): void {
-    for (const table of ["chats", "shared_chats"])
-      this.#sql.exec(
-        `UPDATE ${table} SET closed_at = 0 WHERE id = ? AND closed_at > 0`,
-        id,
-      );
+    for (const table of ["chats", "shared_chats"]) this.#sql.exec(`UPDATE ${table} SET closed_at = 0 WHERE id = ? AND closed_at > 0`, id);
   }
 
   /** The kind of chat `id` as this sidebar last heard it, or null for a chat it does not list. */
   kindOf(id: string): ChatKind | null {
     const row = this.#sql
-      .exec(
-        "SELECT kind, shared AS members FROM chats WHERE id = ? UNION ALL SELECT kind, 1 FROM shared_chats WHERE id = ?",
-        id,
-        id,
-      )
+      .exec("SELECT kind, shared AS members FROM chats WHERE id = ? UNION ALL SELECT kind, 1 FROM shared_chats WHERE id = ?", id, id)
       .toArray()[0];
     return row ? rowKind(row.kind as string | null, row.members === 1) : null;
   }
@@ -155,10 +130,7 @@ export class ChatRows {
   /** The chat that discusses one of this user's artifacts, made by "Discuss" on its page; null when there is none yet. */
   pageChat(artifactId: string): string | null {
     const row = this.#sql
-      .exec(
-        "SELECT p.chat_id FROM page_chats p JOIN chats c ON c.id = p.chat_id WHERE p.artifact_id = ?",
-        artifactId,
-      )
+      .exec("SELECT p.chat_id FROM page_chats p JOIN chats c ON c.id = p.chat_id WHERE p.artifact_id = ?", artifactId)
       .toArray()[0];
     return (row?.chat_id as string | undefined) ?? null;
   }
@@ -183,36 +155,22 @@ export class ChatRows {
    * was counted. Its branches' branches count against the same root.
    */
   takeBranch(root: string, max: number): boolean {
-    const n =
-      (this.#sql
-        .exec("SELECT n FROM branch_counts WHERE root = ?", root)
-        .toArray()[0]?.n as number | undefined) ?? 0;
+    const n = (this.#sql.exec("SELECT n FROM branch_counts WHERE root = ?", root).toArray()[0]?.n as number | undefined) ?? 0;
     if (n >= max) return false;
-    this.#sql.exec(
-      "INSERT INTO branch_counts (root, n) VALUES (?, 1) ON CONFLICT(root) DO UPDATE SET n = n + 1",
-      root,
-    );
+    this.#sql.exec("INSERT INTO branch_counts (root, n) VALUES (?, 1) ON CONFLICT(root) DO UPDATE SET n = n + 1", root);
     return true;
   }
 
   /** A branch counted against `root` was deleted, or never made: its place is free again. */
   returnBranch(root: string): void {
-    this.#sql.exec(
-      "UPDATE branch_counts SET n = n - 1 WHERE root = ? AND n > 0",
-      root,
-    );
+    this.#sql.exec("UPDATE branch_counts SET n = n - 1 WHERE root = ? AND n > 0", root);
   }
 
   /**
    * Remember the people this user shares chat `chatId` with, by the name they last showed. Someone is known only while
    * they share a chat with this user: each pair goes when either leaves it, or it is deleted (forgetPeople).
    */
-  knowPeople(
-    chatId: string,
-    people: readonly Person[],
-    self: string,
-    now = Date.now(),
-  ): void {
+  knowPeople(chatId: string, people: readonly Person[], self: string, now = Date.now()): void {
     for (const person of people) {
       if (person.uid === self) continue;
       this.#sql.exec(
@@ -224,9 +182,7 @@ export class ChatRows {
         now,
       );
     }
-    const pairs = this.#sql
-      .exec("SELECT COUNT(*) AS n FROM chat_people")
-      .toArray()[0]?.n as number;
+    const pairs = this.#sql.exec("SELECT COUNT(*) AS n FROM chat_people").toArray()[0]?.n as number;
     if (pairs > MAX_KNOWN_PAIRS) {
       this.#sql.exec(
         "DELETE FROM chat_people WHERE rowid NOT IN (SELECT rowid FROM chat_people ORDER BY met_at DESC LIMIT ?)",
@@ -237,34 +193,21 @@ export class ChatRows {
 
   /** This user no longer shares chat `chatId` with `uid`, or (no `uid`) with anyone: they left it, or it is gone. */
   forgetPeople(chatId: string, uid?: string): void {
-    if (uid === undefined)
-      this.#sql.exec("DELETE FROM chat_people WHERE chat_id = ?", chatId);
-    else
-      this.#sql.exec(
-        "DELETE FROM chat_people WHERE chat_id = ? AND uid = ?",
-        chatId,
-        uid,
-      );
+    if (uid === undefined) this.#sql.exec("DELETE FROM chat_people WHERE chat_id = ?", chatId);
+    else this.#sql.exec("DELETE FROM chat_people WHERE chat_id = ? AND uid = ?", chatId, uid);
   }
 
   /** The people this user shares a chat with now, most recently met first, by the name they last showed. */
   people(): Person[] {
     return this.#sql
-      .exec(
-        "SELECT uid, name, MAX(met_at) AS met FROM chat_people GROUP BY uid ORDER BY met DESC",
-      )
+      .exec("SELECT uid, name, MAX(met_at) AS met FROM chat_people GROUP BY uid ORDER BY met DESC")
       .toArray()
       .map((row) => ({ uid: row.uid as string, name: row.name as string }));
   }
 
   /** One of them, or null for someone this user shares no chat with now. */
   person(uid: string): Person | null {
-    const row = this.#sql
-      .exec(
-        "SELECT uid, name FROM chat_people WHERE uid = ? ORDER BY met_at DESC LIMIT 1",
-        uid,
-      )
-      .toArray()[0];
+    const row = this.#sql.exec("SELECT uid, name FROM chat_people WHERE uid = ? ORDER BY met_at DESC LIMIT 1", uid).toArray()[0];
     return row ? { uid: row.uid as string, name: row.name as string } : null;
   }
 }
