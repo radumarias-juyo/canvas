@@ -364,8 +364,5 @@ export function publishedIn(entries: readonly EntryRecord[]): NonNullable<ChatAg
 
 /** The agents a turn drafted: the results of agent_propose among `entries` (its session's, from the turn on). */
 export function draftedIn(entries: readonly EntryRecord[]): NonNullable<ChatAgentReplyData["drafted"]> {
-  return entries.flatMap((entry) => {
-    const draft = proposedBy(entry);
-    return draft ? [draft] : [];
-  });
+  return entries.flatMap((entry) => proposedBy(entry) ?? []);
 }

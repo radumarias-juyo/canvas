@@ -14,14 +14,11 @@ const servers = [
   { name: "vault", url: `http://127.0.0.1:${MCP_PORT + 1}/mcp`, auth: "oauth" },
 ];
 
-const env = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined));
-
 export default defineConfig({
   testDir: ".",
   outputDir: ".results",
   // The flows share people, agents and chats, in order.
   workers: 1,
-  fullyParallel: false,
   timeout: 120_000,
   expect: { timeout: 20_000 },
   reporter: [["list"]],
@@ -29,7 +26,6 @@ export default defineConfig({
     baseURL: `http://localhost:${APP_PORT}`,
     viewport: { width: 1280, height: 860 },
     deviceScaleFactor: 2,
-    trace: "off",
     ...(process.env.E2E_CHROMIUM && { launchOptions: { executablePath: process.env.E2E_CHROMIUM } }),
   },
   webServer: [
@@ -37,7 +33,6 @@ export default defineConfig({
       command: `node --experimental-strip-types e2e/stand-in.ts ${MCP_PORT}`,
       cwd: root,
       url: `http://127.0.0.1:${MCP_PORT}/health`,
-      reuseExistingServer: false,
       stdout: "ignore",
     },
     {
@@ -45,11 +40,10 @@ export default defineConfig({
       cwd: root,
       // 401 until someone signs in: the Worker is up.
       url: `http://localhost:${APP_PORT}/api/me`,
-      reuseExistingServer: false,
       timeout: 180_000,
       stdout: process.env.E2E_LOGS ? "pipe" : "ignore",
+      // Added to the runner's own environment.
       env: {
-        ...env,
         AUTH_MODE: "demo",
         PI_OFFLINE: "1",
         PI_NO_DOCKER: "1",

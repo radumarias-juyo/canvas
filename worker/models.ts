@@ -252,7 +252,7 @@ export class Catalog {
     const byCatalogId = new Map(base.map((entry) => [entry.info.id, entry]));
     const entries = new Map<string, ModelEntry>();
     for (const provider of PROVIDER_ORDER) {
-      const listed = provider === "workers-ai" || provider === "script" ? undefined : discovery?.providers[provider]?.models;
+      const listed = Object.hasOwn(GATEWAY_PROVIDERS, provider) ? discovery?.providers[provider as GatewayProviderId]?.models : undefined;
       // A provider with no models listed (Workers AI, and before or without a list) shows what AI Gateway's catalog
       // has of it: Anthropic and OpenAI can be reached without a key of the deployment's own (unified billing).
       if (!listed?.length) {
@@ -324,10 +324,11 @@ export function baseCatalog(): Catalog {
 let scripted: Catalog | undefined;
 
 /** The scripted dev model's catalog (worker/dev-model.ts): the picker's only choice when it is on. */
-export function scriptCatalog(): Catalog {
-  const { model } = scriptModel();
-  const info: ModelInfo = { id: SCRIPT_MODEL, name: model.name, provider: "script", efforts: [], images: true, contextWindow: model.contextWindow };
-  return (scripted ??= new Catalog([{ info, model, metadata: model }], null));
+function scriptCatalog(): Catalog {
+  return (scripted ??= (() => {
+    const { model } = scriptModel();
+    return new Catalog([{ info: infoOf(model, model, "script", SCRIPT_MODEL, false), model, metadata: model }], null);
+  })());
 }
 
 /** The catalog from a discovery. */
@@ -426,7 +427,7 @@ export function catalogSource(
       tryModels: (catalog: Catalog) => {
         const gemini = new GeminiCompat();
         const targets = auto.flatMap((id) => catalog.model(id) ?? []);
-        return tryModels(piModels(gatewayAI(env, gemini).provider, gemini, () => catalog), targets);
+        return tryModels(piModels(gatewayAI(env, gemini).provider, gemini, { catalog: () => catalog }), targets);
       },
     }),
   };
@@ -533,7 +534,11 @@ export function modelsNamed(list: string, catalog: Catalog): Model<Api>[] {
  * in the background while the old one serves. `refresh` asks again now, unless the last ask was under a minute ago.
  */
 export async function loadCatalog(source: CatalogSource, { refresh = false } = {}): Promise<Catalog> {
-  if (source.scripted) return (held = { catalog: scriptCatalog(), discovery: null, readAt: Date.now() }).catalog;
+  if (source.scripted) {
+    const catalog = scriptCatalog();
+    if (held?.catalog !== catalog) held = { catalog, discovery: null, readAt: Date.now() };
+    return catalog;
+  }
   if (held && !refresh && Date.now() - held.readAt < REREAD_MS) return held.catalog;
   const discovery = await readCached(source.cache);
   const age = discovery ? Date.now() - discovery.checkedAt : Infinity;
@@ -585,7 +590,7 @@ export function forgetCatalog(): void {
  * Gemini's tool calls signed: AI Gateway's catalog and Workers AI's through `provider`, and the models the providers list
  * (as this isolate's catalog has them now) through one pi provider each. `scripted`: and the scripted dev model.
  */
-export function piModels(provider: Provider, gemini: GeminiCompat, catalog: () => Catalog = currentCatalog, scripted = false) {
+export function piModels(provider: Provider, gemini: GeminiCompat, { catalog = currentCatalog, scripted = false }: { catalog?: () => Catalog; scripted?: boolean } = {}) {
   const models = createModels();
   models.setProvider(withCurrentPrices(provider));
   for (const listed of listedProviders(provider, catalog)) models.setProvider(listed);

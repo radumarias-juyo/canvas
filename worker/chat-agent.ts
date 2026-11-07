@@ -468,7 +468,7 @@ export class ChatAgent extends DurableObject<Env> {
       return pi;
     },
     // What a chat runs on until someone picks a model, or Auto picks one for it.
-    defaults: this.#defaults(this.#defaultChoice()),
+    defaults: this.#defaults(),
   });
   readonly members = new ChatMembers(this.ctx.storage.sql);
   /** The chat's kind, the page it discusses and the chat it branched off from (worker/chat-kind.ts). */
@@ -754,12 +754,10 @@ export class ChatAgent extends DurableObject<Env> {
   }
 
   /** The deployment's default model: MODEL at THINKING_LEVEL, or with DEV_MODEL=script the scripted model (worker/dev-model.ts). */
-  #defaultChoice(): ModelChoice {
-    return scriptOn(this.env) ? { model: SCRIPT_MODEL, thinkingLevel: "off" } : defaultModelChoice(this.env.MODEL, this.env.THINKING_LEVEL);
-  }
-
-  #defaults({ model, thinkingLevel }: ModelChoice) {
-    return { model: model === SCRIPT_MODEL ? (scriptModel().model as Model<Api>) : this.ai(model), thinkingLevel };
+  #defaults(): { model: Model<Api>; thinkingLevel: ModelChoice["thinkingLevel"] } {
+    if (scriptOn(this.env)) return { model: scriptModel().model as Model<Api>, thinkingLevel: "off" };
+    const { model, thinkingLevel } = defaultModelChoice(this.env.MODEL, this.env.THINKING_LEVEL);
+    return { model: this.ai(model), thinkingLevel };
   }
 
   /** A choice as pi takes it: the model's provider and id (a provider's own model is not in AI Gateway's catalog). */
@@ -917,7 +915,7 @@ export class ChatAgent extends DurableObject<Env> {
 
   /** The picker's id of the model `agent` runs on. */
   #modelOf(agent: Pick<AgentState, "model">): string {
-    return agent.model ? modelKey(agent.model.provider, agent.model.modelId) : this.#defaultChoice().model;
+    return agent.model ? modelKey(agent.model.provider, agent.model.modelId) : scriptOn(this.env) ? SCRIPT_MODEL : this.env.MODEL;
   }
 
   /**
@@ -997,7 +995,7 @@ export class ChatAgent extends DurableObject<Env> {
   #models(): Models {
     const source = catalogSource(this.env, this.storage.models);
     // Metered: each call counted for the chat's day and its owner's, tagged for AI Gateway, refused past the budget.
-    const models = piModels(this.ai.provider, this.gemini, undefined, scriptOn(this.env));
+    const models = piModels(this.ai.provider, this.gemini, { scripted: source.scripted });
     return this.spend.models(withFailuresReported(models, (id, error) => this.ctx.waitUntil(markFailing(source, id, error))));
   }
 

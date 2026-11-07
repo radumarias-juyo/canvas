@@ -1,5 +1,6 @@
-import { createModels, fauxAssistantMessage, fauxToolCall, type AssistantMessage, type Message } from "@earendil-works/pi-ai";
+import { createModels, fauxAssistantMessage, fauxToolCall, type Message } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
+import { assistantText as said } from "../worker/agents/turns.ts";
 import { scriptModel, scriptOn, scriptReply, scriptSteps } from "../worker/dev-model.ts";
 
 const user = (text: string): Message => ({ role: "user", content: text, timestamp: 0 });
@@ -13,7 +14,6 @@ const result = (name: string, text: string, isError = false): Message => ({
   isError,
   timestamp: 0,
 });
-const said = (reply: AssistantMessage) => reply.content.map((block) => (block.type === "text" ? block.text : "")).join("");
 
 describe("the scripted dev model", () => {
   it("is on only with DEV_MODEL=script and DEV_TOOLS=true", () => {
@@ -27,7 +27,7 @@ describe("the scripted dev model", () => {
     expect(scriptSteps("@helper /say hello from the agent")).toEqual([{ say: "hello from the agent" }]);
     expect(scriptSteps('/tool crm.list_deals {"stage":"won"}\n/say done')).toEqual([{ tool: "crm__list_deals", input: { stage: "won" } }, { say: "done" }]);
     expect(scriptSteps("/tool checklist")).toEqual([{ tool: "checklist", input: {} }]);
-    expect(scriptSteps("/tool crm.update_deal {oops")[0]).toHaveProperty("bad");
+    expect(scriptSteps("/tool crm.update_deal {oops")[0]).toEqual({ say: expect.stringContaining("the input is not JSON") });
     expect(scriptSteps("a path like x/say is no script")).toEqual([]);
     // A turn's ask indents a message's further lines: the reply has them as written.
     expect(scriptSteps("[ada · person · your owner]: /say Summary ready.\n  Next step: Send this every Monday?")).toEqual([

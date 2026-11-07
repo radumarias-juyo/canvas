@@ -10,7 +10,6 @@ const SCREENS = fileURLToPath(new URL("./screens/", import.meta.url));
 mkdirSync(SCREENS, { recursive: true });
 
 export interface Person {
-  name: string;
   page: Page;
 }
 
@@ -22,7 +21,7 @@ export async function signIn(browser: Browser, name: string): Promise<Person> {
   await page.getByLabel("Your name").fill(name);
   await page.getByRole("button", { name: "Continue" }).click();
   await expect(page.getByRole("button", { name: "+ New chat" })).toBeVisible();
-  return { name, page };
+  return { page };
 }
 
 type Method = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";

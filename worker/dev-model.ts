@@ -22,19 +22,22 @@ import {
   type Provider,
 } from "@earendil-works/pi-ai";
 import { textOf } from "../shared/canonical.ts";
+import { modelKey } from "../shared/models.ts";
 import { excerpt } from "../shared/replies.ts";
 import { mcpToolName } from "./agent/mcp.ts";
 
 export const SCRIPT_PROVIDER = "script";
-/** The picker's id of the scripted model (modelKey of its provider and id). */
-export const SCRIPT_MODEL = `${SCRIPT_PROVIDER}/scripted`;
+const SCRIPT_ID = "scripted";
+/** The picker's id of the scripted model. */
+export const SCRIPT_MODEL = modelKey(SCRIPT_PROVIDER, SCRIPT_ID);
 
 /** Whether this deployment runs on the scripted model: only a local one with DEV_TOOLS on. */
 export function scriptOn(env: { DEV_MODEL?: string; DEV_TOOLS?: string }): boolean {
   return env.DEV_MODEL === "script" && env.DEV_TOOLS === "true";
 }
 
-type Step = { say: string } | { tool: string; input: JsonObject } | { bad: string };
+/** A script's step: a reply, or one tool call. A /tool line that cannot be read is a reply saying why. */
+type Step = { say: string } | { tool: string; input: JsonObject };
 
 /** A script marker: /say or /tool, after a space or at the start (`lineStart`: only at the start of a line). */
 const marker = (lineStart: boolean) => new RegExp(`${lineStart ? "(?:^|\\n)[ \\t]*" : "(?:^|\\s)"}\\/(say|tool)(?=\\s|$)`, "g");
@@ -53,38 +56,36 @@ export function scriptSteps(text: string, lineStart = false): Step[] {
     const tool = dot > 0 ? mcpToolName(name.slice(0, dot), name.slice(dot + 1)) : name;
     try {
       const input: unknown = JSON.parse(space < 0 ? "{}" : body.slice(space) || "{}");
-      if (!tool || typeof input !== "object" || input === null || Array.isArray(input)) return { bad: `/tool needs a name and a JSON object: ${body}` };
+      if (!tool || typeof input !== "object" || input === null || Array.isArray(input)) return { say: `/tool needs a name and a JSON object: ${body}` };
       return { tool, input: input as JsonObject };
     } catch (error) {
-      return { bad: `/tool ${name}: the input is not JSON (${(error as Error).message})` };
+      return { say: `/tool ${name}: the input is not JSON (${(error as Error).message})` };
     }
   });
 }
 
-const messageText = (message: Message): string =>
-  message.role === "system"
-    ? [typeof message.content === "string" ? message.content : textOf(message.content), ...Object.values(message.sections ?? {})].join("\n")
-    : message.role === "assistant"
-      ? ""
-      : typeof message.content === "string"
-        ? message.content
-        : textOf(message.content);
+type Said = Extract<Message, { role: "user" | "system" }>;
+
+/** A user message's text, or a system message's with its sections (an agent's instructions may sit in one). */
+function messageText(message: Said): string {
+  const text = typeof message.content === "string" ? message.content : textOf(message.content);
+  return message.role === "system" ? [text, ...Object.values(message.sections ?? {})].join("\n") : text;
+}
 
 /** The scripted model's answer to a conversation, as a model message. */
 export function scriptReply(messages: readonly Message[]): AssistantMessage {
   // The turn's message is the last user message: an agent's catch-up on the chat, before it, is only context.
   const from = messages.findLastIndex((message) => message.role === "user");
-  const text = from >= 0 ? messageText(messages[from]!) : "";
+  const text = from >= 0 ? messageText(messages[from] as Said) : "";
   let steps = scriptSteps(text);
   if (!steps.length) {
-    const instructions = messages.filter((message) => message.role === "system").reverse();
+    const instructions = messages.filter((message): message is Said => message.role === "system").reverse();
     for (const message of instructions) if ((steps = scriptSteps(messageText(message), true)).length) break;
   }
   const turn = messages.slice(from + 1);
   const done = turn.filter((message) => message.role === "assistant").length;
   const step = steps[done];
   if (step && "say" in step) return fauxAssistantMessage(step.say);
-  if (step && "bad" in step) return fauxAssistantMessage(step.bad);
   if (step) return fauxAssistantMessage(fauxToolCall(step.tool, step.input), { stopReason: "toolUse" });
   const result = turn.findLast((message) => message.role === "toolResult");
   if (steps.length && result?.role === "toolResult") {
@@ -103,14 +104,15 @@ export function scriptModel(): { provider: Provider; model: Model<string> } {
   const faux = fauxProvider({
     api: SCRIPT_PROVIDER,
     provider: SCRIPT_PROVIDER,
-    models: [{ id: SCRIPT_MODEL.slice(SCRIPT_PROVIDER.length + 1), name: "Scripted model (dev)", contextWindow: 200_000, maxTokens: 16_384 }],
+    models: [{ id: SCRIPT_ID, name: "Scripted model (dev)", contextWindow: 200_000, maxTokens: 16_384 }],
   });
-  // The faux provider answers from a queue: one answer goes in before each call.
+  // The faux provider answers from a queue: one answer goes in before each call. Its prompt cache (for usage figures)
+  // would keep every session's prompt for the isolate's life, so it is off.
   const next = () => faux.appendResponses([(context) => scriptReply(context.messages)]);
   const provider: Provider = {
     ...faux.provider,
-    stream: (model, context, options) => (next(), faux.provider.stream(model, context, options)),
-    streamSimple: (model, context, options) => (next(), faux.provider.streamSimple(model, context, options)),
+    stream: (model, context, options) => (next(), faux.provider.stream(model, context, { ...options, cacheRetention: "none" } as typeof options)),
+    streamSimple: (model, context, options) => (next(), faux.provider.streamSimple(model, context, { ...options, cacheRetention: "none" })),
   };
   return (made = { provider, model: faux.getModel() });
 }

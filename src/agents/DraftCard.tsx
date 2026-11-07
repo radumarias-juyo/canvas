@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { AgentDefinition, AgentProposedDetails } from "../../shared/agents.ts";
+import { AGENT_NAME } from "../../shared/mentions.ts";
 import { errorMessage } from "../../shared/util.ts";
 import { api } from "../api.ts";
 import { Markdown } from "../chat/Markdown.tsx";
@@ -20,11 +21,12 @@ import { putAgent, reloadAgents, useAgents } from "./store.ts";
 export function DraftCard({ details, chatId, mine, by }: { details: AgentProposedDetails; chatId: string; mine: boolean; by?: string }) {
   const { agents } = useAgents();
   const agent = mine ? agents?.find((known) => known.id === details.agentId) : undefined;
+  const drafter = by ? `@${by}` : AGENT_NAME;
   if (!mine) {
     return (
       <div className="agent-card compact">
         <p>
-          {by ? `@${by}` : "pi"} drafted an agent, <strong>@{details.name}</strong>, for {by ? "its" : "the chat's"} owner to review.
+          {drafter} drafted an agent, <strong>@{details.name}</strong>, for {by ? "its" : "the chat's"} owner to review.
         </p>
       </div>
     );
@@ -36,13 +38,13 @@ export function DraftCard({ details, chatId, mine, by }: { details: AgentPropose
       </div>
     );
   }
-  return <Card agent={agent} chatId={chatId} by={by} />;
+  return <Card agent={agent} chatId={chatId} drafter={drafter} />;
 }
 
-function Card({ agent, chatId, by }: { agent: AgentDefinition; chatId: string; by?: string }) {
+function Card({ agent, chatId, drafter }: { agent: AgentDefinition; chatId: string; drafter: string }) {
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<{ text: string; error?: boolean; run?: number } | null>(null);
-  const state = stateLabel(agent, by);
+  const state = stateLabel(agent, drafter);
   const steps = instructionSteps(agent.instructions);
   const rows = glanceRows(agent);
   const runs = runsLabel(agent.trigger);

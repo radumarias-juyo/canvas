@@ -19,8 +19,7 @@ let scoutId: string;
 const propose = (input: Record<string, unknown>) => `/tool agent_propose ${JSON.stringify(input)}`;
 
 test.beforeAll(async ({ browser }) => {
-  ada = await signIn(browser, "ada");
-  bob = await signIn(browser, "bob");
+  [ada, bob] = await Promise.all([signIn(browser, "ada"), signIn(browser, "bob")]);
 });
 
 test("a. an agent made in the editor answers in a chat", async () => {
@@ -230,10 +229,10 @@ test("h. a run that needs a sign-in says so, and goes on once signed in", async 
   await shot(page, "h-sign-in-notice");
 
   // The stand-in approves at once: the sign-in comes back to the app, and the run goes again.
-  const [popup] = await Promise.all([page.waitForEvent("popup").catch(() => null), page.getByRole("link", { name: "Sign in" }).click()]);
-  const signedIn = popup ?? page;
-  await signedIn.waitForLoadState();
-  await page.goto(`/c/${started.homeChatId}`);
+  // The link opens the sign-in in a tab of its own; the chat hears the run's reply and the sign-in over its sockets.
+  const popup = page.waitForEvent("popup");
+  await page.getByRole("link", { name: "Sign in" }).click();
+  await (await popup).waitForLoadState();
   await expect(agentReply(page, "notes", "Two notes: the quarterly review and the renewals.")).toBeVisible();
   await expect(page.getByText("Sign in to vault", { exact: true })).toHaveCount(0);
   await shot(page, "h-signed-in");
