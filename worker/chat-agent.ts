@@ -145,7 +145,7 @@ import {
   type Catalog,
 } from "./models.ts";
 import { withFailuresReported } from "./model-health.ts";
-import { scriptModel, scriptOn, SCRIPT_MODEL } from "./dev-model.ts";
+import { scriptEmbedder, scriptModel, scriptOn, scriptPauseMs, SCRIPT_MODEL } from "./dev-model.ts";
 import { chatAgentName, parseChatAgentName } from "./chat-name.ts";
 import { inboxIds, queuedIdsOf, queuedMessages } from "./queue.ts";
 import { readSystemPrompt, saveSystemPrompt, SYSTEM_PROMPT_KEY, type Tag } from "./users.ts";
@@ -528,13 +528,16 @@ export class ChatAgent extends DurableObject<Env> {
     definition: async (entry) => this.#inThisChat(await this.#index(entry.ownerUid).getAgent(entry.agentId)),
     budgetLeft: () => this.spend.refusal() === undefined,
     spendLeft: async (ownerUid) => (await this.#runsCapped(ownerUid)) === undefined,
-    embedder: embedder(this.env.AI as unknown as ModelRunner, this.env.INTEREST_MODEL ?? ""),
+    // On the scripted model, a stand-in that compares words (worker/dev-model.ts).
+    embedder: scriptOn(this.env) ? scriptEmbedder : embedder(this.env.AI as unknown as ModelRunner, this.env.INTEREST_MODEL ?? ""),
     give: (agentId, request) => {
       this.turns.call([agentId], request);
     },
     observe: (event: FunnelEvent) => this.metrics.funnel({ ...event, stage: event.refusal ? `${event.stage}:${event.refusal}` : event.stage }),
     now: () => Date.now(),
   });
+  /** How long the chat stays quiet before an agent may speak up: PAUSE_MS, or on the scripted model what DEV_PAUSE_MS says. */
+  readonly #pauseMs = scriptPauseMs(this.env) ?? PAUSE_MS;
   /** The spend not yet sent to each payer's directory, by uid (#spent). */
   readonly #ownerSpend = new Map<string, { calls: number; tokens: number; cost: number }>();
   /** What each session's model calls came to since its turn started, for the turn's metrics: tokens, dollars, tool calls. */
@@ -3324,7 +3327,7 @@ export class ChatAgent extends DurableObject<Env> {
     if (!this.speakUp.possible()) return;
     const kept = this.ctx.storage.kv.get<PauseState>(PAUSE_KEY);
     this.ctx.storage.kv.put(PAUSE_KEY, { after: Math.max(sentAt, kept?.after ?? 0), tries: 0, armed: kept?.armed ?? false } satisfies PauseState);
-    if (!kept?.armed) this.ctx.waitUntil(this.#armPause(sentAt + PAUSE_MS));
+    if (!kept?.armed) this.ctx.waitUntil(this.#armPause(sentAt + this.#pauseMs));
   }
 
   async #armPause(at: number): Promise<void> {
@@ -3350,11 +3353,11 @@ export class ChatAgent extends DurableObject<Env> {
   async #afterPause(): Promise<void> {
     const kept = this.ctx.storage.kv.get<PauseState>(PAUSE_KEY);
     if (!kept) return;
-    const quietAt = kept.after + PAUSE_MS;
+    const quietAt = kept.after + this.#pauseMs;
     const busy = this.#status() === "running" || this.roster.allRunning().length > 0;
     if (this.speakUp.possible() && (Date.now() < quietAt || (busy && kept.tries < MAX_PAUSE_TRIES))) {
       this.ctx.storage.kv.put(PAUSE_KEY, { ...kept, armed: false, tries: kept.tries + (Date.now() < quietAt ? 0 : 1) } satisfies PauseState);
-      await this.#armPause(Math.max(quietAt, Date.now() + (busy ? PAUSE_MS : 0)));
+      await this.#armPause(Math.max(quietAt, Date.now() + (busy ? this.#pauseMs : 0)));
       return;
     }
     this.ctx.storage.kv.delete(PAUSE_KEY);

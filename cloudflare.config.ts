@@ -128,6 +128,9 @@ export default defineConfig({
       // that follows /say and /tool lines in the conversation (worker/dev-model.ts), so agent turns work without a model.
       // Empty unless set; never set it for a deploy.
       DEV_MODEL: bindings.text(process.env.DEV_MODEL === "script" ? "script" : ""),
+      // With DEV_MODEL=script only: how long, in milliseconds, a chat stays quiet before an agent may speak up in it (the
+      // e2e suite's few seconds; worker/dev-model.ts). Empty: the usual pause.
+      DEV_PAUSE_MS: bindings.text(process.env.DEV_MODEL === "script" ? (process.env.DEV_PAUSE_MS ?? "") : ""),
       // The MCP servers every chat connects to: just a name and a URL each (see mcpServerList above). The agent learns
       // what a server offers from the server, and you name servers and tools in chat. "oauth": each user signs in, from
       // a link the agent gives. A Cloudflare MCP portal is one entry for every server behind it.
