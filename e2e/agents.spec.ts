@@ -364,9 +364,76 @@ test("k. a run's write waits for the owner's approval, and one a guardrail block
   await expect(card.getByRole("button", { name: "Approve" })).toHaveCount(0);
 });
 
-test.skip("members' own agents in a shared chat: waits for the seat write-gate fix", () => {});
+test("l. bob brings his own agents to ada's shared chat: his turns write, hers only read, his drafts and approvals are his", async () => {
+  const owner = ada.page;
+  const member = bob.page;
+  // bob's agents, from his own account: clerk asks him before marking a deal lost; scribe reads a server it does not
+  // share with chats, and bob reviews its replies before they are posted.
+  await call(member, "POST", "/api/agents", {
+    name: "clerk",
+    job: "Updates the deals for bob",
+    instructions: "Update the deals bob names.",
+    servers: ["crm"],
+    guardrails: [{ id: "asklost", server: "crm", tool: "update_deal", arg: "stage", kind: "never", value: ["lost"], effect: "approve" }],
+  });
+  await call(member, "POST", "/api/agents", {
+    name: "scribe",
+    job: "Writes up the deals for bob",
+    instructions: "Summarise the deals.",
+    servers: ["crm"],
+    sharedServers: [],
+    reviewBeforePosting: true,
+  });
+  await owner.goto(`/c/${sharedChat}`);
+  await member.goto(`/c/${sharedChat}`);
+  await addToChat(member, "clerk");
+  await addToChat(member, "scribe");
+  await expect(owner.locator(".chat-notice", { hasText: "added @clerk to the chat" })).toBeVisible();
 
-test("l. agents speak up after a pause in the chat, and a muted one does not", async () => {
+  // bob's own turn runs in his own account and may write.
+  const before = (await crmState(member)).writes.length;
+  await send(member, '@clerk /tool crm.update_deal {"id":"d2","stage":"negotiation"}');
+  await expect(agentReply(member, "clerk", /crm__update_deal: \{"updated"/)).toBeVisible();
+  await expect(agentReply(owner, "clerk", /crm__update_deal: \{"updated"/)).toBeVisible();
+  expect((await crmState(member)).writes.slice(before)).toEqual([{ tool: "update_deal", input: { id: "d2", stage: "negotiation" } }]);
+
+  // ada's turn on bob's agent only reads: the write is neither offered nor run.
+  await send(owner, '@clerk /tool crm.update_deal {"id":"d2","stage":"won"}');
+  await expect(agentReply(owner, "clerk", /crm__update_deal failed/)).toBeVisible();
+  expect((await crmState(owner)).writes).toHaveLength(before + 1);
+  await shot(owner, "l-owner-read-only");
+
+  // A write bob's rule holds: the card shows to bob alone, and his Approve runs the stored call.
+  await send(member, '@clerk /tool crm.update_deal {"id":"d3","stage":"lost"}');
+  const held = member.getByRole("article", { name: "@clerk asks to crm.update_deal" });
+  await expect(held).toContainText("lost");
+  await expect(held.getByRole("button", { name: "Approve" })).toBeVisible();
+  // ada sees clerk's reply to it (its third), not the card.
+  await expect(owner.locator(".agent-reply").filter({ has: owner.getByText("@clerk", { exact: true }) })).toHaveCount(3);
+  await expect(owner.getByRole("article", { name: "@clerk asks to crm.update_deal" })).toHaveCount(0);
+  await shot(member, "l-member-approval");
+  expect((await crmState(member)).writes).toHaveLength(before + 1);
+  await held.getByRole("button", { name: "Approve" }).click();
+  // Once it ran, the room lets its card go (worker/agents/seats/actions.ts): the outcome is in bob's feed.
+  await expect(held).toHaveCount(0);
+  expect((await crmState(member)).writes.slice(before + 1)).toEqual([{ tool: "update_deal", input: { id: "d3", stage: "lost" } }]);
+
+  // scribe's reply read a server bob does not share: a draft only he sees until he posts it, edited.
+  await send(member, '@scribe /tool crm.list_deals {"stage":"won"}');
+  const draft = member.getByLabel("Draft reply of @scribe, only you can see it");
+  await expect(draft).toContainText("crm__list_deals");
+  for (const action of ["Post to chat", "Edit", "Discard"]) await expect(draft.getByRole("button", { name: action })).toBeVisible();
+  await shot(member, "l-member-draft");
+  await expect(agentReply(owner, "scribe", /./)).toHaveCount(0);
+  await draft.getByRole("button", { name: "Edit" }).click();
+  await draft.getByLabel("Edit the reply before posting it").fill("No deal is won right now.");
+  await draft.getByRole("button", { name: "Post to chat" }).click();
+  await expect(draft).toHaveCount(0);
+  await expect(agentReply(owner, "scribe", "No deal is won right now.")).toBeVisible();
+  await expect(agentReply(member, "scribe", "No deal is won right now.")).toBeVisible();
+});
+
+test("m. agents speak up after a pause in the chat, and a muted one does not", async () => {
   const { page } = ada;
   // Two agents that may speak up, both close to what the chat is about. On the scripted model the interest stage scores
   // by the words two texts share (worker/dev-model.ts): tracker is the closer, dispatch is past the threshold too.
@@ -408,7 +475,7 @@ test("l. agents speak up after a pause in the chat, and a muted one does not", a
   const trackerPost = agentReply(page, "tracker", "two orders are past due");
   await expect(trackerPost).toBeVisible();
   await expect(trackerPost.locator(".mute-row")).toContainText("Nobody asked");
-  await shot(page, "l-speak-up");
+  await shot(page, "m-speak-up");
   await trackerPost.getByRole("button", { name: "Mute @tracker here" }).click();
   await expect(trackerPost).toContainText("@tracker won't speak up unasked here again.");
   await expect(agentReply(page, "dispatch", /./)).toHaveCount(1);
