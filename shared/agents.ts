@@ -498,6 +498,8 @@ export const COPIED_FIELDS = [
   "workflow",
 ] as const satisfies readonly (keyof AgentInput)[];
 export type CopiedField = (typeof COPIED_FIELDS)[number];
+/** The fields a copy takes only as its new owner sets them when they copy it, never from the one it copies. */
+export const OWN_FIELDS = ["reviewBeforePosting"] as const satisfies readonly (keyof AgentInput)[];
 
 /** Changes to a definition's fields, as a request carries them: null clears an optional one (checkAgent reads it as none). */
 export type AgentChanges = { [K in keyof AgentInput]?: AgentInput[K] | null };
@@ -520,8 +522,8 @@ export function copiedFields(agent: Pick<AgentInput, CopiedField>): Pick<AgentIn
 
 /**
  * The fields of someone's copy of `original`: what they changed (`changes`, a request's body, checked by checkAgent when
- * saved), else the original's. Only the fields a copy takes, and review before posting as they set it: never its state,
- * its guesses or where it came from.
+ * saved), else the original's. Only the fields a copy takes, and its own (OWN_FIELDS) as they set them: never its
+ * state, its guesses or where it came from.
  */
 export function copyInput(original: Pick<AgentInput, CopiedField>, changes: AgentChanges): AgentChanges {
   const fields: AgentChanges = {};
@@ -529,8 +531,7 @@ export function copyInput(original: Pick<AgentInput, CopiedField>, changes: Agen
     const value = Object.hasOwn(changes, field) ? changes[field] : original[field];
     if (value !== undefined) Object.assign(fields, { [field]: value });
   }
-  // Whether its new owner reviews its replies is theirs to say as they copy it, never the original's.
-  if (changes.reviewBeforePosting !== undefined) fields.reviewBeforePosting = changes.reviewBeforePosting;
+  for (const field of OWN_FIELDS) if (changes[field] !== undefined) Object.assign(fields, { [field]: changes[field] });
   return fields;
 }
 

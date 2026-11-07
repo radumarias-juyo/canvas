@@ -9,7 +9,7 @@ import type { RoomLink, RoomRef, SeatBatch, SeatLink, SeatResult, SeatTurn } fro
 import { memberAgentName, seatChatId } from "../worker/agents/seats/names.ts";
 import { addRefusal, mayRemove, mayShare, seatedEntry, type ChatRules } from "../worker/agents/seats/rules.ts";
 import { AgentSeats, type SeatHost } from "../worker/agents/seats/seat.ts";
-import { allowedTools, askLine, askOf, forksFor, messageAskKey, sharedServer, turnSources, UNKNOWN_SOURCE } from "../worker/agents/turns.ts";
+import { allowedTools, askLine, askOf, messageAskKey, sharedServer, turnSources, UNKNOWN_SOURCE } from "../worker/agents/turns.ts";
 import { memorySql } from "./fakes.ts";
 
 const T0 = 1_000_000;
@@ -72,7 +72,7 @@ function result(toolName: string, records: { id: string; title: string }[]): Ent
 class Sessions {
   readonly writes: { session: string; text: string; requestId: string }[] = [];
   readonly submits: { session: string; input: string; operationId: string; data: ChatTurnData }[] = [];
-  readonly configured: { session: string; byOwner: boolean; apart?: boolean }[] = [];
+  readonly configured: { session: string; byOwner: boolean }[] = [];
   readonly aborts: string[] = [];
   readonly forks = new Map<string, string>();
   /** Per session and turn, what turnEntries returns. */
@@ -163,12 +163,8 @@ class MemberObject implements SeatHost {
   async write(session: string, text: string, requestId: string) {
     this.sessions.write(session, text, requestId);
   }
-  async forks(agent: AgentDefinition) {
-    const shared = sharedServer(agent, SIGNS_IN);
-    return forksFor(allowedTools(ALL_TOOLS, MCP, agent, true, SIGNS_IN), MCP, shared);
-  }
-  async configure(session: string, _agent: AgentDefinition, turn: SeatTurn, apart: boolean) {
-    this.sessions.configured.push({ session, byOwner: turn.byOwner, apart });
+  async configure(session: string, _agent: AgentDefinition, turn: SeatTurn) {
+    this.sessions.configured.push({ session, byOwner: turn.byOwner });
   }
   async submit(session: string, input: string, op: string, data: ChatTurnData) {
     this.sessions.submit(session, input, op, data);
@@ -277,7 +273,7 @@ class Room implements TurnHost {
       : (this.member(entry.ownerUid).definitions.get(entry.agentId) ?? null);
   }
   async configure(entry: RosterEntry, _agent: AgentDefinition, turn: { session?: string; byOwner: boolean }) {
-    this.sessions.configured.push({ session: turn.session ?? entry.session, byOwner: turn.byOwner, apart: turn.session !== undefined });
+    this.sessions.configured.push({ session: turn.session ?? entry.session, byOwner: turn.byOwner });
   }
   async *logSince(after: number) {
     yield this.log.filter((entry) => (entry.id as number) > after).reverse();
@@ -316,9 +312,6 @@ class Room implements TurnHost {
   }
   waitUntil(promise: Promise<unknown>) {
     this.kept.push(promise);
-  }
-  async forks(_entry: RosterEntry, agent: AgentDefinition) {
-    return forksFor(allowedTools(ALL_TOOLS, MCP, agent, true, SIGNS_IN), MCP, sharedServer(agent, SIGNS_IN));
   }
   async fork(session: string) {
     return this.sessions.fork(session);
@@ -420,25 +413,6 @@ describe("Member agents: tools follow who asks", () => {
     expect(allowedTools(ALL_TOOLS, MCP, planner, false, SIGNS_IN)).toEqual(["artifact_read", "db_query"]);
   });
 
-  it("forks a turn its owner gives that may reach a server outside the shared list, or the owner's files, and no other", () => {
-    const forks = (agent: AgentDefinition, tools = ALL_TOOLS) =>
-      forksFor(allowedTools(tools, MCP, agent, true, SIGNS_IN), MCP, sharedServer(agent, SIGNS_IN));
-    expect(forks(planner)).toBe(true);
-    const sharesAll = { ...planner, sharedServers: ["db", "calendar"] };
-    // Every server shared, but files_read and artifact_write read and write what is the owner's alone.
-    expect(forks(sharesAll)).toBe(true);
-    const dbOnly = definition("d", "db", { servers: ["db"] });
-    expect(forks(dbOnly)).toBe(true);
-    // Only what a turn anyone else asked for may use too, besides the shared servers' writes: nothing to fork for.
-    expect(forks(dbOnly, ["artifact_read", ...MCP.keys()])).toBe(false);
-  });
-
-  it("gives an owner's turn that did not fork nothing that would have forked it", () => {
-    const tools = (apart: boolean) => allowedTools(ALL_TOOLS, MCP, planner, true, SIGNS_IN, apart);
-    expect(tools(true)).toEqual(ALL_TOOLS);
-    expect(tools(false)).toEqual(["artifact_read", "db_query", "db_insert"]);
-  });
-
   it("counts a result by the server its call recorded, and one no one can tell as private", () => {
     const recorded = (toolName: string, server?: string) =>
       ({
@@ -493,7 +467,7 @@ describe("Member agents: a seat in the member's own object", () => {
     const [seatSession] = ana.sessions.submits.map((submit) => submit.session);
     expect(ana.sessions.textOf(seatSession)).toContain("[Mia · person]: Lunch at noon?");
     // Radu is the chat's owner, not the agent's: the turn only reads, and is labelled as anyone's.
-    expect(ana.sessions.configured).toEqual([{ session: seatSession, byOwner: false, apart: false }]);
+    expect(ana.sessions.configured).toEqual([{ session: seatSession, byOwner: false }]);
     expect(ana.sessions.submits[0].input).not.toContain("your owner");
 
     ana.sessions.finish(byRadu.id, "We know the Q3 numbers.", [result("db_query", [{ id: "r1", title: "Q3" }])]);
@@ -509,7 +483,7 @@ describe("Member agents: a seat in the member's own object", () => {
     await settle();
     const fork = ana.sessions.sessionOf(byAna.id);
     expect(ana.sessions.forks.get(fork)).toBe(seatSession);
-    expect(ana.sessions.configured.at(-1)).toEqual({ session: fork, byOwner: true, apart: true });
+    expect(ana.sessions.configured.at(-1)).toEqual({ session: fork, byOwner: true });
     // The seat's own session reads her ask, which went into the fork only.
     expect(ana.sessions.textOf(seatSession)).toContain("@planner and mine?");
     expect(ana.sessions.submits.at(-1)!.input).toContain("your owner");
@@ -584,7 +558,7 @@ describe("Member agents: a seat in the member's own object", () => {
     expect(turns.map((turn) => turn.byOwner)).toEqual([false, false]);
     await settle();
     // No fork: the owner's agent runs in its own session, reading only.
-    expect(chat.sessions.configured).toEqual([{ session: mine.session, byOwner: false, apart: false }]);
+    expect(chat.sessions.configured).toEqual([{ session: mine.session, byOwner: false }]);
     expect(chat.member(ANA.uid).sessions.configured.map((configured) => configured.byOwner)).toEqual([false]);
     chat.sessions.finish(turns[0].id, "@pi have a look at this.");
     await settle();
@@ -734,6 +708,18 @@ describe("Member agents: a seat in the member's own object", () => {
 });
 
 describe("Member agents: private turns run apart", () => {
+  it("runs every turn its owner gives in a fork, whatever servers it shares: it has the owner's files and tools", async () => {
+    const chat = room();
+    const dbOnly = chat.add(RADU, "planner", { servers: ["db"] });
+    const [mine] = chat.turns.call([dbOnly.agentId], chat.say(RADU, "@planner total salaries.md"));
+    const [hers] = chat.turns.call([dbOnly.agentId], chat.say(MIA, "@planner hi"));
+    await settle();
+    expect(chat.sessions.forks.get(chat.sessions.sessionOf(mine.id))).toBe(dbOnly.session);
+    chat.sessions.finish(mine.id, "42.");
+    await settle();
+    expect(chat.sessions.sessionOf(hers.id)).toBe(dbOnly.session);
+  });
+
   it("runs the owner's turn that may reach a private server in a fork; only the posted reply reaches the shared session", async () => {
     const chat = room();
     const planner = chat.add(RADU, "planner", { servers: ["db", "calendar"] });
@@ -761,7 +747,7 @@ describe("Member agents: private turns run apart", () => {
     const [hers] = chat.turns.call([planner.agentId], chat.say(MIA, "@planner what did the calendar say earlier?"));
     await settle();
     expect(chat.sessions.sessionOf(hers.id)).toBe(planner.session);
-    expect(chat.sessions.configured.at(-1)).toEqual({ session: planner.session, byOwner: false, apart: false });
+    expect(chat.sessions.configured.at(-1)).toEqual({ session: planner.session, byOwner: false });
     const shared = chat.sessions.textOf(planner.session);
     expect(shared).toContain("(your reply, as posted): The West launch is in week 41.");
     expect(shared).not.toContain("Board dinner");
@@ -894,7 +880,7 @@ describe("Member agents: what the review of private turns found", () => {
     await settle();
     expect(chat.sessions.sessionOf(turn.id)).toBe("room-fork-before");
     expect(chat.sessions.forks.size).toBe(0);
-    expect(chat.sessions.configured.at(-1)).toEqual({ session: "room-fork-before", byOwner: true, apart: true });
+    expect(chat.sessions.configured.at(-1)).toEqual({ session: "room-fork-before", byOwner: true });
   });
 
   it("holds a forked reply whose outputs cannot be read when its owner reviews such replies, with an unknown source", async () => {

@@ -5,7 +5,7 @@ import { AGENT_NAME } from "../shared/mentions.ts";
 import { CHAT_MESSAGE_KIND, PUBLISH_TOOL } from "../shared/protocol.ts";
 import { AgentTurns, operationId, type Caller, type TurnHost, type TurnResult } from "../worker/agents/controller.ts";
 import { ChatRoster, type AgentTurn, type RosterEntry } from "../worker/agents/roster.ts";
-import { askOf, messageAskKey, turnInput } from "../worker/agents/turns.ts";
+import { askOf, itemsIn, messageAskKey, turnInput } from "../worker/agents/turns.ts";
 import { memorySql } from "./fakes.ts";
 
 const T0 = 1_000_000;
@@ -76,6 +76,8 @@ class FakeChat implements TurnHost {
   readonly calls: string[] = [];
   readonly reads: number[] = [];
   readonly writes: { session: string; text: string; requestId: string }[] = [];
+  /** The asks of owners' turns, which run in forks, written into their agents' sessions (TurnHost.write, `apart:`). */
+  readonly apart: { session: string; text: string; requestId: string }[] = [];
   readonly configured: { entry: RosterEntry; agent: AgentDefinition; turn: AgentTurn }[] = [];
   readonly submits: { session: string; input: string; operationId: string; data: ChatTurnData }[] = [];
   readonly waits: { session: string; operationId: string }[] = [];
@@ -132,6 +134,12 @@ class FakeChat implements TurnHost {
   }
 
   async write(session: string, text: string, requestId: string): Promise<void> {
+    // The ask of a turn in a fork, written into the agent's own session too: kept apart from the catch-ups.
+    if (requestId.startsWith("apart:")) {
+      this.calls.push(`apart ${session}`);
+      this.apart.push({ session, text, requestId });
+      return;
+    }
     this.calls.push(`write ${session}`);
     this.writes.push({ session, text, requestId });
   }
@@ -182,15 +190,13 @@ class FakeChat implements TurnHost {
     this.changes++;
   }
 
-  // The owner's agents only, and no private servers: no turn forks, none is held, and anyone may call.
-  async forks(): Promise<boolean> {
-    return false;
+  // An owner's turn runs in a fork of its agent's session: here the session itself, so what it reads and writes shows
+  // where the agent's turns do. No private servers: every record shows, and none is held.
+  async fork(session: string): Promise<string> {
+    return session;
   }
-  async fork(): Promise<string> {
-    throw new Error("No turn forks here.");
-  }
-  async sources() {
-    return { items: [], sources: [] };
+  async sources(_entry: RosterEntry, entries: readonly EntryRecord[]) {
+    return { items: itemsIn(entries), sources: [] };
   }
   seat(): never {
     throw new Error("No seats here.");
@@ -320,8 +326,18 @@ describe("AgentTurns: a turn", () => {
     expect(turn).toMatchObject({ agentId: idOf(A), status: "queued", hop: 0, byOwner: true, root: turn.id, ask: caller.ask });
     await chat.flush();
 
-    // The catch-up and the set-up go at once; the input only after both.
-    expect(chat.calls).toEqual(["read", `configure ${A}`, `write ${sessionOf(A)}`, `submit ${sessionOf(A)}`, `wait ${sessionOf(A)}`]);
+    // Its owner's turn: the catch-up goes in before the fork is made, then the set-up and the ask at once, then the input.
+    expect(chat.calls).toEqual([
+      "read",
+      `write ${sessionOf(A)}`,
+      `apart ${sessionOf(A)}`,
+      `configure ${A}`,
+      `submit ${sessionOf(A)}`,
+      `wait ${sessionOf(A)}`,
+    ]);
+    expect(chat.apart).toEqual([
+      { session: sessionOf(A), requestId: `apart:${idOf(A)}:${turn.id}`, text: expect.stringContaining(caller.ask as string) },
+    ]);
     // The asking message is left out of the catch-up: the turn's input carries it.
     expect(chat.writes).toEqual([
       { session: sessionOf(A), requestId: `mirror:${idOf(A)}:2`, text: expect.stringContaining("[Mia · person]: Lunch at noon?") },
@@ -384,9 +400,9 @@ describe("AgentTurns: a turn", () => {
     chat.turns.call([idOf(A)], chat.say(OWNER, "@atlas two"));
     await chat.flush();
     expect(chat.reads).toEqual([-1, 1]);
-    // Its own reply (entry 2) is in its session already, and the asking message (entry 4) is in the input.
+    // Its own reply (entry 2) came from a fork, so it reads it as posted; the asking message (entry 4) is in the input.
     expect(chat.writes).toEqual([{ session: sessionOf(A), requestId: `mirror:${idOf(A)}:4`, text: expect.stringContaining("[Mia · person]: nice") }]);
-    expect(chat.writes[0].text).not.toContain("One.");
+    expect(chat.writes[0].text).toContain("(your reply, as posted): One.");
     expect(chat.writes[0].text).not.toContain("two");
     expect(chat.roster.get(idOf(A))?.mirrored).toBe(4);
   });
@@ -423,6 +439,7 @@ describe("AgentTurns: a turn", () => {
           startedAt: T0 + 5,
           endedAt: T0 + 90,
           published: [{ artifactId: "art-1", title: "Sales", version: 2 }],
+          forked: true,
         },
       },
     ]);

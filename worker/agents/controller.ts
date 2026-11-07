@@ -1,7 +1,7 @@
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { MAX_HOPS, type AgentDefinition, type AgentDraftView, type ChatAgentReplyData, type ChatTurnData } from "../../shared/agents.ts";
 import { AGENT_NAME } from "../../shared/mentions.ts";
-import { errorMessage, serial } from "../../shared/util.ts";
+import { errorMessage, isObject, serial } from "../../shared/util.ts";
 import { sessionOf, type AgentTurn, type ChatRoster, type RosterEntry, type TurnRequest } from "./roster.ts";
 import type { SeatBatch, SeatLink, SeatResult } from "./seats/link.ts";
 import {
@@ -62,12 +62,7 @@ export interface TurnHost {
   handToPi(input: string, data: ChatTurnData): Promise<void>;
   /** The roster's view changed (an agent started or ended a turn, or was dropped): tell everyone. */
   changed(): void;
-  /**
-   * Whether a turn its owner asked for may reach a server outside the agent's shared list (forksFor): it then runs in a
-   * fork of the agent's session.
-   */
-  forks(entry: RosterEntry, agent: AgentDefinition, turn: AgentTurn): Promise<boolean>;
-  /** A new session that sees `session`'s history so far. */
+  /** A new session that sees `session`'s history so far: a turn its owner asked for runs in one. */
   fork(session: string): Promise<string>;
   /**
    * What a forked turn's reply shows of its sources (turnSources), from its session's entries: only the shared servers'
@@ -182,10 +177,10 @@ export class AgentTurns {
         if (!live()) await this.#abortSeat(entry, turn.id);
         return;
       }
-      if (turn.forked) {
-        // Its fork was made before a restart, and its input may be in it already: it goes in again there, placed once.
-        await Promise.all([this.#tellApart(entry, turn), this.#host.configure(entry, agent, turn)]);
-      } else if (turn.session === undefined && turn.byOwner && (await this.#host.forks(entry, agent, turn))) {
+      // A turn its owner asked for runs with all of their tools, so apart from the chat: in a fork of the agent's
+      // session, made once (one made before a restart is its session still, its input maybe in it already). A turn in
+      // a session of its own (a reply to a run's report) reads that session, not the chat: it forks nothing.
+      if (turn.byOwner && turn.session === undefined) {
         // A fork sees the agent's session as it is when made: the catch-up goes in first.
         await this.#catchUp(entry, turn.id);
         // Stopped meanwhile: no fork, which nothing would run in or abort.
@@ -196,12 +191,9 @@ export class AgentTurns {
         turn = { ...turn, session, forked: true };
         // Its owner follows it live in the fork from now on, and nobody follows the agent's session for it.
         this.#host.changed();
-        await Promise.all([this.#tellApart(entry, turn), this.#host.configure(entry, agent, turn)]);
-      } else {
-        // A turn in a session of its own (a reply to a run's report) reads that session, not the chat: it catches up on
-        // nothing, and forks nothing.
-        await Promise.all([turn.session ? undefined : this.#catchUp(entry, turn.id), this.#host.configure(entry, agent, turn)]);
       }
+      if (turn.forked) await Promise.all([this.#tellApart(entry, turn), this.#host.configure(entry, agent, turn)]);
+      else await Promise.all([turn.session ? undefined : this.#catchUp(entry, turn.id), this.#host.configure(entry, agent, turn)]);
       if (!live()) return;
       await this.#host.submit(sessionOf(entry, turn), turnInput(turn), operationId(turn.id), {
         turn: turn.id,
@@ -561,19 +553,17 @@ export function unreadOutputs(forked: boolean, review: boolean): Outputs {
   return { published: [], items: [], sources: [UNKNOWN_SOURCE], ...(forked && { forked: true }), ...(review && { review: true }) };
 }
 
-/** Errors of a call between objects that a retry may get past (the other object restarted, or was overloaded). */
-function retryable(error: unknown): boolean {
-  return typeof error === "object" && error !== null && (error as { retryable?: unknown }).retryable === true;
-}
+/** How long a call between objects waits before it is made again (retried), after each failure a retry may get past. */
+const RETRY_WAITS = [250, 1_000];
 
-/** Make a call between objects, again after a short wait when it failed in a way a retry may get past (twice at most). */
-export async function retried<T>(call: () => Promise<T>, waits: readonly number[] = [250, 1_000]): Promise<T> {
+/** Make a call between objects, again after a short wait when it failed in a way a retry may get past (the other object restarted, or was overloaded). */
+async function retried<T>(call: () => Promise<T>): Promise<T> {
   for (let attempt = 0; ; attempt++) {
     try {
       return await call();
     } catch (error) {
-      const wait = waits[attempt];
-      if (wait === undefined || !retryable(error)) throw error;
+      const wait = RETRY_WAITS[attempt];
+      if (wait === undefined || !isObject(error) || error.retryable !== true) throw error;
       await new Promise((resolve) => setTimeout(resolve, wait));
     }
   }

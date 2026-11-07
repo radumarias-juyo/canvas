@@ -167,7 +167,6 @@ import {
   askOf,
   assistantText,
   attachedNote,
-  forksFor,
   MAX_ASK_CHARS,
   messageAskKey,
   runTools,
@@ -287,8 +286,11 @@ const IMPORTED_KEY = "imported";
  * within the chain's cap. Set when the first agent joins, so pi's earlier answers start nothing.
  */
 const PI_SCAN_KEY = "piScan";
-/** What the chat's sessions name (#readTraces): the chat's, and what only forks whose replies were not posted did. */
-type SessionTraces = { shared: ChatTraces; withheld: ChatTraces };
+/**
+ * What the chat's sessions name (#readTraces): the chat's (`shared`), what the forks whose replies were not posted
+ * named (`withheld`), and of those what is in no other session (`hidden`): not the chat's for anyone but its owner.
+ */
+type SessionTraces = { shared: ChatTraces; withheld: ChatTraces; hidden: ChatTraces };
 /** How far #piScan read pi's log, the chain pi's next answer is in, and the person who started it (`by`, whom its turns count for). */
 type PiScan = { through: number; chain?: { hop: number; root: number }; by?: string };
 /**
@@ -481,6 +483,10 @@ export class ChatAgent extends DurableObject<Env> {
   #seen: { through: Map<string, number>; traces: ChatTraces } = { through: new Map(), traces: chatTraces([]) };
   /** The same, of the forks whose replies were not posted (ChatRoster.withheld): only the owner's (see #readTraces). */
   #seenWithheld: { through: Map<string, number>; traces: ChatTraces } = { through: new Map(), traces: chatTraces([]) };
+  /** The pages only forks whose replies were not posted published, as last read with no fork running (#withheldPage). */
+  #hiddenPages: Set<string> | undefined;
+  /** How often the roster's turns changed (#broadcastAgents): what keeps #hiddenPages from a read that raced one. */
+  #rosterChanges = 0;
   /** Set while a broadcast of the agents' view waits for the current task to end (#broadcastAgents). */
   #agentsChanged = false;
   /** The asking line the skill classifier last read for an agent's turn (#skillsForTurn). */
@@ -1615,8 +1621,8 @@ export class ChatAgent extends DurableObject<Env> {
    * Whether a file is the chat's: named in its sessions, or in its out/ folder, but for one only a fork whose reply was
    * not posted saved (what an agent's private turn saved is the chat's once its reply is).
    */
-  #inChat(path: string, { shared, withheld }: SessionTraces): boolean {
-    return shared.files.has(path) || (path.startsWith(chatOutFolder(this.chatId)) && !withheld.files.has(path));
+  #inChat(path: string, { shared, hidden }: SessionTraces): boolean {
+    return !hidden.files.has(path) && (shared.files.has(path) || path.startsWith(chatOutFolder(this.chatId)));
   }
 
   /** The owner's files that belong to this chat (#isChatFile) and are still there, as the people it is shared with see them. */
@@ -1625,10 +1631,21 @@ export class ChatAgent extends DurableObject<Env> {
     return listed.filter((file) => this.#inChat(file.path, traces));
   }
 
-  /** Whether only a fork whose reply was not posted published `artifactId`: a page that is not the chat's yet, but for its owner. */
+  /**
+   * Whether only a fork whose reply was not posted published `artifactId`: a page that is not the chat's yet, but for
+   * its owner. On a page's every call: read from the last trace read while no fork runs, as only a running fork adds
+   * such a page (#hiddenPages, which a change of the roster's turns lets go).
+   */
   async #withheldPage(artifactId: string): Promise<boolean> {
-    const { shared, withheld } = await this.#readTraces();
-    return withheld.artifacts.has(artifactId) && !shared.artifacts.has(artifactId);
+    const forking = () => this.roster.allRunning().some((turn) => turn.forked);
+    let hidden = this.#hiddenPages;
+    if (!hidden || forking()) {
+      const changes = this.#rosterChanges;
+      hidden = (await this.#readTraces()).hidden.artifacts;
+      // Kept only when no turn started or ended during the read.
+      if (changes === this.#rosterChanges && !forking()) this.#hiddenPages = hidden;
+    }
+    return hidden.has(artifactId);
   }
 
   /**
@@ -1637,13 +1654,9 @@ export class ChatAgent extends DurableObject<Env> {
    */
   async contents(uid: string): Promise<ChatContents | null> {
     if (!this.isInChat(uid)) return null;
-    const [files, artifacts, { shared, withheld }] = await Promise.all([
-      this.chatFiles(),
-      this.#directory.listChatArtifacts(this.chatId),
-      this.#readTraces(),
-    ]);
+    const [files, artifacts, { hidden }] = await Promise.all([this.chatFiles(), this.#directory.listChatArtifacts(this.chatId), this.#readTraces()]);
     if (uid === this.uid) return { files: newestFirst(files), artifacts };
-    const visible = artifacts.filter((artifact) => !withheld.artifacts.has(artifact.id) || shared.artifacts.has(artifact.id));
+    const visible = artifacts.filter((artifact) => !hidden.artifacts.has(artifact.id));
     return { files: newestFirst(files), artifacts: visible.map(({ unread: _, ...artifact }) => artifact) };
   }
 
@@ -2461,7 +2474,9 @@ export class ChatAgent extends DurableObject<Env> {
         if (last) seen.through.set(id, last.id as number);
       }
     }
-    return { shared: this.#seen.traces, withheld: this.#seenWithheld.traces };
+    const [shared, held] = [this.#seen.traces, this.#seenWithheld.traces];
+    const only = (of: Set<string>, but: Set<string>) => new Set([...of].filter((value) => !but.has(value)));
+    return { shared, withheld: held, hidden: { artifacts: only(held.artifacts, shared.artifacts), files: only(held.files, shared.files) } };
   });
 
   /**
@@ -2521,6 +2536,9 @@ export class ChatAgent extends DurableObject<Env> {
 
   /** Tell everyone's app the agents' view, once for the changes one task makes. */
   #broadcastAgents(): void {
+    // A fork started, ended or was posted: which pages are the chat's may change.
+    this.#hiddenPages = undefined;
+    this.#rosterChanges++;
     if (this.#agentsChanged) return;
     this.#agentsChanged = true;
     queueMicrotask(() => {
@@ -2733,7 +2751,7 @@ export class ChatAgent extends DurableObject<Env> {
 
   /**
    * The owner's tools, skills, files and prompt as they are now, before an agent's turn or one handed to pi (`ask`).
-   * Once per ask: what sets one turn up (whether it forks, then its session) refreshes them once.
+   * Once per ask: what sets several turns up for one message (or one turn and its sources) refreshes them once.
    */
   #refreshForTurn(ask: string): Promise<void> {
     const now = Date.now();
@@ -2803,19 +2821,6 @@ export class ChatAgent extends DurableObject<Env> {
       .map(({ tool }) => tool);
   }
 
-  /** Whether a turn its owner asks of `agent` here may reach a server outside its shared list (forksFor), with the tools as they are now. */
-  async #forks(agent: AgentDefinition, ask: string): Promise<boolean> {
-    await this.#refreshForTurn(ask);
-    const allowed = allowedTools(
-      this.#installedTools().map((tool) => tool.name),
-      this.#mcpTools,
-      agent,
-      true,
-      this.#signsIn,
-    );
-    return forksFor(allowed, this.#mcpTools, sharedServer(agent, this.#signsIn));
-  }
-
   /**
    * What a forked turn's reply shows of its sources (turnSources), by the servers this object's tools are of, and
    * whether its owner reviews it before it is posted.
@@ -2835,13 +2840,7 @@ export class ChatAgent extends DurableObject<Env> {
         return uid();
       },
       definition: (entry) => this.#index(entry.ownerUid).getAgent(entry.agentId),
-      configure: (entry, agent, turn) =>
-        this.#configureAgent(
-          sessionOf(entry, turn),
-          agent,
-          { ask: turn.ask, byOwner: turn.byOwner, apart: turn.session !== undefined },
-          this.#nameOf(entry.ownerUid),
-        ),
+      configure: (entry, agent, turn) => this.#configureAgent(sessionOf(entry, turn), agent, turn, this.#nameOf(entry.ownerUid)),
       logSince: (after) => this.#log({ order: "descending", minEntryId: (after + 1) as EntryId }),
       write: (session, text, requestId) => this.#writeTo(session, text, requestId),
       submit: (session, input, operationId, data) => this.#submitTo(session, input, operationId, data),
@@ -2868,8 +2867,6 @@ export class ChatAgent extends DurableObject<Env> {
       },
       changed: () => this.#broadcastAgents(),
       waitUntil: (promise) => this.ctx.waitUntil(promise),
-      // Only an agent of the owner's runs here; a member's forks in its seat.
-      forks: (entry, agent, turn) => (entry.ownerUid === this.uid ? this.#forks(agent, turn.ask) : Promise.resolve(false)),
       fork: (session) => this.#fork(session),
       sources: async (entry, entries) => {
         const agent = await this.#index(entry.ownerUid).getAgent(entry.agentId);
@@ -2953,9 +2950,7 @@ export class ChatAgent extends DurableObject<Env> {
       create: async () => (await this.harness.sessions.create()).id,
       fork: (session) => this.#fork(session),
       write: (session, text, requestId) => this.#writeTo(session, text, requestId),
-      forks: (agent, turn) => this.#forks(agent, turn.input),
-      configure: (session, agent, turn, apart) =>
-        this.#configureAgent(session, agent, { ask: turn.input, byOwner: turn.byOwner, apart }, turn.ownerName),
+      configure: (session, agent, turn) => this.#configureAgent(session, agent, { ask: turn.input, byOwner: turn.byOwner }, turn.ownerName),
       submit: (session, input, operationId, data) => this.#submitTo(session, input, operationId, data),
       wait: (session, operationId) => this.harness.wait(operationId, { session }),
       abort: (session) => this.#abortSession(session),
@@ -3021,17 +3016,11 @@ export class ChatAgent extends DurableObject<Env> {
   /**
    * Set an agent session up for a turn: the owner's tools and skills as they are now, its model and effort (the
    * chat's model when it names none), its own instructions, and only the tools this turn may use (allowedTools): the
-   * harness offers and runs no other. `turn.ask` is what the skill classifier reads; `turn.apart`: it runs in a session
-   * apart from the chat (a fork, a run's), where its owner's turn may use all of theirs.
+   * harness offers and runs no other. `turn.ask` is what the skill classifier reads.
    */
-  async #configureAgent(
-    session: string,
-    agent: AgentDefinition,
-    turn: { ask: string; byOwner: boolean; apart: boolean },
-    ownerName: string,
-  ): Promise<void> {
+  async #configureAgent(session: string, agent: AgentDefinition, turn: { ask: string; byOwner: boolean }, ownerName: string): Promise<void> {
     await this.#refreshForTurn(turn.ask);
-    const allowed = (installed: readonly string[]) => allowedTools(installed, this.#mcpTools, agent, turn.byOwner, this.#signsIn, turn.apart);
+    const allowed = (installed: readonly string[]) => allowedTools(installed, this.#mcpTools, agent, turn.byOwner, this.#signsIn);
     await this.#configureSession(session, this.#agentChoice(agent), agentInstructions(agent, ownerName), allowed);
   }
 
@@ -3608,9 +3597,10 @@ export class ChatAgent extends DurableObject<Env> {
   async artifactTools(artifactId: string, version: number, viewer: string): Promise<DeclaredTool[] | null> {
     const manifest = await this.#manifest(artifactId, version);
     if (!manifest) return null;
-    const withheld = viewer !== this.uid && (await this.#withheldPage(artifactId));
+    const servers = manifest.mcp?.servers ?? [];
+    const withheld = viewer !== this.uid && servers.some((entry) => this.#membersOnly(entry.server)) && (await this.#withheldPage(artifactId));
     const perServer = await Promise.all(
-      (manifest.mcp?.servers ?? [])
+      servers
         .filter((entry) => this.#mayLoad(entry.server, viewer) && !(withheld && this.#membersOnly(entry.server)))
         .map(async (entry) =>
         (await this.hub.tools(entry.server).catch(() => [])).filter((tool) => entry.tools.includes(tool.name)).map((tool) => ({ ...tool, server: entry.server })),

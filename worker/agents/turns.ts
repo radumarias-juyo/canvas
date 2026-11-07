@@ -9,7 +9,7 @@ import { textOf } from "../../shared/canonical.ts";
 import { CHAT_CONTEXT_KIND, CHAT_COPY_KIND, type ChatCopyData } from "../../shared/chat-kinds.ts";
 import { entryItems, mergeItems, type ItemRef, type McpResultDetails } from "../../shared/items.ts";
 import { AGENT_NAME, calledNames, type Mention } from "../../shared/mentions.ts";
-import { CHAT_MESSAGE_KIND, incomingKey, MCP_TOOL_SEPARATOR, publishedBy, type ChatMessageData } from "../../shared/protocol.ts";
+import { CHAT_MESSAGE_KIND, incomingKey, mcpParts, publishedBy, type ChatMessageData } from "../../shared/protocol.ts";
 import type { McpToolInfo } from "../agent/mcp.ts";
 import type { AgentTurn, RosterEntry } from "./roster.ts";
 
@@ -262,9 +262,10 @@ const READ_TOOLS = ["artifact_read", "artifact_history", "artifact_diff", "activ
 /**
  * The tools a turn may use, by name, of `tools` (every tool installed), as an allow-list: a tool installed after the
  * turn was set up stays off. A turn its owner asked for gets every tool but the MCP tools of servers the agent may not
- * use. A turn its owner did not ask for (a member's, another agent's hand-off, a schedule's) gets only the app's read
- * tools (READ_TOOLS) and the read-only MCP tools of its servers for shared chats. Its owner then approves any write in
- * their own view.
+ * use, and runs apart from the chat (a fork of the agent's session, or a run's own): what it reads there never reaches
+ * a question someone else asks. A turn its owner did not ask for (a member's, another agent's hand-off, a schedule's)
+ * gets only the app's read tools (READ_TOOLS) and the read-only MCP tools of its servers for shared chats. Its owner
+ * then approves any write in their own view.
  *
  * `servers`: the agent's own list (every server when absent); `sharedServers`: the one for shared chats (when absent,
  * those of its servers that do not sign in each user, `signsIn`).
@@ -275,27 +276,14 @@ export function allowedTools(
   agent: Pick<AgentDefinition, "servers" | "sharedServers">,
   byOwner: boolean,
   signsIn: (server: string) => boolean,
-  apart = true,
 ): string[] {
   const shared = sharedServer(agent, signsIn);
   return tools.filter((name) => {
     if (NEVER_FOR_AGENTS.includes(name)) return false;
     const info = mcp.get(name);
-    // An owner's turn in the agent's shared session (it did not fork) gets nothing that would have forked it, as the
-    // tools are now: what it reads there, a later question from anyone else can pull out.
-    if (byOwner) return (!info || mayUseServer(agent, info.server)) && (apart || !privateTool(name, mcp, shared));
+    if (byOwner) return !info || mayUseServer(agent, info.server);
     return info ? info.readOnly && shared(info.server) : READ_TOOLS.includes(name);
   });
-}
-
-/**
- * Whether a tool reads or does what a turn its owner did not ask for may not: any of the app's tools but its read
- * tools (READ_TOOLS: the others read the owner's private files, run code with them, or write), and the MCP tools of
- * the servers outside the agent's shared list (`shared`).
- */
-function privateTool(name: string, mcp: ReadonlyMap<string, McpToolInfo>, shared: (server: string) => boolean): boolean {
-  const info = mcp.get(name);
-  return info ? !shared(info.server) : !READ_TOOLS.includes(name);
 }
 
 /**
@@ -307,16 +295,6 @@ export function sharedServer(
   signsIn: (server: string) => boolean,
 ): (server: string) => boolean {
   return (server) => mayUseServer(agent, server) && (agent.sharedServers ? agent.sharedServers.includes(server) : !signsIn(server));
-}
-
-/**
- * Whether a turn runs in a fork of its agent's session: its owner asked for it, and `allowed` (its tools, allowedTools
- * for its owner) has one a turn anyone else asked for lacks (privateTool): one of the app's that reads the owner's
- * files or runs code, or one of a server outside the agent's shared list. Only the fork's reply then returns to the
- * shared session, so a later question from someone else cannot pull the private results out of it.
- */
-export function forksFor(allowed: readonly string[], mcp: ReadonlyMap<string, McpToolInfo>, shared: (server: string) => boolean): boolean {
-  return allowed.some((name) => privateTool(name, mcp, shared));
 }
 
 /** The source chip of a reply whose sources cannot be told (an MCP tool no listing knows, outputs that could not be read). */
@@ -332,8 +310,8 @@ function resultsIn(entries: readonly EntryRecord[], mcp: ReadonlyMap<string, Mcp
     const message = entry.model?.[0];
     if (entry.kind !== "pi.tool-result" || message?.role !== "toolResult") return [];
     const recorded = (message.details as Partial<McpResultDetails> | undefined)?.server;
-    const mcpTool = message.toolName.includes(MCP_TOOL_SEPARATOR) || mcp.has(message.toolName);
-    const server = typeof recorded === "string" ? recorded : (mcp.get(message.toolName)?.server ?? (mcpTool ? UNKNOWN_SOURCE : undefined));
+    const server =
+      typeof recorded === "string" ? recorded : (mcp.get(message.toolName)?.server ?? (mcpParts(message.toolName) ? UNKNOWN_SOURCE : undefined));
     return [{ entry, ...(server !== undefined && { server }) }];
   });
 }

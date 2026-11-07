@@ -129,7 +129,7 @@ export function PeopleBar({
           onClose={close}
         />
       )}
-      {open === ADDING && !secondSeat && <AddAgents chatId={chatId} roster={agents} uid={uid} isOwner={isOwner} onClose={close} />}
+      {open === ADDING && <AddAgents chatId={chatId} roster={agents} uid={uid} isOwner={isOwner} onClose={close} />}
     </div>
   );
 }

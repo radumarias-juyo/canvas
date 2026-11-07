@@ -21,17 +21,12 @@ export interface SeatHost {
   room(ref: RoomRef, agentId: string): RoomLink;
   /** A new session for a seat. */
   create(): Promise<string>;
-  /** A new session that sees `session`'s history so far (a new one when it has none); for a turn that may read a private server. */
+  /** A new session that sees `session`'s history so far (a new one when it has none): a turn its owner asked for runs in one. */
   fork(session: string): Promise<string>;
   /** A passive write into a session: context, no run. `requestId` keeps a retry from placing it twice. */
   write(session: string, text: string, requestId: string): Promise<void>;
-  /** Whether a turn its owner asked for may reach a server outside the agent's shared list (forksFor). */
-  forks(agent: AgentDefinition, turn: SeatTurn): Promise<boolean>;
-  /**
-   * Set a session up for a turn: the agent's model, effort and instructions, and the tools this turn may use (`apart`:
-   * it runs in a fork, where its owner's turn may use all of theirs).
-   */
-  configure(session: string, agent: AgentDefinition, turn: SeatTurn, apart: boolean): Promise<void>;
+  /** Set a session up for a turn: the agent's model, effort and instructions, and the tools this turn may use. */
+  configure(session: string, agent: AgentDefinition, turn: SeatTurn): Promise<void>;
   submit(session: string, input: string, operationId: string, data: ChatTurnData): Promise<void>;
   wait(session: string, operationId: string): Promise<TurnResult>;
   abort(session: string): Promise<void>;
@@ -152,8 +147,8 @@ export class AgentSeats {
   }
 
   /**
-   * Give the agent its turn: in the seat's session, or for a turn its owner asked for that may reach a private server,
-   * in a fork of it, so the private results stay out of the session other people's questions reach. The turn's tools
+   * Give the agent its turn: in the seat's session, or for a turn its owner asked for (with all of their tools) in a
+   * fork of it, so what it reads stays out of the session other people's questions reach. The turn's tools
    * follow who asked, as this object checks it again: only its owner, directly. The lines of the log said before it
    * (`batch`) go in first. Returns once its input is in, with the newest log entry the seat has taken; the reply goes
    * to the room when it ends. A turn given again is placed once.
@@ -162,18 +157,20 @@ export class AgentSeats {
     const known = this.#turn(ref, turn.turn);
     if (known) {
       // Given again (the room did not hear back): it runs, or its result goes to the room again.
-      this.#host.waitUntil(known.status === "ended" ? this.#report(ref, known.turn) : this.#await(known));
+      this.#resume(known);
       return this.delivered(ref, agentId);
     }
     const agent = await this.#agent(agentId);
     const seat = await this.#ensure(ref, agentId, true);
     // The room gives an agent one turn at a time: one still running here is one the room ended (a give it thought
-    // failed), and it stops before this turn sets the session up for someone else's tools.
-    await this.#abortOthers(ref, agentId, turn.turn);
+    // failed), and it stops before this turn sets the session up for someone else's tools. First: a stop also drops
+    // what waits in the session's inbox, the batch among it.
+    await this.#abort(this.#running(ref, agentId).filter((row) => row.turn !== turn.turn));
     const delivered = batch ? await this.deliver(ref, agentId, batch) : seat.delivered;
     const byOwner = turn.byOwner && !turn.unattended && turn.hop === 0 && turn.calledBy.uid === this.#host.uid && !turn.calledBy.agentId;
     const checked: SeatTurn = { ...turn, byOwner };
-    const forked = checked.byOwner && (await this.#host.forks(agent, checked));
+    // Its owner's turn has all of their tools, so it runs apart, in a fork of the seat's session.
+    const forked = checked.byOwner;
     const session = forked ? await this.#host.fork(seat.session) : seat.session;
     // Given meanwhile by a retry: that one runs.
     if (this.#turn(ref, turn.turn)) return delivered;
@@ -189,7 +186,7 @@ export class AgentSeats {
     try {
       // Its input goes only into the fork: the seat's session reads the ask as context (the batch left it out).
       const apart = forked ? this.#host.write(seat.session, askedApart(turn.ask), `apart:${turn.turn}`) : undefined;
-      await Promise.all([apart, this.#host.configure(session, agent, checked, forked)]);
+      await Promise.all([apart, this.#host.configure(session, agent, checked)]);
       await this.#host.submit(session, turn.input, operationId(turn.turn), { turn: turn.turn, calledBy: turn.calledBy, hop: turn.hop });
     } catch (error) {
       this.#end(ref, turn.turn, { status: "unanswered", reason: errorMessage(error), published: [], items: [], sources: [] });
@@ -221,18 +218,30 @@ export class AgentSeats {
     }
   }
 
-  /** The turns of `agentId` still running in a room's seat but `turn`: stopped, as the room no longer waits on them. */
-  async #abortOthers(ref: RoomRef, agentId: string, turn: number): Promise<void> {
-    const others = this.#sql
+  /** The turns of `agentId` running in a room's seat. */
+  #running(ref: RoomRef, agentId: string): SeatTurnRow[] {
+    return this.#sql
       .exec(
-        "SELECT session FROM agent_seat_turns WHERE room_owner = ? AND room_chat = ? AND agent_id = ? AND turn != ? AND status = 'running'",
+        "SELECT * FROM agent_seat_turns WHERE room_owner = ? AND room_chat = ? AND agent_id = ? AND status = 'running'",
         ref.ownerUid,
         ref.chatId,
         agentId,
-        turn,
       )
-      .toArray() as Pick<SeatTurnRow, "session">[];
-    await Promise.all([...new Set(others.map((row) => row.session))].map((session) => this.#host.abort(session)));
+      .toArray() as SeatTurnRow[];
+  }
+
+  /** Stop the runs of `rows`' turns; a failed stop is logged. */
+  async #abort(rows: readonly SeatTurnRow[]): Promise<void> {
+    await Promise.all(
+      [...new Set(rows.map((row) => row.session))].map((session) =>
+        this.#host.abort(session).catch((error: unknown) => console.error("agent seat, stop:", errorMessage(error))),
+      ),
+    );
+  }
+
+  /** Go on with a turn kept here: wait on it again while it runs, or post its result to the room again. */
+  #resume(row: SeatTurnRow): void {
+    this.#host.waitUntil(row.status === "ended" ? this.#report(refOf(row), row.turn) : this.#await(row));
   }
 
   /**
@@ -307,22 +316,16 @@ export class AgentSeats {
         ? this.#sql.exec("SELECT * FROM agent_seat_turns WHERE room_owner = ? AND room_chat = ?", ref.ownerUid, ref.chatId)
         : this.#sql.exec("SELECT * FROM agent_seat_turns")
     ).toArray() as SeatTurnRow[];
-    for (const row of rows) {
-      this.#host.waitUntil(row.status === "ended" ? this.#report(refOf(row), row.turn) : this.#await(row));
-    }
+    for (const row of rows) this.#resume(row);
   }
 
   /** The agent left the room (removed, or its owner left): its seat goes, and what it runs there stops. */
   async drop(ref: RoomRef, agentId: string): Promise<void> {
     const where = "room_owner = ? AND room_chat = ? AND agent_id = ?";
-    const running = this.#sql
-      .exec(`SELECT * FROM agent_seat_turns WHERE ${where} AND status = 'running'`, ref.ownerUid, ref.chatId, agentId)
-      .toArray() as SeatTurnRow[];
+    const running = this.#running(ref, agentId);
     this.#sql.exec(`DELETE FROM agent_seat_turns WHERE ${where}`, ref.ownerUid, ref.chatId, agentId);
     this.#sql.exec(`DELETE FROM agent_seats WHERE ${where}`, ref.ownerUid, ref.chatId, agentId);
-    await Promise.all(
-      running.map((row) => this.#host.abort(row.session).catch((error: unknown) => console.error("agent seat, stop:", errorMessage(error)))),
-    );
+    await this.#abort(running);
   }
 
   /** The newest log entry a room's seat took; -1 before any. */
