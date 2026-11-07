@@ -17,6 +17,13 @@ export type RunStatus = "running" | "sent" | "not_today" | "failed" | "needs_sig
 /** `waiting`: stopped at a do step held for its owner; approved it goes on from there, declined or expired it stops. */
 export type RunItemStatus = "running" | "acted" | "not_today" | "failed" | "waiting";
 
+/** How a run ended: not running, and not waiting for a held call (it goes on once its owner decides). */
+export type EndedRunStatus = Exclude<RunStatus, "running" | "waiting">;
+
+export function runEnded(status: RunStatus): status is EndedRunStatus {
+  return status !== "running" && status !== "waiting";
+}
+
 /** One step as a run went through it, for the run detail's "How it got there". */
 export interface RunStepRecord {
   kind: AgentStep["kind"] | "when" | "scope";

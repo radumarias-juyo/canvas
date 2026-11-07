@@ -1,6 +1,8 @@
 import {
   KEPT_RUNS,
+  runEnded,
   type AgentRunView,
+  type EndedRunStatus,
   type RunDelivery,
   type RunItemStatus,
   type RunItemView,
@@ -94,6 +96,9 @@ interface ItemDetail {
   looked?: Record<string, unknown>;
 }
 
+/** A run that ended, as AgentRuns tells its owner's feed. */
+export type EndedRun = RunRecord & { status: EndedRunStatus };
+
 /** A run as its own row has it. */
 export interface RunRecord {
   agentId: string;
@@ -161,9 +166,9 @@ export class AgentRuns {
   readonly #now: () => number;
 
   /** Hears each run that ends (or waits for a sign-in), as its row then says; never a test's. */
-  readonly #onEnded: ((run: RunRecord) => void) | undefined;
+  readonly #onEnded: ((run: EndedRun) => void) | undefined;
 
-  constructor(sql: Sql, now: () => number = Date.now, onEnded?: (run: RunRecord) => void) {
+  constructor(sql: Sql, now: () => number = Date.now, onEnded?: (run: EndedRun) => void) {
     this.#sql = sql;
     this.#now = now;
     this.#onEnded = onEnded;
@@ -282,7 +287,7 @@ export class AgentRuns {
     );
     // Every way a run ends comes through here: its owner's feed hears of it (worker/users.ts runEnded). One waiting for
     // a held call has not ended: the call's own feed item asks for it.
-    if (change.status && status !== "running" && status !== "waiting" && !run.test) this.#onEnded?.(this.get(agentId, dueAt)!);
+    if (change.status && runEnded(status) && !run.test) this.#onEnded?.({ ...this.get(agentId, dueAt)!, status });
   }
 
   /** Start an item of a run in its session, or find it: an item that ended is not run again. */

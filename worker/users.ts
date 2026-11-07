@@ -18,7 +18,7 @@ import { mcpTokensKey } from "./storage/index.ts";
 import type { McpSignInView, SignInNotice } from "../shared/sign-ins.ts";
 import { AgentStore, type AgentSave } from "./agents/store.ts";
 import { LimitsDirectory, type CallEntry } from "./agents/limits/directory.ts";
-import { approvalFeed, approvalRef } from "./agents/limits/feed.ts";
+import { approvalAsk, approvalFeed, approvalRef } from "./agents/limits/feed.ts";
 import { actorName, LIMIT_FIELDS, type CallLogView, type GuardrailRule, type NeedsYouItem, type PendingActionView } from "../shared/limits.ts";
 import { UserMemory, type Learned, type LearnedNote } from "./memory/memory.ts";
 import type { Forgot, MemoryNote, MemoryNoteView, MemoryReader, MemoryWriter, Recalled, ServerCoverage } from "../shared/memory.ts";
@@ -26,7 +26,7 @@ import { ChatRows } from "./chat-rows.ts";
 import { addColumns } from "./members.ts";
 import { mayLeave, type ChatKind } from "../shared/chat-kinds.ts";
 import { agentFrom, NEEDS_YOU, RUN_FEED_TEXT, type FeedInput, type FeedList, type FeedOpen, type FollowKind, type FollowView } from "../shared/feed.ts";
-import type { RunStatus } from "../shared/runs.ts";
+import type { EndedRunStatus, RunStatus } from "../shared/runs.ts";
 import { aboutOf, FAN_OUT, fanOut, FeedStore, FollowStore, postsReachFollowers, type Follower, type FollowRecord } from "./feed/store.ts";
 import { mcpServers } from "./mcp/servers.ts";
 import {
@@ -81,7 +81,7 @@ export type Tag = Pick<MentionNotice, "from" | "text" | "at" | "added"> & {
 export interface RunEnded {
   agentId: string;
   dueAt: number;
-  status: Exclude<RunStatus, "running" | "waiting">;
+  status: EndedRunStatus;
   summary?: string;
   /** The agent's home conversation, where the run lives, and its kind. */
   chatId: string;
@@ -940,13 +940,12 @@ export class UserDirectory extends DurableObject<Env> {
     this.#changed("needs-you");
     // In the feed's Needs you too (not from a chat off the record), until it is decided or expires.
     this.addFeed(approvalFeed(view, chatTitle, chatKind));
-    const who = actorName(view.actor);
     // Only that something waits: the call itself stays in the app.
     await this.push({
-      title: view.kind === "proposal" ? `${who} proposes a change` : `${who} needs your approval`,
+      title: approvalAsk(view),
       body: excerpt(`In “${chatTitle}”`, 120),
       url: `/c/${view.chatId}`,
-      tag: `action:${view.chatId}:${view.id}`,
+      tag: approvalRef(view.chatId, view.id),
     }).catch((error: unknown) => console.error("push:", errorMessage(error)));
   }
 

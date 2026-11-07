@@ -157,7 +157,7 @@ import { isTurnEntry, TurnFilter } from "./agents/live.ts";
 import { ChatRoster, type AgentTurn, type RosterEntry } from "./agents/roster.ts";
 import { actedOf, jsonOf, reportOf, SignInNeeded, whenOf, type ActContext, type ActResult, type DeliveryRequest } from "./agents/runs/executor.ts";
 import { AgentRunner, type RunAlarm, type RunnerHost, type WatchAlarm } from "./agents/runs/runner.ts";
-import { AgentRuns, type RunRecord } from "./agents/runs/store.ts";
+import { AgentRuns, type EndedRun, type RunRecord } from "./agents/runs/store.ts";
 import { reportContext, runInstructions, RUN_STEP_KIND, workSpend, type RunStepData } from "./agents/runs/report.ts";
 import { publishedAlready, publishFindings, publishRebuilt, readOnlyDeclaration, runMark } from "./agents/runs/page.ts";
 import { compileWorkflow } from "./agents/runs/compile.ts";
@@ -3309,8 +3309,7 @@ export class ChatAgent extends DurableObject<Env> {
    * A run ended: its owner's feed hears how, with the report it posted here or as a notification (what the agent's
    * followers may read, the directory decides: postsReachFollowers). Off the caller's path.
    */
-  #runEnded(run: RunRecord): void {
-    if (run.status === "running" || run.status === "waiting") return; // not ended (AgentRuns.update calls only on an end)
+  #runEnded(run: EndedRun): void {
     const posted = run.status === "sent" ? run.detail.deliveries.find((delivery) => (delivery.kind === "chat" || delivery.kind === "notify") && delivery.status === "sent" && delivery.text) : undefined;
     const ended = this.#directory.runEnded({
       agentId: run.agentId,

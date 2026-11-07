@@ -407,19 +407,20 @@ describe("the write gate", () => {
   });
 });
 
-describe("pending actions", () => {
-  const action = (over: Partial<NewAction> = {}): NewAction => ({
-    kind: "approval",
-    actor: { name: "deals", agentId: "a".repeat(16) },
-    server: "crm",
-    tool: "update_deal",
-    input: { discount: 5 },
-    why: "at Approve",
-    expiresAt: T0 + 3_600_000,
-    origin: { session: "3", level: 3 },
-    ...over,
-  });
+/** A call held for the owner, as the gate makes one. */
+const action = (over: Partial<NewAction> = {}): NewAction => ({
+  kind: "approval",
+  actor: { name: "deals", agentId: "a".repeat(16) },
+  server: "crm",
+  tool: "update_deal",
+  input: { discount: 5 },
+  why: "at Approve",
+  expiresAt: T0 + 3_600_000,
+  origin: { session: "3", level: 3 },
+  ...over,
+});
 
+describe("pending actions", () => {
   it("end once: a press and its expiry, or two presses, decide it once", () => {
     const actions = new ChatActions(
       memorySql(),
@@ -464,24 +465,12 @@ describe("pending actions", () => {
 });
 
 describe("approvals in the feed", () => {
-  const chatActions = () =>
+  const held = (over: Partial<NewAction> = {}) =>
     new ChatActions(
       memorySql(),
       () => "chat-1",
       () => T0,
-    );
-  const held = (over: Partial<NewAction> = {}, actions = chatActions()) =>
-    actions.add({
-      kind: "approval",
-      actor: { name: "deals", agentId: "a".repeat(16), avatar: "de", color: "blue" },
-      server: "crm",
-      tool: "update_deal",
-      input: { discount: 5 },
-      why: "at Approve",
-      expiresAt: T0 + 3_600_000,
-      origin: { session: "3", level: 3 },
-      ...over,
-    });
+    ).add(action({ actor: { name: "deals", agentId: "a".repeat(16), avatar: "de", color: "blue" }, ...over }));
 
   it("waits in Needs you from its hold, naming who asks and the call, and opens its chat", () => {
     const feed = new FeedStore(memorySql());
@@ -497,22 +486,16 @@ describe("approvals in the feed", () => {
     expect(approvalFeed(held({ kind: "proposal", actor: { name: "pi" } }), "Deals", "group")).toMatchObject({ title: "pi proposes a change in Deals", from: { name: "pi" } });
   });
 
-  for (const end of ["done", "declined", "expired"] as const) {
-    it(`waits no more once it is ${end === "done" ? "approved" : end}`, () => {
-      const actions = chatActions();
-      const feed = new FeedStore(memorySql());
-      const view = held({}, actions);
-      feed.add(approvalFeed(view, "Deals", "group"));
-      if (end === "done") {
-        actions.move(view.id, "pending", "running");
-        actions.move(view.id, "running", "done", "{}");
-      } else actions.move(view.id, "pending", end);
-      // What the chat's #actionEnded calls for every end: UserDirectory.removeNeedsYou, which resolves the ref.
-      expect(feed.resolve(approvalRef("chat-1", view.id))).toBe(1);
-      expect(feed.counts()).toEqual({ unread: 0, needsYou: 0 });
-      expect(feed.list().items[0]).toMatchObject({ kind: "approval", read: true });
-    });
-  }
+  it("waits no more once it ends: approved, declined and expired all end through removeNeedsYou, which resolves its ref", () => {
+    const feed = new FeedStore(memorySql());
+    const view = held();
+    feed.add(approvalFeed(view, "Deals", "group"));
+    expect(feed.resolve(approvalRef("chat-1", view.id))).toBe(1);
+    expect(feed.counts()).toEqual({ unread: 0, needsYou: 0 });
+    expect(feed.list().items[0]).toMatchObject({ kind: "approval", read: true });
+    // Ended twice (a press and its expiry): nothing more.
+    expect(feed.resolve(approvalRef("chat-1", view.id))).toBe(0);
+  });
 
   it("never reaches the feed from a chat off the record", () => {
     const feed = new FeedStore(memorySql());

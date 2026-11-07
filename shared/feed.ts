@@ -5,7 +5,7 @@
 // reach it (mayLeave in shared/chat-kinds.ts).
 
 import type { ChatAgentView } from "./agents.ts";
-import type { RunStatus } from "./runs.ts";
+import type { EndedRunStatus, RunStatus } from "./runs.ts";
 
 /** One follow among a person's, as the app names it: two people's agents can share an id, followed from different chats. */
 export const followKey = (follow: { kind: string; id: string; chatId?: string }) => `${follow.kind}:${follow.id}:${follow.chatId ?? ""}`;
@@ -150,7 +150,7 @@ export function feedPath(open: FeedOpen): string {
 }
 
 /** A run's end in words, after the agent's name: what its feed item says. */
-export const RUN_FEED_TEXT: Record<Exclude<RunStatus, "running" | "waiting">, string> = {
+export const RUN_FEED_TEXT: Record<EndedRunStatus, string> = {
   sent: "sent its report",
   not_today: "had nothing to report",
   failed: "failed",
