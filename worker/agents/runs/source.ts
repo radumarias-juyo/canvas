@@ -59,8 +59,12 @@ export class SourceCore {
     return row.every === null ? null : row.every * 60_000;
   }
 
+  #anyone(): boolean {
+    return this.#sql.exec("SELECT 1 FROM source_subscribers LIMIT 1").toArray().length > 0;
+  }
+
   subscribe(step: Pick<LookStep, "server" | "tool" | "input">, subscriber: Subscriber, everyMinutes: number): void {
-    const first = this.#subscribers().length === 0;
+    const first = !this.#anyone();
     this.#sql.exec("INSERT OR REPLACE INTO source_call (id, step) VALUES (1, ?)", canonicalJson({ server: step.server, tool: step.tool, input: step.input }));
     this.#sql.exec(
       "INSERT OR REPLACE INTO source_subscribers (uid, chat_id, agent_id, every_minutes) VALUES (?, ?, ?, ?)",
@@ -76,7 +80,7 @@ export class SourceCore {
   /** Whether anyone still subscribes. */
   unsubscribe(subscriber: Pick<Subscriber, "uid" | "agentId">): boolean {
     this.#sql.exec("DELETE FROM source_subscribers WHERE uid = ? AND agent_id = ?", subscriber.uid, subscriber.agentId);
-    return this.#subscribers().length > 0;
+    return this.#anyone();
   }
 
   /** Read once for every subscriber; tell them when the value moved. Sets the next poll. */

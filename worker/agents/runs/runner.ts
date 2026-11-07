@@ -5,7 +5,7 @@
 import { canonicalJson } from "../../../shared/canonical.ts";
 import type { Value } from "../../../shared/conditions.ts";
 import type { AgentDefinition, LookStep } from "../../../shared/agents.ts";
-import { errorMessage } from "../../../shared/util.ts";
+import { errorMessage, sha256Hex } from "../../../shared/util.ts";
 import { resultName, RunExecutor, watchFires, type RunEnd, type RunHost } from "./executor.ts";
 import { nextRunAt } from "./schedule.ts";
 import type { Sql } from "../../members.ts";
@@ -46,12 +46,12 @@ function triggerKey(agent: AgentDefinition): string {
   return trigger.kind === "schedule" ? canonicalJson(trigger) : canonicalJson({ step: trigger.step, everyMinutes: trigger.everyMinutes });
 }
 
+const HASHED = "sha256:";
+
 /** A value as it is compared with the last one: its canonical JSON, or a hash of a large one. */
 async function fingerprint(value: Value): Promise<string> {
   const json = canonicalJson(value);
-  if (json.length <= MAX_KEPT_VALUE) return json;
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(json));
-  return `sha256:${[...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+  return json.length <= MAX_KEPT_VALUE ? json : `${HASHED}${await sha256Hex(json)}`;
 }
 
 /**
@@ -75,7 +75,7 @@ export class AgentRunner {
       CREATE TABLE IF NOT EXISTS agent_schedules (
         agent_id TEXT PRIMARY KEY, kind TEXT NOT NULL, key TEXT NOT NULL, schedule_id TEXT, due_at INTEGER
       );
-      CREATE TABLE IF NOT EXISTS agent_watch_last (agent_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, value TEXT, at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS agent_watch_last (agent_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, at INTEGER NOT NULL);
     `);
   }
 
@@ -183,19 +183,11 @@ export class AgentRunner {
     if (agent.trigger?.kind !== "watch") return null;
     const now = this.#host.runs.now();
     const print = await fingerprint(value);
-    const last = this.#sql.exec("SELECT fingerprint, value FROM agent_watch_last WHERE agent_id = ?", agent.id).toArray()[0] as
-      | { fingerprint: string; value: string | null }
-      | undefined;
+    const last = this.#sql.exec("SELECT fingerprint FROM agent_watch_last WHERE agent_id = ?", agent.id).toArray()[0] as { fingerprint: string } | undefined;
     if (last?.fingerprint === print) return null;
-    const json = canonicalJson(value);
-    this.#sql.exec(
-      "INSERT OR REPLACE INTO agent_watch_last (agent_id, fingerprint, value, at) VALUES (?, ?, ?, ?)",
-      agent.id,
-      print,
-      json.length <= MAX_KEPT_VALUE ? json : null,
-      now,
-    );
-    const previous = last?.value ? (JSON.parse(last.value) as Value) : undefined;
+    this.#sql.exec("INSERT OR REPLACE INTO agent_watch_last (agent_id, fingerprint, at) VALUES (?, ?, ?)", agent.id, print, now);
+    // A small value is kept as its JSON, so the condition can compare with it; a large one only as its hash.
+    const previous = last && !last.fingerprint.startsWith(HASHED) ? (JSON.parse(last.fingerprint) as Value) : undefined;
     let fires: boolean;
     try {
       fires = watchFires(agent.trigger.when, resultName(agent.trigger.step), value, previous);

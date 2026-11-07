@@ -237,6 +237,19 @@ export function allowedTools(
 }
 
 /**
+ * The tools a run's work step may use, by name, of `tools`: as a turn its owner did not ask for, only reading tools,
+ * but the read-only MCP tools of all of its own servers (`servers`, every server when absent), those that sign in each
+ * user too: a run reads as its owner, with nobody else in it.
+ */
+export function runTools(tools: readonly string[], mcp: ReadonlyMap<string, McpToolInfo>, agent: Pick<AgentDefinition, "servers">): string[] {
+  return tools.filter((name) => {
+    if (NEVER_FOR_AGENTS.includes(name)) return false;
+    const info = mcp.get(name);
+    return info ? info.readOnly && (!agent.servers || agent.servers.includes(info.server)) : READ_TOOLS.includes(name);
+  });
+}
+
+/**
  * An agent's own instructions, as its session's `instructions` (rendered after every section): who it is here, its
  * job, what its owner wrote, and the rules every agent follows. Changes only with its definition, so the prompt cache
  * holds between its turns.

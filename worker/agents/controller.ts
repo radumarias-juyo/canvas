@@ -118,8 +118,8 @@ export class AgentTurns {
         await this.#ended(entry, turn, { status: "unanswered", reason: `its owner turned @${entry.name} off` });
         return;
       }
-      // A turn that continues a run reads the run's session, not the chat: it catches up on nothing.
-      await Promise.all([turn.run ? undefined : this.#catchUp(entry, turn.id), this.#host.configure(entry, agent, turn)]);
+      // A turn in a session of its own reads that session, not the chat: it catches up on nothing.
+      await Promise.all([turn.session ? undefined : this.#catchUp(entry, turn.id), this.#host.configure(entry, agent, turn)]);
       if (!live()) return;
       await this.#host.submit(sessionOf(entry, turn), turnInput(turn), operationId(turn.id), { turn: turn.id, calledBy: turn.calledBy, hop: turn.hop });
       roster.markSubmitted(turn.id);
@@ -196,8 +196,7 @@ export class AgentTurns {
         endedAt: roster.now(),
         ...(!done && { failed: result.reason ?? "it ended without an answer" }),
         ...(published.length && { published }),
-        // A reply in a run's session carries the run, so a reply to it continues the run too.
-        ...(turn.run && { run: { dueAt: turn.run.dueAt, why: turn.run.why, ...(turn.run.test && { test: true as const }) } }),
+        ...(turn.run && { run: turn.run }),
       };
       // Who it hands work to, within what the chain may still make.
       const left = MAX_HOPS - roster.handOffsFrom(turn.root);
@@ -282,7 +281,7 @@ export class AgentTurns {
   async #stopped(stopped: readonly AgentTurn[]): Promise<boolean> {
     const roster = this.#host.roster;
     const sessions = new Set(
-      stopped.filter((turn) => turn.startedAt !== undefined).flatMap((turn) => turn.run?.session ?? roster.get(turn.agentId)?.session ?? []),
+      stopped.filter((turn) => turn.startedAt !== undefined).flatMap((turn) => turn.session ?? roster.get(turn.agentId)?.session ?? []),
     );
     await Promise.all([...sessions].map((session) => this.#host.abort(session).catch((error: unknown) => console.error("agent stop:", errorMessage(error)))));
     if (stopped.length) this.#host.changed();
@@ -309,9 +308,9 @@ export class AgentTurns {
   }
 }
 
-/** The session a turn runs in: the run's it continues, else its agent's own. */
-export function sessionOf(entry: Pick<RosterEntry, "session">, turn: Pick<AgentTurn, "run">): string {
-  return turn.run?.session ?? entry.session;
+/** The session a turn runs in: its own, else its agent's. */
+export function sessionOf(entry: Pick<RosterEntry, "session">, turn: Pick<AgentTurn, "session">): string {
+  return turn.session ?? entry.session;
 }
 
 /** A turn's operation id in its agent's session: submitting it twice places it once. */

@@ -3,9 +3,11 @@
 // definition. People can then edit the list on the Workflow tab.
 
 import { clampThinkingLevel, type Api, type Model, type Models, type ModelThinkingLevel, type Usage } from "@earendil-works/pi-ai";
-import { AgentError, checkAgent, STEP_KINDS, type AgentDefinition, type AgentStep } from "../../../shared/agents.ts";
+import { AgentError, checkAgent, inputOf, STEP_KINDS, type AgentDefinition, type AgentStep } from "../../../shared/agents.ts";
 import { textOf } from "../../../shared/canonical.ts";
 import { isReadOnly, type ToolInfo } from "../../../shared/protocol.ts";
+import { excerpt } from "../../../shared/replies.ts";
+import { jsonIn } from "../../../shared/util.ts";
 import { FINDINGS_END, FINDINGS_START } from "./report.ts";
 
 /** Enough for a workflow of MAX_WORKFLOW_STEPS steps as JSON. */
@@ -37,8 +39,7 @@ export interface ServerTools {
 
 function toolLine(tool: ToolInfo): string {
   const schema = tool.inputSchema ? ` input ${JSON.stringify(tool.inputSchema)}` : "";
-  const line = `${tool.name}${isReadOnly(tool) ? " (read-only)" : " (writes)"}: ${tool.description ?? ""}${schema}`.replace(/\s+/g, " ");
-  return line.length > TOOL_CHARS ? `${line.slice(0, TOOL_CHARS - 1)}…` : line;
+  return excerpt(`${tool.name}${isReadOnly(tool) ? " (read-only)" : " (writes)"}: ${tool.description ?? ""}${schema}`, TOOL_CHARS);
 }
 
 /** The compile call's message: the agent's fields and the tools it may use. */
@@ -58,20 +59,13 @@ export function compilePrompt(agent: Pick<AgentDefinition, "name" | "job" | "ins
  * Throws an AgentError with what is wrong.
  */
 export function parseWorkflow(reply: string, agent: AgentDefinition): AgentStep[] {
-  const start = reply.indexOf("[");
-  const end = reply.lastIndexOf("]");
-  if (start < 0 || end < start) throw new AgentError("The reply has no list of steps.");
-  let steps: unknown;
-  try {
-    steps = JSON.parse(reply.slice(start, end + 1));
-  } catch {
-    throw new AgentError("The reply's list of steps is not JSON.");
-  }
-  if (!Array.isArray(steps) || !steps.length) throw new AgentError("The reply's list of steps is empty.");
+  const steps = jsonIn(reply);
+  if (steps === undefined && reply.includes("[")) throw new AgentError("The reply's list of steps is not JSON.");
+  if (!Array.isArray(steps)) throw new AgentError("The reply has no list of steps.");
+  if (!steps.length) throw new AgentError("The reply's list of steps is empty.");
   if (steps.some((step) => typeof step !== "object" || step === null || !(STEP_KINDS as readonly unknown[]).includes((step as { kind?: unknown }).kind)))
     throw new AgentError(`Each step is one of ${STEP_KINDS.join(", ")}.`);
-  const { id: _id, avatar: _avatar, color: _color, origin: _origin, enabled: _enabled, version: _version, createdAt: _c, updatedAt: _u, copiedFrom: _from, ...fields } = agent;
-  return checkAgent({ ...fields, workflow: steps }).workflow!;
+  return checkAgent({ ...inputOf(agent), workflow: steps }).workflow!;
 }
 
 /** Compile an agent's instructions to steps with one model call. Throws when the call fails or its reply is no workflow. */

@@ -5,7 +5,8 @@
 // items that reached it. A test run records them instead.
 
 import { AUTONOMY_LABELS, type AgentDefinition, type AgentStep, type LookStep, type StepInput, type StepValue } from "../../../shared/agents.ts";
-import { ConditionError, evaluate, holds, truthy, type Value } from "../../../shared/conditions.ts";
+import { ConditionError, evaluate, holds, type Value } from "../../../shared/conditions.ts";
+import { excerpt } from "../../../shared/replies.ts";
 import {
   MAX_RUN_ITEMS,
   RUN_CONCURRENCY,
@@ -17,12 +18,12 @@ import {
   type RunStepRecord,
   type RunWhy,
 } from "../../../shared/runs.ts";
-import { errorMessage } from "../../../shared/util.ts";
+import { clip, errorMessage, mapLimit } from "../../../shared/util.ts";
 import { describeSchedule } from "./schedule.ts";
-import { isFinal, type AgentRuns, type RunRecord } from "./store.ts";
+import type { AgentRuns, RunRecord } from "./store.ts";
 
 /** How much of a read's result goes into the run's session: the rest is cut, with a note. */
-export const MAX_RESULT_CHARS = 12_000;
+const MAX_RESULT_CHARS = 12_000;
 /** How much of a result a step's trace row shows. */
 const DETAIL_CHARS = 160;
 
@@ -87,7 +88,7 @@ export interface RunStart {
 }
 
 /** The workflow a definition runs: its own, else its instructions as one work step reported to its home chat. */
-export function workflowOf(agent: Pick<AgentDefinition, "workflow" | "instructions">): AgentStep[] {
+function workflowOf(agent: Pick<AgentDefinition, "workflow" | "instructions">): AgentStep[] {
   if (agent.workflow?.length) return agent.workflow;
   return [
     { kind: "work", prompt: "Do what your instructions say, for this run." },
@@ -101,18 +102,9 @@ export function resultName(step: LookStep): string {
 }
 
 /** Every look step's server in a definition, its scope's and its watch's included: what a run reads. */
-export function serversRead(agent: Pick<AgentDefinition, "workflow" | "scope" | "trigger">): string[] {
+function serversRead(agent: Pick<AgentDefinition, "workflow" | "scope" | "trigger">): string[] {
   const servers = new Set<string>();
-  const walk = (steps: readonly AgentStep[]) => {
-    for (const step of steps) {
-      if (step.kind === "look") servers.add(step.server);
-      if (step.kind === "if") {
-        walk(step.then);
-        walk(step.else ?? []);
-      }
-    }
-  };
-  walk(agent.workflow ?? []);
+  for (const { step } of walkSteps(agent.workflow ?? [])) if (step.kind === "look") servers.add(step.server);
   if (agent.scope) servers.add(agent.scope.list.server);
   if (agent.trigger?.kind === "watch") servers.add(agent.trigger.step.server);
   return [...servers];
@@ -120,19 +112,33 @@ export function serversRead(agent: Pick<AgentDefinition, "workflow" | "scope" | 
 
 /** The skills a workflow's work steps name. */
 function skillsNamed(steps: readonly AgentStep[]): string[] {
-  return steps.flatMap((step) => (step.kind === "work" && step.skill ? [step.skill] : step.kind === "if" ? [...skillsNamed(step.then), ...skillsNamed(step.else ?? [])] : []));
+  return [...walkSteps(steps)].flatMap(({ step }) => (step.kind === "work" && step.skill ? [step.skill] : []));
 }
 
-/** A value as JSON on one line, cut to `max`. */
-export function excerptJson(value: unknown, max = DETAIL_CHARS): string {
-  let json: string;
-  try {
-    json = typeof value === "string" ? value : (JSON.stringify(value) ?? "null");
-  } catch {
-    json = String(value);
+/** The key of step `index` of the steps at `path`: what its trace, deliveries and operation ids go by. */
+function stepKey(path: string, index: number): string {
+  return path ? `${path}.${index}` : String(index);
+}
+
+/** Every step of a workflow with its key, in order, those inside ifs (at `<key>.then.<i>`, `<key>.else.<i>`) too. */
+function* walkSteps(steps: readonly AgentStep[], path = ""): Generator<{ key: string; step: AgentStep }> {
+  for (const [index, step] of steps.entries()) {
+    const key = stepKey(path, index);
+    yield { key, step };
+    if (step.kind === "if") {
+      yield* walkSteps(step.then, `${key}.then`);
+      yield* walkSteps(step.else ?? [], `${key}.else`);
+    }
   }
-  json = json.replace(/\s+/g, " ").trim();
-  return json.length > max ? `${json.slice(0, max - 1)}…` : json;
+}
+
+/** A value as JSON (a string as itself). */
+function jsonOf(value: unknown): string {
+  try {
+    return typeof value === "string" ? value : (JSON.stringify(value) ?? "null");
+  } catch {
+    return String(value);
+  }
 }
 
 /** `input` with each `{{expression}}` in its text replaced by its value over `scope`; a whole `{{…}}` keeps its type. */
@@ -180,9 +186,9 @@ export function itemKey(element: Value, index: number): { key: string; label: st
 }
 
 /** What a work step's prompt says around the step's own words. */
-export function workPrompt(step: Extract<AgentStep, { kind: "work" }>, when: string, item?: { label: string; value: Value }): string {
+function workPrompt(step: Extract<AgentStep, { kind: "work" }>, when: string, item?: { label: string; value: Value }): string {
   return [
-    `Your schedule started this run (${when}).${item ? ` This run is for ${item.label}: ${excerptJson(item.value, 2_000)}` : ""}`,
+    `Your schedule started this run (${when}).${item ? ` This run is for ${item.label}: ${excerpt(jsonOf(item.value), 2_000)}` : ""}`,
     "The results of the run's reads are above. Do this step:",
     step.prompt,
     ...(step.skill ? [`Use the skill "${step.skill}" for it (activate_skill).`] : []),
@@ -251,13 +257,13 @@ export class RunExecutor {
       used: { skills: skillsNamed(workflowOf(agent)), servers: serversRead(agent), models: [] },
     });
     // Ended, or waiting for a sign-in that has not come: an alarm that fires twice sends once.
-    if (!started && (isFinal(run.status) || run.status === "needs_sign_in")) return { status: run.status, started: false };
+    if (!started && run.status !== "running") return { status: run.status, started: false };
     this.#host.changed(agent.id);
     try {
       const missing = await this.#host.needsSignIn(serversRead(agent));
       if (missing.length) return this.#waitForSignIn(run, missing);
       const elements = await this.#elements(agent);
-      const outcomes = await pool(elements, RUN_CONCURRENCY, (element) => this.#item(agent, run, element, when));
+      const outcomes = await mapLimit(elements, RUN_CONCURRENCY, (element) => this.#item(agent, run, element, when));
       const status = await this.#finish(agent, runs.get(agent.id, dueAt)!, outcomes);
       return { status, started };
     } catch (error) {
@@ -332,12 +338,12 @@ export class RunExecutor {
       status = "failed";
       reason = errorMessage(error);
     }
-    runs.updateItem(agent.id, run.dueAt, element.key, {
+    runs.endItem(agent.id, run.dueAt, element.key, {
       status,
       steps: state.steps,
       ...(state.texts.length && { text: state.texts.join("\n\n") }),
       ...(reason !== undefined && { reason }),
-      reached: state.reached,
+      ...(state.reached.length && { reached: state.reached }),
       cost: state.cost,
     });
     this.#host.changed(agent.id);
@@ -347,7 +353,7 @@ export class RunExecutor {
   /** Run steps in order. Returns why the item stopped at a condition, or undefined when it went through. */
   async #steps(state: ItemRun, steps: readonly AgentStep[], path: string): Promise<string | undefined> {
     for (const [index, step] of steps.entries()) {
-      const key = path ? `${path}.${index}` : String(index);
+      const key = stepKey(path, index);
       const started = Date.now();
       const record = (label: string, ok: boolean, detail?: string, cost?: number) =>
         state.steps.push({ kind: step.kind, label, ok, ms: Date.now() - started, ...(detail && { detail }), ...(cost !== undefined && { cost }) });
@@ -365,10 +371,9 @@ export class RunExecutor {
           const name = resultName(step);
           state.scope[name] = value;
           state.scope.last = value;
-          const json = excerptJson(value, MAX_RESULT_CHARS);
-          const cut = json.length >= MAX_RESULT_CHARS ? " (cut)" : "";
-          await this.#host.write(state.session, `Result of ${step.server}.${step.tool} (${name})${cut}:\n${json}`, `${opId(state)}:look:${key}`);
-          record(label, true, excerptJson(value));
+          const json = jsonOf(value);
+          await this.#host.write(state.session, `Result of ${step.server}.${step.tool} (${name}):\n${clip(json, MAX_RESULT_CHARS)}`, `${opId(state)}:look:${key}`);
+          record(label, true, excerpt(json, DETAIL_CHARS));
           break;
         }
         case "onlyIf": {
@@ -488,13 +493,8 @@ function opId(state: Pick<ItemRun, "agent" | "run" | "item">): string {
 }
 
 /** The delivery steps of a workflow with their keys, in order, those inside ifs too. */
-function deliverySteps(steps: readonly AgentStep[], path = ""): { key: string; step: DeliveryRequest["step"] }[] {
-  return steps.flatMap((step, index) => {
-    const key = path ? `${path}.${index}` : String(index);
-    if (step.kind === "tell" || step.kind === "page" || step.kind === "handOver") return [{ key, step }];
-    if (step.kind === "if") return [...deliverySteps(step.then, `${key}.then`), ...deliverySteps(step.else ?? [], `${key}.else`)];
-    return [];
-  });
+function deliverySteps(steps: readonly AgentStep[]): { key: string; step: DeliveryRequest["step"] }[] {
+  return [...walkSteps(steps)].flatMap(({ key, step }) => (step.kind === "tell" || step.kind === "page" || step.kind === "handOver" ? [{ key, step }] : []));
 }
 
 /** The report of the items that reached a delivery: one item's text, or each item's under its name. */
@@ -536,31 +536,12 @@ export function whenOf(agent: Pick<AgentDefinition, "trigger">): string {
   return `when ${trigger.when} (checked every ${trigger.everyMinutes} minutes)`;
 }
 
-export function firstLine(text: string, max = 140): string {
-  const line =
-    text
-      .trim()
-      .split("\n")
-      .find((part) => part.trim())
-      ?.trim() ?? "";
-  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
-}
-
-/** `run` over `items`, at most `limit` at once, in their order. */
-async function pool<T, R>(items: readonly T[], limit: number, run: (item: T) => Promise<R>): Promise<R[]> {
-  const results: R[] = new Array(items.length);
-  let next = 0;
-  const lane = async () => {
-    while (next < items.length) {
-      const index = next++;
-      results[index] = await run(items[index]);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, lane));
-  return results;
+/** The first line of a text with anything on it, cut to `max`. */
+function firstLine(text: string, max = 140): string {
+  return excerpt(text.split("\n").find((part) => part.trim()) ?? "", max);
 }
 
 /** Whether a watch's value says it fires: its condition holds over the new value (and the one before, as `previous`). */
 export function watchFires(when: string, name: string, value: Value, previous: Value | undefined): boolean {
-  return truthy(evaluate(when, { [name]: value, watch: value, previous: previous ?? null }));
+  return holds(when, { [name]: value, watch: value, previous: previous ?? null });
 }

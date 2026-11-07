@@ -5,7 +5,8 @@ import { errorMessage } from "../shared/util.ts";
 import { SourceCore, type Subscriber } from "./agents/runs/source.ts";
 import { connectStreamableHttp } from "./mcp/connect.ts";
 import { McpHub } from "./mcp/hub.ts";
-import { mcpServers } from "./mcp/servers.ts";
+import { mcpServers, watchableForAll } from "./mcp/servers.ts";
+import { chatAgentName } from "./names.ts";
 
 /** The Source Durable Object (see SourceCore), named by sourceName. */
 export class Source extends DurableObject<Env> {
@@ -14,10 +15,10 @@ export class Source extends DurableObject<Env> {
     read: async (step) => {
       const server = this.hub.server(step.server);
       // A Source reads only what every viewer shares: never with someone's own sign-in.
-      if (!server || server.auth === "oauth" || server.cacheScope === "viewer") throw new Error(`${step.server} cannot be watched for everyone.`);
+      if (!server || !watchableForAll(server)) throw new Error(`${step.server} cannot be watched for everyone.`);
       return ((await this.hub.call(step.server, step.tool, step.input)).payload ?? null) as Value;
     },
-    notify: (subscriber, value) => exports.ChatAgent.getByName(`${subscriber.uid}:${subscriber.chatId}`).sourceMoved(subscriber.agentId, value as never),
+    notify: (subscriber, value) => exports.ChatAgent.getByName(chatAgentName(subscriber.uid, subscriber.chatId)).sourceMoved(subscriber.agentId, value as never),
     setAlarm: (at) => void this.ctx.storage.setAlarm(at),
     now: () => Date.now(),
   });

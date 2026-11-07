@@ -10,6 +10,7 @@ import { titleFromMessage, UNNAMED_CHAT } from "./agent/title.ts";
 import { applyAuthChange, type McpAuthChange, type McpAuthRecord, type McpAuthStore } from "./mcp/oauth.ts";
 import { mcpServers } from "./mcp/servers.ts";
 import { AgentStore, type AgentSave } from "./agents/store.ts";
+import { chatAgentName } from "./names.ts";
 import type { AgentDefinition, AgentOrigin, AgentResult } from "../shared/agents.ts";
 import { excerpt } from "../shared/replies.ts";
 import { errorMessage, randomHex } from "../shared/util.ts";
@@ -96,6 +97,7 @@ export class UserDirectory extends DurableObject<Env> {
     // An agent's own conversation: the agent it is the home of, and its last post, shown like a contact's.
     this.#addColumn("chats", "agent_id", "TEXT");
     this.#addColumn("chats", "preview", "TEXT");
+    this.ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS chats_by_agent ON chats (agent_id) WHERE agent_id IS NOT NULL");
     // The files of a skill imported as a package (SkillPackageFiles as JSON).
     this.#addColumn("skills", "files", "TEXT");
     // The newest version of each artifact its owner opened. Artifacts from before count as seen.
@@ -232,13 +234,13 @@ export class UserDirectory extends DurableObject<Env> {
 
   /** Tell an agent's home conversation about it as it is now (null: deleted). Off the caller's path; a failure is logged. */
   #tellHome(chatId: string, agentId: string, agent: AgentDefinition | null): void {
-    // The chat object's name, as chatAgentName makes it (worker/chat-agent.ts, which imports this file).
-    const chat = exports.ChatAgent.getByName(`${this.ctx.id.name!}:${chatId}`);
-    this.ctx.waitUntil(chat.agentChanged(agentId, agent, true).catch((error: unknown) => console.error("agent home:", errorMessage(error))));
+    const chat = exports.ChatAgent.getByName(chatAgentName(this.ctx.id.name!, chatId));
+    this.ctx.waitUntil(chat.agentChanged(agentId, agent).catch((error: unknown) => console.error("agent home:", errorMessage(error))));
   }
 
-  /** One of this user's agents was saved, turned on or off, or deleted: its home conversation follows (made when it is on). */
+  /** One of this user's agents was saved, turned on or off, or deleted: the lists and its home conversation follow. */
   #agentChanged(agentId: string): void {
+    this.#changed("agents");
     const agent = this.#agents.get(agentId);
     const home = this.agentHome(agentId);
     if (!home) {
@@ -250,10 +252,10 @@ export class UserDirectory extends DurableObject<Env> {
     if (!agent && this.ctx.storage.sql.exec("UPDATE chats SET agent_id = NULL WHERE agent_id = ?", agentId).rowsWritten) this.#changed("chats");
   }
 
-  /** This user signed in to `server`: the runs of their agents that waited for it go again. */
-  async signedInTo(server: string): Promise<void> {
+  /** This user signed in to `server`: the runs of their agents that waited for it go again, off the caller's path. */
+  signedInTo(server: string): void {
     const homes = this.ctx.storage.sql.exec<{ id: string }>("SELECT id FROM chats WHERE agent_id IS NOT NULL").toArray();
-    await Promise.allSettled(homes.map(({ id }) => exports.ChatAgent.getByName(`${this.ctx.id.name!}:${id}`).signedIn(server)));
+    this.ctx.waitUntil(Promise.allSettled(homes.map(({ id }) => exports.ChatAgent.getByName(chatAgentName(this.ctx.id.name!, id)).signedIn(server))));
   }
 
   /**
@@ -580,10 +582,7 @@ export class UserDirectory extends DurableObject<Env> {
    */
   saveAgent(input: unknown, origin: AgentOrigin, enabled?: boolean, save?: AgentSave): AgentResult {
     const saved = this.#agents.save(input, origin, enabled, save);
-    if (!("error" in saved)) {
-      this.#changed("agents");
-      this.#agentChanged(saved.id);
-    }
+    if (!("error" in saved)) this.#agentChanged(saved.id);
     return saved;
   }
 
@@ -591,19 +590,13 @@ export class UserDirectory extends DurableObject<Env> {
   setAgentEnabled(id: string, enabled: boolean, version?: number): AgentResult {
     const before = this.#agents.get(id)?.version;
     const result = this.#agents.setEnabled(id, enabled, version);
-    if (!("error" in result) && result.version !== before) {
-      this.#changed("agents");
-      this.#agentChanged(id);
-    }
+    if (!("error" in result) && result.version !== before) this.#agentChanged(id);
     return result;
   }
 
   deleteAgent(id: string): { error: string } | null {
     const refused = this.#agents.delete(id);
-    if (!refused) {
-      this.#changed("agents");
-      this.#agentChanged(id);
-    }
+    if (!refused) this.#agentChanged(id);
     return refused;
   }
 

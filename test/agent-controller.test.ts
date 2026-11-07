@@ -330,21 +330,20 @@ describe("AgentTurns: a turn", () => {
     const chat = new FakeChat([A]);
     chat.say(MIA, "Lunch at noon?");
     const caller = chat.say(OWNER, "why is West down?");
-    const run = { dueAt: T0, why: "schedule" as const, session: "run-fork-1" };
-    const [turn] = chat.turns.call([idOf(A)], { ...caller, run });
+    const run = { dueAt: T0, why: "schedule" as const };
+    const [turn] = chat.turns.call([idOf(A)], { ...caller, session: "run-fork-1", run });
     await chat.flush();
     // The run's session has the run's reads and report: it reads nothing of the chat, and its own session is untouched.
     expect(chat.calls).toEqual([`configure ${A}`, "submit run-fork-1", "wait run-fork-1"]);
     expect(chat.writes).toEqual([]);
-    expect(chat.configured[0].turn.run).toEqual(run);
+    expect(chat.configured[0].turn).toMatchObject({ session: "run-fork-1", run });
     expect(chat.roster.get(idOf(A))).toMatchObject({ mirrored: -1 });
     chat.finish(turn.id, done("West's paid search fell 30% on Monday."));
     await chat.flush();
     expect(chat.replies()[0]).toMatchObject({ text: "West's paid search fell 30% on Monday.", run: { dueAt: T0, why: "schedule" } });
-    expect(chat.replies()[0].run).not.toHaveProperty("session");
     expect(chat.asked).toEqual([{ session: "run-fork-1", turn: turn.id }]);
     // A Stop aborts the run's session, not the agent's.
-    const [next] = chat.turns.call([idOf(A)], { ...chat.say(OWNER, "and East?"), run });
+    const [next] = chat.turns.call([idOf(A)], { ...chat.say(OWNER, "and East?"), session: "run-fork-1", run });
     await chat.flush();
     await chat.turns.stop(idOf(A));
     expect(chat.aborts).toEqual(["run-fork-1"]);

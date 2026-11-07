@@ -5,7 +5,7 @@
 // autonomy level) are stored here too, for the scheduler.
 
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
-import { conditionProblem } from "./conditions.ts";
+import { conditionProblem, MAX_CONDITION } from "./conditions.ts";
 import { AGENT_NAME } from "./mentions.ts";
 import { EFFORT_LABELS } from "./models.ts";
 import type { RunRef } from "./runs.ts";
@@ -134,6 +134,12 @@ export interface AgentDefinition extends AgentInput {
   copiedFrom?: { owner: string; id: string; version: number };
 }
 
+/** A definition's own fields, as checkAgent and saving take them: its id, look and bookkeeping left out. */
+export function inputOf(agent: AgentDefinition): AgentInput {
+  const { id: _i, avatar: _a, color: _c, origin: _o, enabled: _e, version: _v, createdAt: _cr, updatedAt: _u, copiedFrom: _f, ...input } = agent;
+  return input;
+}
+
 /** Whether a definition is a proposal waiting for its owner: made by the model and not turned on yet. */
 export function isDraftAgent(agent: Pick<AgentDefinition, "origin" | "enabled">): boolean {
   return agent.origin === "agent" && !agent.enabled;
@@ -217,7 +223,7 @@ function checkLook(value: unknown, what: string): LookStep {
 
 /** A condition, trimmed and parsed (shared/conditions.ts): one that does not parse is refused with what is wrong. */
 function condition(value: unknown, what: { needs: string; its: string }): string {
-  const text = str(value, what, 500)!;
+  const text = str(value, what, MAX_CONDITION)!;
   const problem = conditionProblem(text);
   if (problem) fail(`${what.its} does not read: ${problem}`);
   return text;

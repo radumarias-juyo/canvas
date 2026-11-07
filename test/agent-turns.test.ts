@@ -11,6 +11,7 @@ import {
   askOf,
   assistantText,
   allowedTools,
+  runTools,
   CatchUp,
   handOffs,
   messageAskKey,
@@ -465,6 +466,11 @@ describe("allowedTools", () => {
     expect(allowedTools(tools, mcp, {}, true, signsIn)).toEqual([...appButReact, ...mcp.keys()]);
     // The list for shared chats does not narrow its owner's turns.
     expect(allowedTools(tools, mcp, { ...agent, sharedServers: [] }, true, signsIn)).toEqual(allowedTools(tools, mcp, agent, true, signsIn));
+  });
+
+  it("gives a run only reading tools: the app's and those of all its own servers, sign-in ones too", () => {
+    expect(runTools([...tools, "some_new_tool"], mcp, agent)).toEqual([...reads, "crm__list_deals", "mail__search"]);
+    expect(runTools(tools, mcp, {})).toEqual([...reads, "crm__list_deals", "mail__search", "vault__read"]);
   });
 
   it("gives anyone else's turn only the app's read tools and read tools of servers that do not sign in each user", () => {

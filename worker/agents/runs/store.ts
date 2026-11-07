@@ -13,6 +13,14 @@ import type { Sql } from "../../members.ts";
 /** The run itself, among its items: the row its status, deliveries and totals are kept in. */
 const RUN = "";
 
+/** An item's row key: the one item of a run with no scope ("") is kept as "*", apart from the run's own row. */
+function rowKey(item: string): string {
+  return item || "*";
+}
+
+type Counts = { total: number; acted: number | null; not_today: number | null; failed: number | null; cost: number | null };
+const NO_ITEMS: Counts = { total: 0, acted: 0, not_today: 0, failed: 0, cost: 0 };
+
 type RunRow = {
   agent_id: string;
   due_at: number;
@@ -60,7 +68,6 @@ export interface RunRecord {
   test: boolean;
   startedAt: number;
   endedAt?: number;
-  cost: number;
   summary?: string;
   detail: RunDetail;
   /** The session replies to its post continue in: a fork of its session, made at the first reply. */
@@ -85,7 +92,6 @@ function recordOf(row: RunRow): RunRecord {
     test: row.test === 1,
     startedAt: row.started_at,
     ...(row.ended_at !== null && { endedAt: row.ended_at }),
-    cost: row.cost,
     ...(row.summary !== null && { summary: row.summary }),
     detail: parse<RunDetail>(row.detail, { deliveries: [] }),
     ...(row.reply_session !== null && { replySession: row.reply_session }),
@@ -95,7 +101,7 @@ function recordOf(row: RunRow): RunRecord {
 function itemOf(row: RunRow): RunItemView {
   const detail = parse<ItemDetail>(row.detail, { steps: [] });
   return {
-    item: row.item,
+    item: row.item === "*" ? "" : row.item,
     label: row.label ?? row.item,
     status: row.status as RunItemStatus,
     ...(row.session !== null && { session: row.session }),
@@ -107,11 +113,6 @@ function itemOf(row: RunRow): RunItemView {
     startedAt: row.started_at,
     ...(row.ended_at !== null && { endedAt: row.ended_at }),
   };
-}
-
-/** A run that ended, as `begin` finds it: it is not run again. */
-export function isFinal(status: RunStatus): boolean {
-  return status !== "running" && status !== "needs_sign_in";
 }
 
 /**
@@ -195,21 +196,16 @@ export class AgentRuns {
     );
   }
 
-  /** Change what a run's row keeps: its status (an end when final), summary, cost, detail. */
+  /** Change what a run's row keeps: its status (an end once it is not running), summary, detail. */
   update(agentId: string, dueAt: number, change: { status?: RunStatus; summary?: string; detail?: Partial<RunDetail> }): void {
     const run = this.get(agentId, dueAt);
     if (!run) return;
     const status = change.status ?? run.status;
-    const ended = isFinal(status) || status === "needs_sign_in" ? this.#now() : null;
-    const { cost } = this.#sql.exec("SELECT COALESCE(SUM(cost), 0) AS cost FROM agent_runs WHERE agent_id = ? AND due_at = ? AND item != ''", agentId, dueAt).toArray()[0] as {
-      cost: number;
-    };
     this.#sql.exec(
-      "UPDATE agent_runs SET status = ?, ended_at = ?, summary = ?, cost = ?, detail = ? WHERE agent_id = ? AND due_at = ? AND item = ''",
+      "UPDATE agent_runs SET status = ?, ended_at = ?, summary = ?, detail = ? WHERE agent_id = ? AND due_at = ? AND item = ''",
       status,
-      ended,
+      status === "running" ? null : this.#now(),
       change.summary ?? run.summary ?? null,
-      cost,
       JSON.stringify({ ...run.detail, ...change.detail }),
       agentId,
       dueAt,
@@ -228,7 +224,7 @@ export class AgentRuns {
        ON CONFLICT (agent_id, due_at, item) DO NOTHING`,
       agentId,
       dueAt,
-      item || "*",
+      rowKey(item),
       label,
       id,
       this.#now(),
@@ -239,52 +235,49 @@ export class AgentRuns {
     return { view: this.item(agentId, dueAt, item)!, started: true };
   }
 
-  /** An item of a run; "" names the item of a run with no scope (kept as "*", apart from the run's own row). */
+  /** An item of a run; "" names the item of a run with no scope. */
   item(agentId: string, dueAt: number, item: string): RunItemView | null {
-    const row = this.#rows("agent_id = ? AND due_at = ? AND item = ?", agentId, dueAt, item || "*")[0];
-    return row ? { ...itemOf(row), item } : null;
+    const row = this.#rows("agent_id = ? AND due_at = ? AND item = ?", agentId, dueAt, rowKey(item))[0];
+    return row ? itemOf(row) : null;
   }
 
-  /** An item ended (or recorded a step): its status, steps, text and cost. */
-  updateItem(agentId: string, dueAt: number, item: string, change: { status?: RunItemStatus; cost?: number } & Partial<ItemDetail>): void {
-    const found = this.item(agentId, dueAt, item);
-    if (!found) return;
-    const status = change.status ?? found.status;
-    const detail: ItemDetail = {
-      steps: change.steps ?? found.steps,
-      ...((change.text ?? found.text) !== undefined && { text: change.text ?? found.text }),
-      ...((change.reason ?? found.reason) !== undefined && { reason: change.reason ?? found.reason }),
-      ...((change.reached ?? found.reached) && { reached: change.reached ?? found.reached }),
-    };
+  /** An item ended: its status, steps, part of the report and cost. */
+  endItem(agentId: string, dueAt: number, item: string, end: { status: RunItemStatus; cost: number } & ItemDetail): void {
+    const { status, cost, ...detail } = end;
     this.#sql.exec(
       "UPDATE agent_runs SET status = ?, ended_at = ?, cost = ?, detail = ? WHERE agent_id = ? AND due_at = ? AND item = ?",
       status,
-      status === "running" ? null : this.#now(),
-      change.cost ?? found.cost,
-      JSON.stringify(detail),
+      this.#now(),
+      cost,
+      JSON.stringify(detail satisfies ItemDetail),
       agentId,
       dueAt,
-      item || "*",
+      rowKey(item),
     );
   }
 
   items(agentId: string, dueAt: number): RunItemView[] {
-    return this.#rows("agent_id = ? AND due_at = ? AND item != '' ORDER BY started_at, item", agentId, dueAt).map((row) => {
-      const view = itemOf(row);
-      return row.item === "*" ? { ...view, item: "", label: view.label === "*" ? "" : view.label } : view;
-    });
+    return this.#rows("agent_id = ? AND due_at = ? AND item != '' ORDER BY started_at, item", agentId, dueAt).map(itemOf);
+  }
+
+  /** The counts and cost of runs' items, by due time. */
+  #counts(agentId: string, dueAts: readonly number[]): Map<number, Counts> {
+    if (!dueAts.length) return new Map();
+    const rows = this.#sql
+      .exec(
+        `SELECT due_at, COUNT(*) AS total, SUM(status = 'acted') AS acted, SUM(status = 'not_today') AS not_today, SUM(status = 'failed') AS failed,
+           SUM(cost) AS cost
+         FROM agent_runs WHERE agent_id = ? AND due_at IN (${dueAts.map(() => "?").join(", ")}) AND item != '' GROUP BY due_at`,
+        agentId,
+        ...dueAts,
+      )
+      .toArray() as (Counts & { due_at: number })[];
+    return new Map(rows.map((row) => [row.due_at, row]));
   }
 
   /** The run as the runs list shows it. */
-  view(run: RunRecord): AgentRunView {
-    const counts = this.#sql
-      .exec(
-        `SELECT COUNT(*) AS total, SUM(status = 'acted') AS acted, SUM(status = 'not_today') AS not_today, SUM(status = 'failed') AS failed
-         FROM agent_runs WHERE agent_id = ? AND due_at = ? AND item != ''`,
-        run.agentId,
-        run.dueAt,
-      )
-      .toArray()[0] as { total: number; acted: number | null; not_today: number | null; failed: number | null };
+  view(run: RunRecord, counted?: Counts): AgentRunView {
+    const counts = counted ?? this.#counts(run.agentId, [run.dueAt]).get(run.dueAt) ?? NO_ITEMS;
     return {
       agentId: run.agentId,
       dueAt: run.dueAt,
@@ -293,7 +286,7 @@ export class AgentRuns {
       ...(run.test && { test: true as const }),
       startedAt: run.startedAt,
       ...(run.endedAt !== undefined && { endedAt: run.endedAt }),
-      cost: run.cost,
+      cost: counts.cost ?? 0,
       items: { total: counts.total, acted: counts.acted ?? 0, notToday: counts.not_today ?? 0, failed: counts.failed ?? 0 },
       ...(run.summary !== undefined && { summary: run.summary }),
       ...(run.detail.needsSignIn?.length && { needsSignIn: run.detail.needsSignIn }),
@@ -302,7 +295,9 @@ export class AgentRuns {
 
   /** An agent's runs, newest first. */
   list(agentId: string, limit = 50): AgentRunView[] {
-    return this.#rows("agent_id = ? AND item = '' ORDER BY due_at DESC LIMIT ?", agentId, limit).map((row) => this.view(recordOf(row)));
+    const runs = this.#rows("agent_id = ? AND item = '' ORDER BY due_at DESC LIMIT ?", agentId, limit).map(recordOf);
+    const counts = this.#counts(agentId, runs.map((run) => run.dueAt));
+    return runs.map((run) => this.view(run, counts.get(run.dueAt) ?? NO_ITEMS));
   }
 
   /** The runs that did not end: cut off by a restart, or waiting for a sign-in. */

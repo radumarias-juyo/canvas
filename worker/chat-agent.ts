@@ -42,14 +42,13 @@ import {
   type ProxyRequest,
   type QueuedMessage,
   type IncomingMessage,
-  type ReplyQuote,
   type ToolPickNote,
   clampStaleMs,
   incomingKey,
   everyone,
 } from "../shared/protocol.ts";
 import { baseName, type AttachmentInput } from "../shared/attachments.ts";
-import { keptMentions, parseMentions, summonsAgent, taggedPeople, type MentionInput } from "../shared/mentions.ts";
+import { keptMentions, parseMentions, summonsAgent, taggedPeople, type Mention, type MentionInput } from "../shared/mentions.ts";
 import { freePath, MAX_LISTED, uploadTargets } from "../shared/uploads.ts";
 import {
   AUTO_LEDGER_PREFIX,
@@ -105,7 +104,7 @@ import { newestFirst, type FileEntry } from "./storage/user-files.ts";
 import { connectStreamableHttp, signInRequired } from "./mcp/connect.ts";
 import { McpOAuthClient } from "./mcp/oauth.ts";
 import { McpFailure, McpHub } from "./mcp/hub.ts";
-import { mcpServers, sharesResults, type McpServerConfig } from "./mcp/servers.ts";
+import { mcpServers, sharesResults, watchableForAll, type McpServerConfig } from "./mcp/servers.ts";
 import { CacheWarmer } from "./cache-warmer.ts";
 import { GeminiCompat } from "./gemini.ts";
 import { ChatMembers, formatInviteToken } from "./members.ts";
@@ -123,13 +122,17 @@ import {
   type Catalog,
 } from "./models.ts";
 import { withFailuresReported } from "./model-health.ts";
+import { chatAgentName, parseChatAgentName } from "./names.ts";
 import { inboxIds, queuedIdsOf, queuedMessages } from "./queue.ts";
 import { mcpAuthStore, readSystemPrompt, saveSystemPrompt, SYSTEM_PROMPT_KEY, type Tag } from "./users.ts";
 import {
   AGENT_ID_PATTERN,
+  AUTONOMY_LABELS,
   CHAT_AGENT_KIND,
   CHAT_TURN_KIND,
+  inputOf,
   type AgentDefinition,
+  type AgentStep,
   type AgentTurnView,
   type ChatAgentReplyData,
   type ChatAgents,
@@ -137,7 +140,7 @@ import {
   type ChatTurnData,
 } from "../shared/agents.ts";
 import { AgentTurns, sessionOf, type TurnHost } from "./agents/controller.ts";
-import { ChatRoster, type AgentTurn, type RosterEntry, type TurnRun } from "./agents/roster.ts";
+import { ChatRoster, type AgentTurn, type RosterEntry } from "./agents/roster.ts";
 import { reportOf, SignInNeeded, whenOf, type DeliveryRequest } from "./agents/runs/executor.ts";
 import { AgentRunner, type RunAlarm, type RunnerHost, type WatchAlarm } from "./agents/runs/runner.ts";
 import { AgentRuns } from "./agents/runs/store.ts";
@@ -147,10 +150,9 @@ import { compileWorkflow } from "./agents/runs/compile.ts";
 import { sourceName } from "./agents/runs/source.ts";
 import { publishedIn } from "./agents/turns.ts";
 import type { Value } from "../shared/conditions.ts";
-import { AUTONOMY_LABELS, type AgentStep } from "../shared/agents.ts";
-import type { AgentRunDetail, AgentRunView, RunDelivery } from "../shared/runs.ts";
+import { runRef, type AgentRunDetail, type AgentRunView, type RunDelivery, type RunRef } from "../shared/runs.ts";
 import { agentsExtension } from "./agents/tools.ts";
-import { agentInstructions, allowedTools, askOf, assistantText, attachedNote, MAX_ASK_CHARS, messageAskKey, speakersFor } from "./agents/turns.ts";
+import { agentInstructions, allowedTools, askOf, assistantText, attachedNote, MAX_ASK_CHARS, messageAskKey, runTools, speakersFor } from "./agents/turns.ts";
 
 /** Artifacts from the owner's other chats one chat remembers as named with "@" (see ChatAgent.#broughtIn). */
 const MAX_BROUGHT_IN = 200;
@@ -266,16 +268,7 @@ function isRunStep(entry: EntryRecord, operationId: string): boolean {
   return entry.kind === RUN_STEP_KIND && (entry.data as RunStepData | undefined)?.op === operationId;
 }
 
-/** The name of a user's chat object. The uid must come from a verified identity: it is what keeps users apart. */
-export function chatAgentName(uid: string, chatId: string): string {
-  return `${uid}:${chatId}`;
-}
-
-/** The uid and chat id a chat object's name was built from (see chatAgentName). */
-function parseChatAgentName(name: string): { uid: string; chatId: string } {
-  const [uid, chatId] = name.split(":");
-  return { uid, chatId };
-}
+export { chatAgentName };
 
 interface ArtifactCall {
   artifactId: string;
@@ -1263,7 +1256,8 @@ export class ChatAgent extends DurableObject<Env> {
   ): Promise<boolean> {
     this.#requireInChat(author);
     const shared = this.members.hasAny();
-    const quote = replyTo === undefined ? null : await this.#quote(replyTo);
+    const replied = replyTo === undefined ? undefined : await this.#entryAt(replyTo);
+    const quote = replyQuote(replied);
     // A reply to pi calls it too, as a follow-up to what it said; a reply to another agent calls that agent. Told for
     // sure once the mentions are known.
     const repliesToAgent = quote !== null && "agent" in quote && !quote.agentId;
@@ -1272,9 +1266,13 @@ export class ChatAgent extends DurableObject<Env> {
     const repliesTo = quote && "agent" in quote ? quote.agentId : undefined;
     // In an agent's home conversation, a message that calls nobody else is the agent's, not pi's.
     const home = this.#homeSpeaker();
+    const speakersOf = (named: readonly Mention[] = []) => {
+      const called = speakersFor(text, this.roster.list(), repliesTo, named);
+      if (!called.length && home !== undefined && !summonsAgent(text, named) && !repliesToAgent) called.push(home);
+      return called;
+    };
     // With files, artifacts or people named, their "@name"s may hide what looks like a call now: pi may be summoned after all.
-    const callsAgents =
-      mentionInputs.length === 0 && (speakersFor(text, this.roster.list(), repliesTo).length > 0 || (home !== undefined && !summonsAgent(text) && !repliesToAgent));
+    const callsAgents = mentionInputs.length === 0 && speakersOf().length > 0;
     const calling = (!shared && !callsAgents) || repliesToAgent || summonsAgent(text);
     const byOwner = author.uid === this.uid;
     // Someone else's own files they named come as attachments, copied to the owner's files, where the agent works. The
@@ -1339,8 +1337,7 @@ export class ChatAgent extends DurableObject<Env> {
     ]);
     // The files they named of their own are named too: "@pi notes.md" is not a call.
     const named = [...mentions, ...own];
-    const speakers = speakersFor(text, this.roster.list(), repliesTo, named);
-    if (!speakers.length && home !== undefined && !summonsAgent(text, named) && !repliesToAgent) speakers.push(home);
+    const speakers = speakersOf(named);
     const summoned = (!shared && !speakers.length) || repliesToAgent || summonsAgent(text, named);
     // Again after the refreshes, which can take seconds: the author may have been removed meanwhile.
     this.#requireInChat(author);
@@ -1385,7 +1382,7 @@ export class ChatAgent extends DurableObject<Env> {
     // run's report continues that run, in a fork of its session, for the agent that posted it.
     if (speakers.length) {
       const files = attachedNote(attached?.attachments.map((attachment) => attachment.path) ?? []);
-      const continued = repliesTo && speakers.includes(repliesTo) ? await this.#continuedRun(await this.#entryAt(replyTo)).catch(() => undefined) : undefined;
+      const continued = repliesTo && speakers.includes(repliesTo) ? await this.#continuedRun(replied).catch(() => undefined) : undefined;
       const caller = {
         calledBy: { name: author.name, uid: author.uid },
         // The catch-up leaves the message out (askKey), so the input carries all of it a hand-off would.
@@ -1394,7 +1391,7 @@ export class ChatAgent extends DurableObject<Env> {
         byOwner,
       };
       const others = continued ? speakers.filter((id) => id !== continued.agentId) : speakers;
-      if (continued) this.turns.call([continued.agentId], { ...caller, run: continued.run });
+      if (continued) this.turns.call([continued.agentId], { ...caller, session: continued.session, run: continued.run });
       if (others.length) this.turns.call(others, caller);
     }
     // The sidebars are only a convenience: update them off the prompt's path, and let a failure be.
@@ -1402,11 +1399,6 @@ export class ChatAgent extends DurableObject<Env> {
     const tags = taggedPeople(keptMentions(text, mentions));
     void this.#touchIndexes(title, author, tags, text).catch((error) => console.error("chat index:", errorMessage(error)));
     return true;
-  }
-
-  /** What a reply quotes of the message at transcript entry `id`; null for one it cannot quote. */
-  async #quote(id: number): Promise<ReplyQuote | null> {
-    return replyQuote(await this.#entryAt(id));
   }
 
   /** The transcript entry `id`; undefined for none, or for an id that cannot be one. */
@@ -2138,30 +2130,15 @@ export class ChatAgent extends DurableObject<Env> {
 
   /** What the turn controller needs of this chat (worker/agents/controller.ts). */
   #turnHost(): TurnHost {
-    const conversation = async (session: string) => {
-      const found = await this.harness.conversation(session);
-      if (!found) throw new Error(`The agent's session ${session} is gone.`);
-      return found;
-    };
-    const turnEntries = async (session: string, turn: number) => {
-      const found: EntryRecord[] = [];
-      for await (const page of entryPages(await conversation(session), { order: "descending" }, 100, 10)) {
-        for (const entry of page) {
-          if (entry.kind === CHAT_TURN_KIND && (entry.data as ChatTurnData | undefined)?.turn === turn) return found.reverse();
-          found.push(entry);
-        }
-      }
-      return [];
-    };
+    // The entries after the turn's input: the input itself is the first of #entriesFrom's.
+    const turnEntries = async (session: string, turn: number) =>
+      (await this.#entriesFrom(await this.#conversation(session), (entry) => entry.kind === CHAT_TURN_KIND && (entry.data as ChatTurnData | undefined)?.turn === turn)).slice(1);
     return {
       roster: this.roster,
       definition: (entry) => this.#index(entry.ownerUid).getAgent(entry.agentId),
-      configure: (entry, agent, turn) => this.#configureAgent(entry, agent, turn, conversation),
+      configure: (entry, agent, turn) => this.#configureAgent(entry, agent, turn),
       logSince: (after) => this.#log({ order: "descending", minEntryId: (after + 1) as EntryId }),
-      write: async (session, text, requestId) => {
-        const message: UserMessage = { role: "user", content: text, timestamp: Date.now() };
-        await (await conversation(session)).submit({ type: "write", requestId, entry: { kind: CHAT_ASIDE_KIND, model: [message] } }, BACKGROUND_CONTEXT);
-      },
+      write: async (session, text, requestId) => this.#writeAside(await this.#conversation(session), text, requestId),
       submit: async (session, input, operationId, data) => {
         await this.harness.submit(input, { session, operationId, whenBusy: "followUp", entry: { kind: CHAT_TURN_KIND, data } });
       },
@@ -2171,18 +2148,10 @@ export class ChatAgent extends DurableObject<Env> {
       },
       turnEntries,
       // Request ids, so a reply posted again after a restart is placed once.
-      post: async (reply) => {
-        const requestId = `agent-reply:${reply.agentId}:${reply.turn}`;
-        await (await this.#root()).submit({ type: "write", requestId, entry: { kind: CHAT_AGENT_KIND, data: reply } }, BACKGROUND_CONTEXT);
-        // Unread in everyone's sidebar, as a person's message is. Only a view: a failure is logged.
-        const author = { uid: `agent:${reply.agentId}`, name: reply.name };
-        void this.#touchIndexes(reply.text || reply.name, author, [], reply.text).catch((error) => console.error("chat index:", errorMessage(error)));
-      },
+      post: (reply) => this.#postAgentReply(reply, `agent-reply:${reply.agentId}:${reply.turn}`),
       tellPi: async (reply) => {
         if (!reply.text) return;
-        const said: UserMessage = { role: "user", content: askOf({ name: reply.name, kind: "agent" }, reply.text), timestamp: Date.now() };
-        const requestId = `agent-aside:${reply.agentId}:${reply.turn}`;
-        await (await this.#root()).submit({ type: "write", requestId, entry: { kind: CHAT_ASIDE_KIND, model: [said] } }, BACKGROUND_CONTEXT);
+        await this.#writeAside(await this.#root(), askOf({ name: reply.name, kind: "agent" }, reply.text), `agent-aside:${reply.agentId}:${reply.turn}`);
       },
       handToPi: async (input, data) => {
         await this.#watchRuns().catch((error: unknown) => console.error("chat status:", errorMessage(error)));
@@ -2201,38 +2170,74 @@ export class ChatAgent extends DurableObject<Env> {
     };
   }
 
+  /** A session of this chat's pi; throws when it is gone. */
+  async #conversation(session: string): Promise<Conversation> {
+    const found = await this.harness.conversation(session);
+    if (!found) throw new Error(`The session ${session} is gone.`);
+    return found;
+  }
+
+  /** A passive write into a session: context its next turn reads, with no model call. Placed once per `requestId`. */
+  async #writeAside(conversation: Conversation, text: string, requestId: string): Promise<void> {
+    const message: UserMessage = { role: "user", content: text, timestamp: Date.now() };
+    await conversation.submit({ type: "write", requestId, entry: { kind: CHAT_ASIDE_KIND, model: [message] } }, BACKGROUND_CONTEXT);
+  }
+
+  /**
+   * An agent's post in this chat's log, placed once per `requestId`, and unread in everyone's sidebar as a person's
+   * message is (`tags`: the uids it notifies). The sidebars are only a view: a failure there is logged.
+   */
+  async #postAgentReply(reply: ChatAgentReplyData, requestId: string, tags: readonly string[] = []): Promise<void> {
+    await (await this.#root()).submit({ type: "write", requestId, entry: { kind: CHAT_AGENT_KIND, data: reply } }, BACKGROUND_CONTEXT);
+    const author = { uid: `agent:${reply.agentId}`, name: reply.name };
+    void this.#touchIndexes(reply.text || reply.name, author, tags, reply.text).catch((error) => console.error("chat index:", errorMessage(error)));
+  }
+
+  /** A session's entries from the newest one `first` matches on, oldest first; none when no entry matches. */
+  async #entriesFrom(conversation: Conversation, first: (entry: EntryRecord) => boolean): Promise<EntryRecord[]> {
+    const found: EntryRecord[] = [];
+    for await (const page of entryPages(conversation, { order: "descending" }, 100, 10)) {
+      for (const entry of page) {
+        found.push(entry);
+        if (first(entry)) return found.reverse();
+      }
+    }
+    return [];
+  }
+
   /**
    * Set an agent's session up for a turn: the owner's tools and skills as they are now, its model and effort (the
    * chat's model when it names none), its own instructions, and only the tools this turn may use (allowedTools): the
    * harness offers and runs no other.
    */
-  async #configureAgent(entry: RosterEntry, agent: AgentDefinition, turn: AgentTurn, conversation: (session: string) => Promise<Conversation>): Promise<void> {
+  async #configureAgent(entry: RosterEntry, agent: AgentDefinition, turn: AgentTurn): Promise<void> {
     await this.#refreshForTurn(turn.ask);
-    const [session, choice] = await Promise.all([conversation(sessionOf(entry, turn)), this.#agentChoice(agent)]);
+    const allowed = (installed: readonly string[]) =>
+      allowedTools(installed, this.#mcpTools, agent, turn.byOwner, (server) => this.hub.server(server)?.auth === "oauth");
+    await this.#configureSession(sessionOf(entry, turn), this.#agentChoice(agent), agentInstructions(agent, this.#nameOf(entry.ownerUid)), allowed);
+  }
+
+  /**
+   * Set a session up with a model, its instructions and exactly the installed tools `allowed` keeps of them: a tool
+   * installed later stays off for it, and the harness offers and runs no other. An agent's turns and runs are few and
+   * its own: they get every MCP tool they may use, without the tool picker.
+   */
+  async #configureSession(
+    session: string,
+    choosing: Promise<ModelChoice>,
+    instructions: string,
+    allowed: (installed: readonly string[]) => readonly string[],
+  ): Promise<void> {
+    const [found, choice] = await Promise.all([this.#conversation(session), choosing]);
     const installed = this.registry
       .snapshot()
       .tools()
       .map(({ tool }) => tool);
-    const allowed = new Set(
-      allowedTools(
-        installed.map((tool) => tool.name),
-        this.#mcpTools,
-        agent,
-        turn.byOwner,
-        (server) => this.hub.server(server)?.auth === "oauth",
-      ),
-    );
-    const enabled = installed.filter((tool) => allowed.has(tool.name));
+    const keep = new Set(allowed(installed.map((tool) => tool.name)));
+    const enabled = installed.filter((tool) => keep.has(tool.name));
     const deferred = enabled.filter((tool) => tool.deferred);
-    await session.configure(
-      {
-        ...this.#agentChange(choice),
-        instructions: agentInstructions(agent, this.#nameOf(entry.ownerUid)),
-        // Exactly these: a tool installed after this turn was set up stays off for it.
-        tools: enabled,
-        // An agent's turns are few and its own: it gets every MCP tool it may use, without the tool picker.
-        modelTools: deferred.length ? { add: deferred } : null,
-      },
+    await found.configure(
+      { ...this.#agentChange(choice), instructions, tools: enabled, modelTools: deferred.length ? { add: deferred } : null },
       BACKGROUND_CONTEXT,
     );
   }
@@ -2266,13 +2271,13 @@ export class ChatAgent extends DurableObject<Env> {
   }
 
   /**
-   * The owner's directory tells this chat about one of their agents: it was saved, turned on or off, or deleted
-   * (`agent` null). `home`: this chat is the agent's home conversation, where it is on the roster and its runs run.
-   * Its alarms follow the definition; a definition with a trigger and no workflow is compiled to one.
+   * The owner's directory tells this chat, the agent's home conversation (where it is on the roster and its runs run),
+   * that the agent was saved, turned on or off, or deleted (`agent` null). Its alarms follow the definition; a
+   * definition with a trigger and no workflow is compiled to one.
    */
-  async agentChanged(agentId: string, agent: AgentDefinition | null, home: boolean): Promise<void> {
+  async agentChanged(agentId: string, agent: AgentDefinition | null): Promise<void> {
     if (this.#gone) return;
-    if (home && agent) {
+    if (agent) {
       this.ctx.storage.kv.put(HOME_AGENT_KEY, agentId);
       if (agent.enabled && !this.roster.get(agentId)) {
         const refused = await this.#addToRoster(agent);
@@ -2381,6 +2386,8 @@ export class ChatAgent extends DurableObject<Env> {
   }
 
   readonly #compiling = new Map<string, Promise<AgentDefinition>>();
+  /** The last refresh for a run (#runRefresh): which agent at which version, when, and its promise. */
+  #runRefreshed?: { key: string; at: number; done: Promise<void> };
 
   /**
    * One model call turns an agent's instructions into its workflow, saved with the definition (as the version it was
@@ -2398,8 +2405,7 @@ export class ChatAgent extends DurableObject<Env> {
         servers.map(async (server) => ({ server, tools: await this.hub.tools(server).catch(() => []) })),
       );
       const { workflow } = await compileWorkflow(this.#oneShotModels, model, agent, listed);
-      const { id, avatar: _a, color: _c, origin, enabled: _e, version, createdAt: _cr, updatedAt: _u, copiedFrom: _f, ...fields } = agent;
-      const saved = await this.#directory.saveAgent({ ...fields, workflow }, origin, undefined, { id, version });
+      const saved = await this.#directory.saveAgent({ ...inputOf(agent), workflow }, agent.origin, undefined, { id: agent.id, version: agent.version });
       if ("error" in saved) throw new Error(saved.error);
       return saved;
     })().finally(() => this.#compiling.delete(agent.id));
@@ -2434,52 +2440,36 @@ export class ChatAgent extends DurableObject<Env> {
   }
 
   /** A run's report in this chat's log, and as context in the agent's session here when it has one. */
-  async #placeRun(reply: ChatAgentReplyData, context: string, requestId: string, entry: RosterEntry | null): Promise<void> {
-    await (await this.#root()).submit({ type: "write", requestId, entry: { kind: CHAT_AGENT_KIND, data: reply } }, BACKGROUND_CONTEXT);
-    if (entry) {
-      const said: UserMessage = { role: "user", content: context, timestamp: Date.now() };
-      const session = await this.harness.conversation(entry.session);
-      await session?.submit({ type: "write", requestId: `${requestId}:context`, entry: { kind: CHAT_ASIDE_KIND, model: [said] } }, BACKGROUND_CONTEXT);
-    }
-    const author = { uid: `agent:${reply.agentId}`, name: reply.name };
-    void this.#touchIndexes(reply.text || reply.name, author, [], reply.text).catch((error) => console.error("chat index:", errorMessage(error)));
+  async #placeRun(reply: ChatAgentReplyData, context: string, requestId: string, entry: RosterEntry | null, tags: readonly string[] = []): Promise<void> {
+    await this.#postAgentReply(reply, requestId, tags);
+    const session = entry && (await this.harness.conversation(entry.session));
+    if (session) await this.#writeAside(session, context, `${requestId}:context`);
   }
 
   /**
    * The run a reply continues: when `entry` is a run's report posted here (its run is this chat's), the session of the
    * run the reply goes to, a fork of the run's, made at the first reply and kept for the next ones.
    */
-  async #continuedRun(entry: EntryRecord | undefined): Promise<{ agentId: string; run: TurnRun } | undefined> {
+  async #continuedRun(entry: EntryRecord | undefined): Promise<{ agentId: string; session: string; run: RunRef } | undefined> {
     if (entry?.kind !== CHAT_AGENT_KIND) return undefined;
     const data = entry.data as unknown as ChatAgentReplyData;
     if (!data.run) return undefined;
     const record = this.runs.get(data.agentId, data.run.dueAt);
     if (!record) return undefined;
-    const ref = { dueAt: record.dueAt, why: record.why, ...(record.test && { test: true as const }) };
-    if (record.replySession) return { agentId: data.agentId, run: { ...ref, session: record.replySession } };
+    const ref = runRef(record);
+    if (record.replySession) return { agentId: data.agentId, session: record.replySession, run: ref };
     const items = this.runs.items(data.agentId, record.dueAt);
     const from = items.find((item) => item.status === "acted" && item.session) ?? items.find((item) => item.session);
     if (!from?.session) return undefined;
     const fork = await this.harness.sessions.fork(from.session);
     // A run of several items: the fork has one item's reads; the whole report says what the others came to.
-    if (items.length > 1) {
-      const said: UserMessage = { role: "user", content: reportContext(record.detail.when ?? "", reportOf(items)), timestamp: Date.now() };
-      await (await this.harness.conversation(fork.id))?.submit(
-        { type: "write", requestId: `run-reply:${record.dueAt}`, entry: { kind: CHAT_ASIDE_KIND, model: [said] } },
-        BACKGROUND_CONTEXT,
-      );
-    }
+    if (items.length > 1) await this.#writeAside(await this.#conversation(fork.id), reportContext(record.detail.when ?? "", reportOf(items)), `run-reply:${record.dueAt}`);
     this.runs.setReplySession(data.agentId, record.dueAt, fork.id);
-    return { agentId: data.agentId, run: { ...ref, session: this.runs.get(data.agentId, record.dueAt)!.replySession ?? fork.id } };
+    return { agentId: data.agentId, session: this.runs.get(data.agentId, record.dueAt)!.replySession ?? fork.id, run: ref };
   }
 
   /** What the run executor needs of this chat (worker/agents/runs/). */
   #runnerHost(): RunnerHost {
-    const conversation = async (session: string) => {
-      const found = await this.harness.conversation(session);
-      if (!found) throw new Error(`The run's session ${session} is gone.`);
-      return found;
-    };
     const signInOr = (error: unknown) => (error instanceof McpFailure && error.error.code === "auth_required" ? new SignInNeeded(error.error.server ?? "") : error);
     return {
       runs: this.runs,
@@ -2497,26 +2487,16 @@ export class ChatAgent extends DurableObject<Env> {
         }
       },
       needsSignIn: async (servers) => {
-        const missing: string[] = [];
-        for (const server of servers) {
-          if (this.hub.server(server)?.auth !== "oauth") continue;
-          const { tokens } = await mcpAuthStore(this.uid, server).get();
-          if (!tokens) missing.push(server);
-        }
-        return missing;
+        const signsIn = servers.filter((server) => this.hub.server(server)?.auth === "oauth");
+        const signedIn = await Promise.all(signsIn.map(async (server) => Boolean((await mcpAuthStore(this.uid, server).get()).tokens)));
+        return signsIn.filter((_, index) => !signedIn[index]);
       },
       newSession: async () => (await this.harness.sessions.create()).id,
-      configure: (session, agent, model) => this.#configureRun(session, agent, model, conversation),
-      write: async (session, text, requestId) => {
-        const message: UserMessage = { role: "user", content: text, timestamp: Date.now() };
-        await (await conversation(session)).submit({ type: "write", requestId, entry: { kind: CHAT_ASIDE_KIND, model: [message] } }, BACKGROUND_CONTEXT);
-      },
+      configure: (session, agent, model) => this.#configureRun(session, agent, model),
+      write: async (session, text, requestId) => this.#writeAside(await this.#conversation(session), text, requestId),
       work: async (session, prompt, operationId) => {
-        const data: RunStepData = { op: operationId };
-        await this.harness.submit(prompt, { session, operationId, whenBusy: "followUp", entry: { kind: RUN_STEP_KIND, data } });
-        const result = await this.harness.wait(operationId, { session });
-        const spend = workSpend(await this.#entriesFrom(await conversation(session), (entry) => isRunStep(entry, operationId)));
-        return { status: result.status, ...(result.text !== undefined && { text: result.text }), ...(result.reason && { reason: result.reason }), ...spend };
+        const { result, entries } = await this.#runStep(session, prompt, operationId);
+        return { status: result.status, ...(result.text !== undefined && { text: result.text }), ...(result.reason && { reason: result.reason }), ...workSpend(entries) };
       },
       deliver: (request) => this.#deliverRun(request),
       changed: (agentId) => this.sockets.broadcast({ type: "runs", agentId }),
@@ -2528,7 +2508,7 @@ export class ChatAgent extends DurableObject<Env> {
       definition: (agentId) => this.#directory.getAgent(agentId),
       sharedWatch: (step) => {
         const server = this.hub.server(step.server);
-        return !!server && server.auth !== "oauth" && sharesResults(server);
+        return !!server && watchableForAll(server);
       },
       subscribe: async (agentId, step, everyMinutes) => {
         await exports.Source.getByName(await sourceName(step)).subscribe(step, { uid: this.uid, chatId: this.chatId, agentId }, everyMinutes);
@@ -2540,59 +2520,42 @@ export class ChatAgent extends DurableObject<Env> {
     };
   }
 
-  /** A session's entries from the newest one `first` matches on, oldest first; none when no entry matches. */
-  async #entriesFrom(conversation: Conversation, first: (entry: EntryRecord) => boolean): Promise<EntryRecord[]> {
-    const found: EntryRecord[] = [];
-    for await (const page of entryPages(conversation, { order: "descending" }, 100, 10)) {
-      for (const entry of page) {
-        found.push(entry);
-        if (first(entry)) return found.reverse();
-      }
-    }
-    return [];
+  /** A run step's prompt into its session (placed once per `operationId`), waited for: its end and its entries. */
+  async #runStep(session: string, prompt: string, operationId: string) {
+    const data: RunStepData = { op: operationId };
+    await this.harness.submit(prompt, { session, operationId, whenBusy: "followUp", entry: { kind: RUN_STEP_KIND, data } });
+    const result = await this.harness.wait(operationId, { session });
+    const entries = await this.#entriesFrom(await this.#conversation(session), (entry) => isRunStep(entry, operationId));
+    return { result, entries };
   }
 
   /**
    * Set a run's session up for its work steps: the owner's tools and skills as they are now, the agent's model (or the
    * step's), its run instructions, and only reading tools: the read-only MCP tools of its servers and the app's read
-   * tools (allowedTools for a turn its owner did not ask for, with all of the agent's servers its own). `extra`: tools
+   * tools (runTools). `extra`: tools
    * of the app a step needs besides (a page rebuild's).
    */
-  async #configureRun(
-    session: string,
-    agent: AgentDefinition,
-    model: string | undefined,
-    conversation: (session: string) => Promise<Conversation>,
-    extra: readonly string[] = [],
-  ): Promise<void> {
-    await this.#refreshForTurn(agent.instructions.slice(0, 2_000));
-    const [found, choice] = await Promise.all([conversation(session), this.#agentChoice(agent, model)]);
-    const installed = this.registry
-      .snapshot()
-      .tools()
-      .map(({ tool }) => tool);
-    const own = agent.servers ?? this.hub.servers().map((server) => server.name);
-    const allowed = new Set([
-      ...allowedTools(
-        installed.map((tool) => tool.name),
-        this.#mcpTools,
-        { servers: agent.servers, sharedServers: own },
-        false,
-        () => false,
-      ),
-      ...extra,
-    ]);
-    const enabled = installed.filter((tool) => allowed.has(tool.name));
-    const deferred = enabled.filter((tool) => tool.deferred);
-    await found.configure(
-      {
-        ...this.#agentChange(choice),
-        instructions: runInstructions(agent, this.#nameOf(this.uid)),
-        tools: enabled,
-        modelTools: deferred.length ? { add: deferred } : null,
-      },
-      BACKGROUND_CONTEXT,
-    );
+  async #configureRun(session: string, agent: AgentDefinition, model: string | undefined, extra: readonly string[] = []): Promise<void> {
+    await this.#runRefresh(agent);
+    const allowed = (installed: readonly string[]) => [...runTools(installed, this.#mcpTools, agent), ...extra];
+    await this.#configureSession(session, this.#agentChoice(agent, model), runInstructions(agent, this.#nameOf(this.uid)), allowed);
+  }
+
+  /**
+   * The owner's tools and skills brought up to date for an agent's run: once for all the items and steps of a run that
+   * start within RUN_STALE_MS, not once each (a refresh lists files and tools, and may ask a model which skills fit).
+   */
+  #runRefresh(agent: AgentDefinition): Promise<void> {
+    const key = `${agent.id}:${agent.version}`;
+    const now = Date.now();
+    const kept = this.#runRefreshed;
+    if (kept?.key === key && now - kept.at < RUN_STALE_MS) return kept.done;
+    const done = this.#refreshForTurn(agent.instructions.slice(0, 2_000));
+    this.#runRefreshed = { key, at: now, done };
+    done.catch(() => {
+      if (this.#runRefreshed?.done === done) this.#runRefreshed = undefined;
+    });
+    return done;
   }
 
   /** A run's report as a post of its agent's, carrying the run. */
@@ -2611,7 +2574,7 @@ export class ChatAgent extends DurableObject<Env> {
       hop: 0,
       startedAt: this.runs.get(agent.id, run.dueAt)?.startedAt ?? now,
       endedAt: now,
-      run: { dueAt: run.dueAt, why: run.why, ...(run.test && { test: true as const }) },
+      run: runRef(run),
     };
   }
 
@@ -2632,14 +2595,15 @@ export class ChatAgent extends DurableObject<Env> {
         detail: `at ${AUTONOMY_LABELS[agent.autonomy]}, outside tools wait for approvals, which come later`,
       };
     }
-    const when = whenOf(agent);
+    const context = reportContext(whenOf(agent), request.text);
+    // "owner", "me", "you", the agent itself or this chat: the owner, in the agent's home conversation.
+    const isOwner = (to: string) => OWNER_TARGETS.has(to.toLowerCase()) || to.replace(/^@/, "") === agent.name || to === this.chatId;
     if (step.via === "notify") {
-      const others = step.to.filter((to) => !OWNER_TARGETS.has(to.toLowerCase()) && to.replace(/^@/, "") !== agent.name);
+      const others = step.to.filter((to) => !isOwner(to.trim()));
       if (others.length === step.to.length)
         return { kind: "notify", to: step.to.join(", "), status: "refused", detail: "at Inform, an agent notifies only its owner" };
-      const requestId = `run-post:${agent.id}:${request.run.dueAt}:${request.key}`;
-      await this.#placeRun(this.#runReply(request), reportContext(when, request.text), requestId, this.roster.get(agent.id));
-      await this.#directory.touchChat(this.chatId, request.text, true, { from: agent.name, text: excerpt(request.text), at: Date.now() });
+      // Posted here, tagging the owner: their sidebar's notice, and a browser notification when they allow one.
+      await this.#placeRun(this.#runReply(request), context, `run-post:${agent.id}:${request.run.dueAt}:${request.key}`, this.roster.get(agent.id), [this.uid]);
       return {
         kind: "notify",
         to: "you",
@@ -2648,28 +2612,24 @@ export class ChatAgent extends DurableObject<Env> {
         ...(others.length && { detail: `not ${others.join(", ")}: at Inform, an agent notifies only its owner` }),
       };
     }
-    // To chats: its home (this one), and the owner's chats it is in, by id or title.
-    const sent: string[] = [];
-    const refused: string[] = [];
-    const chats = (await this.#directory.listChats()).filter((chat) => !chat.sharedBy);
-    for (const to of step.to) {
-      const target = to.trim();
-      const requestId = `run-post:${agent.id}:${request.run.dueAt}:${request.key}:${target}`;
-      if (OWNER_TARGETS.has(target.toLowerCase()) || target.replace(/^@/, "") === agent.name || target === this.chatId) {
-        await this.#placeRun(this.#runReply(request), reportContext(when, request.text), requestId, this.roster.get(agent.id));
-        sent.push("its chat");
-        continue;
-      }
-      const chat = chats.find((one) => one.id === target) ?? chats.find((one) => one.title.toLowerCase() === target.toLowerCase());
-      if (!chat) {
-        refused.push(`${target} (no such chat of yours)`);
-        continue;
-      }
-      const other = exports.ChatAgent.getByName(chatAgentName(this.uid, chat.id));
-      const answer = await other.postRun(this.#runReply(request), reportContext(when, request.text), requestId);
-      if (answer) refused.push(`${chat.title} (${answer.error})`);
-      else sent.push(chat.title);
-    }
+    // To chats: its home (this one), and the owner's chats it is in, by id or title. The list only when one is named.
+    const targets = step.to.map((to) => to.trim());
+    const chats = targets.every(isOwner) ? [] : (await this.#directory.listChats()).filter((chat) => !chat.sharedBy);
+    const outcomes = await Promise.all(
+      targets.map(async (target): Promise<{ sent: string } | { refused: string }> => {
+        const requestId = `run-post:${agent.id}:${request.run.dueAt}:${request.key}:${target}`;
+        if (isOwner(target)) {
+          await this.#placeRun(this.#runReply(request), context, requestId, this.roster.get(agent.id));
+          return { sent: "its chat" };
+        }
+        const chat = chats.find((one) => one.id === target) ?? chats.find((one) => one.title.toLowerCase() === target.toLowerCase());
+        if (!chat) return { refused: `${target} (no such chat of yours)` };
+        const answer = await exports.ChatAgent.getByName(chatAgentName(this.uid, chat.id)).postRun(this.#runReply(request), context, requestId);
+        return answer ? { refused: `${chat.title} (${answer.error})` } : { sent: chat.title };
+      }),
+    );
+    const sent = outcomes.flatMap((outcome) => ("sent" in outcome ? [outcome.sent] : []));
+    const refused = outcomes.flatMap((outcome) => ("refused" in outcome ? [outcome.refused] : []));
     return {
       kind: "chat",
       to: [...sent, ...refused].join(", ") || step.to.join(", "),
@@ -2723,15 +2683,10 @@ export class ChatAgent extends DurableObject<Env> {
   /** A page rebuilt as today's snapshot: one model turn in a fresh session that may write, check and publish only it. */
   async #rebuildPage(request: DeliveryRequest, artifactId: string, title: string): Promise<RunDelivery> {
     const { agent, run } = request;
-    const conversation = async (session: string) => {
-      const found = await this.harness.conversation(session);
-      if (!found) throw new Error(`The run's session ${session} is gone.`);
-      return found;
-    };
     // The artifact tools take this chat's pages and the ones brought in.
     this.#bringIn([artifactId]);
     const session = (await this.harness.sessions.create()).id;
-    await this.#configureRun(session, agent, undefined, conversation, ["artifact_read", WRITE_TOOL, CHECK_TOOL, PUBLISH_TOOL, DRAFTS_TOOL]);
+    await this.#configureRun(session, agent, undefined, ["artifact_read", WRITE_TOOL, CHECK_TOOL, PUBLISH_TOOL, DRAFTS_TOOL]);
     const operationId = `run:${agent.id}:${run.dueAt}:page:${request.key}`;
     const prompt = [
       `Rebuild the page "${title}" (artifact ${artifactId}) as a snapshot of this run: today's data written into the page, so it makes no live calls.`,
@@ -2739,10 +2694,7 @@ export class ChatAgent extends DurableObject<Env> {
       `Read the page with artifact_read, write the new page with ${WRITE_TOOL}, check it with ${CHECK_TOOL} and fix what it finds, ` +
         `then publish it with ${PUBLISH_TOOL} and artifact_id "${artifactId}". Answer with one line on what changed.`,
     ].join("\n\n");
-    const data: RunStepData = { op: operationId };
-    await this.harness.submit(prompt, { session, operationId, whenBusy: "followUp", entry: { kind: RUN_STEP_KIND, data } });
-    const result = await this.harness.wait(operationId, { session });
-    const entries = await this.#entriesFrom(await conversation(session), (entry) => isRunStep(entry, operationId));
+    const { result, entries } = await this.#runStep(session, prompt, operationId);
     const page = publishedIn(entries).find((one) => one.artifactId === artifactId);
     if (!page) return { kind: "page", to: title, status: "failed", detail: `page not updated${result.reason ? `: ${result.reason}` : ": it was not published"}` };
     return { kind: "page", to: title, status: "sent", detail: `${title} v${page.version} published`, version: page.version };

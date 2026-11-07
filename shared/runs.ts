@@ -102,6 +102,11 @@ export interface AgentRunDetail extends AgentRunView {
 /** What a run's post in a chat carries (ChatAgentReplyData.run): which run, so a reply can continue it. */
 export type RunRef = { dueAt: number; why: RunWhy; test?: true };
 
+/** The ref of a run, from anything that has its due time, why it ran and whether it was a test. */
+export function runRef(run: { dueAt: number; why: RunWhy; test?: boolean }): RunRef {
+  return { dueAt: run.dueAt, why: run.why, ...(run.test && { test: true as const }) };
+}
+
 /** How many runs the runs list keeps per agent; older ones go. */
 export const KEPT_RUNS = 200;
 /** How many items of a scope's list one run takes at most. */
