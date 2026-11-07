@@ -152,11 +152,11 @@ export class ChatSignals {
 
   /**
    * An agent's turn ended: one nobody asked for that passed is `passed`; one handed to it by another agent that failed
-   * or stopped is that agent's `handoff_failed`.
+   * is that agent's `handoff_failed`.
    */
-  turnEnded(turn: { id: number; agentId: string; calledBy: ChatAgentReplyData["calledBy"] }, status: "done" | "failed" | "passed" | "stopped"): void {
+  turnEnded(turn: { id: number; agentId: string; calledBy: ChatAgentReplyData["calledBy"] }, status: "done" | "failed" | "passed"): void {
     if (status === "passed") this.#record(turn.agentId, "passed", undefined, { turn: turn.id });
-    if ((status === "failed" || status === "stopped") && turn.calledBy.agentId) this.#record(turn.calledBy.agentId, "handoff_failed", undefined, { turn: turn.id });
+    if (status === "failed" && turn.calledBy.agentId) this.#record(turn.calledBy.agentId, "handoff_failed", undefined, { turn: turn.id });
   }
 
   /** `uid` posted a reply an agent held for their review, edited or not, or discarded it. */

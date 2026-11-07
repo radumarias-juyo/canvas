@@ -1329,7 +1329,6 @@ export class UserDirectory extends DurableObject<Env> {
     return this.#memory.delete(id);
   }
 
-  /** A note the model saves in one of the user's chats, which says who reads and asks there (UserMemory.learn). */
   /**
    * Keep what a chat recorded of how people worked with this user's agents there (shared/signals.ts): each checked, and
    * none from a chat off the record, as the chat says or as this user's sidebar row of it says.
@@ -1338,6 +1337,7 @@ export class UserDirectory extends DurableObject<Env> {
     this.#signals.record(signals, (chatId) => this.#rows.kindOf(chatId));
   }
 
+  /** A note the model saves in one of the user's chats, which says who reads and asks there (UserMemory.learn). */
   learnNote(writer: MemoryWriter, note: LearnedNote): Learned {
     return this.#memory.learn(writer, note);
   }

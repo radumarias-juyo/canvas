@@ -116,11 +116,16 @@ export function looksLikeCorrection(text: string): boolean {
     .replace(/@[a-z0-9-]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
-  if (/^(no|nope|nah|wrong|incorrect|not quite|not really|that's not|that is not|thats not)\b/.test(said)) return true;
-  return /\b(that'?s wrong|is wrong|are wrong|was wrong|not what i (asked|meant|wanted)|you misunderstood|you missed|incorrect|not correct|isn'?t right|is not right|actually,|i said\b|i meant\b|should be\b|should have been\b)/.test(
-    said,
-  );
+  return OPENS_WITH_NO.test(said) || SAYS_WRONG.test(said);
 }
+
+const OPENS_WITH_NO = /^(no|nope|nah|wrong|incorrect|not quite|not really|that's not|that is not|thats not)\b/;
+const SAYS_WRONG = new RegExp(
+  `\\b(${[
+    "that'?s wrong|is wrong|are wrong|was wrong|not what i (asked|meant|wanted)|you misunderstood|you missed",
+    "incorrect|not correct|isn'?t right|is not right|actually,|i said\\b|i meant\\b|should be\\b|should have been\\b",
+  ].join("|")})`,
+);
 
 /** Words a question key leaves out: the ones that change nothing of what is asked. */
 const FILLER = new Set(

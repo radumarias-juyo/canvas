@@ -720,7 +720,9 @@ export class ChatAgent extends DurableObject<Env> {
         // A version a conversation apart from the chat published (an agent's private turn): kept by version, before
         // anything else, so members never reach it before its reply is posted, nor hear of it (ChatRoster.release).
         const held = session !== undefined && chatId === this.chatId && this.roster.recordPage(session, artifact.id, artifact.latest);
-        if (session !== undefined && isPiConversation(session) && chatId === this.chatId) this.signals.published(artifact.id, artifact.latest);
+        if (session !== undefined && isPiConversation(session) && chatId === this.chatId) {
+          this.signals.published(artifact.id, artifact.latest);
+        }
         return afterPublish(this.#published, artifact, chatId, held);
       },
       rulesFor: (session) => this.#rulesFor(session),
@@ -1603,7 +1605,7 @@ export class ChatAgent extends DurableObject<Env> {
     const entry = await this.#entryAt(entryId);
     // The offer as the app shows it (entryOffer), so Yes is taken only where it is offered.
     if (!entry || entryOffer(entry) === undefined) throw new Error("That message offers no next step.");
-    this.signals.offerTaken(author.uid, entry.kind === CHAT_AGENT_KIND ? (entry.data as unknown as ChatAgentReplyData).agentId : AGENT_NAME, entry.id as number);
+    this.signals.offerTaken(author.uid, replyAgent(entry) ?? AGENT_NAME, entry.id as number);
     await this.prompt(OFFER_YES, author, [], [], entry.id, true);
   }
 
@@ -3024,7 +3026,7 @@ export class ChatAgent extends DurableObject<Env> {
     const reacted = on ? await this.#entryAt(entry) : undefined;
     if (on && !this.reactions.has(entry) && !isReactable(reacted)) throw new Error("That message cannot be reacted to.");
     this.#setReaction(entry, emoji, by.uid, on);
-    const reactedTo = reacted?.kind === CHAT_AGENT_KIND ? (reacted.data as unknown as ChatAgentReplyData).agentId : reacted?.kind === "pi.assistant" ? AGENT_NAME : undefined;
+    const reactedTo = reacted && (replyAgent(reacted) ?? (reacted.kind === "pi.assistant" ? AGENT_NAME : undefined));
     if (reactedTo) this.signals.reacted(by.uid, reactedTo, entry, emoji);
   }
 
@@ -4971,7 +4973,8 @@ export class ChatAgent extends DurableObject<Env> {
       await this.#expireAction(id);
       return this.actions.get(id) ?? found;
     }
-    if (found.status === "pending") this.signals.action(uid, found.actor.agentId ?? (found.actor.name === AGENT_NAME ? AGENT_NAME : ""), decision);
+    const actor = found.actor.agentId ?? (found.actor.name === AGENT_NAME ? AGENT_NAME : undefined);
+    if (found.status === "pending" && actor) this.signals.action(uid, actor, decision);
     if (decision === "decline") {
       const declined = this.actions.move(id, "pending", "declined");
       if (!declined) return found;
@@ -5775,4 +5778,9 @@ function pageNote(page: ChatPage, what: "discusses" | "has a new version" | "cam
 /** A branch's title, from the chat it branched off from. */
 function branchTitleOf(title: string): string {
   return `${title || "Chat"} (branch)`;
+}
+
+/** The agent whose reply `entry` is (a `chat.agent` entry); undefined for any other entry. */
+function replyAgent(entry: EntryRecord): string | undefined {
+  return entry.kind === CHAT_AGENT_KIND ? (entry.data as unknown as ChatAgentReplyData).agentId : undefined;
 }

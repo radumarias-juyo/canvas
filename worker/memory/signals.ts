@@ -100,9 +100,8 @@ export class SignalStore {
 
   /** An agent's signals from `from` (inclusive) to `to` (exclusive), newest first. */
   between(agentId: string, from: number, to: number): AgentSignal[] {
-    return (
-      this.#sql.exec("SELECT * FROM agent_signals WHERE agent_id = ? AND at >= ? AND at < ? ORDER BY at DESC, id DESC", agentId, from, to).toArray() as SignalRow[]
-    ).map(signalOf);
+    const query = "SELECT * FROM agent_signals WHERE agent_id = ? AND at >= ? AND at < ? ORDER BY at DESC, id DESC";
+    return (this.#sql.exec(query, agentId, from, to).toArray() as SignalRow[]).map(signalOf);
   }
 
   /** Whether an agent did anything from `from` to `to`: a signal of any kind. */
