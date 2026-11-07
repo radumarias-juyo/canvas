@@ -7,7 +7,7 @@ import type { EntryRecord } from "@earendil-works/pi-durable";
 import type { EntryReactions, Reactions } from "./reactions.ts";
 import type { Attachment, AttachmentInput } from "./attachments.ts";
 import type { Mention, MentionInput } from "./mentions.ts";
-import type { ChatAgentView } from "./agents.ts";
+import type { AgentColor, ChatAgentView } from "./agents.ts";
 
 export type McpErrorCode =
   | "server_not_connected"
@@ -304,6 +304,8 @@ export interface ChatSummary {
   unread?: true;
   /** Set when someone tagged this user ("@name") in a message they have not seen yet. */
   mentioned?: true;
+  /** Set on an agent's own conversation: the agent, shown like a contact (its badge and its last post). */
+  agent?: { id: string; name: string; avatar: string; color: AgentColor; preview?: string };
 }
 
 /**
@@ -577,6 +579,8 @@ export type ChatServerMessage =
   | { type: "callHint"; entry: number }
   /** The chat's agents besides pi (shared/agents.ts): on connect, and whenever one is added, removed, starts or ends a turn. */
   | { type: "agents"; agents: ChatAgentView[] }
+  /** A run of the agent whose home this chat is started, moved on or ended: its runs list is read again. */
+  | { type: "runs"; agentId: string }
   /** Sent just before the chat closes a removed person's socket, in case the close code is lost on the way. */
   | { type: "removed" }
   /** Sent to everyone just before the chat closes their sockets, when its owner deleted it. */

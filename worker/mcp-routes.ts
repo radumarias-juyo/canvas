@@ -1,3 +1,4 @@
+import { exports } from "cloudflare:workers";
 import { errorMessage } from "../shared/util.ts";
 import { mcpAuthStore } from "./users.ts";
 import { finishSignIn, OAUTH_CALLBACK_PATH, serverOfState, SIGN_IN_PATH, startSignIn } from "./mcp/oauth.ts";
@@ -37,6 +38,10 @@ export async function mcpRoute(request: Request, env: Env, uid: string): Promise
     if (denied || !code) return page("Sign-in failed", denied ?? "The sign-in returned no code.", 400);
     try {
       await finishSignIn(server.url, server.name, mcpAuthStore(uid, server.name), code, state);
+      // The runs of the user's agents that waited for this sign-in go again. A failure there is the runs' to record.
+      await exports.UserDirectory.getByName(uid)
+        .signedInTo(server.name)
+        .catch((error: unknown) => console.error("agent runs:", errorMessage(error)));
       return page(`Signed in to ${server.name}`, "Go back to the chat and ask again. You can close this tab.");
     } catch (error) {
       return page("Sign-in failed", errorMessage(error), 400);

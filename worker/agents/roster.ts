@@ -6,6 +6,7 @@ import {
   type ChatAgentReplyData,
   type ChatAgentView,
 } from "../../shared/agents.ts";
+import type { RunRef } from "../../shared/runs.ts";
 import type { Sql } from "../members.ts";
 
 /** One agent of a chat's roster: which definition it points at, and the pi session it runs in. */
@@ -37,14 +38,19 @@ export interface AgentTurn extends AgentTurnView {
   ask: string;
   /** Its input reached its session (see ChatRoster.markSubmitted). */
   submitted?: true;
+  /** Set on a reply to a run's report: the run, and the session the turn runs in (a fork of the run's), not the agent's own. */
+  run?: TurnRun;
 }
+
+/** The run a turn continues, and the session it continues in. */
+export type TurnRun = RunRef & { session: string };
 
 /**
  * A turn to queue. `askKey` says which log entry `ask` is (see askKey in turns.ts), so the catch-up before a turn
  * leaves out what its input already says; absent when it is no entry of the log. Without a `root`, the turn starts a
  * chain of hand-offs of its own.
  */
-export type TurnRequest = Pick<AgentTurn, "agentId" | "hop" | "calledBy" | "byOwner" | "ask"> & { root?: number; askKey?: string };
+export type TurnRequest = Pick<AgentTurn, "agentId" | "hop" | "calledBy" | "byOwner" | "ask" | "run"> & { root?: number; askKey?: string };
 
 /** What an ended turn still has to deliver: its reply to the log, and whether pi is handed a turn for it. */
 export interface Outbox {
@@ -82,6 +88,7 @@ type TurnRow = {
   reply: string | null;
   to_pi: number;
   delivered_at: number | null;
+  run: string | null;
 };
 
 function entryOf(row: RosterRow): RosterEntry {
@@ -112,6 +119,7 @@ function turnOf(row: TurnRow): AgentTurn {
     ...(row.started_at !== null && { startedAt: row.started_at }),
     ...(row.submitted_at !== null && { submitted: true }),
     ...(row.ended_at !== null && { endedAt: row.ended_at }),
+    ...(row.run !== null && { run: JSON.parse(row.run) as TurnRun }),
   };
 }
 
@@ -150,6 +158,9 @@ export class ChatRoster {
       CREATE INDEX IF NOT EXISTS chat_agent_turns_by_status ON chat_agent_turns (status);
       CREATE INDEX IF NOT EXISTS chat_agent_turns_by_root ON chat_agent_turns (root);
     `);
+    // Added later: the run a reply to a run's report continues (TurnRun).
+    const columns = sql.exec("SELECT name FROM pragma_table_info('chat_agent_turns')").toArray();
+    if (!columns.some((column) => column.name === "run")) sql.exec("ALTER TABLE chat_agent_turns ADD COLUMN run TEXT");
   }
 
   /** The roster's clock: what its turns' times are taken from. */
@@ -256,8 +267,8 @@ export class ChatRoster {
   enqueue(turn: TurnRequest): AgentTurn {
     const row = this.#sql
       .exec(
-        `INSERT INTO chat_agent_turns (agent_id, status, hop, called_by, by_owner, root, ask, ask_key, created_at)
-         VALUES (?, 'queued', ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
+        `INSERT INTO chat_agent_turns (agent_id, status, hop, called_by, by_owner, root, ask, ask_key, created_at, run)
+         VALUES (?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
         turn.agentId,
         turn.hop,
         JSON.stringify(turn.calledBy),
@@ -266,6 +277,7 @@ export class ChatRoster {
         turn.ask,
         turn.askKey ?? null,
         this.#now(),
+        turn.run ? JSON.stringify(turn.run) : null,
       )
       .toArray()[0] as TurnRow;
     return turnOf(row);
