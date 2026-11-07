@@ -161,6 +161,7 @@ class MemberObject implements SeatHost {
         return room.seatLog(this.uid, agentId, after, turn);
       },
       ended: (turn, ended) => room.seatEnded(this.uid, agentId, turn, ended),
+      action: async () => {},
     };
   }
   async create() {
@@ -354,6 +355,8 @@ class Room implements TurnHost {
         return object.seats.abort(ROOM, turn);
       },
       wake: async () => object.seats.wake(ROOM),
+      kind: async (kind) => object.seats.setKind(ROOM, kind),
+      decide: async () => ({ error: "No such action.", status: 404 }),
     };
   }
   async mayCall(_entry: RosterEntry, uid: string) {
@@ -1596,6 +1599,7 @@ describe("Member agents: a seat's turn given again while it is set up, or after 
           this.ended.push({ turn, result });
           return true;
         },
+        action: async () => {},
       };
     }
     async create() {
