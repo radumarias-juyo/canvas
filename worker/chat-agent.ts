@@ -2631,7 +2631,8 @@ export class ChatAgent extends DurableObject<Env> {
   get #published(): PublishedHost {
     return {
       chatId: this.chatId,
-      kind: () => this.kinds.kind(),
+      // A seat object's pages go out as its room's kind (AgentSeats.publishKind): an off-the-record room's never leave it.
+      kind: () => this.seats.publishKind() ?? this.kinds.kind(),
       directory: this.#directory,
       chat: (chatId) => exports.ChatAgent.getByName(chatAgentName(this.uid, chatId)),
       later: (work) => void work.catch((error: unknown) => console.error("page chat:", errorMessage(error))),
@@ -3779,9 +3780,10 @@ export class ChatAgent extends DurableObject<Env> {
     return { ownerUid: this.uid, chatId: this.chatId };
   }
 
-  /** The seat of a member's agent: its owner's object for it (seatChatId), reached by RPC. */
+  /** The seat of a member's agent: its owner's object for it in this room (seatChatId), reached by RPC. */
   #seatLink(entry: RosterEntry): SeatLink & { drop(): Promise<void> } {
-    const seat = exports.ChatAgent.getByName(chatAgentName(entry.ownerUid, entry.seat ?? seatChatId(entry.agentId)));
+    if (entry.seat === undefined) throw new Error(`@${entry.name} has no seat: it runs here.`);
+    const seat = exports.ChatAgent.getByName(chatAgentName(entry.ownerUid, entry.seat));
     const room = this.#room;
     return {
       give: (batch, turn) => seat.seatGive(room, entry.agentId, { ...turn, ownerName: this.#nameOf(entry.ownerUid), kind: this.kinds.kind() }, batch),
@@ -4232,12 +4234,13 @@ export class ChatAgent extends DurableObject<Env> {
     // Before its session is made: a session made for an agent the roster refuses would stay, read by every traces read.
     const early = this.roster.refusal(name);
     if (early) return early;
-    const [session, newest] = await Promise.all([
-      // A member's runs in their own object: no session here.
+    const [session, newest, seat] = await Promise.all([
+      // A member's runs in their own object, in a seat for this room alone: no session here.
       member ? "" : this.harness.sessions.create().then((made) => made.id as string),
       // Read for every add (one entry): whether it is the first is known only after the awaits, as agents added at once
       // must not both start pi's scan over.
       this.#root().then((root) => root.entries({ order: "descending" }, 1, undefined, BACKGROUND_CONTEXT)),
+      member ? seatChatId(agent.id, this.#room) : undefined,
     ]);
     const first = !this.roster.hasAny();
     const newestId = (newest?.items[0]?.id as number | undefined) ?? -1;
@@ -4250,7 +4253,7 @@ export class ChatAgent extends DurableObject<Env> {
       color: agent.color,
       job: agent.job,
       // A member's agent reads its owner's messages as theirs only from here on (OwnerMarks in turns.ts).
-      ...(member && { seat: seatChatId(agent.id), ownerFrom: newestId + 1, ...(name !== agent.name && { aliasOf: agent.name }) }),
+      ...(member && seat && { seat, ownerFrom: newestId + 1, ...(name !== agent.name && { aliasOf: agent.name }) }),
     });
     if (refused) return refused;
     // The first agent: pi's answers from now on are read for the agents they name, none before.
