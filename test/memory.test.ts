@@ -379,6 +379,29 @@ describe("UserMemory", () => {
     expect(later?.updatedAt).toBe(later?.createdAt);
   });
 
+  it("imports only a note's own fields, within MAX_NOTES in all", () => {
+    const { memory } = directory();
+    const waiting = Array.from({ length: MAX_NOTES + 10 }, (_, i) => ({
+      ...note({ id: i.toString(16).padStart(12, "0"), text: `Said ${i}.`, source: "learned", confirmed: false, scope: "chat", chatId: GROUP }),
+      // Not a field of a note's: an export never sets it.
+      byOwner: false,
+    }));
+    const results = memory.import(waiting);
+    expect(results.filter((result) => "error" in result)).toHaveLength(10);
+    expect(memory.list()).toHaveLength(MAX_NOTES);
+  });
+
+  it("keeps imported waiting notes out of the owner's own room", () => {
+    const { memory } = directory();
+    const waiting = Array.from({ length: MAX_UNCONFIRMED_ALL }, (_, i) =>
+      note({ id: i.toString(16).padStart(12, "0"), text: `Said ${i}.`, source: "learned", confirmed: false, scope: "chat", chatId: GROUP }),
+    );
+    expect(memory.import(waiting).every((result) => !("error" in result))).toBe(true);
+    // They waited for the owner's confirm as members' saves: the owner's own still wait too.
+    const fact = saved(memory.learn(writer(PRIVATE, "private", true, true), { text: "The target is 40.", scope: "user", kind: "fact" }));
+    expect(fact.note.confirmed).toBe(false);
+  });
+
   it("imports a forgotten note once, and never brings back one forgotten here", () => {
     const owner = directory();
     const gone = saved(owner.memory.add({ text: "Old rule.", scope: "user" }));

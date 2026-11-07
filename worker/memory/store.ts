@@ -267,14 +267,33 @@ export class MemoryStore {
     if (kept && kept.scope === note.scope && kept.text.toLowerCase() === note.text.toLowerCase()) return { id: kept.id, skipped: true };
     const same = note.forgottenAt === undefined ? this.#same(note) : undefined;
     if (same) return { id: same.id, skipped: true };
-    if (this.#ownersCount() >= MAX_NOTES) return { error: `There are ${MAX_NOTES} memory notes already.` };
+    // One still waiting may have been saved in a turn the owner did not ask for: kept as such (add), so it takes
+    // nobody's room but its own, within all of them.
+    const waits = !note.confirmed && note.forgottenAt === undefined;
+    if ((waits ? this.#count() : this.#ownersCount()) >= MAX_NOTES) return { error: `There are ${MAX_NOTES} memory notes already.` };
     const id = NOTE_ID_PATTERN.test(note.id) && !this.get(note.id) ? note.id : randomHex(6);
     // Its times as exported (recency ranks the notes), never later than now.
     const now = this.#now();
     const createdAt = pastTime(note.createdAt, now);
-    const forgottenAt = note.forgottenAt === undefined ? undefined : pastTime(note.forgottenAt, now);
     const updatedAt = Math.max(createdAt, pastTime(note.updatedAt, createdAt, now));
-    this.#insert({ ...note, id, uses: Math.max(0, Math.floor(note.uses) || 0), createdAt, updatedAt, forgottenAt });
+    // Only the fields a note has: nothing else of the export's JSON reaches the row.
+    this.#insert({
+      id,
+      scope: note.scope,
+      ...(note.agentId !== undefined && { agentId: note.agentId }),
+      ...(note.chatId !== undefined && { chatId: note.chatId }),
+      text: note.text,
+      source: note.source,
+      kind: note.kind,
+      ...(note.learnedBy !== undefined && { learnedBy: note.learnedBy }),
+      uses: Math.max(0, Math.floor(note.uses) || 0),
+      pinned: note.pinned === true,
+      confirmed: note.confirmed === true,
+      ...(note.forgottenAt !== undefined && { forgottenAt: pastTime(note.forgottenAt, now) }),
+      createdAt,
+      updatedAt,
+      byOwner: !waits,
+    });
     return { id };
   }
 }
