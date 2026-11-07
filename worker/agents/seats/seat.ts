@@ -10,7 +10,9 @@ import { errorMessage } from "../../../shared/util.ts";
 import { addColumns, type Sql } from "../../members.ts";
 import type { MemoryAgent } from "../../memory/chat.ts";
 import { NO_OUTPUTS, operationId, outputsOf, unreadOutputs, type Outputs, type TurnResult } from "../controller.ts";
-import { askedApart } from "../turns.ts";
+import { askedApart, runsApart } from "../turns.ts";
+import type { Caller, GateCall } from "../limits/gate.ts";
+import { seatCaller } from "../limits/levels.ts";
 import type { RoomLink, RoomRef, SeatBatch, SeatResult, SeatTurn } from "./link.ts";
 import { chatAgentName } from "../../chat-name.ts";
 
@@ -82,6 +84,16 @@ const REPORT_LATER = 5 * 60_000;
 const TAKEN_KEEP = 24 * 60 * 60_000;
 
 const refOf = (row: Pick<SeatRow, "room_owner" | "room_chat">): RoomRef => ({ ownerUid: row.room_owner, chatId: row.room_chat });
+
+/** Whether a turn as given and checked (SeatTurnRow.given) is its owner's; a row from before it was kept had only theirs forked. */
+function checkedByOwner(given: string | null): boolean {
+  if (given === null) return true;
+  try {
+    return (JSON.parse(given) as Partial<SeatTurn>).byOwner === true;
+  } catch {
+    return false;
+  }
+}
 const turnKey = (ref: RoomRef, turn: number) => `${ref.ownerUid}:${ref.chatId}:${turn}`;
 
 /**
@@ -137,10 +149,10 @@ export class AgentSeats {
   memoryAgent(session: string): MemoryAgent | undefined {
     const [turn] = this.#sql
       .exec(
-        "SELECT agent_id, room_owner, room_chat, status, forked, kind, name FROM agent_seat_turns WHERE session = ? ORDER BY status = 'running' DESC, turn DESC LIMIT 1",
+        "SELECT agent_id, room_owner, room_chat, status, forked, kind, name, given FROM agent_seat_turns WHERE session = ? ORDER BY status = 'running' DESC, turn DESC LIMIT 1",
         session,
       )
-      .toArray() as Pick<SeatTurnRow, "agent_id" | "room_owner" | "room_chat" | "status" | "forked" | "kind" | "name">[];
+      .toArray() as Pick<SeatTurnRow, "agent_id" | "room_owner" | "room_chat" | "status" | "forked" | "kind" | "name" | "given">[];
     const running = turn?.status === "running";
     const seat =
       turn ??
@@ -152,7 +164,8 @@ export class AgentSeats {
       agentId: seat.agent_id,
       ownerUid: this.#host.uid,
       name: turn?.name ?? "agent",
-      byOwner: running && turn.forked === 1,
+      // A fork is not always its owner's (someone else's Yes to an offer runs in one too): the turn as checked says.
+      byOwner: running && turn.forked === 1 && checkedByOwner(turn.given),
       // The room by its object's name (its owner and chat), never a bare chat id: one of this user's own chats could
       // have the same id (an imported one keeps its id), and would lend the seat its notes.
       room: { chatId: chatAgentName(seat.room_owner, seat.room_chat), kind: running && isChatKind(turn.kind) ? turn.kind : null },
@@ -177,6 +190,16 @@ export class AgentSeats {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Who a call from `session` is, for the write gate in this object (ChatAgent's GateHost.caller): the seat's turn
+   * running there, at its level, with its agent's rules (seatCaller, its agent read by `agent`). Null when no seat's turn
+   * runs there; throws, so the call is refused, for an agent that is gone or off or a server it may not use.
+   */
+  async caller(session: string, call: Pick<GateCall, "server">, agent: (agentId: string) => Promise<AgentDefinition | null>): Promise<Caller | null> {
+    const found = this.turnIn(session);
+    return found && seatCaller(found, await agent(found.agentId), call, session);
   }
 
   /**
@@ -294,8 +317,10 @@ export class AgentSeats {
     const delivered = batch ? await this.deliver(ref, agentId, batch) : seat.delivered;
     const byOwner = turn.byOwner && !turn.unattended && turn.hop === 0 && turn.calledBy.uid === this.#host.uid && !turn.calledBy.agentId;
     const checked: SeatTurn = { ...turn, byOwner };
-    // Its owner's turn has all of their tools, so it runs apart, in a fork of the seat's session.
-    const forked = checked.byOwner;
+    // A turn that may read its owner's private servers runs apart, in a fork of the seat's session: their own (all of
+    // their tools), and anyone's Yes to an offer (draftTools reads every server of the agent's). Only its posted reply
+    // reaches the seat's session, which everyone else's turns read. A seat is never alone with its owner.
+    const forked = runsApart(checked, false);
     const session = forked ? await this.#host.fork(seat.session) : seat.session;
     // Given meanwhile by a retry: that one runs.
     if (this.#turn(ref, turn.turn)) return delivered;
