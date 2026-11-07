@@ -581,6 +581,17 @@ describe("ChatMemory", () => {
     expect((await host.recall("s1", "")).notes).toEqual([expect.objectContaining({ text: "Cite sources." })]);
   });
 
+  it("says which notes a run's session read as its turn started, never the owner's own", async () => {
+    const owner = directory();
+    saved(owner.memory.add({ text: "My salary is private.", scope: "user" }));
+    const cite = saved(owner.memory.add({ text: "Cite sources.", scope: "agent", agentId: RESEARCH }));
+    const { memory, sessions } = chat(PRIVATE, "private", true, owner);
+    sessions.set("run-1", { agentId: RESEARCH, ownerUid: "owner", name: "research", byOwner: true, run: true });
+    expect(await memory.notesIn("run-1")).toEqual([]);
+    await memory.refresh("run-1");
+    expect(await memory.notesIn("run-1")).toEqual([cite.id]);
+  });
+
   it("reads a seat's session as its room: never the owner's own notes, and saves as theirs only on a turn they asked for", async () => {
     // A seat runs in an object of the member's own with nobody else in it (a private chat as it knows itself), and
     // here the member's directory knows the room too, so only the reader keeps the owner's own notes out.

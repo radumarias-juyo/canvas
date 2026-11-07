@@ -46,6 +46,7 @@ import { clip, MAX_TOOL_TEXT, text } from "./output.ts";
 import { pagePart } from "./page-part.ts";
 import type { AgentsScope } from "../agents/tools.ts";
 import { shownOf, type HeldPage } from "../agents/roster.ts";
+import { upTo, versionRefusal } from "./page-authors.ts";
 
 /** What the tools need from the chat they run in. */
 export interface ChatScope extends PublishScope, AgentsScope {
@@ -57,6 +58,11 @@ export interface ChatScope extends PublishScope, AgentsScope {
   broughtIn(id: string): boolean;
   /** What of a page of the owner's chat `chatId` is not that chat's yet (ChatAgent.held): a page brought in reads without it. */
   heldIn(chatId: string, artifactId: string): Promise<HeldPage>;
+  /**
+   * The newest version of another person's page (a member's agent's, or the room's for a seat) that conversation
+   * `session` may read as posted in its chat; 0 for none. Unset: no other person's page is read here.
+   */
+  chatPage?(meta: Pick<ArtifactMeta, "id" | "ownerUid" | "chatId">, session: string): Promise<number>;
   /** Save a skill for the user, turned off until they turn it on. */
   proposeSkill(skill: SkillInput): Promise<SkillResult>;
   /** The checks that found errors in a row; the chat resets it when someone writes. */
@@ -337,25 +343,37 @@ export function sandboxExtension(scope: ChatScope): Extension {
 }
 
 /**
- * An artifact of this chat, or one of the owner's from another chat that the owner named here with "@": the agent may
- * read it, but publishes a new version only of this chat's (ArtifactStore.publishVersion). Anything else reads as missing.
+ * An artifact of this chat, one of the owner's from another chat that the owner named here with "@", or another
+ * person's page posted in this chat (ChatScope.chatPage): the agent may read it, but publishes a new version only of
+ * this chat's (ArtifactStore.publishVersion). Anything else reads as missing.
  * One brought in reads as its own chat has it: not what turns apart from that chat published with their replies not
  * posted, which this chat's rules do not know.
  */
-async function ownArtifact(scope: ChatScope, id: string, rules?: SessionRules): Promise<ArtifactMeta> {
+async function ownArtifact(scope: ChatScope, id: string, session: string, rules?: SessionRules): Promise<ArtifactMeta> {
   const meta = rules?.hidden.has(id) ? null : await scope.artifacts.readMeta(id);
   const missing = () => new Error(`No artifact ${id} in this chat. One from another chat must be named with @ by the chat's owner first.`);
-  if (meta && isOwnedBy(meta, scope.uid, scope.chatId)) return meta;
-  if (!meta || meta.ownerUid !== scope.uid || !scope.broughtIn(meta.id)) throw missing();
-  const shown = shownOf(meta, await scope.heldIn(meta.chatId, meta.id));
-  if (!shown) throw missing();
-  return shown;
+  if (!meta) throw missing();
+  if (isOwnedBy(meta, scope.uid, scope.chatId)) return meta;
+  if (meta.ownerUid === scope.uid && scope.broughtIn(meta.id)) {
+    const shown = shownOf(meta, await scope.heldIn(meta.chatId, meta.id));
+    if (!shown) throw missing();
+    return shown;
+  }
+  // Another person's page posted in this chat (a member's agent's, or the room's to a seat): up to the newest version posted.
+  const posted = upTo(meta, (await scope.chatPage?.(meta, session)) ?? 0);
+  if (!posted) throw missing();
+  return posted;
 }
 
-/** An artifact of this chat, the only kind a publish can add a version to (ArtifactStore.publishVersion). */
+/**
+ * An artifact of this chat, the only kind a publish can add a version to (ArtifactStore.publishVersion): another
+ * chat's of the owner, or another person's page, is refused with what to do instead (versionRefusal).
+ */
 async function chatArtifact(scope: ChatScope, id: string, rules?: SessionRules): Promise<ArtifactMeta> {
   const meta = rules?.hidden.has(id) ? null : await scope.artifacts.readMeta(id);
-  if (!meta || !isOwnedBy(meta, scope.uid, scope.chatId)) throw new Error(`No artifact ${id} in this chat to publish a new version of. Write the page without artifact_id to make a new artifact.`);
+  if (!meta) throw new Error(`No artifact ${id} in this chat to publish a new version of. Write the page without artifact_id to make a new artifact.`);
+  const refused = versionRefusal(meta, scope.uid, scope.chatId, "Not saved:");
+  if (refused) throw new Error(refused);
   return meta;
 }
 
@@ -599,12 +617,14 @@ export function artifactExtension(scope: ChatScope): Extension {
       }),
       defineTool({
         name: "artifact_read",
-        description: "Read the HTML of an artifact published in this chat, to revise it, or of one the user named with @ from another of their chats, to build on it.",
+        description:
+          "Read the HTML of an artifact published in this chat, to revise it (or, for one another person's agent posted here, to build on it), " +
+          "or of one the user named with @ from another of their chats, to build on it.",
         parameters: Type.Object({ artifact_id: Type.String(), version: Type.Optional(Type.Number()), part: pagePartParameter }),
         replay: "safe",
         execute: async (args, api) => {
           const rules = await rulesOf(scope, api);
-          const meta = await ownArtifact(scope, args.artifact_id, rules);
+          const meta = await ownArtifact(scope, args.artifact_id, String(api.conversationId), rules);
           const version = versionToRead(meta, args.version, rules);
           const html = await readPageSource(scope, meta.id, version);
           if (html === null) throw new Error(`Artifact ${meta.id} has no version ${version}.`);
@@ -620,7 +640,7 @@ export function artifactExtension(scope: ChatScope): Extension {
         replay: "safe",
         execute: async (args, api) => {
           const rules = await rulesOf(scope, api);
-          const meta = await ownArtifact(scope, args.artifact_id, rules);
+          const meta = await ownArtifact(scope, args.artifact_id, String(api.conversationId), rules);
           const versions = meta.versions.filter((v) => !rules?.hiddenVersion(meta.id, v.version));
           const lines = versions.map((v) => `v${v.version}  ${new Date(v.publishedAt).toISOString()}  ${v.message ?? "(no message)"}`);
           return { output: text(`"${meta.title}", ${lines.length} versions, newest last:\n${lines.join("\n")}`) };
@@ -633,7 +653,7 @@ export function artifactExtension(scope: ChatScope): Extension {
         replay: "safe",
         execute: async (args, api) => {
           const rules = await rulesOf(scope, api);
-          const meta = await ownArtifact(scope, args.artifact_id, rules);
+          const meta = await ownArtifact(scope, args.artifact_id, String(api.conversationId), rules);
           const to = versionToRead(meta, args.to, rules);
           // By default the newest version before `to` this conversation sees.
           const from = args.from === undefined ? versionToRead(meta, undefined, rules, to - 1) : versionToRead(meta, args.from, rules);

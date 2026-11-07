@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { AgentStep } from "../shared/agents.ts";
 import { agentPath, agentPlace } from "../src/agents/nav.ts";
-import { stepSummary } from "../shared/runs.ts";
-import { deliveryLabel, deliveryStatusLabel, itemsLabel, runStatusLabel, signInWayOut, whyLabel } from "../src/agents/runs.ts";
+import { stepSummary, type RunItemView } from "../shared/runs.ts";
+import { deliveryLabel, deliveryStatusLabel, itemGroups, itemLine, itemsLabel, runStatusLabel, signInWayOut, usedParts, whyLabel } from "../src/agents/runs.ts";
 import { ASSUMED_FIELDS, withoutAssumed } from "../src/agents/glance.ts";
 import { assumedAfter, moveItem, newStep, withKeys, withoutKeys } from "../src/agents/workflow.ts";
 
@@ -46,6 +46,47 @@ describe("the Runs tab's words", () => {
     expect(deliveryLabel({ kind: "notify", to: "you", status: "recorded" })).toBe("Would notify you");
     expect(deliveryLabel({ kind: "page", to: "Signups brief", status: "failed" })).toBe("Did not update Signups brief");
     expect(deliveryStatusLabel("refused")).toEqual({ text: "Not sent", tone: "off" });
+  });
+
+  it("groups a run's items into acted on and not today, each with its line, and says what it used", () => {
+    const item = (label: string, status: RunItemView["status"], more: Partial<RunItemView> = {}): RunItemView => ({
+      item: label.toLowerCase(),
+      label,
+      status,
+      steps: [{ kind: "look", label: "Look at crm.region", ok: true, ms: 10 }],
+      cost: 0,
+      startedAt: 0,
+      ...more,
+    });
+    const groups = itemGroups([
+      item("North", "not_today", { reason: "region.change < -5% did not hold" }),
+      item("West", "acted", { text: "\nWest is furthest behind, at -12.4%.\nMostly paid search." }),
+      item("East", "failed", { reason: "crm.region failed: timeout" }),
+      item("South", "acted", { text: "South will land 3% short." }),
+      item("Hills", "running"),
+    ]);
+    expect(groups.map((group) => [group.title, group.count])).toEqual([
+      ["Running", "1"],
+      ["Acted on", "2 of 5"],
+      ["Failed", "1"],
+      ["Not today", "1"],
+    ]);
+    expect(groups[1].items.map(({ item, line }) => [item.label, line])).toEqual([
+      ["West", "West is furthest behind, at -12.4%."],
+      ["South", "South will land 3% short."],
+    ]);
+    expect(groups[3].items[0].line).toBe("region.change < -5% did not hold");
+    expect(groups[0].items[0].line).toBe("Look at crm.region");
+    expect(itemLine(item("Islands", "waiting"))).toBe("Waits for you to approve a call.");
+    expect(usedParts({ skills: ["forecasting"], servers: ["crm", "forecast"], models: [], notes: 4 })).toEqual([
+      { what: "Skill", text: "forecasting" },
+      { what: "Memory", text: "4 notes" },
+      { what: "Read", text: "crm, forecast" },
+    ]);
+    expect(usedParts({ skills: [], servers: [], models: ["a", "b"], notes: 1 })).toEqual([
+      { what: "Memory", text: "1 note" },
+      { what: "Models", text: "a, b" },
+    ]);
   });
 
   it("puts a run in the agent page's address and reads it back", () => {
