@@ -2,6 +2,7 @@ import type { EntryRecord } from "@earendil-works/pi-durable";
 import { MAX_HOPS, type AgentDefinition, type AgentDraftView, type ChatAgentReplyData, type ChatTurnData } from "../../shared/agents.ts";
 import { AGENT_NAME } from "../../shared/mentions.ts";
 import { errorMessage, isObject, serial } from "../../shared/util.ts";
+import { steerLine, type SteerResult } from "../../shared/agent-window.ts";
 import type { DaySpend } from "./spend.ts";
 import { sessionOf, type AgentTurn, type ChatRoster, type PostedPage, type RosterEntry, type TurnRequest } from "./roster.ts";
 import { isPass } from "./funnel.ts";
@@ -278,6 +279,8 @@ export class AgentTurns {
    * the catch-up before it left the ask out (the input carries it). Later turns read it there, with the reply as posted.
    */
   async #tellApart(entry: RosterEntry, turn: AgentTurn): Promise<void> {
+    // What its owner told it from its window is theirs alone: it never reaches the session the chat's turns read.
+    if (turn.calledBy.window) return;
     await this.#host.write(entry.session, askedApart(turn.ask), `apart:${entry.agentId}:${turn.id}`);
   }
 
@@ -589,6 +592,35 @@ export class AgentTurns {
       );
     }
     for (const agentId of roster.waitingAgents()) this.pump(agentId);
+  }
+
+  /**
+   * Its owner's words to an agent from its window (shared/agent-window.ts): into the turn of theirs it runs apart now
+   * (a steer, read at its next step, in its fork, so nothing of it reaches the session the chat's turns read), or else
+   * as a turn of their own, at their level, apart (it forks, as any turn its owner gives does), queued after any other
+   * turn it runs. Its ask is in no log: others see only the reply it posts. Refused for anyone but the agent's owner.
+   */
+  async instruct(agentId: string, by: { uid: string; name: string }, text: string): Promise<SteerResult | { error: string; status: 403 }> {
+    const roster = this.#host.roster;
+    const entry = roster.get(agentId);
+    if (!entry || entry.ownerUid !== by.uid) return { error: "Only the agent's owner can steer it.", status: 403 };
+    const running = roster.allRunning().find((turn) => turn.agentId === agentId);
+    const line = steerLine(by.name, text);
+    if (running?.byOwner && running.calledBy.uid === by.uid) {
+      // A seat says itself whether the turn runs apart there (its own fork, for its owner's own turn).
+      const steered =
+        entry.seat !== undefined
+          ? await this.#host.seat(entry).steer(running.id, line)
+          : running.session !== undefined &&
+            (await this.#host.write(running.session, line, `steer:${entry.agentId}:${running.id}:${roster.now()}:${text.length}`), true);
+      if (steered) return { mode: "steered", turn: running.id };
+    }
+    const [turn] = this.call([agentId], {
+      calledBy: { name: by.name, uid: by.uid, window: true },
+      ask: askOf({ name: by.name, kind: "person", owner: true }, text),
+      byOwner: true,
+    });
+    return { mode: running ? "queued" : "started", turn: turn.id };
   }
 
   /** Stop every agent's turns, or one agent's: running ones are aborted, waiting ones dropped. True when one was stopped. */
