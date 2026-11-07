@@ -531,10 +531,11 @@ async function artifactFor(scope: PublishScope, target: PublishTarget, writtenFo
     if (same) chosen = { id: same.id, byTitle: true };
   }
   if (chosen.id !== undefined && rules?.reviewed && !rules.own.has(chosen.id)) throw new Error(reviewedRefusal("page"));
-  // Named: only a page of this chat takes a new version (ArtifactStore.publishVersion refuses the rest anyway); another
-  // chat's, or another person's page, is refused here with what to do instead.
-  if (named !== undefined) {
-    const meta = await scope.artifacts.readMeta(named);
+  // Named by the publish: only a page of this chat takes a new version (ArtifactStore.publishVersion refuses the rest
+  // anyway); another chat's, or another person's page, is refused here with what to do instead. A draft's own artifact
+  // was checked as it was written (artifact_write).
+  if (target.artifactId !== undefined) {
+    const meta = await scope.artifacts.readMeta(target.artifactId);
     const refused = meta && versionRefusal(meta, scope.uid, scope.chatId, "Not published:");
     if (refused) throw new Error(refused);
   }
