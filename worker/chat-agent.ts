@@ -143,6 +143,7 @@ import {
   CHAT_EVENT_KIND,
   isChatKind,
   kindAfterJoin,
+  legacyKind,
   losesAccess,
   type BranchedFrom,
   type ChatEventData,
@@ -1788,16 +1789,16 @@ export class ChatAgent extends DurableObject<Env> {
    * them directly (addMember).
    */
   #joined(person: Person, by?: Person): void {
-    const before = this.kinds.kind();
+    // A chat that never stored its kind was a group before only if someone else was in it already.
+    const stored = this.kinds.stored();
+    const before = stored ?? legacyKind(this.members.list().some((member) => member.uid !== person.uid));
     const after = kindAfterJoin(before);
-    if (after !== before) this.kinds.setKind(after);
+    if (after !== stored) this.kinds.setKind(after);
     this.sockets.broadcastPeople();
     if (by) this.#notePeople(person, "added", undefined, by.name);
     else this.#notePeople(person, "joined");
-    if (after !== before) {
-      this.#notice({ kind: CHAT_EVENT_KIND, data: { event: "kind", kind: after, from: before, auto: true } satisfies ChatEventData });
-      this.#tellKind();
-    }
+    if (after !== before) this.#notice({ kind: CHAT_EVENT_KIND, data: { event: "kind", kind: after, from: before, auto: true } satisfies ChatEventData });
+    if (after !== stored) this.#tellKind();
     this.#tellShared();
     this.#meet([person]);
   }

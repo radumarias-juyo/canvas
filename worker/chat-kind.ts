@@ -50,8 +50,13 @@ export class ChatKindState {
   }
 
   kind(): ChatKind {
+    return this.stored() ?? legacyKind(this.#hasMembers());
+  }
+
+  /** The kind stored, if one is. */
+  stored(): ChatKind | undefined {
     const stored = this.#kv.get<string>(KIND_KEY);
-    return isChatKind(stored) ? stored : legacyKind(this.#hasMembers());
+    return isChatKind(stored) ? stored : undefined;
   }
 
   setKind(kind: ChatKind): void {
