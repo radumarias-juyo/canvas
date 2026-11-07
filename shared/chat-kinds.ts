@@ -154,7 +154,7 @@ export type ChatEventData =
  * own entry kind, not a chat.event: an app from before it skips a kind it does not know.
  */
 export const CHAT_BUDGET_KIND = "chat.budget";
-export type ChatBudgetData = { scope: "chat" | "runs"; text: string };
+export type ChatBudgetData = { scope: "chat" | "runs" | "message"; text: string };
 
 /**
  * A message copied into a branch from the chat it branched off: pi's reply as its text, or an artifact card. People's
