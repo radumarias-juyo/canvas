@@ -328,6 +328,9 @@ class Room implements TurnHost {
   async newest(session: string) {
     return this.newestEntries.get(session);
   }
+  alone() {
+    return this.members.size === 0;
+  }
   async sources(entry: RosterEntry, entries: readonly EntryRecord[]) {
     const agent = (await this.definition(entry))!;
     return { ...turnSources(entries, MCP, sharedServer(agent, SIGNS_IN)), ...(agent.reviewBeforePosting && { review: true }) };
@@ -836,6 +839,69 @@ describe("Member agents: private turns run apart", () => {
     const shared = chat.sessions.textOf(planner.session);
     expect(shared).toContain("(your reply, as posted): The West launch is in week 41.");
     expect(shared).not.toContain("Board dinner");
+  });
+
+  it("runs a turn nobody asked of the agent in a fork while the owner is alone; shared later, only its posted reply is in the shared session", async () => {
+    const chat = room();
+    chat.members.clear();
+    const planner = chat.add(RADU, "planner", { servers: ["db", "calendar"] });
+    // A hand-off in the owner's private chat: alone with the owner, it reads the calendar (allowedTools' `alone`).
+    const handOff: Caller = { calledBy: { name: "atlas", agentId: "atlas" }, ask: "[atlas · agent] @planner when is the launch?", byOwner: false };
+    const [alone] = chat.turns.call([planner.agentId], handOff);
+    await settle();
+    const fork = chat.sessions.sessionOf(alone.id);
+    expect(chat.sessions.forks.get(fork)).toBe(planner.session);
+    expect(chat.roster.turn(alone.id)).toMatchObject({ session: fork, forked: true, byOwner: false });
+    // Its owner alone follows it live.
+    expect(chat.roster.runningSessions()).toEqual([{ agentId: planner.agentId, session: fork, turn: alone.id, only: RADU.uid }]);
+    chat.sessions.finish(alone.id, "The launch is in week 41.", [result("calendar_events", [{ id: "e1", title: "Board dinner (private)" }])]);
+    await settle();
+    expect(chat.posts).toEqual([expect.objectContaining({ turn: alone.id, forked: true, sources: ["calendar"], text: "The launch is in week 41." })]);
+    // What it read is the fork's, never the shared session's.
+    expect([...chat.sessions.entries.keys()]).toEqual([`${fork}|${alone.id}`]);
+
+    // The chat is shared later: Mia's question goes to the shared session, which has the posted reply, not what it read.
+    chat.members.add(MIA.uid);
+    const [hers] = chat.turns.call([planner.agentId], chat.say(MIA, "@planner what was on the calendar?"));
+    await settle();
+    expect(chat.sessions.sessionOf(hers.id)).toBe(planner.session);
+    expect(chat.sessions.configured.at(-1)).toEqual({ session: planner.session, byOwner: false });
+    const shared = chat.sessions.textOf(planner.session);
+    expect(shared).toContain("(your reply, as posted): The launch is in week 41.");
+    expect(shared).not.toContain("Board dinner");
+    expect(chat.sessions.submits.filter((submit) => submit.session === planner.session).map((submit) => submit.data.turn)).toEqual([hers.id]);
+  });
+
+  it("runs an unprompted turn apart while the owner is alone: one that passes leaves nothing in the shared session", async () => {
+    const chat = room();
+    chat.members.clear();
+    const planner = chat.add(RADU, "planner", { servers: ["db", "calendar"] });
+    const speakUp: Caller = { calledBy: { name: "the conversation", unprompted: "speak-up" }, ask: "Radu: the launch slipped", byOwner: false, unattended: true };
+    const [turn] = chat.turns.call([planner.agentId], speakUp);
+    await settle();
+    const fork = chat.sessions.sessionOf(turn.id);
+    expect(chat.sessions.forks.get(fork)).toBe(planner.session);
+    chat.sessions.finish(turn.id, "PASS", [result("calendar_events", [{ id: "e1", title: "Board dinner (private)" }])]);
+    await settle();
+    expect(chat.posts).toEqual([]);
+    expect(chat.sessions.textOf(planner.session)).not.toContain("Board dinner");
+  });
+
+  it("keeps a turn its owner did not ask for in the shared session once others are in the chat, and runs a Yes apart there", async () => {
+    const chat = room();
+    const planner = chat.add(RADU, "planner", { servers: ["db", "calendar"] });
+    // With Ana and Mia in, a hand-off reads only the shared servers (allowedTools): it runs where they follow it.
+    const [handed] = chat.turns.call([planner.agentId], { calledBy: { name: "atlas", agentId: "atlas" }, ask: "go", byOwner: false });
+    await settle();
+    expect(chat.sessions.sessionOf(handed.id)).toBe(planner.session);
+    chat.sessions.finish(handed.id, "Done.");
+    await settle();
+    // The owner's Yes to an offer drafts with draftTools, which read every server of the agent's: apart, also here.
+    const yes = { ...chat.say(RADU, "Yes"), calledBy: { name: RADU.name, uid: RADU.uid, drafts: true as const }, unattended: true as const };
+    const [drafting] = chat.turns.call([planner.agentId], yes);
+    await settle();
+    expect(chat.roster.turn(drafting.id)).toMatchObject({ byOwner: false, forked: true });
+    expect(chat.sessions.forks.get(chat.sessions.sessionOf(drafting.id))).toBe(planner.session);
   });
 
   it("does the same in a member's seat: the fork is in their object, and the reply carries their source chip", async () => {

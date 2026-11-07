@@ -17,6 +17,7 @@ import {
   draftedIn,
   MAX_ASK_CHARS,
   publishedIn,
+  runsApart,
   turnAskKey,
   turnInput,
   UNKNOWN_SOURCE,
@@ -73,12 +74,14 @@ export interface TurnHost {
   /** The roster's view changed (an agent started or ended a turn, or was dropped): tell everyone. */
   changed(): void;
   /**
-   * A new session that sees `session`'s history so far: a turn its owner asked for runs in one. `from`: the newest entry
-   * it inherited, after which only its own come.
+   * A new session that sees `session`'s history so far: a turn that runs apart (runsApart) runs in one. `from`: the
+   * newest entry it inherited, after which only its own come.
    */
   fork(session: string): Promise<{ session: string; from?: number }>;
   /** The newest entry of a session; undefined for one with none. */
   newest(session: string): Promise<number | undefined>;
+  /** Whether nobody but the chat's owner is in the chat now (no members): a turn then reads every server of its agent's. */
+  alone(): boolean;
   /**
    * What a forked turn's reply shows of its sources (turnSources), from its session's entries: only the shared servers'
    * records, the private servers it called, and whether its owner reviews it first.
@@ -212,10 +215,13 @@ export class AgentTurns {
         if (!live()) await this.#abortSeat(entry, turn.id);
         return;
       }
-      // A turn its owner asked for runs with all of their tools, so apart from the chat: in a fork of the agent's
-      // session, made once (one made before a restart is its session still, its input maybe in it already). A turn in
-      // a session of its own (a reply to a run's report) reads that session, not the chat: it forks nothing.
-      if (turn.byOwner && turn.session === undefined) {
+      // A turn that may read its owner's private servers runs apart from the chat: in a fork of the agent's session,
+      // made once (one made before a restart is its session still, its input maybe in it already). So does one its
+      // owner asked for (all their tools), one that starts while nobody but the owner is in the chat (it reads every
+      // server of the agent's, which the shared session would keep for whoever comes in later), and the owner's Yes to
+      // an offer (draftTools reads them all). A turn in a session of its own (a reply to a run's report) reads that
+      // session, not the chat: it forks nothing.
+      if (runsApart(turn, this.#host.alone()) && turn.session === undefined) {
         // A fork sees the agent's session as it is when made: the catch-up goes in first.
         await this.#catchUp(entry, turn.id);
         // Stopped meanwhile: no fork, which nothing would run in or abort.

@@ -14,6 +14,8 @@ import {
   allowedTools,
   draftTools,
   piBusy,
+  readsAlone,
+  runsApart,
   runTools,
   CatchUp,
   handOffs,
@@ -498,6 +500,22 @@ describe("allowedTools", () => {
     expect(allowedTools(tools, mcp, agent, false, signsIn)).toEqual([...reads, "crm__list_deals"]);
     // Never a write, alone or not.
     expect(allowedTools(tools, mcp, agent, false, signsIn, { alone: true })).not.toContain("crm__update_deal");
+  });
+
+  it("runs apart every turn that may read the owner's private servers, and reads as alone only there", () => {
+    const routed = { byOwner: true, calledBy: { name: "Olga", uid: "olga", routed: true as const } };
+    const handOff = { byOwner: false, calledBy: { name: "atlas", agentId: "atlas" } };
+    const yes = { byOwner: false, calledBy: { name: "Olga", uid: "olga", drafts: true as const } };
+    expect(runsApart(routed, false)).toBe(true);
+    expect(runsApart(yes, false)).toBe(true);
+    // Alone with the owner, any turn reads every server of the agent's: it too runs apart; with others in, it reads only shared ones.
+    expect(runsApart(handOff, true)).toBe(true);
+    expect(runsApart(handOff, false)).toBe(false);
+    // In the agent's shared session a turn never reads as alone: a member let in later reads that session.
+    expect(readsAlone({}, true)).toBe(false);
+    expect(readsAlone({ session: "fork", forked: true }, true)).toBe(true);
+    expect(readsAlone({ session: "run-reply" }, true)).toBe(true);
+    expect(readsAlone({ session: "fork", forked: true }, false)).toBe(false);
   });
 
   it("gives a run only reading tools: the app's and those of all its own servers, sign-in ones too", () => {

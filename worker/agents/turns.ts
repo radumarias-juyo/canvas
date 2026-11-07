@@ -333,6 +333,26 @@ const READ_TOOLS = [
 const DISPLAY_TOOLS = [CHECKLIST_TOOL];
 
 /**
+ * Whether a turn of the chat's own (not a seat's) runs apart from the chat, in a fork of its agent's session, as it may
+ * read its owner's private servers: one its owner asked for (all their tools), the owner's Yes to an offer (draftTools
+ * reads every server of the agent's), and, while nobody but the owner is in the chat (`alone`), any turn (allowedTools'
+ * `alone`). Only the reply it posts reaches the agent's shared session, which later turns read for whoever is in the
+ * chat then (a member let in after it, too).
+ */
+export function runsApart(turn: Pick<AgentTurn, "byOwner" | "calledBy">, alone: boolean): boolean {
+  return turn.byOwner || turn.calledBy.drafts === true || alone;
+}
+
+/**
+ * Whether a turn reads as alone with its owner (allowedTools' `alone`): only one that runs apart from the chat (a fork,
+ * or a run's reply session) while nobody but the owner is in it. Never one in the agent's shared session, whatever the
+ * chat's audience is now: that session is read later for anyone the chat lets in.
+ */
+export function readsAlone(turn: Pick<AgentTurn, "forked" | "session">, alone: boolean): boolean {
+  return alone && (turn.forked === true || turn.session !== undefined);
+}
+
+/**
  * The tools a turn may use, by name, of `tools` (every tool installed), as an allow-list: a tool installed after the
  * turn was set up stays off. A turn its owner asked for gets every tool but the MCP tools of servers the agent may not
  * use, and runs apart from the chat (a fork of the agent's session, or a run's own): what it reads there never reaches
