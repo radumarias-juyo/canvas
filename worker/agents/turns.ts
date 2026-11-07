@@ -58,6 +58,30 @@ export function speakersFor(
 }
 
 /**
+ * Where pi goes among `speakers` (the agents a message calls, speakersFor) when it calls pi too: before the first one it
+ * did not name before "@pi", or last when it only replies to pi (the agent replied to goes after those named). Undefined
+ * when it does not call pi.
+ */
+export function piPlace(
+  text: string,
+  roster: readonly Pick<RosterEntry, "agentId" | "name">[],
+  mentions: readonly Mention[],
+  repliesToPi: boolean,
+  speakers: readonly string[],
+): number | undefined {
+  const names = calledNames(
+    text,
+    [...roster.map((entry) => entry.name), AGENT_NAME],
+    mentions,
+  );
+  const at = names.indexOf(AGENT_NAME);
+  if (at < 0) return repliesToPi ? speakers.length : undefined;
+  const before = new Set(names.slice(0, at).map((name) => roster.find((entry) => entry.name === name)?.agentId));
+  const index = speakers.findIndex((agentId) => !before.has(agentId));
+  return index < 0 ? speakers.length : index;
+}
+
+/**
  * The agents a reply hands work to: those of the roster it names (and pi, as `AGENT_NAME`), never the one replying,
  * while the hand-offs from the person's message stay within MAX_HOPS. `hop` is the replying turn's.
  */

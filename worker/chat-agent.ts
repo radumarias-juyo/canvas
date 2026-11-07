@@ -169,8 +169,9 @@ import {
   type SharedAgentView,
   type StepInput,
 } from "../shared/agents.ts";
-import { AgentTurns, type Caller as TurnCaller, type Outputs, type PiChain, type TurnHost, type TurnOutcome } from "./agents/controller.ts";
+import { AgentTurns, type Caller as TurnCaller, type Outputs, type TurnHost, type TurnOutcome } from "./agents/controller.ts";
 import { isTurnEntry, TurnFilter } from "./agents/live.ts";
+import { piScanStep, type PiScan } from "./agents/pi-scan.ts";
 import {
   ChatRoster,
   newestShown,
@@ -207,14 +208,14 @@ import {
   agentInstructions,
   allowedTools,
   askOf,
-  assistantText,
   attachedNote,
   draftTools,
   MAX_ASK_CHARS,
   messageAskKey,
   isPiConversation,
   piBusy,
-  piLogEntry,
+  piPlace,
+  askKey,
   readsAlone,
   runTools,
   sharedServer,
@@ -392,8 +393,6 @@ type SessionTraces = { shared: ChatTraces; withheld: ChatTraces; hidden: ChatTra
 /** What some of the chat's sessions name (#readTraces): how far each was read, and those read to their end for good. */
 type SeenTraces = { through: Map<string, number>; settled: Set<string>; traces: ChatTraces };
 const seenTraces = (): SeenTraces => ({ through: new Map(), settled: new Set(), traces: chatTraces([]) });
-/** How far #piScan read pi's log, the chain pi's next answer is in, and the person who started it (`by`, whom its turns count for). */
-type PiScan = { through: number; chain?: PiChain; by?: string };
 /**
  * Set on an agent's home conversation: the agent whose own chat this is (the owner's directory marks the chat with
  * it too). There the agent is on the roster and answers every message that calls nobody else; its runs run here.
@@ -1790,7 +1789,11 @@ export class ChatAgent extends DurableObject<Env> {
     // Picked by the router: nobody named an agent, pi or a person.
     const routed = !speakers.length && agentPicking !== undefined && !summonsAgent(text, named) && !named.some((mention) => mention.kind === "person");
     if (routed) speakers = await agentPicking;
-    const summoned = (everyMessage && !speakers.length) || repliesToAgent || summonsAgent(text, named);
+    // pi takes its place among the agents a message calls (a Yes's apart): in the order named, or last when it is
+    // replied to. Named first, it answers the message as ever and the agents after it wait for its answer; named after
+    // one, the message is an aside now and pi gets its turn once those before it answered. Alone, nothing changes.
+    const piAt = !routed && !drafts && speakers.length ? piPlace(text, roster, named, repliesToAgent, speakers) : undefined;
+    const summoned = piAt === undefined || piAt === 0 ? (everyMessage && !speakers.length) || repliesToAgent || summonsAgent(text, named) : false;
     // Again after the refreshes, which can take seconds: the author may have been removed meanwhile.
     this.#requireInChat(author);
     // Nothing left to say: every attachment was one they may not attach.
@@ -1861,9 +1864,15 @@ export class ChatAgent extends DurableObject<Env> {
         byOwner: true,
       };
       const others = continued ? speakers.filter((id) => id !== continued.agentId) : speakers;
+      // pi's place, as its answer to this message, which it has: the chain starts with it.
+      const [lead] = piAt === 0 ? this.turns.call([AGENT_NAME], caller, { piPlaced: true }) : [];
       // One message, one chain: the other agents' turns share the continued one's, so MAX_HOPS holds for all of them.
-      const [first] = continued ? this.turns.call([continued.agentId], { ...caller, session: continued.session, run: continued.run }) : [];
-      if (others.length) this.turns.call(others, { ...caller, ...(first && { root: first.root }) });
+      const chained = { ...caller, ...(lead && { root: lead.root }) };
+      const [first] = continued ? this.turns.call([continued.agentId], { ...chained, session: continued.session, run: continued.run }) : [];
+      // pi's turn after those named before it.
+      const at = piAt ? piPlace(text, roster, named, repliesToAgent, others)! : -1;
+      const rest = at >= 0 ? [...others.slice(0, at), AGENT_NAME, ...others.slice(at)] : others;
+      if (rest.length) this.turns.call(rest, { ...chained, ...(first && { root: first.root }) });
     }
     // The sidebars are only a convenience: update them off the prompt's path, and let a failure be.
     // Only a tag whose "@name" is in the text: one sent without it would notify someone of nothing they can see.
@@ -3580,39 +3589,35 @@ export class ChatAgent extends DurableObject<Env> {
    * get turns, within the chain pi's input was in. Its inputs are placed in its log in order, so the latest one read
    * says whose turn its next answer is: a turn another agent handed it (chat.turn, with its chain) or a person's
    * message (a chain of its own). One read at a time; each page's turns and how far it read are written together, so
-   * a restart gives none twice.
+   * a restart gives none twice (piScanStep). pi's places in chains whose inputs it read end at its next final answer,
+   * or once it is idle: the chains' next speakers go then (AgentTurns.piAnswered).
    */
   readonly #piScan = serial(async (): Promise<void> => {
-    const scan = this.ctx.storage.kv.get<PiScan>(PI_SCAN_KEY);
+    let scan = this.ctx.storage.kv.get<PiScan>(PI_SCAN_KEY);
     if (!scan) return;
-    let { through, chain, by } = scan;
-    for await (const page of this.#log({ order: "ascending", minEntryId: (through + 1) as EntryId })) {
+    for await (const page of this.#log({ order: "ascending", minEntryId: (scan.through + 1) as EntryId })) {
       for (const entry of page) {
-        through = entry.id as number;
-        const seen = piLogEntry(entry);
-        if (!seen) continue;
-        if ("reply" in seen) {
-          if (seen.reply.stopReason === "stop") {
-            this.turns.fromPi(assistantText(seen.reply), through, { ...(chain ?? { hop: 0 }), ...(by !== undefined && { by }) });
-          }
-        } else if (seen.input === "handOff") {
-          const { data } = seen;
-          chain = typeof data?.hop === "number" && typeof data.root === "number" ? { hop: data.hop, root: data.root } : undefined;
-          by = typeof data?.by === "string" ? data.by : undefined;
-        } else if (seen.input === "message" && seen.drafts) {
-          // A Yes's run: the agents its answer names never hand pi a turn (unattended), which would have its full tools again.
-          chain = { hop: 0, unattended: true };
-          by = typeof seen.uid === "string" ? seen.uid : undefined;
-        } else {
-          chain = undefined;
-          // A person's message is theirs; pi's own input (a pi.user line) is the owner's.
-          by = seen.input === "message" ? (typeof seen.uid === "string" ? seen.uid : undefined) : this.uid;
-        }
+        const step = piScanStep(scan, entry, this.uid, (input) => this.#piTurnFor(input));
+        scan = step.scan;
+        if (step.handOn) this.turns.fromPi(step.handOn.text, scan.through, step.handOn.chain);
+        this.turns.piAnswered(step.answered);
       }
       if (this.#gone) return;
-      this.ctx.storage.kv.put(PI_SCAN_KEY, { through, ...(chain && { chain }), ...(by !== undefined && { by }) } satisfies PiScan);
+      this.ctx.storage.kv.put(PI_SCAN_KEY, scan);
+    }
+    // pi idle with places still open (a run that ended with no final answer): they end too, so no chain waits for good.
+    if (scan.pending?.length && this.#status() !== "running") {
+      this.turns.piAnswered(scan.pending);
+      const { pending: _, ...rest } = scan;
+      this.ctx.storage.kv.put(PI_SCAN_KEY, rest);
     }
   });
+
+  /** pi's place in the chain of a message in its log (#piScan), not ended; none for a message that gave it none. */
+  #piTurnFor(entry: EntryRecord): AgentTurn | null {
+    const key = askKey(entry);
+    return key ? this.roster.piTurnFor(key) : null;
+  }
 
   /**
    * What the skill classifier reads for an agent's turn, or one handed to pi: the asking line, with the chat's newest
@@ -3742,7 +3747,7 @@ export class ChatAgent extends DurableObject<Env> {
         // The handing turn names the input: handed again after a restart, it is placed once. Its entry says which chain
         // pi's answer is in (#piScan).
         try {
-          const operationId = `pi-turn:${data.turn}`;
+          const operationId = `pi-turn:${data.piTurn ?? data.turn}`;
           const submit = () => this.harness.submit(input, { operationId, whenBusy: "followUp", entry: { kind: CHAT_TURN_KIND, data } });
           // After a Yes, placed in turn with the messages once pi's tools are back (a Yes's chain hands pi nothing,
           // unattended, so this is someone's own ask). One that joins a Yes's run still going gets what that run has, as
@@ -3763,6 +3768,11 @@ export class ChatAgent extends DurableObject<Env> {
       fork: (session) => this.#fork(session),
       newest: (session) => this.#newestEntry(session),
       alone: () => !this.members.hasAny(),
+      piTokens: () => {
+        const spent = this.#turnSpend.get(ROOT_SESSION)?.tokens ?? 0;
+        this.#turnSpend.delete(ROOT_SESSION);
+        return spent;
+      },
       turnTokens: (entry, turn) => this.#turnSpend.get(sessionOf(entry, turn))?.tokens ?? 0,
       messageBudget: () => messageBudget(this.#agentSettings()),
       chainStopped: async (root, text) => {
