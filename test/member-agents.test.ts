@@ -943,6 +943,93 @@ describe("Member agents: private turns run apart", () => {
     expect(chat.posts).toHaveLength(1);
   });
 
+  describe("a turn that went apart alone with the owner, when someone joins before it posts", () => {
+    const handOff: Caller = { calledBy: { name: "atlas", agentId: "atlas" }, ask: "[atlas · agent] @planner when is the launch?", byOwner: false };
+    const alone = () => {
+      const chat = room();
+      chat.members.clear();
+      return { chat, planner: chat.add(RADU, "planner", { servers: ["db", "calendar"] }) };
+    };
+
+    it("holds a reply built on a private server for the owner, saying why, and posts nothing for the member", async () => {
+      const { chat, planner } = alone();
+      const [turn] = chat.turns.call([planner.agentId], handOff);
+      await settle();
+      expect(chat.roster.turn(turn.id)).toMatchObject({ forked: true, alone: true });
+      // Mia comes in while it works.
+      chat.members.add(MIA.uid);
+      chat.sessions.finish(turn.id, "Board dinner on Friday; the launch is in week 41.", [result("calendar_events", [{ id: "e1", title: "Board dinner" }])]);
+      await settle();
+      expect(chat.posts).toEqual([]);
+      expect(chat.log.some((entry) => entry.kind === CHAT_AGENT_KIND)).toBe(false);
+      expect(chat.told).toEqual([RADU.uid]);
+      const [draft] = chat.roster.held(RADU.uid);
+      expect(draft).toMatchObject({ turn: turn.id, agentId: planner.agentId, why: expect.stringMatching(/joined the chat/) });
+      expect(draft.reply).toMatchObject({ sources: ["calendar"], forked: true });
+      expect(chat.roster.held(MIA.uid)).toEqual([]);
+      // The owner's own review path: Post to chat (here as they edited it) or Discard.
+      expect(await chat.turns.post(MIA.uid, planner.agentId, turn.id)).toEqual({ error: expect.stringContaining("No such draft") });
+      expect(await chat.turns.post(RADU.uid, planner.agentId, turn.id, "The launch is in week 41.")).toBeNull();
+      expect(chat.posts).toEqual([expect.objectContaining({ text: "The launch is in week 41.", postedBy: RADU.uid })]);
+    });
+
+    it("holds the owner's own turn too, which went apart while they were alone", async () => {
+      const { chat, planner } = alone();
+      const [turn] = chat.turns.call([planner.agentId], chat.say(RADU, "@planner my calendar?"));
+      await settle();
+      chat.members.add(ANA.uid);
+      chat.sessions.finish(turn.id, "Board dinner on Friday.", [result("calendar_events", [{ id: "e1", title: "Board dinner" }])]);
+      await settle();
+      expect(chat.posts).toEqual([]);
+      expect(chat.roster.held(RADU.uid)).toEqual([expect.objectContaining({ turn: turn.id, why: expect.stringMatching(/joined/) })]);
+    });
+
+    it("posts a reply that read no private server", async () => {
+      const { chat, planner } = alone();
+      const [turn] = chat.turns.call([planner.agentId], handOff);
+      await settle();
+      chat.members.add(MIA.uid);
+      chat.sessions.finish(turn.id, "Signups are up.", [result("db_query", [{ id: "r1", title: "Signups" }])]);
+      await settle();
+      expect(chat.posts).toEqual([expect.objectContaining({ turn: turn.id, text: "Signups are up." })]);
+      expect(chat.roster.held(RADU.uid)).toEqual([]);
+    });
+
+    it("posts as before when nobody joined, or when it went apart with others in the chat already", async () => {
+      const { chat, planner } = alone();
+      const [turn] = chat.turns.call([planner.agentId], handOff);
+      await settle();
+      chat.sessions.finish(turn.id, "The launch is in week 41.", [result("calendar_events", [{ id: "e1", title: "Board dinner" }])]);
+      await settle();
+      expect(chat.posts).toEqual([expect.objectContaining({ turn: turn.id, sources: ["calendar"] })]);
+      // In a shared chat the owner's turn goes apart as before (not alone): its reply posts, as #110 has it.
+      const shared = room();
+      const mine = shared.add(RADU, "planner", { servers: ["db", "calendar"] });
+      const [own] = shared.turns.call([mine.agentId], shared.say(RADU, "@planner my calendar?"));
+      await settle();
+      expect(shared.roster.turn(own.id)).not.toHaveProperty("alone");
+      shared.members.add("zed");
+      shared.sessions.finish(own.id, "Friday.", [result("calendar_events", [{ id: "e1", title: "x" }])]);
+      await settle();
+      expect(shared.posts).toEqual([expect.objectContaining({ turn: own.id })]);
+    });
+
+    it("holds a reply to a run's report the same way, and keeps the mark when the turn is given again", async () => {
+      const { chat, planner } = alone();
+      const [turn] = chat.turns.call([planner.agentId], { ...chat.say(RADU, "why?"), session: "run-fork" });
+      await settle();
+      expect(chat.roster.turn(turn.id)).toMatchObject({ session: "run-fork", alone: true });
+      chat.members.add(MIA.uid);
+      // Given again once someone is in (requeued): it went apart alone, and stays so.
+      chat.roster.setApart("run-fork", false, undefined, turn.id, false);
+      expect(chat.roster.turn(turn.id)).toMatchObject({ alone: true });
+      chat.sessions.finish(turn.id, "Because of the board dinner.", [result("calendar_events", [{ id: "e1", title: "x" }])]);
+      await settle();
+      expect(chat.posts).toEqual([]);
+      expect(chat.roster.held(RADU.uid)).toEqual([expect.objectContaining({ turn: turn.id, why: expect.stringMatching(/joined/) })]);
+    });
+  });
+
   it("never posts a discarded draft, and posts a private reply at once when review is off or it read no private server", async () => {
     const chat = room();
     const planner = chat.add(RADU, "planner", { servers: ["db", "calendar"], reviewBeforePosting: true });

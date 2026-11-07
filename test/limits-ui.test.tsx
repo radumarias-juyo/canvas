@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import type { GuardrailRule, PendingActionView } from "../shared/limits.ts";
 import { blankDraft, draftOf, endedText, expiresText, newRuleId, ruleLine, ruleOf, ruleWarning, type RuleDraft } from "../src/agents/limits/rules.ts";
 import { ActionCard, ActionDecision, ChatActions } from "../src/chat/ActionCard.tsx";
+import { AgentDraft } from "../src/chat/AgentDraft.tsx";
+import type { ChatAgentReplyData } from "../shared/agents.ts";
 
 const HOUR = 3_600_000;
 
@@ -183,5 +185,31 @@ describe("waiting actions", () => {
     expect(renderToStaticMarkup(<ActionDecision action={{ ...action, status: "done" }} waiting={false} />)).toContain("Ran");
     expect(renderToStaticMarkup(<ActionDecision action={{ ...action, status: "declined" }} waiting={false} />)).toContain("Declined");
     expect(renderToStaticMarkup(<ActionDecision action={{ ...action, status: "expired" }} waiting={false} />)).toContain("Expired");
+  });
+});
+
+describe("a held reply's draft", () => {
+  const reply: ChatAgentReplyData = {
+    agentId: "a".repeat(16),
+    name: "planner",
+    avatar: "pl",
+    color: "teal",
+    ownerUid: "radu",
+    text: "Week 41.",
+    calledBy: { name: "atlas", agentId: "atlas" },
+    turn: 3,
+    hop: 1,
+    startedAt: 0,
+    endedAt: 1,
+    sources: ["calendar"],
+  };
+
+  it("says why it waits when someone joined while it worked, and nothing more otherwise", () => {
+    const why = "Someone joined the chat while it worked, and it read your private servers: only you see it until you post it.";
+    const held = renderToStaticMarkup(<AgentDraft chatId="c1" draft={{ turn: 3, agentId: reply.agentId, reply, why }} onDone={() => {}} />);
+    expect(held).toContain("Someone joined the chat while it worked");
+    expect(held).toContain("Post to chat");
+    const reviewed = renderToStaticMarkup(<AgentDraft chatId="c1" draft={{ turn: 3, agentId: reply.agentId, reply }} onDone={() => {}} />);
+    expect(reviewed).not.toContain("joined");
   });
 });

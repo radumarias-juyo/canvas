@@ -7,8 +7,9 @@ import { AgentByline } from "./people.tsx";
 
 /**
  * A reply of one of the viewer's agents held for them to review before the chat sees it (reviewBeforePosting): it was
- * built on servers they do not share with the chat. Only they see it, with which servers it read, and Post to chat,
- * Edit (then post what they wrote) or Discard. `onDone` gets the drafts left, as the chat answered.
+ * built on servers they do not share with the chat (`why` adds when someone joined while it worked). Only they see it,
+ * with which servers it read, and Post to chat, Edit (then post what they wrote) or Discard. `onDone` gets the drafts
+ * left, as the chat answered.
  */
 export function AgentDraft({ chatId, draft, onDone }: { chatId: string; draft: AgentDraftView; onDone: (drafts: AgentDraftView[]) => void }) {
   const { reply } = draft;
@@ -31,6 +32,7 @@ export function AgentDraft({ chatId, draft, onDone }: { chatId: string; draft: A
       <div className="draft-note">
         Only you can see this draft · {reply.name} used {reply.sources?.join(", ") || "private servers"} · private
       </div>
+      {draft.why && <div className="draft-note">{draft.why}</div>}
       {editing === null ? (
         <div className="bubble markdown">
           <Markdown text={reply.text} />

@@ -498,6 +498,8 @@ export interface AgentDraftView {
   turn: number;
   agentId: string;
   reply: ChatAgentReplyData;
+  /** Why it waits for them, when not only because they review such replies (someone came into the chat meanwhile). */
+  why?: string;
 }
 
 /** An MCP server of the deployment, as the agent editor lists it: whether it signs in each user, and this one now. */
