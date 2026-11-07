@@ -232,16 +232,30 @@ describe("levels in a chat", () => {
   });
 
   it("a hand-off to pi goes no further than the turn that handed it", () => {
-    expect(inputLevel(handOff(1), OWNER, () => ({ byOwner: true })).level).toBe(4);
-    expect(inputLevel(handOff(1), OWNER, () => ({ byOwner: false })).level).toBe(2);
+    const radu = { name: "Radu", uid: OWNER };
+    expect(inputLevel(handOff(1), OWNER, () => ({ byOwner: true, calledBy: radu })).level).toBe(4);
+    expect(inputLevel(handOff(1), OWNER, () => ({ byOwner: false, calledBy: { name: "Mia" } })).level).toBe(2);
     // A run's chain never does, whoever's it is; nor a turn the chat no longer has.
-    expect(inputLevel(handOff(1), OWNER, () => ({ byOwner: true, unattended: true })).level).toBe(2);
+    expect(inputLevel(handOff(1), OWNER, () => ({ byOwner: true, calledBy: radu, unattended: true })).level).toBe(2);
+    // Nor a turn the router picked the agent for, though on the owner's message.
+    expect(inputLevel(handOff(1), OWNER, () => ({ byOwner: true, calledBy: { ...radu, routed: true } })).level).toBe(2);
     expect(inputLevel(handOff(1), OWNER, () => null).level).toBe(2);
   });
 
   it("an agent runs on its owner's own turn and proposes on any other", () => {
     expect(turnLevel({ byOwner: true, calledBy: { name: "Radu" } }).level).toBe(4);
     expect(turnLevel({ byOwner: false, calledBy: { name: "Mia" } })).toEqual({ level: 2, because: "on a turn Mia gave it" });
+  });
+
+  it("turns nobody asked for propose: speaking up, a follow-up, a router's pick; and the owner's Yes only drafts", () => {
+    const radu = { name: "Radu", uid: OWNER };
+    expect(turnLevel({ byOwner: false, calledBy: { name: "the conversation", unprompted: "speak-up" } }).level).toBe(2);
+    // A follow-up on the owner's own question is still a turn they did not give it.
+    expect(turnLevel({ byOwner: true, calledBy: { ...radu, unprompted: "follow-up" } }).level).toBe(2);
+    expect(turnLevel({ byOwner: true, calledBy: { ...radu, routed: true } }).level).toBe(2);
+    expect(turnLevel({ byOwner: true, calledBy: { ...radu, drafts: true } })).toEqual({ level: 2, because: "on your Yes to an offer, which only drafts" });
+    // pi answering a Yes in place of an agent: the same.
+    expect(inputLevel({ kind: CHAT_MESSAGE_KIND, data: { uid: OWNER, name: "Radu", text: "", sentAt: 1, drafts: true } }, OWNER, () => null).level).toBe(2);
   });
 });
 
