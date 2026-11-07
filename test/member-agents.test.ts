@@ -323,7 +323,7 @@ class Room implements TurnHost {
     this.kept.push(promise);
   }
   async fork(session: string) {
-    return this.sessions.fork(session);
+    return { session: this.sessions.fork(session) };
   }
   async sources(entry: RosterEntry, entries: readonly EntryRecord[]) {
     const agent = (await this.definition(entry))!;
@@ -581,7 +581,7 @@ describe("Member agents: a seat in the member's own object", () => {
     const again = chat.add(RADU, "planner");
     const plain = chat.roster.enqueue({ ...ask, agentId: again.agentId });
     chat.roster.startNext(again.agentId);
-    chat.roster.setFork(plain.id, "private-fork");
+    chat.roster.setFork(plain.id, "private-fork", { review: false });
     expect(chat.roster.turn(plain.id)).toMatchObject({ session: "private-fork", forked: true });
     chat.roster.requeueUnsubmitted();
     expect(chat.roster.turn(plain.id)).toMatchObject({ status: "queued", session: "private-fork", forked: true });
@@ -939,7 +939,7 @@ describe("Member agents: what the review of private turns found", () => {
     const planner = chat.add(RADU, "planner", { servers: ["db", "calendar"] });
     const turn = chat.roster.enqueue({ agentId: planner.agentId, hop: 0, calledBy: { name: RADU.name, uid: RADU.uid }, byOwner: true, ask: "go" });
     chat.roster.startNext(planner.agentId);
-    chat.roster.setFork(turn.id, "room-fork-before");
+    chat.roster.setFork(turn.id, "room-fork-before", { review: false });
     // The object restarted before the input was marked in.
     chat.turns.resume();
     await settle();
@@ -973,11 +973,11 @@ describe("Member agents: what the review of private turns found", () => {
     await settle();
     // Held for review: still withheld, until its owner posts it.
     expect(chat.roster.withheld()).toEqual(new Set([first]));
-    expect(chat.roster.forks().get(first)).toEqual({ posted: false, ended: true });
+    expect(chat.roster.forks().get(first)).toMatchObject({ posted: false, ended: true });
     expect(await chat.turns.post(RADU.uid, planner.agentId, kept.id)).toBeNull();
     expect(chat.roster.withheld()).toEqual(new Set());
     // Kept as a fork, ended: its session is read once more, as the chat's, and then no more.
-    expect(chat.roster.forks().get(first)).toEqual({ posted: true, ended: true });
+    expect(chat.roster.forks().get(first)).toMatchObject({ posted: true, ended: true });
 
     const [dropped] = chat.turns.call([planner.agentId], chat.say(RADU, "@planner again"));
     await settle();
@@ -1030,6 +1030,72 @@ describe("Member agents: what the review of private turns found", () => {
     expect(chat.posts.at(-1)).toMatchObject({ turn: unreviewed.id, failed: "model error" });
     expect(chat.posts.at(-1)).not.toHaveProperty("published");
     expect(chat.roster.withheld()).toEqual(new Set([emptyFork, openFork]));
+  });
+
+  it("keeps what a fork published by version until its reply is posted, and for good once it is discarded", async () => {
+    const chat = room();
+    const planner = chat.add(RADU, "planner", { servers: ["db", "calendar"], reviewBeforePosting: true });
+    const [kept] = chat.turns.call([planner.agentId], chat.say(RADU, "@planner chart it"));
+    await settle();
+    const fork = chat.sessions.sessionOf(kept.id);
+    expect(chat.roster.fork(fork)).toMatchObject({ posted: false, ended: false, review: true });
+    // A new version of a page the chat has (w1 v3), and a page of its own (p1 v1); pi's session records nothing.
+    chat.roster.recordPage(fork, "w1", 3);
+    chat.roster.recordPage(fork, "p1", 1);
+    chat.roster.recordPage(planner.session, "x1", 1);
+    expect([chat.roster.withheldVersion("w1", 3), chat.roster.withheldVersion("w1", 2), chat.roster.withheldVersion("x1", 1)]).toEqual([
+      true,
+      false,
+      false,
+    ]);
+    // Not from the fork itself: it builds on what it made.
+    expect(chat.roster.withheldVersion("w1", 3, fork)).toBe(false);
+    expect([chat.roster.pagesOf(fork), chat.roster.madeApart(), chat.roster.hasWithheldVersion("w1")]).toEqual([
+      new Set(["w1", "p1"]),
+      new Set(["p1"]),
+      true,
+    ]);
+    chat.sessions.finish(kept.id, "Charted.", [result("calendar_events", [{ id: "e1", title: "x" }])]);
+    await settle();
+    expect(chat.roster.withheldVersion("w1", 3)).toBe(true);
+    expect(await chat.turns.post(RADU.uid, planner.agentId, kept.id)).toBeNull();
+    expect([chat.roster.withheldVersion("w1", 3), chat.roster.madeApart(), chat.roster.hasWithheldVersion("w1")]).toEqual([false, new Set(), false]);
+    // Recorded only while apart and not posted.
+    chat.roster.recordPage(fork, "w1", 4);
+    expect(chat.roster.withheldVersion("w1", 4)).toBe(false);
+
+    const [dropped] = chat.turns.call([planner.agentId], chat.say(RADU, "@planner again"));
+    await settle();
+    const second = chat.sessions.sessionOf(dropped.id);
+    chat.roster.recordPage(second, "w1", 5);
+    chat.sessions.finish(dropped.id, "Again.", [result("calendar_events", [{ id: "e1", title: "x" }])]);
+    await settle();
+    expect(chat.turns.discard(RADU.uid, planner.agentId, dropped.id)).toBeNull();
+    expect(chat.roster.withheldVersion("w1", 5)).toBe(true);
+  });
+
+  it("runs a reply to a run's report apart from the chat: what it publishes waits for its reply, and the session never settles", async () => {
+    const chat = room();
+    const planner = chat.add(RADU, "planner", { servers: ["db", "calendar"], reviewBeforePosting: true });
+    const reply = (text: string) => chat.turns.call([planner.agentId], { ...chat.say(RADU, text), session: "run-reply" });
+    const [first] = reply("@planner and the week after?");
+    await settle();
+    expect(chat.sessions.sessionOf(first.id)).toBe("run-reply");
+    expect(chat.roster.fork("run-reply")).toMatchObject({ posted: false, ended: false, review: true });
+    chat.roster.recordPage("run-reply", "r1", 2);
+    chat.sessions.finish(first.id, "Week 42 too.", [result("calendar_events", [{ id: "e1", title: "x" }])]);
+    await settle();
+    // Held for review: its version waits. A session later turns run in again is never read to its end for good.
+    expect(chat.roster.withheldVersion("r1", 2)).toBe(true);
+    expect(chat.roster.fork("run-reply")).toMatchObject({ posted: false, ended: false });
+    expect(await chat.turns.post(RADU.uid, planner.agentId, first.id)).toBeNull();
+    expect(chat.roster.withheldVersion("r1", 2)).toBe(false);
+    // The next reply in the same session is apart again; what the first posted stays the chat's.
+    reply("@planner and after that?");
+    await settle();
+    expect(chat.roster.fork("run-reply")).toMatchObject({ posted: false });
+    chat.roster.recordPage("run-reply", "r1", 3);
+    expect([chat.roster.withheldVersion("r1", 2), chat.roster.withheldVersion("r1", 3)]).toEqual([false, true]);
   });
 
   it("gives a seat its turn again when the call was cut off, and stops it there when giving fails", async () => {

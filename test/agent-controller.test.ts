@@ -192,8 +192,8 @@ class FakeChat implements TurnHost {
 
   // An owner's turn runs in a fork of its agent's session: here the session itself, so what it reads and writes shows
   // where the agent's turns do. No private servers: every record shows, and none is held.
-  async fork(session: string): Promise<string> {
-    return session;
+  async fork(session: string) {
+    return { session };
   }
   async sources(_entry: RosterEntry, entries: readonly EntryRecord[]) {
     return { items: itemsIn(entries), sources: [] };

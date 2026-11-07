@@ -111,6 +111,22 @@ type RosterRow = {
   owner_from: number;
 };
 
+/**
+ * A session apart from the chat (ChatRoster.forks): whether its reply was `posted`, whether its turn `ended` (it takes
+ * no more entries; never for a session later turns run in again), the newest entry it inherited (`from`, after which its own start), and whether its owner reviews it.
+ */
+export type Fork = { posted: boolean; ended: boolean; from?: number; review: boolean };
+type ForkRow = { session: string; posted: number; from_entry: number | null; review: number; reused: number; open: number };
+const FORKS = `SELECT f.session, f.posted, f.from_entry, f.review, f.reused,
+  EXISTS (SELECT 1 FROM chat_agent_turns t WHERE t.session = f.session AND t.status IN ('queued', 'running')) AS open
+  FROM chat_agent_forks f`;
+const forkOf = (row: ForkRow): Fork => ({
+  posted: row.posted === 1,
+  ended: row.reused !== 1 && row.open !== 1,
+  ...(row.from_entry !== null && { from: row.from_entry }),
+  review: row.review === 1,
+});
+
 type TurnRow = {
   id: number;
   agent_id: string;
@@ -216,7 +232,15 @@ export class ChatRoster {
       CREATE INDEX IF NOT EXISTS chat_agent_turns_by_status ON chat_agent_turns (status);
       CREATE INDEX IF NOT EXISTS chat_agent_turns_by_root ON chat_agent_turns (root);
       CREATE TABLE IF NOT EXISTS chat_agent_forks (session TEXT PRIMARY KEY, posted INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE IF NOT EXISTS chat_agent_fork_pages (
+        session TEXT NOT NULL, artifact_id TEXT NOT NULL, version INTEGER NOT NULL, posted INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (session, artifact_id, version)
+      );
+      CREATE INDEX IF NOT EXISTS chat_agent_fork_pages_by_page ON chat_agent_fork_pages (artifact_id, version);
     `);
+    // From where a fork's own entries start (what it inherited is its parent's), whether its owner reviews its reply,
+    // and whether later turns run in it again (a run's reply session, setApart): such a session never ends for good.
+    addColumns(sql, "chat_agent_forks", { from_entry: "INTEGER", review: "INTEGER NOT NULL DEFAULT 0", reused: "INTEGER NOT NULL DEFAULT 0" });
     // Columns added later: a roster or turn table made before them lacks them.
     addColumns(sql, "chat_agents", {
       shared: "INTEGER NOT NULL DEFAULT 0",
@@ -424,12 +448,91 @@ export class ChatRoster {
 
   /**
    * A turn runs in a session of its own (a fork of its agent's): set before its input goes in. What the fork publishes
-   * or saves is withheld from the chat's listings until its reply is posted (`forks`).
+   * or saves is withheld from the chat's listings until its reply is posted (`forks`). `from`: the newest entry it
+   * inherited, after which its own start; `review`: its agent's owner reviews its reply before it is posted.
    */
-  setFork(id: number, session: string): void {
+  setFork(id: number, session: string, apart: { from?: number; review: boolean }): void {
     if (this.#sql.exec("UPDATE chat_agent_turns SET session = ?, forked = 1 WHERE id = ? AND status = 'running'", session, id).rowsWritten) {
-      this.#sql.exec("INSERT INTO chat_agent_forks (session) VALUES (?) ON CONFLICT DO NOTHING", session);
+      this.#sql.exec(
+        "INSERT INTO chat_agent_forks (session, from_entry, review) VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
+        session,
+        apart.from ?? null,
+        apart.review ? 1 : 0,
+      );
     }
+  }
+
+  /**
+   * A turn in a session of its own that is not a fork (a reply to a run's report, in the run's reply session) runs apart
+   * from the chat as a fork does: what it publishes or saves now is withheld until its reply is posted. What the session
+   * made before stays as it was: the traces read keep what they read as the chat's, and its pages' versions are kept
+   * by turn (recordPage).
+   */
+  setApart(session: string, review: boolean): void {
+    this.#sql.exec(
+      "INSERT INTO chat_agent_forks (session, review, reused) VALUES (?, ?, 1) ON CONFLICT (session) DO UPDATE SET posted = 0, review = excluded.review",
+      session,
+      review ? 1 : 0,
+    );
+  }
+
+  /** A session apart from the chat (setFork, setApart), as `forks` has it; undefined for any other. */
+  fork(session: string): Fork | undefined {
+    const [row] = this.#sql.exec(`${FORKS} WHERE f.session = ?`, session).toArray() as ForkRow[];
+    return row && forkOf(row);
+  }
+
+  /**
+   * A version `session` published while apart from the chat with its reply not posted: withheld from members until it
+   * is (withheldVersion), and for good when it never is. Nothing for any other session.
+   */
+  recordPage(session: string, artifactId: string, version: number): void {
+    this.#sql.exec(
+      `INSERT INTO chat_agent_fork_pages (session, artifact_id, version)
+       SELECT session, ?, ? FROM chat_agent_forks WHERE session = ? AND posted = 0 ON CONFLICT DO NOTHING`,
+      artifactId,
+      version,
+      session,
+    );
+  }
+
+  /** Whether a session apart from the chat (other than `except`) published this version of a page, with its reply not posted. */
+  withheldVersion(artifactId: string, version: number, except?: string): boolean {
+    return (
+      this.#sql
+        .exec(
+          "SELECT 1 FROM chat_agent_fork_pages WHERE artifact_id = ? AND version = ? AND posted = 0 AND session IS NOT ? LIMIT 1",
+          artifactId,
+          version,
+          except ?? null,
+        )
+        .toArray().length > 0
+    );
+  }
+
+  /** Whether a session apart from the chat published any version of a page, with its reply not posted. */
+  hasWithheldVersion(artifactId: string): boolean {
+    return this.#sql.exec("SELECT 1 FROM chat_agent_fork_pages WHERE artifact_id = ? AND posted = 0 LIMIT 1", artifactId).toArray().length > 0;
+  }
+
+  /** The pages a session apart from the chat made (their first version), with its reply not posted: not the chat's yet. */
+  madeApart(): Set<string> {
+    return new Set(
+      this.#sql
+        .exec("SELECT DISTINCT artifact_id FROM chat_agent_fork_pages WHERE version = 1 AND posted = 0")
+        .toArray()
+        .map((row) => row.artifact_id as string),
+    );
+  }
+
+  /** The pages `session` published while apart from the chat (recordPage). */
+  pagesOf(session: string): Set<string> {
+    return new Set(
+      this.#sql
+        .exec("SELECT DISTINCT artifact_id FROM chat_agent_fork_pages WHERE session = ?", session)
+        .toArray()
+        .map((row) => row.artifact_id as string),
+    );
   }
 
   /**
@@ -437,14 +540,9 @@ export class ChatRoster {
    * published or saved is not the chat's for anyone but its owner: it runs, is held for review, was discarded or
    * stopped), and whether it `ended`, after which its session takes no more entries.
    */
-  forks(): Map<string, { posted: boolean; ended: boolean }> {
-    const rows = this.#sql
-      .exec(
-        `SELECT f.session, f.posted, t.status FROM chat_agent_forks f
-         LEFT JOIN chat_agent_turns t ON t.session = f.session AND t.forked = 1`,
-      )
-      .toArray() as { session: string; posted: number; status: AgentTurnStatus | null }[];
-    return new Map(rows.map((row) => [row.session, { posted: row.posted === 1, ended: row.status !== "queued" && row.status !== "running" }]));
+  forks(): Map<string, Fork> {
+    const rows = this.#sql.exec(FORKS).toArray() as ForkRow[];
+    return new Map(rows.map((row) => [row.session, forkOf(row)]));
   }
 
   /** The forks whose replies were not posted: forks() of those. */
@@ -558,7 +656,10 @@ export class ChatRoster {
       )
       .toArray()[0] as Pick<TurnRow, "session" | "forked"> | undefined;
     // Its fork's pages and files are the chat's now, as its reply is.
-    if (posts && row?.forked === 1 && row.session !== null) this.#sql.exec("UPDATE chat_agent_forks SET posted = 1 WHERE session = ?", row.session);
+    if (posts && row?.session) {
+      this.#sql.exec("UPDATE chat_agent_forks SET posted = 1 WHERE session = ?", row.session);
+      this.#sql.exec("UPDATE chat_agent_fork_pages SET posted = 1 WHERE session = ?", row.session);
+    }
   }
 
   /** Drop a held reply, as its owner discards it: it never reaches the chat. */

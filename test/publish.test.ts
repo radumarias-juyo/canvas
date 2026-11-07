@@ -8,8 +8,10 @@ import {
   MAX_FAILED_CHECKS,
   publishDraft,
   checkDraft,
+  reviewedRefusal,
   writeDraft,
   type PublishScope,
+  type SessionRules,
 } from "../worker/agent/publish.ts";
 import { BrowserUnavailable, CheckTimedOut } from "../worker/artifacts/browser.ts";
 import type { CheckReport } from "../worker/artifacts/check.ts";
@@ -173,6 +175,54 @@ describe("write, check, publish", () => {
     expect(looks).toBe(1);
     await publishDraft(scope, { title: "Prices", draftId: id });
     expect(versions).toEqual([{ id: undefined, html: fixed }]);
+  });
+});
+
+describe("publishing from a conversation apart from the chat", () => {
+  const ok = () => report([]);
+  /** A chat that has "Salaries" (s1, a fork's page not the chat's yet) and "Week" (w1, the chat's), and the rules of `session`. */
+  function apart(rules: (session: string) => Partial<SessionRules>) {
+    const made = chat(ok);
+    const published: { id: string; session?: string }[] = [];
+    made.scope.chatArtifacts = async () => [artifact("s1", "Salaries", 2), artifact("w1", "Week", 1)];
+    made.scope.onPublished = async (meta, session) => void published.push({ id: meta.id, ...(session !== undefined && { session }) });
+    made.scope.rulesFor = async (session) => ({
+      hidden: new Set(["s1"]),
+      hiddenVersion: () => false,
+      own: new Set(),
+      reviewed: false,
+      chatFile: () => true,
+      ...rules(session),
+    });
+    const publish = async (target: { title: string; artifactId?: string; newArtifact?: boolean }, session: string) => {
+      const draft = await writeDraft(made.scope, { html: `<p>${target.title} ${Math.random()}</p>` });
+      await checkDraft(made.scope, draft.id, {});
+      return publishDraft(made.scope, { ...target, draftId: draft.id }, undefined, session);
+    };
+    return { ...made, published, publish };
+  }
+
+  it("never takes over a page another conversation apart from the chat made: not by its title, nor by its id", async () => {
+    const { publish, versions, published } = apart(() => ({}));
+    // pi in the shared session publishes a page with the hidden page's title: a new page, not its next version.
+    expect((await publish({ title: "Salaries" }, "1")).meta.id).toBe("new0000000000001");
+    await expect(publish({ title: "Anything", artifactId: "s1" }, "1")).rejects.toThrow("no artifact s1 in this chat");
+    // The chat's own pages go by title as before, and each publish says which conversation it came from.
+    expect((await publish({ title: "week" }, "1")).meta.id).toBe("w1");
+    expect(versions.map((version) => version.id)).toEqual([undefined, "w1"]);
+    expect(published).toEqual([
+      { id: "new0000000000001", session: "1" },
+      { id: "w1", session: "1" },
+    ]);
+  });
+
+  it("lets the fork that made a page build on it, and a reviewed one change no page the chat already has", async () => {
+    const { publish } = apart((session) => (session === "fork" ? { hidden: new Set(), own: new Set(["s1"]), reviewed: true } : {}));
+    expect((await publish({ title: "Salaries" }, "fork")).meta.id).toBe("s1");
+    await expect(publish({ title: "Week" }, "fork")).rejects.toThrow(reviewedRefusal("page"));
+    await expect(publish({ title: "Other", artifactId: "w1" }, "fork")).rejects.toThrow(reviewedRefusal("page"));
+    // A new page it may make: hidden until its reply is posted.
+    expect((await publish({ title: "Week", newArtifact: true }, "fork")).meta.id).toBe("new0000000000001");
   });
 });
 

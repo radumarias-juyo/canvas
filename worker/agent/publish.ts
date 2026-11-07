@@ -17,7 +17,13 @@ export interface PublishScope {
   chatId: string;
   hub: McpHub;
   artifacts: ArtifactStore;
-  onPublished(artifact: Omit<ArtifactSummary, "chatId">): Promise<void>;
+  /** A version is out, published from conversation `session` (none: not by a model's turn, e.g. a dev publish). */
+  onPublished(artifact: Omit<ArtifactSummary, "chatId">, session?: string): Promise<void>;
+  /**
+   * What conversation `session` may see and change of the chat's pages and files while turns run apart from the chat
+   * (agents' private turns, in forks of their sessions): unset, or for a chat with none, nothing is withheld.
+   */
+  rulesFor?(session: string): Promise<SessionRules>;
   /**
    * Render a page in a headless browser and report on it (worker/artifacts/check.ts), for at most CHECK_MS and until
    * `signal` aborts. Throws BrowserUnavailable without a browser, CheckTimedOut when the page held it too long.
@@ -40,6 +46,32 @@ export interface PublishScope {
   skillSets(names: readonly string[]): Promise<Map<string, { set: string; files: SkillFileInfo[] }>>;
   /** The bytes of one file of a set of a skill's files (SkillFiles), or null when the set has no such file, or is gone. */
   readSkillFile(skill: string, set: string, path: string): Promise<Uint8Array | null>;
+}
+
+/**
+ * What one conversation of the chat may see and change while some run apart from it (an agent's private turn runs in a
+ * fork of its session, whose pages and files are not the chat's until its reply is posted).
+ */
+export interface SessionRules {
+  /** The pages other conversations apart from the chat made, not the chat's yet: this one neither sees nor builds on them. */
+  hidden: ReadonlySet<string>;
+  /** Whether another conversation apart from the chat published this version of a page, not the chat's yet. */
+  hiddenVersion(artifactId: string, version: number): boolean;
+  /** The pages this conversation published while apart from the chat: only it builds on them until they are the chat's. */
+  own: ReadonlySet<string>;
+  /** It runs apart and its owner reviews its reply before it is posted: it changes no page or file the chat already has. */
+  reviewed: boolean;
+  /** Whether a file is the chat's (not one only a conversation apart from it saved). */
+  chatFile(path: string): boolean;
+}
+
+/** Why a reviewed turn apart from the chat may not change a page or file the chat already has, and what to do instead. */
+export function reviewedRefusal(what: "page" | "file"): string {
+  return what === "page"
+    ? "Not published: your reply is reviewed before it is posted, so this turn changes no page the chat already has. " +
+        "Put the change in your reply, or publish it as a new page with new_artifact: true, which stays hidden until your reply is posted."
+    : "Not saved: your reply is reviewed before it is posted, so this turn changes no file the chat already has. " +
+        "Save it under a new name, which stays hidden until your reply is posted.";
 }
 
 /** Which artifact a publish goes to and what the version says (see artifactFor). */
@@ -385,14 +417,21 @@ export function artifactByTitle(artifacts: readonly ArtifactSummary[], title: st
 
 /**
  * The artifact a publish goes to: the one it names; a new one with newArtifact; else the one the draft was written as a
- * version of (`writtenFor`); else this chat's by its title (artifactByTitle); else a new one.
+ * version of (`writtenFor`); else this chat's by its title (artifactByTitle); else a new one. Never a page `rules` hide
+ * from the publishing conversation: by title it is not found, and named it is no artifact of this chat. With `rules`
+ * reviewed, never a page the chat already has.
  */
-async function artifactFor(scope: PublishScope, target: PublishTarget, writtenFor?: string): Promise<{ id?: string; byTitle?: boolean }> {
-  if (target.artifactId !== undefined) return { id: target.artifactId };
-  if (target.newArtifact) return {};
-  if (writtenFor !== undefined) return { id: writtenFor };
-  const same = artifactByTitle(await scope.chatArtifacts(), target.title);
-  return same ? { id: same.id, byTitle: true } : {};
+async function artifactFor(scope: PublishScope, target: PublishTarget, writtenFor?: string, rules?: SessionRules): Promise<{ id?: string; byTitle?: boolean }> {
+  const named = target.artifactId ?? (target.newArtifact ? undefined : writtenFor);
+  if (named !== undefined && rules?.hidden.has(named)) throw new Error(`Not published: no artifact ${named} in this chat.`);
+  let chosen: { id?: string; byTitle?: boolean } = named !== undefined ? { id: named } : {};
+  if (named === undefined && !target.newArtifact) {
+    const artifacts = await scope.chatArtifacts();
+    const same = artifactByTitle(rules ? artifacts.filter((artifact) => !rules.hidden.has(artifact.id)) : artifacts, target.title);
+    if (same) chosen = { id: same.id, byTitle: true };
+  }
+  if (chosen.id !== undefined && rules?.reviewed && !rules.own.has(chosen.id)) throw new Error(reviewedRefusal("page"));
+  return chosen;
 }
 
 /**
@@ -400,7 +439,7 @@ async function artifactFor(scope: PublishScope, target: PublishTarget, writtenFo
  * (PublishScope.publishUnchecked), one no browser checked, which is checked here first when a browser can, so a page
  * with errors is never published. A published draft goes: its version holds it now.
  */
-export async function publishDraft(scope: PublishScope, input: PublishInput, signal?: AbortSignal): Promise<Published> {
+export async function publishDraft(scope: PublishScope, input: PublishInput, signal?: AbortSignal, session?: string): Promise<Published> {
   const drafts = await scope.drafts();
   let draft = await draftNamed(drafts, input.draftId, "Not published.");
   // Without the code review: its findings would stop the publish unseen, and the draft would then be reviewed already.
@@ -416,7 +455,8 @@ export async function publishDraft(scope: PublishScope, input: PublishInput, sig
   await validPage(scope, draft.html, draft.manifest.mcp?.servers, "Not published.");
   // The version holds the skill files the check ran with: it never changes when the skill does.
   const { html } = await pageToRun(scope, draft, "Not published.");
-  const target = await artifactFor(scope, input, draft.artifactId);
+  const rules = session === undefined ? undefined : await scope.rulesFor?.(session);
+  const target = await artifactFor(scope, input, draft.artifactId, rules);
   const meta = await scope.artifacts.publishVersion({
     id: target.id,
     ownerUid: scope.uid,
@@ -426,7 +466,7 @@ export async function publishDraft(scope: PublishScope, input: PublishInput, sig
     manifest: draft.manifest,
     message: input.message,
   });
-  await scope.onPublished({ id: meta.id, title: meta.title, latest: meta.latest, updatedAt: meta.updatedAt });
+  await scope.onPublished({ id: meta.id, title: meta.title, latest: meta.latest, updatedAt: meta.updatedAt }, session);
   // Published already: a draft left behind is only clutter, never a reason to fail.
   await drafts.remove(draft.id).catch((error: unknown) => console.error("draft:", errorMessage(error)));
   return { meta, byTitle: target.byTitle, ...(unchecked && { unchecked }) };

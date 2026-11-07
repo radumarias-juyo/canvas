@@ -64,8 +64,11 @@ export interface TurnHost {
   handToPi(input: string, data: ChatTurnData): Promise<void>;
   /** The roster's view changed (an agent started or ended a turn, or was dropped): tell everyone. */
   changed(): void;
-  /** A new session that sees `session`'s history so far: a turn its owner asked for runs in one. */
-  fork(session: string): Promise<string>;
+  /**
+   * A new session that sees `session`'s history so far: a turn its owner asked for runs in one. `from`: the newest entry
+   * it inherited, after which only its own come.
+   */
+  fork(session: string): Promise<{ session: string; from?: number }>;
   /**
    * What a forked turn's reply shows of its sources (turnSources), from its session's entries: only the shared servers'
    * records, the private servers it called, and whether its owner reviews it first.
@@ -187,12 +190,15 @@ export class AgentTurns {
         await this.#catchUp(entry, turn.id);
         // Stopped meanwhile: no fork, which nothing would run in or abort.
         if (!live()) return;
-        const session = await this.#host.fork(entry.session);
+        const { session, from } = await this.#host.fork(entry.session);
         if (!live()) return;
-        roster.setFork(turn.id, session);
+        roster.setFork(turn.id, session, { from, review: agent.reviewBeforePosting === true });
         turn = { ...turn, session, forked: true };
         // Its owner follows it live in the fork from now on, and nobody follows the agent's session for it.
         this.#host.changed();
+      } else if (turn.session !== undefined && !turn.forked) {
+        // A reply to a run's report runs in the run's reply session, apart from the chat as a fork is.
+        roster.setApart(turn.session, agent.reviewBeforePosting === true);
       }
       if (turn.forked) await Promise.all([this.#tellApart(entry, turn), this.#host.configure(entry, agent, turn)]);
       else await Promise.all([turn.session ? undefined : this.#catchUp(entry, turn.id), this.#host.configure(entry, agent, turn)]);

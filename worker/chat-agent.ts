@@ -95,7 +95,7 @@ import { formatSkillFile } from "./skills/index.ts";
 import { ChatReactions } from "./reactions.ts";
 import { clearImported, DumpError, dumpChat, hasConversation, importedRoster, restorePart } from "./chat-dump.ts";
 import { idRemapper, type ChatDumpCursor, type ChatDumpPage, type ChatDumpPart, type ChatImportStart } from "../shared/data-export.ts";
-import { checkDraft, FailedChecks, publishDraft, writeDraft, type PublishScope, type PublishTarget, type WriteInput } from "./agent/publish.ts";
+import { checkDraft, FailedChecks, publishDraft, writeDraft, type PublishScope, type PublishTarget, type SessionRules, type WriteInput } from "./agent/publish.ts";
 import { CheckBrowser } from "./artifacts/browser.ts";
 import { CHECK_MS, checkPage, type Bridge } from "./artifacts/check.ts";
 import { lookFrom } from "./artifacts/look.ts";
@@ -560,6 +560,7 @@ export class ChatAgent extends DurableObject<Env> {
       // Deriving the user's key is not free, so derive it once per object.
       files: memoAsync(() => this.storage.userFiles(this.uid)),
       onPublished: this.#onPublished(this.chatId),
+      rulesFor: (session) => this.#rulesFor(session),
       broughtIn: (id) => this.#broughtIn().includes(id),
       proposeSkill: (skill) => this.#directory.saveSkill(skill, "agent", false),
       proposeAgent: (input) => this.#directory.saveAgent(input, "agent", false),
@@ -1716,6 +1717,7 @@ export class ChatAgent extends DurableObject<Env> {
    * such a page (#hiddenPages, which a change of the roster's turns lets go).
    */
   async #withheldPage(artifactId: string): Promise<boolean> {
+    if (this.roster.madeApart().has(artifactId)) return true;
     const forking = () => this.roster.allRunning().some((turn) => turn.forked);
     let hidden = this.#hiddenPages;
     if (!hidden || forking()) {
@@ -1727,6 +1729,28 @@ export class ChatAgent extends DurableObject<Env> {
     return hidden.has(artifactId);
   }
 
+  /** Whether `version` of a page is not the chat's yet: the page (#withheldPage), or that version (a fork's of a page the chat has). */
+  async #withheldVersion(artifactId: string, version: number): Promise<boolean> {
+    return this.roster.withheldVersion(artifactId, version) || (await this.#withheldPage(artifactId));
+  }
+
+  /**
+   * What conversation `session` may see and change while turns run apart from the chat (PublishScope.rulesFor): not the
+   * pages and versions other such turns made, and, apart itself with its reply reviewed, nothing the chat already has.
+   */
+  async #rulesFor(session: string): Promise<SessionRules> {
+    const traces = await this.#readTraces();
+    const own = this.roster.pagesOf(session);
+    const fork = this.roster.fork(session);
+    return {
+      hidden: new Set([...traces.hidden.artifacts, ...this.roster.madeApart()].filter((id) => !own.has(id))),
+      hiddenVersion: (artifactId, version) => this.roster.withheldVersion(artifactId, version, session),
+      own,
+      reviewed: !!fork && !fork.posted && fork.review,
+      chatFile: (path) => this.#inChat(path, traces),
+    };
+  }
+
   /**
    * What the chat holds of the owner's, for someone in it: its files (chatFiles) and the artifacts published from it.
    * Whether an artifact is unread is the owner's to know: someone else gets none of it.
@@ -1736,7 +1760,8 @@ export class ChatAgent extends DurableObject<Env> {
     const owner = uid === this.uid;
     const [{ files, traces }, artifacts] = await Promise.all([this.#chatFiles(owner), this.#directory.listChatArtifacts(this.chatId)]);
     if (owner) return { files: newestFirst(files), artifacts };
-    const visible = artifacts.filter((artifact) => !traces.hidden.artifacts.has(artifact.id));
+    const madeApart = this.roster.madeApart();
+    const visible = artifacts.filter((artifact) => !traces.hidden.artifacts.has(artifact.id) && !madeApart.has(artifact.id));
     return { files: newestFirst(files), artifacts: visible.map(({ unread: _, ...artifact }) => artifact) };
   }
 
@@ -2274,8 +2299,11 @@ export class ChatAgent extends DurableObject<Env> {
    * What every publish does once a version is out, whoever published it (pi, an agent, a run's page step): record it
    * as `chatId`'s, and, off the publish's path, tell the chat that discusses the page of its new version.
    */
-  #onPublished(chatId: string): (artifact: Omit<ArtifactSummary, "chatId">) => Promise<void> {
-    return async (artifact) => {
+  #onPublished(chatId: string): (artifact: Omit<ArtifactSummary, "chatId">, session?: string) => Promise<void> {
+    return async (artifact, session) => {
+      // A version a conversation apart from the chat published (an agent's private turn): kept by version, before
+      // anything else, so members never reach it before its reply is posted.
+      if (session !== undefined && chatId === this.chatId) this.roster.recordPage(session, artifact.id, artifact.latest);
       // The chat it belongs to says its kind (the owner's row of it can lag): a version of an off-the-record chat reaches
       // no follower. One that cannot be asked counts as off the record.
       const kind =
@@ -2593,11 +2621,12 @@ export class ChatAgent extends DurableObject<Env> {
     // Sessions are read side by side (traces only ever add, so the order does not matter), a few at a time.
     await mapLimit(await this.harness.sessions.list(), TRACE_READS_AT_ONCE, async ({ id }) => {
       // Asked per session, as a fork may be made while the read goes on (it holds only what it inherited until then).
-      const fork = this.roster.forks().get(id);
+      const fork = this.roster.fork(id);
       const seen = fork && !fork.posted ? this.#seenWithheld : this.#seen;
       // A fork whose turn ended takes no more entries: read to its end once, it is not read again.
       if (seen.settled.has(id)) return;
-      const query = { order: "ascending", minEntryId: ((seen.through.get(id) ?? -1) + 1) as EntryId } as const;
+      // A fork is read from its own first entry: what it inherited is its parent's, read there.
+      const query = { order: "ascending", minEntryId: ((seen.through.get(id) ?? fork?.from ?? -1) + 1) as EntryId } as const;
       for await (const page of entryPages(await this.harness.conversation(id), query, 500)) {
         chatTraces(page, seen.traces);
         const last = page.at(-1);
@@ -2925,10 +2954,15 @@ export class ChatAgent extends DurableObject<Env> {
     await this.#writeAside(await this.#conversation(session), text, requestId);
   }
 
-  /** A new session that sees `session`'s history so far (an agent's private turn runs in one); a new one when it has none yet. */
-  async #fork(session: string): Promise<string> {
+  /**
+   * A new session that sees `session`'s history so far (an agent's private turn runs in one); a new one when it has none
+   * yet. `from`: the newest entry it inherited (or one before it), after which only its own entries come.
+   */
+  async #fork(session: string): Promise<{ session: string; from?: number }> {
     const { items } = await (await this.#conversation(session)).entries({ order: "descending" }, 1, undefined, BACKGROUND_CONTEXT);
-    return (items.length ? await this.harness.sessions.fork(session) : await this.harness.sessions.create()).id;
+    const newest = items[0]?.id as number | undefined;
+    if (newest === undefined) return { session: (await this.harness.sessions.create()).id };
+    return { session: (await this.harness.sessions.fork(session)).id, from: newest };
   }
 
   async #submitTo(session: string, input: string, operationId: string, data: ChatTurnData): Promise<void> {
@@ -3079,7 +3113,7 @@ export class ChatAgent extends DurableObject<Env> {
       definition: (agentId) => this.#directory.getAgent(agentId),
       room,
       create: async () => (await this.harness.sessions.create()).id,
-      fork: (session) => this.#fork(session),
+      fork: async (session) => (await this.#fork(session)).session,
       write: (session, text, requestId) => this.#writeTo(session, text, requestId),
       configure: (session, agent, turn) => this.#configureAgent(session, agent, { ask: turn.input, byOwner: turn.byOwner }, turn.ownerName),
       submit: (session, input, operationId, data) => this.#submitTo(session, input, operationId, data),
@@ -3848,7 +3882,7 @@ export class ChatAgent extends DurableObject<Env> {
     const manifest = await this.#manifest(artifactId, version);
     if (!manifest) return null;
     const servers = manifest.mcp?.servers ?? [];
-    const withheld = viewer !== this.uid && servers.some((entry) => this.#membersOnly(entry.server)) && (await this.#withheldPage(artifactId));
+    const withheld = viewer !== this.uid && servers.some((entry) => this.#membersOnly(entry.server)) && (await this.#withheldVersion(artifactId, version));
     const perServer = await Promise.all(
       servers
         .filter((entry) => this.#mayLoad(entry.server, viewer) && !(withheld && this.#membersOnly(entry.server)))
@@ -3873,7 +3907,7 @@ export class ChatAgent extends DurableObject<Env> {
     if (!this.#mayLoad(server, viewer)) {
       return fail({ code: "not_granted", server, message: `${server} signs in each user, and this page calls as its author, so only people in its chat can load it.` });
     }
-    if (viewer !== this.uid && this.#membersOnly(server) && (await this.#withheldPage(artifactId))) {
+    if (viewer !== this.uid && this.#membersOnly(server) && (await this.#withheldVersion(artifactId, request.version))) {
       return fail({
         code: "not_granted",
         server,
@@ -3969,7 +4003,10 @@ export class ChatAgent extends DurableObject<Env> {
    * server only the chat's people may load (#mayLoad) shares its author's values only with them.
    */
   async mayReadPageDefaults(artifactId: string, viewer: string): Promise<boolean> {
-    if (this.isInChat(viewer)) return true;
+    if (viewer === this.uid) return true;
+    // Not while the page, or a version of it, is not the chat's yet: what it saved may come from its author's sign-ins,
+    // which its calls refuse members too (artifactCall).
+    if (this.isInChat(viewer)) return !(await this.#withheldPage(artifactId)) && !this.roster.hasWithheldVersion(artifactId);
     const meta = await this.storage.artifacts.readMeta(artifactId);
     if (!meta || !isOwnedBy(meta, this.uid, this.chatId)) return false;
     return meta.versions.every((version) => (version.manifest.mcp?.servers ?? []).every((entry) => this.#mayLoad(entry.server, viewer)));
