@@ -13,6 +13,7 @@ import {
   type AgentTurnView,
 } from "../../shared/agents.ts";
 import { AUTO_MODEL } from "../../shared/models.ts";
+import { SPEAK_UP_DEFAULTS, SPEAK_UP_FIELDS, SPEAK_UP_LABELS, type SpeakUpLimitField, type SpeakUpLimits } from "../../shared/speak-up.ts";
 import { errorMessage, plural } from "../../shared/util.ts";
 import { api } from "../api.ts";
 import { ModelPicker, useCatalog } from "../chat/ModelPicker.tsx";
@@ -44,8 +45,17 @@ interface Form {
   review: boolean;
   /** It may post unprompted in chats that allow it (AgentDefinition.speaksUp). */
   speaksUp: boolean;
+  /** How often it may (AgentDefinition.speakUpLimits), as typed: empty leaves one to the chat or the default. */
+  limits: Record<SpeakUpLimitField, string>;
   assumed: string[];
 }
+
+/** The speaking-up limits as the form types them. */
+const limitsForm = (limits: SpeakUpLimits | undefined): Record<SpeakUpLimitField, string> =>
+  Object.fromEntries(SPEAK_UP_FIELDS.map((field) => [field, limits?.[field] === undefined ? "" : String(limits[field])])) as Record<
+    SpeakUpLimitField,
+    string
+  >;
 
 /** The fields of the Setup tab that a guess of the model can be about, by the name the form gives each. */
 const SETUP_ASSUMED: Record<string, readonly string[]> = {
@@ -77,6 +87,7 @@ function formOf(subject: AgentSubject): Form {
       sharedServers: null,
       review: false,
       speaksUp: false,
+      limits: limitsForm(undefined),
       assumed: [],
     };
   const { agent } = subject;
@@ -92,6 +103,7 @@ function formOf(subject: AgentSubject): Form {
     sharedServers: agent.sharedServers ? new Set(agent.sharedServers) : null,
     review: "reviewBeforePosting" in agent && agent.reviewBeforePosting === true,
     speaksUp: agent.speaksUp === true,
+    limits: limitsForm(agent.speakUpLimits),
     assumed: subject.kind === "own" ? (subject.agent.assumed ?? []) : [],
   };
 }
@@ -119,15 +131,23 @@ function inputOf(form: Form): AgentInput {
     ...(form.sharedServers && { sharedServers: sorted(form.sharedServers).filter((name) => !form.servers || form.servers.has(name)) }),
     ...(form.review && { reviewBeforePosting: true }),
     ...(form.speaksUp && { speaksUp: true }),
+    ...(limitsOf(form) && { speakUpLimits: limitsOf(form) }),
     ...(form.assumed.length && { assumed: form.assumed }),
   };
+}
+
+/** The limits typed, as numbers (checkAgent says what is wrong with one that is not a whole number in range); none when all are empty. */
+function limitsOf(form: Form): SpeakUpLimits | undefined {
+  const typed = SPEAK_UP_FIELDS.filter((field) => form.limits[field].trim());
+  return typed.length ? Object.fromEntries(typed.map((field) => [field, Number(form.limits[field].trim())])) : undefined;
 }
 
 const sameSet = (a: Set<string> | null, b: Set<string> | null) =>
   a === null || b === null ? a === b : a.size === b.size && [...a].every((x) => b.has(x));
 function changed(a: Form, b: Form): boolean {
   const plain = (["name", "job", "instructions", "avatar", "color", "model", "effort", "review", "speaksUp"] as const).some((key) => a[key] !== b[key]);
-  return plain || !sameSet(a.servers, b.servers) || !sameSet(a.sharedServers, b.sharedServers) || a.assumed.join() !== b.assumed.join();
+  const limits = SPEAK_UP_FIELDS.some((field) => a.limits[field].trim() !== b.limits[field].trim());
+  return plain || limits || !sameSet(a.servers, b.servers) || !sameSet(a.sharedServers, b.sharedServers) || a.assumed.join() !== b.assumed.join();
 }
 
 /**
@@ -389,6 +409,20 @@ export function SetupTab({ subject, field, save, notice, onDirty }: AgentTabProp
           <input type="checkbox" checked={form.speaksUp} onChange={(e) => set("speaksUp", e.target.checked)} />
           May speak up unprompted
         </label>
+        <div className="agent-speak-limits">
+          <small>How often at most, in any chat (a chat's owner may set stricter ones; empty leaves it to the chat):</small>
+          {SPEAK_UP_FIELDS.map((field) => (
+            <label key={field}>
+              {SPEAK_UP_LABELS[field]}
+              <input
+                inputMode="numeric"
+                value={form.limits[field]}
+                placeholder={`Default (${SPEAK_UP_DEFAULTS[field]})`}
+                onChange={(e) => set("limits", { ...form.limits, [field]: e.target.value })}
+              />
+            </label>
+          ))}
+        </div>
       </div>
       {error && <p className="form-error">{error}</p>}
       <div className="agent-form-actions">

@@ -256,8 +256,18 @@ import {
   type ChatAgentSettings,
   type ChatAgentSettingsView,
 } from "../shared/agent-settings.ts";
-import { agentRouterId, agentRouterModel, AGENT_ROUTE_MS, piPicks, routableAgents, routeAgents, routesAgents } from "./agents/router.ts";
-import { answered, embedder, FOLLOW_UP_AFTER_MS, looksLikeAsk, PAUSE_MS } from "./agents/funnel.ts";
+import {
+  agentRouterId,
+  agentRouterModel,
+  AGENT_ROUTE_MS,
+  piPicks,
+  routableAgents,
+  routeAgents,
+  routesAgents,
+  withinRouteLimits,
+} from "./agents/router.ts";
+import { answered, countMessagesSince, embedder, FOLLOW_UP_AFTER_MS, looksLikeAsk } from "./agents/funnel.ts";
+import { SPEAK_UP_DEFAULTS, strictestLimits } from "../shared/speak-up.ts";
 import { SpeakUp, type FunnelEvent } from "./agents/speak-up.ts";
 import { ChatSpend, meterExtension, type Spent } from "./agents/spend.ts";
 import { Metrics } from "./metrics.ts";
@@ -542,9 +552,16 @@ export class ChatAgent extends DurableObject<Env> {
     },
     observe: (event: FunnelEvent) => this.metrics.funnel({ ...event, stage: event.refusal ? `${event.stage}:${event.refusal}` : event.stage }),
     now: () => Date.now(),
+    messagesSince: (at, max) => countMessagesSince(this.#log({ order: "descending" }), at, max),
+    penalties: this.ctx.storage.kv,
   });
-  /** How long the chat stays quiet before an agent may speak up: PAUSE_MS, or on the scripted model what DEV_PAUSE_MS says. */
-  readonly #pauseMs = scriptPauseMs(this.env) ?? PAUSE_MS;
+  /**
+   * How long the chat stays quiet before an agent may speak up: the chat's limit (an agent's own may be longer, which
+   * its gate reads), or on the scripted model what DEV_PAUSE_MS says.
+   */
+  get #pauseMs(): number {
+    return scriptPauseMs(this.env) ?? (this.#agentSettings().speakUpLimits?.pauseMinutes ?? SPEAK_UP_DEFAULTS.pauseMinutes) * 60_000;
+  }
   /** The spend not yet sent to each payer's directory, by uid (#spent). */
   readonly #ownerSpend = new Map<string, { calls: number; tokens: number; cost: number }>();
   /** What each session's model calls came to since its turn started, for the turn's metrics: tokens, dollars, tool calls. */
@@ -3272,6 +3289,8 @@ export class ChatAgent extends DurableObject<Env> {
     if (!entry) return refuse(404, "No such agent in this chat.");
     if (!muted && by.uid !== this.uid && by.uid !== entry.ownerUid) return refuse(403, `Only the chat's owner or @${entry.name}'s can unmute it.`);
     this.roster.setMuted(agentId, muted);
+    // It learns: its threshold for speaking up here goes up for a while.
+    if (muted) this.speakUp.lowered(agentId, "mute");
     this.#broadcastAgents();
     return this.agentViews();
   }
@@ -3311,7 +3330,15 @@ export class ChatAgent extends DurableObject<Env> {
     const speaksUp = async (entry: RosterEntry) => (await abortable(this.#index(entry.ownerUid).getAgent(entry.agentId), cap))?.speaksUp === true;
     // The conversation is read while the members' definitions are (memoised: the other pickers share it).
     void recent().catch(() => {});
-    const may = await routableAgents(roster, this.uid, this.#account(author), speaksUp);
+    const allowed = await routableAgents(roster, this.uid, this.#account(author), speaksUp);
+    // With others in the chat, a routed agent answers at most one of so many messages (its speaking-up limit).
+    const perMessages = async (entry: RosterEntry) => {
+      const agent = await abortable(this.#index(entry.ownerUid).getAgent(entry.agentId), cap);
+      return strictestLimits(this.#agentSettings().speakUpLimits, agent?.speakUpLimits).perMessages;
+    };
+    const messagesSince = (at: number, max: number) => countMessagesSince(this.#log({ order: "descending" }), at, max);
+    const lastRouted = (agentId: string) => this.roster.lastRoutedAt(agentId);
+    const may = this.members.hasAny() ? await withinRouteLimits(allowed, lastRouted, perMessages, messagesSince) : allowed;
     if (!may.length) return [];
     const agents = may.map(({ agentId, name, job }) => ({ id: agentId, name, job }));
     const started = Date.now();
@@ -3341,7 +3368,7 @@ export class ChatAgent extends DurableObject<Env> {
   }
 
   /**
-   * A person said something: once the chat has been quiet for PAUSE_MS after the newest message, an agent may speak up
+   * A person said something: once the chat has been quiet for its pause after the newest message, an agent may speak up
    * about it (#afterPause). One check is set at a time; when it fires early (newer messages came), it is set again.
    */
   #notePause(sentAt: number): void {
@@ -3362,7 +3389,7 @@ export class ChatAgent extends DurableObject<Env> {
   }
 
   /**
-   * The pause check: once the chat was quiet for PAUSE_MS after a person's message, the agents past the gates whose job
+   * The pause check: once the chat was quiet for its pause after a person's message, the agents past the gates whose job
    * is close to the conversation may speak up (worker/agents/speak-up.ts). While pi or an agent works, it waits again.
    */
   /** pi or an agent just finished: a pause waiting counts its quiet from now, not from the person's message. */
@@ -3389,7 +3416,7 @@ export class ChatAgent extends DurableObject<Env> {
     const data = last?.data as Partial<ChatMessageData> | undefined;
     if (!data?.text || data.uid === undefined || data.sentAt === undefined) return;
     const line = askOf({ name: data.name ?? "someone", kind: "person" }, data.text, MAX_ASK_CHARS);
-    await this.speakUp.afterPause(recent, { line, askKey: messageAskKey({ uid: data.uid, sentAt: data.sentAt }) });
+    await this.speakUp.afterPause(recent, { line, askKey: messageAskKey({ uid: data.uid, sentAt: data.sentAt }) }, Date.now() - kept.after);
   }
 
   /**
@@ -3507,6 +3534,8 @@ export class ChatAgent extends DurableObject<Env> {
   /** A roster agent's turn ended: its metrics. */
   #turnEnded(turn: AgentTurn, outcome: TurnOutcome): void {
     this.#quietFrom(outcome.endedAt);
+    // It learns: a turn nobody asked for that it passed raises its threshold for speaking up here for a while.
+    if (outcome.status === "passed") this.speakUp.lowered(turn.agentId, "pass");
     // A restore a Yes's run left undone (pi was busy at its settle) comes once anything ends.
     void this.#restorePiTools();
     const entry = this.roster.get(turn.agentId);

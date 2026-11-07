@@ -7,16 +7,23 @@ import type { EntryRecord } from "@earendil-works/pi-durable";
 import type { AgentDefinition, UnpromptedKind } from "../../shared/agents.ts";
 import { budgetDay, type ChatAgentSettings } from "../../shared/agent-settings.ts";
 import { errorMessage } from "../../shared/util.ts";
+import { strictestLimits } from "../../shared/speak-up.ts";
 import {
   agentProfile,
   cosine,
   followUpAsk,
   gateRefusal,
   INTEREST_THRESHOLD,
+  interestPenalty,
   lateRefusal,
+  limitRefusal,
+  MUTE_PENALTY,
+  PASS_PENALTY,
+  raisedPenalty,
   recentText,
   type Embedder,
   type GateRefusal,
+  type Penalty,
 } from "./funnel.ts";
 import type { ChatRoster, RosterEntry, TurnRequest } from "./roster.ts";
 import { askOf, MAX_ASK_CHARS } from "./turns.ts";
@@ -53,7 +60,14 @@ export interface SpeakUpHost {
   /** Count a stage (the metrics). */
   observe(event: FunnelEvent): void;
   now(): number;
+  /** How many of the people's messages the chat has after `at` (epoch ms), counted up to `max`. */
+  messagesSince(at: number, max: number): Promise<number>;
+  /** Where each agent's raised threshold in this chat is kept (interestPenalty), by key. */
+  readonly penalties: { get(key: string): Penalty | undefined; put(key: string, value: Penalty): void };
 }
+
+/** The key an agent's raised threshold is kept under. */
+const penaltyKey = (agentId: string) => `interestPenalty:${agentId}`;
 
 /** A question nobody answered, as a follow-up reads it: its message, who asked, and when. */
 export interface OpenAsk {
@@ -84,13 +98,23 @@ export class SpeakUp {
   }
 
   /**
-   * The chat went quiet after a conversation (`recent`, the log's newest entries, newest first): the closest agent past
-   * the gates may speak up about it. Which agent got a turn; undefined for none.
+   * An agent of the chat answered PASS to a turn nobody asked of it, or someone muted it here: its threshold for
+   * interest in this chat goes up for a while (interestPenalty), so it learns when to stay quiet.
    */
-  afterPause(recent: readonly EntryRecord[], last: { line: string; askKey?: string }): Promise<string | undefined> {
+  lowered(agentId: string, by: "pass" | "mute"): void {
+    const penalties = this.#host.penalties;
+    const key = penaltyKey(agentId);
+    penalties.put(key, raisedPenalty(penalties.get(key), by === "pass" ? PASS_PENALTY : MUTE_PENALTY, this.#host.now()));
+  }
+
+  /**
+   * The chat went quiet after a conversation (`recent`, the log's newest entries, newest first) for `quietMs`: the
+   * closest agent past the gates may speak up about it. Which agent got a turn; undefined for none.
+   */
+  afterPause(recent: readonly EntryRecord[], last: { line: string; askKey?: string }, quietMs?: number): Promise<string | undefined> {
     const text = recentText(recent);
     if (!text) return Promise.resolve(undefined);
-    return this.#offer(text, () => ({
+    return this.#offer(text, quietMs, () => ({
       calledBy: { name: "the conversation", unprompted: "speak-up" },
       ask: last.line,
       byOwner: false,
@@ -101,7 +125,7 @@ export class SpeakUp {
 
   /** A question has had no answer for a while: the closest agent past the gates may offer to pick it up. */
   followUp(ask: OpenAsk): Promise<string | undefined> {
-    return this.#offer(ask.text, (entry) => ({
+    return this.#offer(ask.text, undefined, (entry) => ({
       calledBy: { name: ask.name, uid: ask.uid, unprompted: "follow-up" },
       // Labelled and escaped as any message an agent reads: the asker is marked as its owner when they are.
       ask: followUpAsk(
@@ -115,7 +139,11 @@ export class SpeakUp {
     }));
   }
 
-  async #offer(text: string, request: (entry: RosterEntry) => Omit<TurnRequest, "agentId" | "hop">): Promise<string | undefined> {
+  async #offer(
+    text: string,
+    quietMs: number | undefined,
+    request: (entry: RosterEntry) => Omit<TurnRequest, "agentId" | "hop">,
+  ): Promise<string | undefined> {
     const host = this.#host;
     const embedder = host.embedder;
     if (!this.possible() || !embedder) return undefined;
@@ -125,16 +153,7 @@ export class SpeakUp {
     // Stage 1, the gates: the cheap ones in code first; the owner's definition and spend only for those still in, read
     // at once, each owner's spend once.
     const early = host.roster.list().filter((entry) => {
-      const used = host.roster.unpromptedSince(entry.agentId, since);
-      const refusal = gateRefusal({
-        muted: entry.muted,
-        off: entry.off,
-        busy: host.roster.isBusy(entry.agentId),
-        postsToday: used.count,
-        ...(used.lastAt !== undefined && { lastAt: used.lastAt }),
-        now,
-        budgetLeft,
-      });
+      const refusal = gateRefusal({ muted: entry.muted, off: entry.off, busy: host.roster.isBusy(entry.agentId), budgetLeft });
       if (refusal) host.observe({ agent: entry.agentId, stage: "gates", passed: false, refusal });
       return !refusal;
     });
@@ -145,10 +164,24 @@ export class SpeakUp {
       if (!left) spends.set(owner, (left = host.spendLeft(owner).catch(() => false)));
       return left;
     };
+    const chatLimits = host.settings().speakUpLimits;
     const read = await Promise.all(
       early.map(async (entry) => {
         const [agent, left] = await Promise.all([host.definition(entry).catch(() => null), spendLeft(entry.ownerUid)]);
-        return { entry, agent, refusal: lateRefusal(agent, left) };
+        const late = lateRefusal(agent, left);
+        if (late || !agent) return { entry, agent, refusal: late };
+        // The limits: the stricter of the chat owner's and the agent owner's. The messages since its last post are
+        // counted only when there is one, and only as far as the limit needs.
+        const limits = strictestLimits(chatLimits, agent.speakUpLimits);
+        const used = host.roster.unpromptedSince(entry.agentId, since);
+        const messagesSince = used.lastAt === undefined ? undefined : await host.messagesSince(used.lastAt, limits.perMessages).catch(() => 0);
+        const state = {
+          postsToday: used.count,
+          now,
+          ...(used.lastAt !== undefined && { lastAt: used.lastAt, messagesSince }),
+          ...(quietMs !== undefined && { quietMs }),
+        };
+        return { entry, agent, refusal: limitRefusal(state, limits) };
       }),
     );
     const open: { entry: RosterEntry; agent: AgentDefinition }[] = [];
@@ -173,7 +206,8 @@ export class SpeakUp {
     let best: { entry: RosterEntry; score: number } | undefined;
     open.forEach(({ entry }, i) => {
       const score = scores[i];
-      const passed = score >= INTEREST_THRESHOLD;
+      // Raised for a while for an agent that was muted here, or answered PASS.
+      const passed = score >= INTEREST_THRESHOLD + interestPenalty(host.penalties.get(penaltyKey(entry.agentId)), now);
       host.observe({ agent: entry.agentId, stage: "interest", passed, score });
       if (passed && (!best || score > best.score)) best = { entry, score };
     });
