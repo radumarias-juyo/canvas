@@ -54,24 +54,38 @@ function useRead<T>(load: () => Promise<T>, agentId: string | null, key: string,
   return { value, error, again: read };
 }
 
+/** The agent whose runs the tab shows: the user's own, or someone else's shared in a chat (read-only, `enabled` unknown). */
+type RunsAgent = Pick<AgentDefinition, "id" | "name" | "version" | "trigger" | "scope" | "workflow"> & { enabled?: boolean };
+
+/**
+ * Someone else's agent, opened from a chat that shares it: the runs show only those that posted their report there,
+ * each with only that post (the server keeps the rest), and nothing to start or open.
+ */
+type Shared = { chatId: string; chatTitle?: string; ownerName: string };
+
 /**
  * The Runs tab: when the agent runs next, Test it, and its runs, newest first; a run opens on what it sent and how it
- * got there, item by item, down to each item's full trace. Only for the user's own agents.
+ * got there, item by item, down to each item's full trace. For someone else's agent shared in a chat, only the runs
+ * that posted in that chat, read-only.
  */
 export function RunsTab({ subject, place, navigate }: AgentTabProps) {
-  if (subject.kind !== "own") {
-    return <p className="skills-note agent-runs-note">{subject.kind === "new" ? "Save the agent first: its runs show here." : "Only its owner sees an agent's runs."}</p>;
-  }
+  if (subject.kind === "new") return <p className="skills-note agent-runs-note">Save the agent first: its runs show here.</p>;
+  const shared = subject.kind === "shared" ? { chatId: subject.chatId, chatTitle: subject.chatTitle, ownerName: subject.agent.ownerName } : undefined;
   return place.run === undefined ? (
-    <RunList agent={subject.agent} chat={place.chat} navigate={navigate} />
+    <RunList agent={subject.agent} chat={place.chat} shared={shared} navigate={navigate} />
   ) : (
-    <RunPage agent={subject.agent} dueAt={place.run} chat={place.chat} navigate={navigate} />
+    <RunPage agent={subject.agent} dueAt={place.run} chat={place.chat} shared={shared} navigate={navigate} />
   );
 }
 
-function RunList({ agent, chat, navigate }: { agent: AgentDefinition; chat?: string; navigate: (path: string) => void }) {
+/** Where a shared agent's runs were posted, in words: "“Weekly numbers”", or "this chat". */
+function chatName(shared: Shared): string {
+  return shared.chatTitle ? `“${shared.chatTitle}”` : "this chat";
+}
+
+function RunList({ agent, chat, shared, navigate }: { agent: RunsAgent; chat?: string; shared?: Shared; navigate: (path: string) => void }) {
   const { value, error, again } = useRead<AgentRunList>(
-    () => api.agentRuns(agent.id),
+    () => api.agentRuns(agent.id, shared?.chatId),
     agent.id,
     // Read again on a new version too (turned on or off, a new time): its next run moves with it.
     `${agent.id}:${agent.version}`,
@@ -100,25 +114,33 @@ function RunList({ agent, chat, navigate }: { agent: AgentDefinition; chat?: str
         <div className="agent-runs-when">
           <strong>{runs ? runs.value : "Runs only when asked"}</strong>
           {runs?.note && <small>{runs.note}</small>}
-          {agent.enabled && value?.nextRunAt && <small>Next run {aheadLabel(value.nextRunAt, now)}</small>}
-          {runs && !agent.enabled && <small>Off: it runs again once you turn it on.</small>}
+          {(shared || agent.enabled) && value?.nextRunAt && <small>Next run {aheadLabel(value.nextRunAt, now)}</small>}
+          {runs && !shared && !agent.enabled && <small>Off: it runs again once you turn it on.</small>}
         </div>
-        <div className="agent-runs-actions">
-          {value?.homeChatId && (
-            <AppLink path={`/c/${value.homeChatId}`} navigate={navigate} className="button">
-              Open its chat
-            </AppLink>
-          )}
-          <button type="button" className="primary" disabled={testing} onClick={() => void test()}>
-            {testing ? "Starting…" : "Test it"}
-          </button>
-        </div>
+        {!shared && (
+          <div className="agent-runs-actions">
+            {value?.homeChatId && (
+              <AppLink path={`/c/${value.homeChatId}`} navigate={navigate} className="button">
+                Open its chat
+              </AppLink>
+            )}
+            <button type="button" className="primary" disabled={testing} onClick={() => void test()}>
+              {testing ? "Starting…" : "Test it"}
+            </button>
+          </div>
+        )}
       </div>
-      <p className="skills-note">Test it runs it now on today's data: nothing is sent or changed, and what it would have sent shows in the run.</p>
+      {shared ? (
+        <p className="skills-note">
+          The runs that posted in {chatName(shared)}, with what they posted there. The rest of each run, and its other runs, stay {shared.ownerName}’s.
+        </p>
+      ) : (
+        <p className="skills-note">Test it runs it now on today's data: nothing is sent or changed, and what it would have sent shows in the run.</p>
+      )}
       {testError && <p className="form-error">{testError}</p>}
       {error && <p className="form-error">Could not read its runs: {error}</p>}
       {value === null && !error && <p className="skills-note">Reading its runs…</p>}
-      {value && !value.runs.length && <p className="skills-note">No runs yet.</p>}
+      {value && !value.runs.length && <p className="skills-note">{shared ? `No runs have posted in ${chatName(shared)} yet.` : "No runs yet."}</p>}
       {value && value.runs.length > 0 && (
         <ol className="run-list">
           {value.runs.map((run) => (
@@ -162,9 +184,9 @@ function RunPill({ run }: { run: Pick<AgentRunView, "status" | "test"> }) {
   );
 }
 
-function RunPage({ agent, dueAt, chat, navigate }: { agent: AgentDefinition; dueAt: number; chat?: string; navigate: (path: string) => void }) {
+function RunPage({ agent, dueAt, chat, shared, navigate }: { agent: RunsAgent; dueAt: number; chat?: string; shared?: Shared; navigate: (path: string) => void }) {
   const { value: run, error } = useRead<AgentRunDetail>(
-    () => api.agentRun(agent.id, dueAt),
+    () => api.agentRun(agent.id, dueAt, shared?.chatId),
     agent.id,
     `${agent.id}:${dueAt}`,
     (read) => read.status === "running",
@@ -234,6 +256,7 @@ function RunPage({ agent, dueAt, chat, navigate }: { agent: AgentDefinition; due
       )}
 
       <h4 className="run-section">How it got there</h4>
+      {shared && <p className="skills-note">Only {shared.ownerName} sees how a run got there: it reads as them, with their sign-ins.</p>}
       <ol className="run-items">
         {run.itemsList.map((item, index) => (
           <RunItem key={item.item} id={scoped ? itemAnchor(index) : undefined} agentId={agent.id} dueAt={run.dueAt} item={item} scoped={scoped} />

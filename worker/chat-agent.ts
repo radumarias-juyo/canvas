@@ -189,6 +189,7 @@ import { answeredIn, reportContext, runInstructions, RUN_STEP_KIND, workSpend, t
 import { publishedAlready, publishFindings, publishRebuilt, readOnlyDeclaration, runMark } from "./agents/runs/page.ts";
 import { compileWorkflow } from "./agents/runs/compile.ts";
 import { sourceName } from "./agents/runs/source.ts";
+import { postedRunDetail, postedRunView, postIn } from "./agents/runs/posted.ts";
 import type { Value } from "../shared/conditions.ts";
 import { runRef, type AgentRunDetail, type AgentRunList, type RunDelivery, type RunRef } from "../shared/runs.ts";
 import type { RoomLink, RoomRef, SeatBatch, SeatLink, SeatResult, SeatTurn } from "./agents/seats/link.ts";
@@ -4285,8 +4286,12 @@ export class ChatAgent extends DurableObject<Env> {
   runDetail(uid: string, agentId: string, dueAt: number): AgentRunDetail | ChatRefusal {
     const refused = this.#ownRuns(uid, agentId);
     if (refused) return refused;
+    return this.#runDetail(agentId, dueAt) ?? refuse(404, "No such run.");
+  }
+
+  #runDetail(agentId: string, dueAt: number): AgentRunDetail | null {
     const run = this.runs.get(agentId, dueAt);
-    if (!run) return refuse(404, "No such run.");
+    if (!run) return null;
     return {
       ...this.runs.view(run),
       when: run.detail.when ?? "",
@@ -4294,6 +4299,30 @@ export class ChatAgent extends DurableObject<Env> {
       deliveries: run.detail.deliveries,
       used: { skills: [], servers: [], models: [], ...run.detail.used, notes: run.detail.used?.notes?.length ?? 0 },
     };
+  }
+
+  /**
+   * A shared agent's runs as someone in `chatId` sees them (the Worker checked they are in it and the agent is shared
+   * there): only those that posted their report into it, and of each only that post (worker/agents/runs/posted.ts).
+   */
+  postedRuns(agentId: string, chatId: string): AgentRunList | ChatRefusal {
+    if (this.#gone) return refuse(404, DELETED);
+    if (!AGENT_ID_PATTERN.test(agentId)) return refuse(400, "No such agent.");
+    const deliveries = new Map<number, RunDelivery[]>();
+    const posted = (run: RunRecord) => {
+      deliveries.set(run.dueAt, run.detail.deliveries);
+      return postIn(run.detail.deliveries, chatId) !== undefined;
+    };
+    const runs = this.runs.list(agentId, 50, posted).flatMap((view) => postedRunView(view, deliveries.get(view.dueAt) ?? [], chatId) ?? []);
+    return { runs, nextRunAt: this.runner.nextRun(agentId), homeChatId: null };
+  }
+
+  /** One run as someone in `chatId` sees it (postedRuns): refused as no such run when it posted nothing there. */
+  postedRun(agentId: string, dueAt: number, chatId: string): AgentRunDetail | ChatRefusal {
+    if (this.#gone) return refuse(404, DELETED);
+    if (!AGENT_ID_PATTERN.test(agentId)) return refuse(400, "No such agent.");
+    const run = this.#runDetail(agentId, dueAt);
+    return (run && postedRunDetail(run, chatId)) ?? refuse(404, "No such run in this chat.");
   }
 
   /** The entries of one item's session in a run, oldest first: the trace the run detail draws with the chat's step rows. */
@@ -4626,7 +4655,8 @@ export class ChatAgent extends DurableObject<Env> {
         status: "sent",
         sentAt,
         chat: this.#chatRef(),
-        ...(others.length && { detail: `not ${others.join(", ")}: at Inform, an agent notifies only its owner` }),
+        chats: [this.chatId],
+        ...(others.length &&{ detail: `not ${others.join(", ")}: at Inform, an agent notifies only its owner` }),
       };
     }
     // To chats: its home (this one), and the owner's chats it is in, by id or title. The list only when one is named.
@@ -4659,7 +4689,8 @@ export class ChatAgent extends DurableObject<Env> {
       text: request.text,
       status: sent.length ? "sent" : "refused",
       ...(answered && { sentAt: answered.at, chat: answered.chat }),
-      ...(refused.length && { detail: `not posted to ${refused.join(", ")}` }),
+      ...(placed.length && { chats: placed.map((outcome) => outcome.chat.id) }),
+      ...(refused.length &&{ detail: `not posted to ${refused.join(", ")}` }),
     };
   }
 
