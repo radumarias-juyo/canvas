@@ -198,6 +198,7 @@ import { SeatActions } from "./agents/seats/actions.ts";
 import { addRefusal, mayRemove, mayShare, seatedEntry, type ChatRules } from "./agents/seats/rules.ts";
 import { AgentSeats, type SeatHost } from "./agents/seats/seat.ts";
 import { agentsExtension } from "./agents/tools.ts";
+import { historyExtension, HISTORY_SCAN_ENTRIES, searchHistory, type HistoryQuery } from "./agents/history.ts";
 import { ChatMemory, runAskedByOwner, type Whose } from "./memory/chat.ts";
 import { freshPrompt, withoutNoteResults } from "./memory/fresh.ts";
 import { memoryExtension } from "./memory/tools.ts";
@@ -760,6 +761,8 @@ export class ChatAgent extends DurableObject<Env> {
     // The read cache's hits and evictions, per agent.
     this.hub.observe(this.metrics);
     this.registry.install(memoryExtension(this.memory.host()));
+    // The chat's whole log, for its agents to search (worker/agents/history.ts); a seat's goes to its room.
+    this.registry.install(historyExtension({ history: (session, query) => this.#history(session, query) }));
   }
 
   /**
@@ -3849,6 +3852,38 @@ export class ChatAgent extends DurableObject<Env> {
     const entry = this.#seated(uid, agentId);
     if (!entry) throw new Error("This agent is not in the chat.");
     return this.turns.batchFor(entry, after, turn);
+  }
+
+  /**
+   * (RPC, from a seat) A member's agent searches this chat's log (chat_history): as it reads the log, with only its
+   * owner's lines, from where it joined, marked as theirs.
+   */
+  async seatHistory(uid: string, agentId: string, query: HistoryQuery): Promise<string> {
+    const entry = this.#seated(uid, agentId);
+    if (!entry) throw new Error("This agent is not in the chat.");
+    const owner = { uid, chatOwner: this.uid, ...(entry.ownerFrom !== undefined && { from: entry.ownerFrom }) };
+    return searchHistory(this.#historyPages(query), query, { self: agentId, owner });
+  }
+
+  /**
+   * chat_history for conversation `session`: pi's, or a turn of one of the owner's agents (its own session or a fork),
+   * reads this chat's log; a seat's turn reads its room's (seatHistory). Any other conversation (a run's) reads none.
+   */
+  async #history(session: string, query: HistoryQuery): Promise<string> {
+    const seated = this.seats.turnIn(session);
+    if (seated) return exports.ChatAgent.getByName(chatAgentName(seated.room.ownerUid, seated.room.chatId)).seatHistory(this.uid, seated.agentId, query);
+    const self = session === ROOT_SESSION ? AGENT_NAME : this.roster.runningSessions().find((one) => one.session === session)?.agentId;
+    if (self === undefined) throw new Error("The chat's history is read only in a turn in the chat.");
+    return searchHistory(this.#historyPages(query), query, { self, owner: this.uid });
+  }
+
+  /** The log within a history query's range, newest first, as far back as one search looks (HISTORY_SCAN_ENTRIES). */
+  #historyPages(query: HistoryQuery): AsyncGenerator<readonly EntryRecord[]> {
+    const range = {
+      ...(query.before !== undefined && { maxEntryId: (query.before - 1) as EntryId }),
+      ...(query.after !== undefined && { minEntryId: (query.after + 1) as EntryId }),
+    };
+    return this.#log({ order: "descending", ...range }, 100, Math.ceil(HISTORY_SCAN_ENTRIES / 100) + 1);
   }
 
   /** (RPC, from a seat) A member's agent's turn ended there. True once taken: the seat lets it go. */

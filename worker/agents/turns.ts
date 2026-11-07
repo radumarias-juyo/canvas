@@ -7,6 +7,7 @@ import { TOOL_SEARCH_TOOL_NAME } from "@earendil-works/pi-durable/tool-search";
 import {
   AGENT_PROPOSE_TOOL,
   CHAT_AGENT_KIND,
+  CHAT_HISTORY_TOOL,
   CHAT_TURN_KIND,
   MAX_HOPS,
   mayUseServer,
@@ -328,6 +329,7 @@ const READ_TOOLS = [
   "read_skill_resource",
   MEMORY_RECALL_TOOL,
   TOOL_SEARCH_TOOL_NAME,
+  CHAT_HISTORY_TOOL,
 ];
 /** The tools that only show something in the chat (a plan as a checklist card: no data): for a turn, not a run, which nobody watches. */
 const DISPLAY_TOOLS = [CHECKLIST_TOOL];
@@ -444,7 +446,8 @@ export function turnSources(
  */
 export function runTools(tools: readonly string[], mcp: ReadonlyMap<string, McpToolInfo>, agent: Pick<AgentDefinition, "servers">): string[] {
   return tools.filter((name) => {
-    if (NEVER_FOR_AGENTS.includes(name)) return false;
+    // Nor the chat's log: a run's report reaches other chats, and its home chat is its owner's own conversation.
+    if (NEVER_FOR_AGENTS.includes(name) || name === CHAT_HISTORY_TOOL) return false;
     const info = mcp.get(name);
     return info ? info.readOnly && mayUseServer(agent, info.server) : READ_TOOLS.includes(name);
   });
