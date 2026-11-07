@@ -219,6 +219,9 @@ describe("the funnel's gates", () => {
     expect(limitRefusal({ ...fresh, quietMs: limits.pauseMinutes * 60_000 - 1 }, limits)).toBe("pause");
     // A follow-up has no pause.
     expect(limitRefusal(fresh, { ...limits, pauseMinutes: 600 })).toBeNull();
+    // The scripted model's pause (DEV_PAUSE_MS) in place of the limits': seconds, not minutes.
+    expect(limitRefusal({ ...fresh, quietMs: 1_500 }, limits, 1_500)).toBeNull();
+    expect(limitRefusal({ ...fresh, quietMs: 1_499 }, limits, 1_500)).toBe("pause");
   });
 
   it("takes the stricter of the chat's and the agent's limits, each one set, else the default", () => {
