@@ -621,3 +621,47 @@ describe("agentsRoute", () => {
     expect(store.list()).toEqual([agent]);
   });
 });
+
+describe("AgentStore: the model revising its draft from the chat", () => {
+  const CHAT = "aaaaaaaaaaaaaaaa";
+  /** The model's proposal, as UserDirectory.saveAgent saves it: proposed again under its name, a draft of this chat's is revised. */
+  const propose = (store: AgentStore, input: AgentInput, chatId = CHAT) => store.save(input, "agent", false, store.proposalSave(input, { proposedIn: chatId }));
+
+  it("revises its own draft, proposed in this chat and still off, as a new version with what it now guesses", () => {
+    const store = newStore();
+    const first = saved(propose(store, fields("research", { assumed: ["servers", "trigger"] })));
+    const revised = saved(propose(store, fields("Research", { job: "Revised.", assumed: ["trigger"] })));
+    expect(revised).toMatchObject({ id: first.id, job: "Revised.", origin: "agent", enabled: false, version: 2, assumed: ["trigger"] });
+    // Guessing nothing any more, nothing shows as Assumed.
+    expect(saved(propose(store, fields("research"))).assumed).toBeUndefined();
+    expect(store.list()).toHaveLength(1);
+  });
+
+  it("never revises a draft another chat proposed, one the user saved or turned on, or one of the user's own", () => {
+    const store = newStore();
+    const taken = { error: expect.stringContaining('already an agent named "research"') };
+    const draft = saved(propose(store, fields("research")));
+    expect(propose(store, fields("research", { job: "Elsewhere." }), "bbbbbbbbbbbbbbbb")).toEqual(taken);
+    // The user saved it: theirs from then on.
+    saved(store.save(fields("research", { job: "Mine now." }), "user", undefined, { id: draft.id }));
+    expect(propose(store, fields("research", { job: "Again." }))).toEqual(taken);
+    expect(store.get(draft.id)).toMatchObject({ job: "Mine now.", origin: "user" });
+    // Turned on, likewise.
+    const scout = saved(propose(store, fields("scout")));
+    saved(store.setEnabled(scout.id, true));
+    expect(propose(store, fields("scout", { job: "Again." }))).toEqual({ error: expect.stringContaining('already an agent named "scout"') });
+    expect(store.get(scout.id)).toMatchObject({ enabled: true, job: research.job });
+    // The user's own, made by them.
+    saved(store.save(fields("mine"), "user", false));
+    expect(propose(store, fields("mine"))).toEqual({ error: expect.stringContaining('already an agent named "mine"') });
+  });
+
+  it("finds no draft for a save that names one, nor for one with no chat: those go as given", () => {
+    const store = newStore();
+    const draft = saved(propose(store, fields("research")));
+    expect(store.proposalSave(fields("research"), { id: "x".repeat(16), proposedIn: CHAT })).toEqual({ id: "x".repeat(16), proposedIn: CHAT });
+    expect(store.proposalSave(fields("research"))).toEqual({});
+    expect(store.proposalSave("not an agent", { proposedIn: CHAT })).toEqual({ proposedIn: CHAT });
+    expect(store.revisable("RESEARCH", CHAT)?.id).toBe(draft.id);
+  });
+});

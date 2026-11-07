@@ -78,6 +78,8 @@ function allSteps(steps: readonly AgentStep[] | undefined): AgentStep[] {
 }
 
 const unique = (items: readonly string[]) => [...new Set(items)];
+/** How a tell step's recipients may name the agent's owner (its own chat): "owner", "me", "you". */
+const OWNER_NAMES = new Set(["owner", "me", "you"]);
 
 /** One "at a glance" row. */
 export interface GlanceRow {
@@ -148,7 +150,8 @@ export function glanceRows(agent: Pick<AgentDefinition, "name" | "trigger" | "sc
           "tells",
           "Tells",
           "workflow",
-          unique(tells.flatMap((step) => step.to)).join(", "),
+          // The owner, however a step names them, reads as "You".
+          unique(tells.flatMap((step) => step.to.map((to) => (OWNER_NAMES.has(to.toLowerCase()) ? "You" : to)))).join(", "),
           unique(
             tells.map((step) => (step.via === "chat" ? "in the chat" : step.via === "notify" ? "by a notification" : `through ${step.via.server}`)),
           ).join(", "),
