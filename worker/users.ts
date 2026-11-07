@@ -766,7 +766,7 @@ export class UserDirectory extends DurableObject<Env> {
   }
 
   /** The notes a conversation's prompt holds (UserMemory.read). */
-  readNotes(reader: MemoryReader): { notes: MemoryNote[]; more: number } {
+  readNotes(reader: MemoryReader): { notes: MemoryNote[]; more: number; off?: true } {
     return this.#memory.read(reader);
   }
 

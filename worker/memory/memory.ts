@@ -109,9 +109,14 @@ export class UserMemory {
     return { ...added, ...(place.narrowed && { narrowed: true as const }) };
   }
 
-  /** The notes a prompt holds for `reader` (promptNotes), and how many more it reads. Counts no use: see `use`. */
-  read(reader: MemoryReader): { notes: MemoryNote[]; more: number } {
-    const readable = this.store.readable(this.#checked(reader));
+  /**
+   * The notes a prompt holds for `reader` (promptNotes), and how many more it reads. `off`: the chat is off the record,
+   * or not one of the owner's, as this directory knows it: nothing is read or saved there. Counts no use: see `use`.
+   */
+  read(reader: MemoryReader): { notes: MemoryNote[]; more: number; off?: true } {
+    const checked = this.#checked(reader);
+    if (offRecord(checked.kinds)) return { notes: [], more: 0, off: true };
+    const readable = this.store.readable(checked);
     const notes = promptNotes(readable);
     return { notes, more: readable.length - notes.length };
   }

@@ -369,6 +369,8 @@ export class ChatAgent extends DurableObject<Env> {
     directory: (uid) => this.#index(uid),
     kv: this.ctx.storage.kv,
   });
+  /** The memory tools and section: kept the last extension (#install), so a note added between turns changes only the end of the prompt. */
+  readonly #memoryExtension = memoryExtension(this.memory.host());
   readonly reactions = new ChatReactions(this.ctx.storage.sql);
   readonly sockets = new ChatSockets({
     events: () => this.harness.session().events(),
@@ -502,8 +504,17 @@ export class ChatAgent extends DurableObject<Env> {
     this.registry.install(agentsExtension(scope));
     if (env.SANDBOX_ENABLED === "true") this.registry.install(sandboxExtension(scope));
     this.registry.install(systemPromptExtension(() => this.#systemPrompts()));
-    // Last: a note added between turns then changes only the end of the prompt.
-    this.registry.install(memoryExtension(this.memory.host()));
+    // Last: a note added between turns then changes only the end of the prompt (#install keeps it so).
+    this.registry.install(this.#memoryExtension);
+  }
+
+  /** Install `extension`; one installed for the first time goes before the memory section, which stays last. */
+  #install(extension: Extension): void {
+    const fresh = this.registry.snapshot().extension(extension.name) === undefined;
+    this.registry.install(extension);
+    if (!fresh) return;
+    this.registry.uninstall(this.#memoryExtension);
+    this.registry.install(this.#memoryExtension);
   }
 
   /** The uid is this object's name, which the Worker sets from a verified identity. */
@@ -902,7 +913,7 @@ export class ChatAgent extends DurableObject<Env> {
         sandbox: this.env.SANDBOX_ENABLED === "true",
       });
       if (source.fingerprint === this.#skillsInstalled) return;
-      this.registry.install(await skills([source]));
+      this.#install(await skills([source]));
       this.#skillsInstalled = source.fingerprint;
     } catch (error) {
       console.error("skills:", errorMessage(error));
@@ -1099,7 +1110,7 @@ export class ChatAgent extends DurableObject<Env> {
         outFolder: chatOutFolder(this.chatId),
       });
       if (index === this.#filesInstalled) return;
-      this.registry.install(filesIndexExtension(index));
+      this.#install(filesIndexExtension(index));
       this.#filesInstalled = index;
     } catch (error) {
       console.error("files:", errorMessage(error));
@@ -1153,9 +1164,9 @@ export class ChatAgent extends DurableObject<Env> {
     const installed = JSON.stringify([deferred, [...catalog], [...unavailable]]);
     if (installed !== this.#mcp.key) {
       const { extension, listing, toolInfo } = mcpExtension(this.hub, catalog, unavailable, () => this.discoverMcp(), { deferred });
-      this.registry.install(extension);
+      this.#install(extension);
       this.#mcpTools = toolInfo;
-      if (deferred) this.registry.install(this.#toolSearch);
+      if (deferred) this.#install(this.#toolSearch);
       else this.registry.uninstall(this.#toolSearch);
       const deferring = deferred && !this.#mcp.deferred;
       this.#mcp = { key: installed, listing, generation, deferred };

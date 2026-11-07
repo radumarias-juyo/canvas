@@ -316,6 +316,27 @@ describe("UserMemory", () => {
     expect(to.memory.import([{ text: "not a note" }])).toEqual([expect.objectContaining({ error: expect.any(String) })]);
   });
 
+  it("imports a forgotten note once, and never brings back one forgotten here", () => {
+    const owner = directory();
+    const gone = saved(owner.memory.add({ text: "Old rule.", scope: "user" }));
+    const kept = saved(owner.memory.add({ text: "Use euros.", scope: "user" }));
+    saved(owner.memory.forget(gone.id));
+    const exported = owner.memory.exported();
+    saved(owner.memory.forget(kept.id));
+    expect(owner.memory.import(exported)).toEqual([{ id: kept.id, skipped: true }, { id: gone.id, skipped: true }]);
+    expect(owner.memory.list()).toHaveLength(2);
+    expect(owner.memory.list().every((each) => each.forgottenAt !== undefined)).toBe(true);
+  });
+
+  it("edits a forgotten note even when one in use says the same", () => {
+    const owner = directory();
+    const gone = saved(owner.memory.add({ text: "Old rule.", scope: "user" }));
+    saved(owner.memory.forget(gone.id));
+    saved(owner.memory.add({ text: "Use euros.", scope: "user" }));
+    expect(owner.memory.change(gone.id, { text: "Use euros." })).toMatchObject({ text: "Use euros." });
+    expect(owner.memory.restore(gone.id)).toHaveProperty("error");
+  });
+
   it("checks what the Memory view sends", () => {
     expect(checkNoteInput({ text: "  Use   euros. " })).toEqual({ text: "Use euros.", scope: "user" });
     expect(checkNoteInput({ text: "x".repeat(MAX_NOTE_CHARS + 1) })).toHaveProperty("error");
@@ -412,6 +433,38 @@ describe("ChatMemory", () => {
     await memory.refresh();
     expect(used().filter((id) => id === kept.id)).toHaveLength(1);
     expect(owner.memory.store.get(kept.id)?.uses).toBe(1);
+  });
+
+  it("reads the section again once the chat is shared, never keeping the owner's own notes in it", async () => {
+    const owner = directory();
+    saved(owner.memory.add({ text: "My salary is private.", scope: "user" }));
+    let alone = true;
+    const memory = new ChatMemory({
+      ownerUid: "owner",
+      chatId: PRIVATE,
+      kind: () => (alone ? "private" : "group"),
+      alone: () => alone,
+      agentFor: () => null,
+      directory: () => ({
+        readNotes: (reader) => owner.memory.read(reader),
+        useNotes: () => {},
+        recallNotes: (reader, query) => owner.memory.recall(reader, query),
+        learnNote: (writer, input) => owner.memory.learn(writer, input),
+        forgetNoteFor: (writer, id) => owner.memory.forgetFor(writer, id),
+      }),
+      kv: { get: () => undefined, put: () => {} },
+    });
+    expect(await memory.refresh()).toContain("salary");
+    alone = false;
+    expect(await memory.host().section("root")).not.toContain("salary");
+  });
+
+  it("says nothing is read or saved where the owner's directory refuses, as the tools do", async () => {
+    // The sidebar already says off the record; the chat object lags.
+    const owner = directory({ [GROUP]: "off_record" });
+    const { host } = chat(GROUP, "group", false, owner);
+    expect(await host.section("root")).toContain("off the record");
+    expect(await host.note("root", { text: "Ana runs the demo.", scope: "chat", kind: "preference" })).toHaveProperty("error");
   });
 
   it("reads and saves nothing in a chat off the record", async () => {

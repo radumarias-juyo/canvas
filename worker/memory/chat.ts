@@ -5,9 +5,12 @@ import { errorMessage } from "../../shared/util.ts";
 import type { Learned, LearnedNote } from "./memory.ts";
 import type { MemoryHost } from "./tools.ts";
 
+/** The notes a conversation's prompt holds; `off`: the owner's directory reads and saves none in this chat. */
+export type NotesRead = { notes: MemoryNote[]; more: number; off?: true };
+
 /** What a chat reaches of a user's notes (UserDirectory's methods, which RPC makes promises). */
 export interface NotesDirectory {
-  readNotes(reader: MemoryReader): { notes: MemoryNote[]; more: number } | Promise<{ notes: MemoryNote[]; more: number }>;
+  readNotes(reader: MemoryReader): NotesRead | Promise<NotesRead>;
   useNotes(ids: readonly string[]): void | Promise<void>;
   recallNotes(reader: MemoryReader, query: string): MemoryNote[] | Promise<MemoryNote[]>;
   learnNote(writer: MemoryWriter, note: LearnedNote): Learned | Promise<Learned>;
@@ -53,8 +56,8 @@ const MAX_SHOWN = 1_000;
  */
 export class ChatMemory {
   readonly #deps: ChatMemoryDeps;
-  /** Each conversation's section, as its turn started. */
-  readonly #sections = new Map<string, Promise<string>>();
+  /** Each conversation's section, as its turn started, with who could read the chat then (`#audience`). */
+  readonly #sections = new Map<string, { audience: string; section: Promise<string> }>();
 
   constructor(deps: ChatMemoryDeps) {
     this.#deps = deps;
@@ -63,6 +66,11 @@ export class ChatMemory {
   #who(conversation: string): { key: string; agent: MemoryAgent | null } {
     const agent = this.#deps.agentFor(conversation);
     return { key: agent ? conversation : PI, agent };
+  }
+
+  /** The chat's kind and whether anyone else is in it: a section read under another is not used. */
+  #audience(): string {
+    return `${this.#deps.kind()}:${this.#deps.alone()}`;
   }
 
   #reader(agent: MemoryAgent | null): MemoryReader {
@@ -86,7 +94,7 @@ export class ChatMemory {
   refresh(conversation?: string): Promise<string> {
     const { key, agent } = conversation === undefined ? { key: PI, agent: null } : this.#who(conversation);
     const section = this.#read(key, agent);
-    this.#sections.set(key, section);
+    this.#sections.set(key, { audience: this.#audience(), section });
     return section;
   }
 
@@ -94,7 +102,10 @@ export class ChatMemory {
     const reader = this.#reader(agent);
     const directory = this.#directory(agent);
     try {
-      const { notes, more } = await directory.readNotes(reader);
+      const { notes, more, off } = await directory.readNotes(reader);
+      // Off the record as the owner's directory knows it (its sidebar's kind, or a chat not theirs): say so, as the
+      // tools refuse there.
+      if (off) return memorySection({ kinds: ["off_record"] }, []);
       const shown = new Set(this.#deps.kv.get<string[]>(SHOWN_KEY + key) ?? []);
       const fresh = notes.map((note) => note.id).filter((id) => !shown.has(id));
       if (fresh.length) {
@@ -114,7 +125,9 @@ export class ChatMemory {
     return {
       section: (conversation) => {
         const { key } = this.#who(conversation);
-        return this.#sections.get(key) ?? this.refresh(conversation);
+        // Read again when the chat was shared or changed its kind since: never a section read for fewer readers.
+        const kept = this.#sections.get(key);
+        return kept && kept.audience === this.#audience() ? kept.section : this.refresh(conversation);
       },
       note: async (conversation, note) => {
         const { agent } = this.#who(conversation);

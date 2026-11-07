@@ -18,7 +18,6 @@ export interface ImportReport {
 }
 
 const PARALLEL = 4;
-/** Memory notes are small: a hundred go in one request. */
 const FILES = ARCHIVE.file("");
 
 /** A file the browser reads from disk, a part at a time. */

@@ -189,8 +189,9 @@ export class MemoryStore {
     }
     if (!sets.length) return note;
     const moved = { ...note, ...change };
-    // Moved onto a note that says the same for the same reader: the two are one.
-    const same = (change.text !== undefined || change.scope !== undefined) && this.#same(moved);
+    // Moved onto a note that says the same for the same reader: the two are one. A forgotten note is in no one's way
+    // until it is brought back (restore checks then).
+    const same = note.forgottenAt === undefined && (change.text !== undefined || change.scope !== undefined) && this.#same(moved);
     if (same && same.id !== id) return { error: "Another note already says this, for the same reader." };
     set("updated_at", this.#at(note));
     this.#sql.exec(`UPDATE memory SET ${sets.join(", ")} WHERE id = ?`, ...values, id);
@@ -239,6 +240,9 @@ export class MemoryStore {
    * the same for the same reader (`skipped`). The caller checks where it goes (its agent, its chat).
    */
   import(note: MemoryNote): { id: string; skipped?: true } | { error: string } {
+    // The same note kept here already (an import run again, or an export of this account), forgotten or not: as it is here.
+    const kept = this.get(note.id);
+    if (kept && kept.scope === note.scope && kept.text.toLowerCase() === note.text.toLowerCase()) return { id: kept.id, skipped: true };
     const same = note.forgottenAt === undefined ? this.#same(note) : undefined;
     if (same) return { id: same.id, skipped: true };
     if (this.#count() >= MAX_NOTES) return { error: `There are ${MAX_NOTES} memory notes already.` };
