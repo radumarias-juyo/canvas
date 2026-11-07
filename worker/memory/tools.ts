@@ -85,7 +85,8 @@ export function memoryExtension(host: MemoryHost): Extension {
         execute: async (args, api) => {
           const forgotten = await host.forget(String(api.conversationId), args.id.replace(/[[\]\s]/g, ""));
           if ("error" in forgotten) throw new Error(forgotten.error);
-          return { output: text(`Forgot [${forgotten.id}]: “${forgotten.text}”. The owner can bring it back under Memory.`) };
+          // Not its text: a note may be the owner's own, and the result stays in the transcript.
+          return { output: text(`Forgot [${forgotten.id}]. The owner can bring it back under Memory.`) };
         },
       }),
     ],

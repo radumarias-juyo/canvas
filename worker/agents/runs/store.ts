@@ -323,10 +323,12 @@ export class AgentRuns {
   agentOfSession(session: string): string | null {
     const row = this.#sql
       .exec(
-        "SELECT agent_id FROM agent_runs WHERE session = ? OR reply_session = ? OR (item = '' AND instr(detail, ?) > 0) LIMIT 1",
+        // Only where a session is kept: its columns, and the delivery sessions of the run's own row (never the rest of its detail).
+        `SELECT agent_id FROM agent_runs WHERE session = ? OR reply_session = ?
+           OR (item = '' AND json_valid(detail) AND EXISTS (SELECT 1 FROM json_each(detail, '$.sessions') WHERE value = ?)) LIMIT 1`,
         session,
         session,
-        JSON.stringify(session),
+        session,
       )
       .toArray()[0];
     return row ? (row.agent_id as string) : null;

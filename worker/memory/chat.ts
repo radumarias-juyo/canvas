@@ -1,6 +1,9 @@
 import type { ChatKind } from "../../shared/chat-kinds.ts";
 import { memorySection, readsOwnNotes, type MemoryNote, type MemoryReader, type MemoryWriter } from "../../shared/memory.ts";
+import type { EntryRecord } from "@earendil-works/pi-durable";
+import { CHAT_TURN_KIND } from "../../shared/agents.ts";
 import { AGENT_NAME } from "../../shared/mentions.ts";
+import { CHAT_MESSAGE_KIND, type ChatMessageData } from "../../shared/protocol.ts";
 import { errorMessage } from "../../shared/util.ts";
 import type { Learned, LearnedNote } from "./memory.ts";
 import type { MemoryHost } from "./tools.ts";
@@ -38,14 +41,42 @@ export interface ChatMemoryDeps {
   alone(): boolean;
   /** The roster's agent whose conversation `conversation` is; null for pi's. */
   agentFor(conversation: string): MemoryAgent | null;
+  /** pi's running turn answers only the owner's own messages (runAskedByOwner over its log). */
+  piByOwner(): Promise<boolean>;
   /**
    * Have the next model request of a conversation (pi's for none, else a session) start its prompt afresh, leaving out
-   * every earlier one: an earlier prompt held the owner's own notes, which its readers may no longer see.
+   * every earlier one: an earlier prompt held the owner's own notes, which its readers may no longer see. With
+   * `compacting`, a compaction it could not stop summarizes the earlier context: once that settles, it is due again.
    */
-  freshPrompt(conversation: string | undefined): Promise<void>;
+  freshPrompt(conversation: string | undefined): Promise<{ compacting?: Promise<unknown> }>;
   directory(uid: string): NotesDirectory;
   /** Where the chat keeps which notes each conversation's prompt already held, so a note's use counts once in each. */
   kv: { get<T>(key: string): T | undefined; put(key: string, value: unknown): void };
+}
+
+/**
+ * Whether the run pi is in answers only the owner's own messages, from its log read newest first (`pages`): every
+ * input since the end of its last run (a reply that ended it, not one calling tools) is a message of `ownerUid`'s,
+ * none an agent's hand-off (CHAT_TURN_KIND) or another input. Read from the transcript, so a run resumed after a restart
+ * is judged as it was. `pages` go back to the start of the log when no run ended before (only this run is read).
+ */
+export async function runAskedByOwner(pages: AsyncIterable<readonly EntryRecord[]>, ownerUid: string): Promise<boolean> {
+  let asked = false;
+  for await (const page of pages) {
+    for (const entry of page) {
+      if (entry.kind === "pi.assistant") {
+        const reply = entry.model?.[0];
+        if (reply?.role === "assistant" && reply.stopReason !== "toolUse") return asked;
+      } else if (entry.kind === CHAT_MESSAGE_KIND) {
+        const data = entry.data as Partial<ChatMessageData> | undefined;
+        if (data?.aside) continue;
+        if (data?.uid !== ownerUid) return false;
+        asked = true;
+      } else if (entry.kind === CHAT_TURN_KIND || entry.kind === "pi.user") return false;
+    }
+  }
+  // The start of the log: the run is the conversation's first.
+  return asked;
 }
 
 /** pi's conversation, as the memos and the counts of uses key it. */
@@ -79,10 +110,6 @@ export class ChatMemory {
   readonly #deps: ChatMemoryDeps;
   /** Each conversation's section, as its turn started, with who could read the chat then (`#audience`). */
   readonly #sections = new Map<string, { audience: string; section: Promise<Section> }>();
-  /** pi's turn now answers the owner's own message (refresh): not after a restart, nor in a hand-off's turn. */
-  #piByOwner = false;
-  /** Hand-offs to pi not done yet (handOff): while any is, whichever turn pi is in saves nothing as the owner. */
-  #handOffs = 0;
   /** The conversations whose prompt is being started afresh now (#forgetOwn). */
   readonly #freshening = new Map<string, Promise<void>>();
 
@@ -109,9 +136,9 @@ export class ChatMemory {
     };
   }
 
-  #writer(agent: MemoryAgent | null): MemoryWriter {
+  async #writer(agent: MemoryAgent | null): Promise<MemoryWriter> {
     const reader = this.#reader(agent);
-    const byOwner = agent ? agent.byOwner : reader.alone && this.#piByOwner && this.#handOffs === 0;
+    const byOwner = agent ? agent.byOwner : reader.alone && (await this.#deps.piByOwner().catch(() => false));
     return { ...reader, byOwner, learnedBy: agent ? agent.name : AGENT_NAME };
   }
 
@@ -146,20 +173,25 @@ export class ChatMemory {
     if (going) return going;
     const fresh = this.#deps
       .freshPrompt(key === PI ? undefined : key)
-      .then(() => this.#clearOwn(key))
+      .then(({ compacting }) => {
+        // Marked until the summary is left out too: if this object goes away first, the next turn does it.
+        if (compacting)
+          void compacting
+            .then(() => this.#forgetOwn(key, this.#reader(null)))
+            .catch((error: unknown) => console.error("memory prompt:", errorMessage(error)));
+        else this.#clearOwn(key);
+      })
       .finally(() => this.#freshening.delete(key));
     this.#freshening.set(key, fresh);
     return fresh;
   }
 
   /**
-   * Read a conversation's notes again as its turn starts: pi's (no `conversation`; `byOwner`: the turn answers the
-   * owner's own message, not an agent's hand-off), or an agent's session's. Starts its prompt afresh first when an
-   * earlier one held the owner's own notes and it reads them no longer, and counts a use of each note its prompt holds
-   * for the first time. Never rejects: on a failure the section says it.
+   * Read a conversation's notes again as its turn starts: pi's (no `conversation`), or an agent's session's. Starts its
+   * prompt afresh first when an earlier one held the owner's own notes and it reads them no longer, and counts a use of
+   * each note its prompt holds for the first time. Never rejects: on a failure the section says it.
    */
-  async refresh(conversation?: string, pi?: { byOwner: boolean }): Promise<string> {
-    if (conversation === undefined) this.#piByOwner = pi?.byOwner === true;
+  async refresh(conversation?: string): Promise<string> {
     const who = conversation === undefined ? { key: PI, agent: null } : this.#who(conversation);
     await this.#forgetOwn(who.key, this.#reader(who.agent)).catch((error: unknown) => console.error("memory prompt:", errorMessage(error)));
     return (await this.#refresh(who)).text;
@@ -170,15 +202,6 @@ export class ChatMemory {
     const section = this.#read(who.key, who.agent);
     this.#sections.set(who.key, { audience: this.#audience(), section });
     return section;
-  }
-
-  /**
-   * An agent handed pi a turn, which ends when `done` settles: until then pi saves nothing as the owner, even in a turn
-   * of the owner's own that it queues behind or that comes in while it runs.
-   */
-  handOff(done: Promise<unknown>): void {
-    this.#handOffs++;
-    void done.catch(() => {}).finally(() => this.#handOffs--);
   }
 
   /**
@@ -232,7 +255,7 @@ export class ChatMemory {
       section: async (conversation) => (await this.#section(this.#who(conversation))).text,
       note: async (conversation, note) => {
         const { agent } = this.#who(conversation);
-        return this.#directory(agent).learnNote(this.#writer(agent), note);
+        return this.#directory(agent).learnNote(await this.#writer(agent), note);
       },
       // The notes the prompt does not hold first: those it holds the model has already.
       recall: async (conversation, query) => {
@@ -245,7 +268,7 @@ export class ChatMemory {
       },
       forget: async (conversation, id) => {
         const { agent } = this.#who(conversation);
-        return this.#directory(agent).forgetNoteFor(this.#writer(agent), id);
+        return this.#directory(agent).forgetNoteFor(await this.#writer(agent), id);
       },
     };
   }

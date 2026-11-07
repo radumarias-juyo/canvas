@@ -3,23 +3,33 @@ import { fauxAssistantMessage, fauxProvider, fauxToolCall, Type, type AssistantM
 import { createModels } from "@earendil-works/pi-ai/models";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createRegistry, defineExtension, defineTool, Harness, MemoryStorage, section } from "@earendil-works/pi-durable";
-import { MEMORY_RECALL_TOOL } from "../shared/memory.ts";
+import { MEMORY_FORGET_TOOL, MEMORY_RECALL_TOOL } from "../shared/memory.ts";
 import { text } from "../worker/agent/output.ts";
 import { freshPrompt } from "../worker/memory/fresh.ts";
 
 /**
- * pi over a faux model with one `memory` section whose text the test sets and a memory_recall that finds the owner's
- * note, the messages each request carried, and the replies to give (`replies`, else "ok").
+ * pi over a faux model with one `memory` section whose text the test sets, a memory_recall that finds the owner's
+ * note and a memory_forget that quotes one, the messages each request carried, and the replies to give (`replies`,
+ * else "ok"). A compaction's summary is `summary`, given once `summarizing` (when set) resolves; a large
+ * `contextWindow` keeps pi from compacting on its own.
  */
-async function piWithMemory(replies: AssistantMessage[] = [], summary = "Summary: nothing to note.") {
-  const faux = fauxProvider({ models: [{ id: "m" }] });
+async function piWithMemory(
+  replies: AssistantMessage[] = [],
+  {
+    summary = "Summary: nothing to note.",
+    summarizing,
+    contextWindow,
+  }: { summary?: string; summarizing?: (signal?: AbortSignal) => Promise<void>; contextWindow?: number } = {},
+) {
+  const faux = fauxProvider({ models: [{ id: "m", contextWindow }] });
   const models = createModels();
   models.setProvider(faux.provider);
   const requests: Message[][] = [];
   faux.setResponses(
-    Array.from({ length: 8 }, () => (context: { messages: Message[]; systemPrompt?: string }) => {
+    Array.from({ length: 8 }, () => (context: { messages: Message[]; systemPrompt?: string }, options?: { signal?: AbortSignal }) => {
       // A compaction's request asks for a summary, in its own instructions.
-      if (JSON.stringify(context).includes("context summarization assistant")) return fauxAssistantMessage(summary);
+      if (JSON.stringify(context).includes("context summarization assistant"))
+        return summarizing ? summarizing(options?.signal).then(() => fauxAssistantMessage(summary)) : fauxAssistantMessage(summary);
       requests.push(structuredClone(context.messages));
       return replies.shift() ?? fauxAssistantMessage("ok");
     }),
@@ -32,7 +42,13 @@ async function piWithMemory(replies: AssistantMessage[] = [], summary = "Summary
     parameters: Type.Object({}),
     execute: async () => ({ output: text("- [a2] (just me) My bonus is private too.") }),
   });
-  registry.install(defineExtension({ name: "memory", sections: [section("memory", () => notes.text)], tools: [recall] }));
+  const forget = defineTool({
+    name: MEMORY_FORGET_TOOL,
+    description: "Forget a memory note.",
+    parameters: Type.Object({}),
+    execute: async () => ({ output: text("Forgot [a3]: “My bonus is private too.”") }),
+  });
+  registry.install(defineExtension({ name: "memory", sections: [section("memory", () => notes.text)], tools: [recall, forget] }));
   const pi = await Harness.open(new MemoryStorage(), { models, registry }, BACKGROUND_CONTEXT);
   const root = await pi.root(BACKGROUND_CONTEXT);
   await root.configure({ model: { provider: faux.provider.id, modelId: "m" } }, BACKGROUND_CONTEXT);
@@ -49,7 +65,7 @@ describe("a prompt that held the owner's own notes", () => {
       expect(JSON.stringify(requests[0])).toContain("salary");
       // Shared: the section no longer holds the note, but the first prompt entry stays in the transcript.
       notes.text = "No notes yet.";
-      await freshPrompt(root);
+      await freshPrompt(root, pi);
       await ask("and now?");
       const next = JSON.stringify(requests[1]);
       expect(next).not.toContain("salary");
@@ -68,7 +84,7 @@ describe("a prompt that held the owner's own notes", () => {
       notes.text = "No notes yet.";
       await ask("what do you know?");
       expect(JSON.stringify(requests.at(-1))).toContain("bonus");
-      await freshPrompt(root);
+      await freshPrompt(root, pi);
       await ask("and now?");
       const next = JSON.stringify(requests.at(-1));
       expect(next).not.toContain("bonus");
@@ -80,7 +96,7 @@ describe("a prompt that held the owner's own notes", () => {
   });
 
   it("leaves out a summary of the conversation, which may have kept the notes", async () => {
-    const { pi, root, notes, ask, requests } = await piWithMemory([], "Summary: the owner's bonus is private.");
+    const { pi, root, notes, ask, requests } = await piWithMemory([], { summary: "Summary: the owner's bonus is private." });
     try {
       notes.text = "No notes yet.";
       await ask(`first ${"words ".repeat(30_000)}`);
@@ -88,10 +104,109 @@ describe("a prompt that held the owner's own notes", () => {
       await pi.waitForTask(await root.compact(undefined, BACKGROUND_CONTEXT), BACKGROUND_CONTEXT);
       await ask("third");
       expect(JSON.stringify(requests.at(-1))).toContain("bonus");
-      await freshPrompt(root);
+      await freshPrompt(root, pi);
       await ask("and now?");
       expect(JSON.stringify(requests.at(-1))).not.toContain("bonus");
     } finally {
+      await pi.close(BACKGROUND_CONTEXT);
+    }
+  });
+
+  it("leaves out what an earlier memory_forget said (results once quoted the note)", async () => {
+    const { pi, root, notes, ask, requests } = await piWithMemory([
+      fauxAssistantMessage(fauxToolCall(MEMORY_FORGET_TOOL, {}, { id: "c2" }), { stopReason: "toolUse" }),
+    ]);
+    try {
+      notes.text = "No notes yet.";
+      await ask("forget that note");
+      expect(JSON.stringify(requests.at(-1))).toContain("bonus");
+      await freshPrompt(root, pi);
+      await ask("and now?");
+      expect(JSON.stringify(requests.at(-1))).not.toContain("bonus");
+    } finally {
+      await pi.close(BACKGROUND_CONTEXT);
+    }
+  });
+
+  /** A gate a compaction's summarizer waits at (`summarizing` once it got there) until `release`d or stopped. */
+  function gate() {
+    let started!: () => void;
+    const summarizing = new Promise<void>((resolve) => (started = resolve));
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    const wait = (signal?: AbortSignal) => {
+      started();
+      return Promise.race([released, new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve()))]);
+    };
+    return { summarizing, release, wait };
+  }
+
+  it("stops a compaction summarizing the context as it was, so its summary never comes in", async () => {
+    const { summarizing, release, wait } = gate();
+    const summary = "Summary: the owner's salary is private.";
+    const { pi, root, notes, ask, requests } = await piWithMemory([], { summary, summarizing: wait, contextWindow: 10_000_000 });
+    try {
+      notes.text = "- [a1] (just me) My salary is private.";
+      await ask(`first ${"words ".repeat(30_000)}`);
+      await ask(`second ${"words ".repeat(30_000)}`);
+      const compaction = await root.compact(undefined, BACKGROUND_CONTEXT);
+      await summarizing;
+      notes.text = "No notes yet.";
+      expect(await freshPrompt(root, pi)).toEqual({});
+      expect((await pi.waitForTask(compaction, BACKGROUND_CONTEXT)).state.outcome.status).toBe("aborted");
+      await ask("and now?");
+      expect(JSON.stringify(requests.at(-1))).not.toContain("salary");
+      expect(JSON.stringify(requests.at(-1))).toContain("second");
+    } finally {
+      release();
+      await pi.close(BACKGROUND_CONTEXT);
+    }
+  });
+
+  it("leaves out a summary placed while it stopped the compactions", async () => {
+    const { summarizing, release, wait } = gate();
+    const summary = "Summary: the owner's salary is private.";
+    const { pi, root, notes, ask, requests } = await piWithMemory([], { summary, summarizing: wait, contextWindow: 10_000_000 });
+    try {
+      notes.text = "- [a1] (just me) My salary is private.";
+      await ask(`first ${"words ".repeat(30_000)}`);
+      await ask(`second ${"words ".repeat(30_000)}`);
+      const compaction = await root.compact(undefined, BACKGROUND_CONTEXT);
+      await summarizing;
+      notes.text = "No notes yet.";
+      // It finishes before it is stopped: its summary comes in after the first edits.
+      const fresh = freshPrompt(root, pi);
+      release();
+      expect(await fresh).toEqual({});
+      await pi.waitForTask(compaction, BACKGROUND_CONTEXT);
+      await ask("and now?");
+      expect(JSON.stringify(requests.at(-1))).not.toContain("salary");
+    } finally {
+      await pi.close(BACKGROUND_CONTEXT);
+    }
+  });
+
+  it("leaves out the summary of a compaction a turn waits for once it is placed", async () => {
+    const { summarizing, release, wait } = gate();
+    const summary = "Summary: the owner's salary is private.";
+    const { pi, root, notes, ask, requests } = await piWithMemory([], { summary, summarizing: wait });
+    try {
+      notes.text = "- [a1] (just me) My salary is private.";
+      await ask(`first ${"words ".repeat(30_000)}`);
+      // This turn compacts first, and waits for it.
+      const turn = ask(`second ${"words ".repeat(30_000)}`);
+      await summarizing;
+      notes.text = "No notes yet.";
+      const { compacting } = await freshPrompt(root, pi);
+      expect(compacting).toBeDefined();
+      release();
+      await compacting;
+      expect(await freshPrompt(root, pi)).toEqual({});
+      await turn;
+      await ask("and now?");
+      expect(JSON.stringify(requests.at(-1))).not.toContain("salary");
+    } finally {
+      release();
       await pi.close(BACKGROUND_CONTEXT);
     }
   });

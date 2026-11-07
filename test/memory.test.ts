@@ -20,7 +20,10 @@ import {
 import type { McpToolInfo } from "../worker/agent/mcp.ts";
 import { AgentRuns } from "../worker/agents/runs/store.ts";
 import { allowedTools } from "../worker/agents/turns.ts";
-import { ChatMemory, type MemoryAgent } from "../worker/memory/chat.ts";
+import type { EntryRecord } from "@earendil-works/pi-durable";
+import { CHAT_TURN_KIND } from "../shared/agents.ts";
+import { CHAT_MESSAGE_KIND } from "../shared/protocol.ts";
+import { ChatMemory, runAskedByOwner, type MemoryAgent } from "../worker/memory/chat.ts";
 import { coverageOf } from "../worker/memory/coverage.ts";
 import { UserMemory } from "../worker/memory/memory.ts";
 import { memorySql } from "./fakes.ts";
@@ -40,7 +43,7 @@ function clock(start = T0) {
 }
 
 /** The owner's directory as memory sees it: their chats by kind, and their agents. */
-function directory(kinds: Record<string, ChatKind> = { [PRIVATE]: "private", [GROUP]: "group", [PAGE]: "page", [OFF]: "off_record" }) {
+function directory(kinds: Record<string, ChatKind> = { [PRIVATE]: "private", [GROUP]: "group", [PAGE]: "page", [OFF]: "off_record" }, start = T0) {
   let changes = 0;
   const memory = new UserMemory(
     memorySql(),
@@ -54,7 +57,7 @@ function directory(kinds: Record<string, ChatKind> = { [PRIVATE]: "private", [GR
         ]),
       changed: () => changes++,
     },
-    clock(),
+    clock(start),
   );
   return { memory, kinds, changes: () => changes };
 }
@@ -337,6 +340,20 @@ describe("UserMemory", () => {
     expect(to.memory.import([{ text: "not a note" }])).toEqual([expect.objectContaining({ error: expect.any(String) })]);
   });
 
+  it("keeps a note's times on import, never later than now", () => {
+    const to = directory(undefined, T0 + 1_000);
+    const results = to.memory.import([
+      note({ id: "00000000000a", text: "Old rule.", createdAt: T0 - 50, updatedAt: T0 - 10 }),
+      note({ id: "00000000000b", text: "From later.", createdAt: T0 + 5_000, updatedAt: T0 + 6_000 }),
+    ]);
+    expect(results).toEqual([{ id: "00000000000a" }, { id: "00000000000b" }]);
+    expect(to.memory.list().find((each) => each.id === "00000000000a")).toMatchObject({ createdAt: T0 - 50, updatedAt: T0 - 10 });
+    // Capped at the clock's now then (it ticks once a read).
+    const later = to.memory.list().find((each) => each.id === "00000000000b");
+    expect(later?.createdAt).toBeLessThan(T0 + 1_010);
+    expect(later?.updatedAt).toBe(later?.createdAt);
+  });
+
   it("imports a forgotten note once, and never brings back one forgotten here", () => {
     const owner = directory();
     const gone = saved(owner.memory.add({ text: "Old rule.", scope: "user" }));
@@ -412,7 +429,7 @@ describe("ChatMemory", () => {
    * turn answers the owner, and the conversations whose prompt was started afresh.
    */
   function chat(chatId: string, kind: ChatKind, alone: boolean, owner = directory()) {
-    const state = { kind, alone };
+    const state: { kind: ChatKind; alone: boolean; piByOwner: boolean; compacting?: Promise<unknown> } = { kind, alone, piByOwner: true };
     const sessions = new Map<string, MemoryAgent>();
     const kv = new Map<string, unknown>();
     const fresh: (string | undefined)[] = [];
@@ -423,7 +440,11 @@ describe("ChatMemory", () => {
       kind: () => state.kind,
       alone: () => state.alone,
       agentFor: (conversation) => sessions.get(conversation) ?? null,
-      freshPrompt: async (conversation) => void fresh.push(conversation),
+      piByOwner: async () => state.piByOwner,
+      freshPrompt: async (conversation) => {
+        fresh.push(conversation);
+        return state.compacting ? { compacting: state.compacting } : {};
+      },
       directory: () => ({
         readNotes: (reader) => owner.memory.read(reader),
         useNotes: (ids) => {
@@ -508,22 +529,58 @@ describe("ChatMemory", () => {
     expect(fresh).toEqual([undefined]);
   });
 
+  it("starts a prompt afresh again once a compaction it could not stop has placed its summary", async () => {
+    const owner = directory();
+    saved(owner.memory.add({ text: "My salary is private.", scope: "user" }));
+    const { memory, state, fresh } = chat(PRIVATE, "private", true, owner);
+    await memory.refresh();
+    let placed!: () => void;
+    state.compacting = new Promise<void>((resolve) => (placed = resolve));
+    state.kind = "group";
+    await memory.audienceChanged();
+    expect(fresh).toEqual([undefined]);
+    state.compacting = undefined;
+    placed();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fresh).toEqual([undefined, undefined]);
+    // Done then: nothing more to leave out.
+    await memory.refresh();
+    expect(fresh).toHaveLength(2);
+  });
+
   it("lets pi save as the owner only in a turn that answers the owner's own message", async () => {
     const owner = directory();
-    const { memory, host } = chat(PRIVATE, "private", true, owner);
-    await memory.refresh(undefined, { byOwner: false });
+    const { host, state } = chat(PRIVATE, "private", true, owner);
+    state.piByOwner = false;
     const handed = saved(await host.note("root", { text: "Use dollars.", scope: "user", kind: "preference" }));
     expect(handed.note.confirmed).toBe(false);
     const kept = saved(owner.memory.add({ text: "Use euros.", scope: "user" }));
     expect(await host.forget("root", kept.id)).toHaveProperty("error");
-    // A hand-off still going: even the owner's own turn saves only what waits.
-    let done = () => {};
-    memory.handOff(new Promise<void>((resolve) => (done = resolve)));
-    await memory.refresh(undefined, { byOwner: true });
-    expect(saved(await host.note("root", { text: "Long answers.", scope: "user", kind: "preference" })).note.confirmed).toBe(false);
-    done();
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    state.piByOwner = true;
     expect(saved(await host.note("root", { text: "Short answers.", scope: "user", kind: "preference" })).note.confirmed).toBe(true);
+  });
+
+  it("tells pi's run is the owner's only when every input since its last run is the owner's own message", async () => {
+    let id = 0;
+    const entry = (kind: string, extra: Partial<EntryRecord> = {}) => ({ id: id++, conversationId: "1", kind, ...extra }) as unknown as EntryRecord;
+    const message = (uid: string, aside = false) => entry(CHAT_MESSAGE_KIND, { data: { uid, name: uid, text: "hi", ...(aside && { aside: true }) } });
+    const reply = (stopReason: string) => entry("pi.assistant", { model: [{ role: "assistant", content: [], stopReason } as never] });
+    // Newest first, as the log is read.
+    const asked = (...newestFirst: EntryRecord[]) =>
+      runAskedByOwner(
+        (async function* () {
+          yield newestFirst;
+        })(),
+        "owner",
+      );
+    expect(await asked(reply("toolUse"), message("owner"), reply("stop"), entry(CHAT_TURN_KIND))).toBe(true);
+    // A hand-off in the run, even with the owner's message after it (steered in, or the run resumed after a restart).
+    expect(await asked(reply("toolUse"), message("owner"), entry(CHAT_TURN_KIND), reply("stop"))).toBe(false);
+    // A member's message in the run, before the chat was made private again.
+    expect(await asked(reply("toolUse"), message("owner"), message("ana"), reply("stop"))).toBe(false);
+    // Asides are not inputs; the conversation's first run goes back to the start of the log; no input is no one's.
+    expect(await asked(reply("toolUse"), message("ana", true), message("owner"))).toBe(true);
+    expect(await asked(reply("toolUse"))).toBe(false);
   });
 
   it("never gives a run's sessions the owner's own notes, as their reports reach other chats", async () => {
@@ -606,11 +663,13 @@ describe("export manifest", () => {
 describe("a run's sessions", () => {
   it("are its agent's, so its turns read that agent's notes and never pi's", async () => {
     const runs = new AgentRuns(memorySql(), () => 1_000);
+    // Sessions are numbers, as pi gives them; pi's own is "1".
     runs.begin(RESEARCH, 500, "schedule", false);
-    await runs.beginItem(RESEARCH, 500, "", "", async () => "item-session");
-    runs.setReplySession(RESEARCH, 500, "reply-session");
-    runs.update(RESEARCH, 500, { detail: { sessions: { page: "page-session" } } });
-    for (const session of ["item-session", "reply-session", "page-session"]) expect(runs.agentOfSession(session)).toBe(RESEARCH);
-    expect(runs.agentOfSession("pi-session")).toBeNull();
+    await runs.beginItem(RESEARCH, 500, "", "", async () => "7");
+    runs.setReplySession(RESEARCH, 500, "8");
+    runs.update(RESEARCH, 500, { detail: { sessions: { "2": "9" }, sent: ["1"], when: "1" } });
+    for (const session of ["7", "8", "9"]) expect(runs.agentOfSession(session)).toBe(RESEARCH);
+    // Only where sessions are kept: a delivery key, a sent list or any other value of the detail is none.
+    for (const session of ["1", "2"]) expect(runs.agentOfSession(session)).toBeNull();
   });
 });

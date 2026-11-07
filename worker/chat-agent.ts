@@ -156,7 +156,7 @@ import { sourceName } from "./agents/runs/source.ts";
 import type { Value } from "../shared/conditions.ts";
 import { runRef, type AgentRunDetail, type AgentRunView, type RunDelivery, type RunRef } from "../shared/runs.ts";
 import { agentsExtension } from "./agents/tools.ts";
-import { ChatMemory, type MemoryAgent } from "./memory/chat.ts";
+import { ChatMemory, runAskedByOwner, type MemoryAgent } from "./memory/chat.ts";
 import { freshPrompt } from "./memory/fresh.ts";
 import { memoryExtension } from "./memory/tools.ts";
 import { coverageOf } from "./memory/coverage.ts";
@@ -388,7 +388,9 @@ export class ChatAgent extends DurableObject<Env> {
     kind: () => this.kinds.kind(),
     alone: () => !this.members.hasAny(),
     agentFor: (conversation) => this.#memoryAgent(conversation),
-    freshPrompt: async (session) => freshPrompt(session === undefined ? await this.#root() : await this.#conversation(session)),
+    piByOwner: () => runAskedByOwner(this.#log({ order: "descending" }), this.uid),
+    freshPrompt: async (session) =>
+      freshPrompt(session === undefined ? await this.#root() : await this.#conversation(session), await this.harness.pi()),
     directory: (uid) => this.#index(uid),
     kv: this.ctx.storage.kv,
   });
@@ -544,6 +546,8 @@ export class ChatAgent extends DurableObject<Env> {
    * the owner's turn). Null for pi's.
    */
   #memoryAgent(conversation: string): MemoryAgent | null {
+    // pi's own conversation is no agent's, whatever a run's rows hold.
+    if (conversation === String(ROOT_CONVERSATION_ID)) return null;
     const entries = this.roster.list();
     const running = this.roster.allRunning();
     const turn = running.find((each) => {
@@ -1452,7 +1456,7 @@ export class ChatAgent extends DurableObject<Env> {
       recent && this.refreshSkills({ text: skillText, recent }),
       calling && this.refreshFiles(),
       calling && this.refreshUserPrompt(),
-      calling && this.memory.refresh(undefined, { byOwner }),
+      calling && this.memory.refresh(),
     ]);
     // The files they named of their own are named too: "@pi notes.md" is not a call.
     const named = [...mentions, ...own];
@@ -2692,14 +2696,13 @@ export class ChatAgent extends DurableObject<Env> {
       },
       handToPi: async (input, data) => {
         await this.#watchRuns().catch((error: unknown) => console.error("chat status:", errorMessage(error)));
-        // A hand-off: nobody may have asked for it, so pi saves nothing as the owner in it.
-        await Promise.all([this.#refreshForTurn(input), this.memory.refresh(undefined, { byOwner: false })]);
+        // A hand-off: nobody may have asked for it, so pi saves nothing as the owner in its run (runAskedByOwner).
+        await Promise.all([this.#refreshForTurn(input), this.memory.refresh()]);
         // The handing turn names the input: handed again after a restart, it is placed once. Its entry says which chain
         // pi's answer is in (#piScan).
         try {
           const operationId = `pi-turn:${data.turn}`;
           await this.harness.submit(input, { operationId, whenBusy: "followUp", entry: { kind: CHAT_TURN_KIND, data } });
-          this.memory.handOff(this.harness.wait(operationId));
         } catch (error) {
           this.#resumeSettle();
           throw error;

@@ -253,8 +253,17 @@ export class MemoryStore {
     if (same) return { id: same.id, skipped: true };
     if (this.#count() >= MAX_NOTES) return { error: `There are ${MAX_NOTES} memory notes already.` };
     const id = NOTE_ID_PATTERN.test(note.id) && !this.get(note.id) ? note.id : randomHex(6);
+    // Its times as exported (recency ranks the notes), never later than now.
     const now = this.#now();
-    this.#insert({ ...note, id, uses: Math.max(0, Math.floor(note.uses) || 0), createdAt: note.createdAt || now, updatedAt: now });
+    const createdAt = pastTime(note.createdAt, now);
+    const forgottenAt = note.forgottenAt === undefined ? undefined : pastTime(note.forgottenAt, now);
+    const updatedAt = Math.max(createdAt, pastTime(note.updatedAt, createdAt, now));
+    this.#insert({ ...note, id, uses: Math.max(0, Math.floor(note.uses) || 0), createdAt, updatedAt, forgottenAt });
     return { id };
   }
+}
+
+/** `time` when it is a time no later than `now`, else `fallback`. */
+function pastTime(time: number | undefined, fallback: number, now = fallback): number {
+  return typeof time === "number" && Number.isFinite(time) && time > 0 && time <= now ? time : fallback;
 }
