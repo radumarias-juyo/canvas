@@ -26,7 +26,7 @@ import { allowedTools } from "../worker/agents/turns.ts";
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { CHAT_TURN_KIND } from "../shared/agents.ts";
 import { CHAT_MESSAGE_KIND } from "../shared/protocol.ts";
-import { ChatMemory, MAX_RUN_PAGES, ROOM_SECTION, runAskedByOwner, type MemoryAgent } from "../worker/memory/chat.ts";
+import { ChatMemory, MAX_RUN_PAGES, ROOM_SECTION, runAskedByOwner, UNKNOWN_SECTION, type MemoryAgent } from "../worker/memory/chat.ts";
 import { coverageOf } from "../worker/memory/coverage.ts";
 import { UserMemory } from "../worker/memory/memory.ts";
 import { recalledText } from "../worker/memory/tools.ts";
@@ -557,6 +557,36 @@ describe("ChatMemory", () => {
     expect(await host.note("s1", { text: "Use metric units.", scope: "agent", kind: "preference" })).toHaveProperty("error");
     // pi's own conversation in the same object is untouched.
     expect(await memory.refresh()).toContain("salary");
+  });
+
+  it("reads and saves nothing in a session nobody knows, never as pi's", async () => {
+    const owner = directory();
+    saved(owner.memory.add({ text: "My salary is private.", scope: "user" }));
+    saved(owner.memory.add({ text: "Standup is at nine.", scope: "chat", chatId: PRIVATE }));
+    const memory = new ChatMemory({
+      ownerUid: "owner",
+      chatId: PRIVATE,
+      kind: () => "private",
+      alone: () => true,
+      agentFor: (conversation) => (conversation === "root" ? null : undefined),
+      piByOwner: async () => true,
+      freshPrompt: async () => ({ placed: Promise.resolve() }),
+      directory: () => ({
+        readNotes: (reader) => owner.memory.read(reader),
+        useNotes: (ids) => owner.memory.use(ids),
+        recallNotes: (reader, query, shown, offset) => owner.memory.recall(reader, query, shown, offset),
+        learnNote: (writer, input) => owner.memory.learn(writer, input),
+        forgetNoteFor: (writer, id) => owner.memory.forgetFor(writer, id),
+      }),
+      kv: { get: () => undefined, put: () => {} },
+    });
+    const host = memory.host();
+    expect(await memory.refresh("old-fork")).toBe(UNKNOWN_SECTION);
+    expect((await host.recall("old-fork", "")).notes).toEqual([]);
+    expect(await host.note("old-fork", { text: "Use metric units.", scope: "user", kind: "preference" })).toHaveProperty("error");
+    // pi's own conversation reads as before, and keeps a section of its own.
+    expect(await memory.refresh()).toContain("salary");
+    expect(await host.section("old-fork")).toBe(UNKNOWN_SECTION);
   });
 
   it("keeps a conversation's section for its turn, and counts a note's use once per conversation", async () => {

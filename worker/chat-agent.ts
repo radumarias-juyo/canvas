@@ -160,11 +160,11 @@ import { sourceName } from "./agents/runs/source.ts";
 import type { Value } from "../shared/conditions.ts";
 import { runRef, type AgentRunDetail, type AgentRunList, type RunDelivery, type RunRef } from "../shared/runs.ts";
 import type { RoomLink, RoomRef, SeatBatch, SeatLink, SeatResult, SeatTurn } from "./agents/seats/link.ts";
-import { memberAgentName, seatAgentOf, seatChatId } from "./agents/seats/names.ts";
+import { memberAgentName, seatChatId } from "./agents/seats/names.ts";
 import { addRefusal, mayRemove, mayShare, seatedEntry, type ChatRules } from "./agents/seats/rules.ts";
 import { AgentSeats, type SeatHost } from "./agents/seats/seat.ts";
 import { agentsExtension } from "./agents/tools.ts";
-import { ChatMemory, runAskedByOwner, type MemoryAgent } from "./memory/chat.ts";
+import { ChatMemory, runAskedByOwner, type Whose } from "./memory/chat.ts";
 import { freshPrompt } from "./memory/fresh.ts";
 import { memoryExtension } from "./memory/tools.ts";
 import { coverageOf } from "./memory/coverage.ts";
@@ -596,18 +596,15 @@ export class ChatAgent extends DurableObject<Env> {
   /**
    * The roster agent whose conversation `conversation` is, for its memory notes: its own session, a turn's own (a
    * reply to a run's report, in a fork of the run's), or one of its runs' (only reading tools, nobody asking: never
-   * the owner's turn), or a seat's (AgentSeats.memoryAgent). Null for pi's.
+   * the owner's turn), or a seat's (AgentSeats.memoryAgent). Null for pi's own conversation only; undefined for a
+   * session nobody knows any more (a fork whose turn ended), which reads and saves nothing.
    */
-  #memoryAgent(conversation: string): MemoryAgent | null {
+  #memoryAgent(conversation: string): Whose {
     // pi's own conversation is no agent's, whatever a run's rows hold.
     if (conversation === String(ROOT_CONVERSATION_ID)) return null;
     // A seat's session (this user's agent in someone else's chat) reads as that chat, never as this object's.
     const seated = this.seats.memoryAgent(conversation);
     if (seated) return seated;
-    // An object only for an agent's seats has no agents or runs of its own: a session no seat knows any more (a fork
-    // whose turn the room took, or one of a seat that left) reads as a room, of no known kind, so nothing.
-    const seatAgent = seatAgentOf(this.chatId);
-    if (seatAgent) return { agentId: seatAgent, ownerUid: this.uid, name: "agent", byOwner: false, room: { chatId: this.chatId, kind: null } };
     const entries = this.roster.list();
     const running = this.roster.allRunning();
     const turn = running.find((each) => {
@@ -619,7 +616,7 @@ export class ChatAgent extends DurableObject<Env> {
     const known = turn?.agentId ?? entries.find((each) => each.session === conversation)?.agentId;
     const ran = known === undefined || turn?.session !== undefined ? this.runs.agentOfSession(conversation) : null;
     const agentId = known ?? ran ?? undefined;
-    if (agentId === undefined) return null;
+    if (agentId === undefined) return undefined;
     // A run's agent is on its home roster; one taken off it still reads only its own notes, never pi's.
     const entry = entries.find((each) => each.agentId === agentId);
     return { agentId, ownerUid: entry?.ownerUid ?? this.uid, name: entry?.name ?? "agent", byOwner: turn?.byOwner === true, ...(ran && { run: true }) };

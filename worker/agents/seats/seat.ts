@@ -5,7 +5,7 @@
 
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import type { AgentDefinition, ChatTurnData } from "../../../shared/agents.ts";
-import type { ChatKind } from "../../../shared/chat-kinds.ts";
+import { isChatKind } from "../../../shared/chat-kinds.ts";
 import { errorMessage } from "../../../shared/util.ts";
 import { addColumns, type Sql } from "../../members.ts";
 import type { MemoryAgent } from "../../memory/chat.ts";
@@ -99,21 +99,28 @@ export class AgentSeats {
    * The seated agent whose session `session` is, for its memory notes (ChatMemory): it reads as its room, never as
    * this object's chat, and its turn is its owner's only while one they asked for runs in it (a fork of the seat's
    * session: give checks who asked). Between turns the room's kind is not known, so nothing is read. Null for a session
-   * no seat has.
+   * no seat has (any more: ChatMemory reads nothing in one nobody knows).
    */
   memoryAgent(session: string): MemoryAgent | null {
     const [turn] = this.#sql
-      .exec("SELECT * FROM agent_seat_turns WHERE session = ? ORDER BY status = 'running' DESC, turn DESC LIMIT 1", session)
-      .toArray() as SeatTurnRow[];
+      .exec(
+        "SELECT agent_id, room_chat, status, forked, kind, name FROM agent_seat_turns WHERE session = ? ORDER BY status = 'running' DESC, turn DESC LIMIT 1",
+        session,
+      )
+      .toArray() as Pick<SeatTurnRow, "agent_id" | "room_chat" | "status" | "forked" | "kind" | "name">[];
     const running = turn?.status === "running";
-    const seat = turn ?? (this.#sql.exec("SELECT * FROM agent_seats WHERE session = ? LIMIT 1", session).toArray()[0] as SeatRow | undefined);
+    const seat =
+      turn ??
+      (this.#sql.exec("SELECT agent_id, room_chat FROM agent_seats WHERE session = ? LIMIT 1", session).toArray()[0] as
+        | Pick<SeatRow, "agent_id" | "room_chat">
+        | undefined);
     if (!seat) return null;
     return {
       agentId: seat.agent_id,
       ownerUid: this.#host.uid,
       name: turn?.name ?? "agent",
       byOwner: running && turn.forked === 1,
-      room: { chatId: seat.room_chat, kind: running ? ((turn.kind as ChatKind | null) ?? null) : null },
+      room: { chatId: seat.room_chat, kind: running && isChatKind(turn.kind) ? turn.kind : null },
     };
   }
 

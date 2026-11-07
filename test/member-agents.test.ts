@@ -6,7 +6,7 @@ import type { McpToolInfo } from "../worker/agent/mcp.ts";
 import { AgentTurns, operationId, type Caller, type TurnHost, type TurnResult } from "../worker/agents/controller.ts";
 import { ChatRoster, type RosterEntry, type RunningTurn } from "../worker/agents/roster.ts";
 import type { RoomLink, RoomRef, SeatBatch, SeatLink, SeatResult, SeatTurn } from "../worker/agents/seats/link.ts";
-import { memberAgentName, seatAgentOf, seatChatId } from "../worker/agents/seats/names.ts";
+import { memberAgentName, seatChatId } from "../worker/agents/seats/names.ts";
 import { addRefusal, mayRemove, mayShare, seatedEntry, type ChatRules } from "../worker/agents/seats/rules.ts";
 import { AgentSeats, type SeatHost } from "../worker/agents/seats/seat.ts";
 import { allowedTools, askLine, askOf, messageAskKey, sharedServer, turnSources, UNKNOWN_SOURCE } from "../worker/agents/turns.ts";
@@ -545,13 +545,11 @@ describe("Member agents: a seat in the member's own object", () => {
     const [shared, fork] = [ana.sessions.sessionOf(1), ana.sessions.sessionOf(2)];
     expect(fork).not.toBe(shared);
     // Once its turns end the room's kind is not known: nothing is read there, and nothing saved as its owner's. A fork
-    // whose turn the room took is no seat's (the chat object reads it as a room of no kind: seatAgentOf).
+    // whose turn the room took is no seat's: the chat object reads it as nobody's (ChatMemory's Whose), so nothing.
     for (const id of [1, 2, 3]) ana.sessions.finish(id, "Done.");
     await settle();
     expect(ana.seats.memoryAgent(shared)).toMatchObject({ byOwner: false, room: inRoom(null) });
     expect(ana.seats.memoryAgent(fork)).toBeNull();
-    expect(seatAgentOf(seatChatId("p"))).toBe("p");
-    expect([seatAgentOf("c1"), seatAgentOf("seat-")]).toEqual([null, null]);
   });
 
   it("keeps an agent id to whoever brought it first: another person's agent with the same id is refused", () => {
