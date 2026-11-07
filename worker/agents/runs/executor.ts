@@ -370,7 +370,8 @@ export class RunExecutor {
         this.#host.signInServers().then((signedIn) => this.#host.needsSignIn(runServers(agent, signedIn))),
       ]);
       if (capped) {
-        runs.update(agent.id, dueAt, { status: "failed", summary: capped });
+        // A run going on (a held call decided, a sign-in come) has items open: they end with it, not left running.
+        runs.stop(agent.id, dueAt, { item: capped, status: "failed", summary: capped });
         return { status: "failed", started };
       }
       let missing = needed;

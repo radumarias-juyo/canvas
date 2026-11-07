@@ -3457,6 +3457,8 @@ export class ChatAgent extends DurableObject<Env> {
     await Promise.all([this.#refreshForTurn(turn.ask), this.memory.refresh(session)]);
     this.spend.tag(session, { agent: entry.agentId });
     this.#turnSpend.delete(session);
+    // Only a turn that runs (turnLevel: its owner's own message that named it) gets tools that change data: one the
+    // router picked it for, or took on its own, only reads, as any turn its owner did not ask of it.
     const allowed = (installed: readonly string[]) =>
       turn.calledBy.drafts
         ? draftTools(installed, this.#mcpTools, agent)
@@ -3464,7 +3466,7 @@ export class ChatAgent extends DurableObject<Env> {
             installed,
             this.#mcpTools,
             agent,
-            turn.byOwner,
+            turnLevel(turn).level === 4,
             (server) => this.hub.server(server)?.auth === "oauth",
             !!turn.calledBy.unprompted,
           );
@@ -4189,7 +4191,8 @@ export class ChatAgent extends DurableObject<Env> {
 
   /**
    * Who a call is from, and how far it may go (shared/limits.ts): pi and an agent on the owner's own message run within
-   * the rules; on anyone else's turn they only propose; a run goes as far as its agent's autonomy; a page runs as its
+   * the rules (an agent only when that message named it); on anyone else's turn, one nobody asked for, or the owner's
+   * Yes to an offer they only propose (levels.ts); a run goes as far as its agent's autonomy; a page runs as its
    * author's. A session with no turn going (a run's work step, a page rebuild) may change nothing.
    */
   async #callerOf(context: GateContext, call: Pick<GateCall, "server">): Promise<Caller> {
@@ -4219,8 +4222,9 @@ export class ChatAgent extends DurableObject<Env> {
   }
 
   /**
-   * pi's level: the lowest of the inputs its run answers. The owner's own message runs; anyone else's only proposes; a
-   * hand-off goes no further than the turn that handed it (the owner's own turn of an agent's, or else a proposal).
+   * pi's level: the lowest of the inputs its run answers. The owner's own message runs (not their Yes to an offer);
+   * anyone else's only proposes; a hand-off goes no further than the turn that handed it (turnLevel: a turn of an
+   * agent's the owner's message named, or else a proposal).
    */
   async #piCaller(): Promise<Caller> {
     const pi = await this.harness.pi();
