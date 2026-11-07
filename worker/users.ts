@@ -1,6 +1,8 @@
 import { DurableObject, exports } from "cloudflare:workers";
-import type { ModelChoice } from "../shared/models.ts";
-import { SOCKET_PING, type ArtifactSummary, type ChatStatus, type ChatSummary, type MentionNotice, type SidebarList } from "../shared/protocol.ts";
+import type { ModelSetting } from "../shared/models.ts";
+import { PAGE_STORAGE_LIMITS, SOCKET_PING, type ArtifactSummary, type ChatStatus, type ChatSummary, type MentionNotice, type SidebarList } from "../shared/protocol.ts";
+import type { SkillFileInfo } from "../shared/skill-files.ts";
+import { checkSystemPrompt, type ChatSystemPrompt } from "../shared/system-prompt.ts";
 import { checkSkill, MAX_SKILL_PROPOSALS, MAX_USER_SKILLS, SkillError, type SavedSkillOrigin, type SkillInfo, type SkillInput, type SkillResult } from "../shared/skills.ts";
 import { BUILTIN_SKILLS, builtinSkill, parseSkillFile } from "./skills/index.ts";
 import { titleFromMessage, UNNAMED_CHAT } from "./agent/title.ts";
@@ -11,6 +13,23 @@ import { mcpServers } from "./mcp/servers.ts";
 export function mcpAuthStore(uid: string, server: string): McpAuthStore {
   const directory = exports.UserDirectory.getByName(uid);
   return { get: () => directory.mcpAuth(server), update: (change) => directory.updateMcpAuth(server, change) };
+}
+
+/** Where a user's, or a chat's, own system prompt is kept, in its object's KV storage. */
+const SYSTEM_PROMPT_KEY = "systemPrompt";
+
+/** The system prompt kept under SYSTEM_PROMPT_KEY in `kv`; "" for none. */
+export function readSystemPrompt(kv: SyncKvStorage): string {
+  return kv.get<string>(SYSTEM_PROMPT_KEY) ?? "";
+}
+
+/** Check `value` as a system prompt and keep it under SYSTEM_PROMPT_KEY in `kv`; empty clears it. */
+export function saveSystemPrompt(kv: SyncKvStorage, value: unknown): { text: string } | { error: string } {
+  const checked = checkSystemPrompt(value);
+  if ("error" in checked) return checked;
+  if (checked.text) kv.put(SYSTEM_PROMPT_KEY, checked.text);
+  else kv.delete(SYSTEM_PROMPT_KEY);
+  return checked;
 }
 
 /** A message that tagged this user: who wrote it, its start, and when. */
@@ -26,7 +45,15 @@ type SkillRow = {
   origin: SavedSkillOrigin;
   enabled: number;
   updated_at: number;
+  /** JSON {set, list} of a skill imported as a package (SkillPackageFiles); null for others. */
+  files: string | null;
 };
+
+/** The files of a skill imported as a package: the set SkillFiles wrote them as, and what is in it. */
+export interface SkillPackageFiles {
+  set: string;
+  list: SkillFileInfo[];
+}
 
 /**
  * One per user: the index of their chats, the chats others shared with them, their artifacts, skills and model.
@@ -42,6 +69,8 @@ export class UserDirectory extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS skills (name TEXT PRIMARY KEY, description TEXT NOT NULL, instructions TEXT NOT NULL, tools TEXT NOT NULL, origin TEXT NOT NULL, enabled INTEGER NOT NULL, updated_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS builtin_skills_off (name TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS shared_chats (id TEXT PRIMARY KEY, owner_uid TEXT NOT NULL, owner_name TEXT NOT NULL, title TEXT NOT NULL, joined_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS page_values (artifact_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT, updated_at INTEGER NOT NULL, PRIMARY KEY (artifact_id, key));
+      CREATE TABLE IF NOT EXISTS page_ai_spend (day TEXT PRIMARY KEY, calls INTEGER NOT NULL, input INTEGER NOT NULL, output INTEGER NOT NULL, cost REAL NOT NULL);
     `);
     // Added later: what the chat's agent is doing (ChatStatus), when something last came in that this user did not
     // write, and when they last saw the chat. activity_at > seen_at is unread. Then: when someone last tagged them in
@@ -54,6 +83,8 @@ export class UserDirectory extends DurableObject<Env> {
     }
     // Whether this user's own chat has members: the chat tells (setChatShared) when that changes, and when it opens.
     this.#addColumn("chats", "shared", "INTEGER NOT NULL DEFAULT 0");
+    // The files of a skill imported as a package (SkillPackageFiles as JSON).
+    this.#addColumn("skills", "files", "TEXT");
     // The newest version of each artifact its owner opened. Artifacts from before count as seen.
     if (this.#addColumn("artifacts", "seen", "INTEGER NOT NULL DEFAULT 0")) ctx.storage.sql.exec("UPDATE artifacts SET seen = latest");
     // A sidebar's socket stays open for hours: answer its keep-alive pings without waking this object.
@@ -183,12 +214,32 @@ export class UserDirectory extends DurableObject<Env> {
     if (this.ctx.storage.sql.exec("UPDATE chats SET shared = ? WHERE id = ? AND shared != ?", flag, id, flag).rowsWritten) this.#changed("chats");
   }
 
-  /** This user has seen everything in the chat so far. */
-  markSeen(id: string): void {
+  /**
+   * This user has seen everything in the chat so far. Returns when they had last seen it before, if something came in
+   * since, so the app can mark what is new; null when nothing was unread, or they never looked at the chat.
+   */
+  markSeen(id: string): number | null {
+    const unread = "WHERE id = ? AND activity_at > seen_at";
+    const before = this.ctx.storage.sql
+      .exec<{ seen_at: number }>(`SELECT seen_at FROM chats ${unread} UNION ALL SELECT seen_at FROM shared_chats ${unread}`, id, id)
+      .toArray()[0];
+    if (!before) return null;
     const now = Date.now();
-    const own = this.ctx.storage.sql.exec("UPDATE chats SET seen_at = ? WHERE id = ? AND activity_at > seen_at", now, id).rowsWritten;
-    const shared = this.ctx.storage.sql.exec("UPDATE shared_chats SET seen_at = ? WHERE id = ? AND activity_at > seen_at", now, id).rowsWritten;
-    if (own + shared > 0) this.#changed("chats");
+    this.ctx.storage.sql.exec(`UPDATE chats SET seen_at = ? ${unread}`, now, id);
+    this.ctx.storage.sql.exec(`UPDATE shared_chats SET seen_at = ? ${unread}`, now, id);
+    this.#changed("chats");
+    return before.seen_at > 0 ? before.seen_at : null;
+  }
+
+  /**
+   * This user stopped looking at the chat: what it showed them until now is read, also what came in without making
+   * it unread (an agent's reply as it streams, before its run ends). Not when something unread is waiting, which
+   * stays new for them.
+   */
+  leftChat(id: string): void {
+    const now = Date.now();
+    this.ctx.storage.sql.exec("UPDATE chats SET seen_at = ? WHERE id = ? AND activity_at <= seen_at", now, id);
+    this.ctx.storage.sql.exec("UPDATE shared_chats SET seen_at = ? WHERE id = ? AND activity_at <= seen_at", now, id);
   }
 
   /** Whose chat `id` is: this user's own uid, the owner's for a chat shared with them, or null. The chat itself still checks membership. */
@@ -275,6 +326,8 @@ export class UserDirectory extends DurableObject<Env> {
 
   /** Take a deleted chat, and the artifacts it published, out of this user's lists. The chat deletes the rest first. */
   forgetChat(id: string): void {
+    // The values its pages saved for this user, which were everyone's defaults.
+    this.ctx.storage.sql.exec("DELETE FROM page_values WHERE artifact_id IN (SELECT id FROM artifacts WHERE chat_id = ?)", id);
     if (this.ctx.storage.sql.exec("DELETE FROM artifacts WHERE chat_id = ?", id).rowsWritten) this.#changed("artifacts");
     if (this.ctx.storage.sql.exec("DELETE FROM chats WHERE id = ?", id).rowsWritten) this.#changed("chats");
   }
@@ -355,9 +408,10 @@ export class UserDirectory extends DurableObject<Env> {
    * replacing any of theirs with that name. A skill the agent proposes is always
    * saved off, and may replace only another proposal that is still off: text from
    * a tool result or a file must not become standing instructions in every chat
-   * without the user turning it on.
+   * without the user turning it on. `files` are the files of a skill imported as a package, which replace the ones it
+   * had (`replacedFileSet`, for the caller to delete); without them, a skill keeps the files it has.
    */
-  saveSkill(input: unknown, origin: SavedSkillOrigin, enabled: boolean): SkillResult {
+  saveSkill(input: unknown, origin: SavedSkillOrigin, enabled: boolean, files?: SkillPackageFiles): (SkillInfo & { replacedFileSet?: string }) | { error: string } {
     let skill: SkillInput;
     try {
       const markdown = (input as { markdown?: unknown } | null)?.markdown;
@@ -381,10 +435,12 @@ export class UserDirectory extends DurableObject<Env> {
     const on = origin === "user" && enabled;
     // Strictly newer than the version it replaces, even within one millisecond: turning a skill on checks it.
     const now = Math.max(Date.now(), (existing?.updated_at ?? 0) + 1);
+    const had = packageFiles(existing);
+    const kept = files ?? had;
     this.ctx.storage.sql.exec(
-      `INSERT INTO skills (name, description, instructions, tools, origin, enabled, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO skills (name, description, instructions, tools, origin, enabled, updated_at, files) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(name) DO UPDATE SET description = excluded.description, instructions = excluded.instructions, tools = excluded.tools,
-         origin = excluded.origin, enabled = excluded.enabled, updated_at = excluded.updated_at`,
+         origin = excluded.origin, enabled = excluded.enabled, updated_at = excluded.updated_at, files = excluded.files`,
       skill.name,
       skill.description,
       skill.instructions,
@@ -392,9 +448,11 @@ export class UserDirectory extends DurableObject<Env> {
       origin,
       on ? 1 : 0,
       now,
+      kept && JSON.stringify(kept),
     );
     this.#changed("skills");
-    return { ...skill, origin, enabled: on, updatedAt: now };
+    const replaced = files && had && had.set !== files.set ? { replacedFileSet: had.set } : {};
+    return { ...skill, origin, enabled: on, updatedAt: now, ...(kept && { files: kept.list, fileSet: kept.set }), ...replaced };
   }
 
   setBuiltinSkillEnabled(name: string, enabled: boolean): SkillResult {
@@ -435,16 +493,103 @@ export class UserDirectory extends DurableObject<Env> {
   }
 
   /** The model and effort the user last picked in any chat: what their new chats start on. Checked by the chat that reads it. */
-  modelChoice(): ModelChoice | null {
-    return this.ctx.storage.kv.get<ModelChoice>("model") ?? null;
+  modelChoice(): ModelSetting | null {
+    return this.ctx.storage.kv.get<ModelSetting>("model") ?? null;
   }
 
-  setModelChoice(choice: ModelChoice): void {
+  setModelChoice(choice: ModelSetting): void {
     this.ctx.storage.kv.put("model", choice);
+  }
+
+  /** The user's own system prompt, added to the built-in one in all their chats; "" for none. Always theirs to change. */
+  systemPrompt(): ChatSystemPrompt {
+    return { text: readSystemPrompt(this.ctx.storage.kv), editable: true };
+  }
+
+  /**
+   * What one page saved for this user, by key. A null value is a key they removed that the page's author has: it
+   * stays removed for them instead of falling back to the author's.
+   */
+  pageValues(artifactId: string): Record<string, string | null> {
+    const rows = this.ctx.storage.sql.exec<{ key: string; value: string | null }>("SELECT key, value FROM page_values WHERE artifact_id = ?", artifactId).toArray();
+    return Object.fromEntries(rows.map((row) => [row.key, row.value]));
+  }
+
+  /**
+   * Save a page's changes for this user: a string sets a key, null removes it. `author`: the user wrote the page, so a
+   * removed key is gone; anyone else keeps it as removed (see pageValues). All or nothing, within PAGE_STORAGE_LIMITS.
+   */
+  writePageValues(artifactId: string, changes: Record<string, string | null>, author: boolean): { ok: true } | { error: string } {
+    const sql = this.ctx.storage.sql;
+    const now = Date.now();
+    try {
+      this.ctx.storage.transactionSync(() => {
+        for (const [key, value] of Object.entries(changes)) {
+          if (value === null && author) sql.exec("DELETE FROM page_values WHERE artifact_id = ? AND key = ?", artifactId, key);
+          else {
+            sql.exec(
+              "INSERT INTO page_values (artifact_id, key, value, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(artifact_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+              artifactId,
+              key,
+              value,
+              now,
+            );
+          }
+        }
+        const { keys, chars } = sql
+          .exec<{ keys: number; chars: number | null }>("SELECT COUNT(*) AS keys, SUM(length(key) + COALESCE(length(value), 0)) AS chars FROM page_values WHERE artifact_id = ?", artifactId)
+          .one();
+        if (keys > PAGE_STORAGE_LIMITS.keys) throw new PageLimitError(`A page saves at most ${PAGE_STORAGE_LIMITS.keys} keys.`);
+        if ((chars ?? 0) > PAGE_STORAGE_LIMITS.totalChars) throw new PageLimitError(`A page saves at most ${PAGE_STORAGE_LIMITS.totalChars} characters.`);
+      });
+    } catch (error) {
+      if (error instanceof PageLimitError) return { error: error.message };
+      throw error;
+    }
+    return { ok: true };
+  }
+
+  /** Drop everything one page saved for this user. */
+  resetPageValues(artifactId: string): void {
+    this.ctx.storage.sql.exec("DELETE FROM page_values WHERE artifact_id = ?", artifactId);
+  }
+
+  /** What this user's calls to pages' models cost today (UTC), in dollars. */
+  pageAiSpentToday(): number {
+    return this.ctx.storage.sql.exec<{ cost: number }>("SELECT cost FROM page_ai_spend WHERE day = ?", utcDay()).toArray()[0]?.cost ?? 0;
+  }
+
+  /** Count one call to a page's model against this user, who typed what it answered. */
+  recordPageAi(usage: { input: number; output: number; cost: number }): void {
+    this.ctx.storage.sql.exec(
+      `INSERT INTO page_ai_spend (day, calls, input, output, cost) VALUES (?, 1, ?, ?, ?)
+       ON CONFLICT(day) DO UPDATE SET calls = calls + 1, input = input + excluded.input, output = output + excluded.output, cost = cost + excluded.cost`,
+      utcDay(),
+      usage.input,
+      usage.output,
+      usage.cost,
+    );
+  }
+
+  /** Save the user's system prompt; their chats use it from their next message on. */
+  setSystemPrompt(value: unknown): ChatSystemPrompt | { error: string } {
+    const saved = saveSystemPrompt(this.ctx.storage.kv, value);
+    return "error" in saved ? saved : { ...saved, editable: true };
   }
 }
 
+/** A page's write that would go over PAGE_STORAGE_LIMITS: it rolls the write back. */
+class PageLimitError extends Error {}
+
+/** Today, as YYYY-MM-DD in UTC. */
+function utcDay(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+const packageFiles = (row: Pick<SkillRow, "files"> | undefined) => (row?.files ? (JSON.parse(row.files) as SkillPackageFiles) : null);
+
 function skillInfo(row: SkillRow): SkillInfo {
+  const files = packageFiles(row);
   return {
     name: row.name,
     description: row.description,
@@ -453,6 +598,7 @@ function skillInfo(row: SkillRow): SkillInfo {
     origin: row.origin,
     enabled: row.enabled === 1,
     updatedAt: row.updated_at,
+    ...(files && { files: files.list, fileSet: files.set }),
   };
 }
 

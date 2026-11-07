@@ -5,6 +5,7 @@ import {
   FILE_ROUTE,
   MAX_FILE_BYTES,
   MAX_FILES_PER_UPLOAD,
+  MAX_LISTED,
   MAX_UPLOAD_BYTES,
   MAX_ZIP_BYTES,
   MAX_ZIP_FILES,
@@ -16,9 +17,9 @@ import {
   ZIP_ROUTE,
   zipRefusal,
 } from "../shared/uploads.ts";
-import { formatBytes } from "../shared/util.ts";
+import { formatBytes, mapLimit } from "../shared/util.ts";
 import { PAGE_HEADERS, PAGE_POLICY } from "./artifacts/serve.ts";
-import { json } from "./http.ts";
+import { json, readJson } from "./http.ts";
 import { normalisePath, PathError } from "./storage/paths.ts";
 import type { ByteRange, FileEntry, UserFiles } from "./storage/user-files.ts";
 import { zipStream } from "./zip.ts";
@@ -41,6 +42,7 @@ export async function filesRoute(request: Request, userFiles: () => Promise<User
   if (request.method === "POST" && pathname === ZIP_ROUTE) return serveSelection(request, await userFiles());
   if (pathname !== "/api/files") return undefined;
   if (request.method === "GET") return json(await (await userFiles()).list());
+  if (request.method === "DELETE") return deleteFiles(request, await userFiles());
   if (request.method !== "POST") return undefined;
   return storeUpload(request, userFiles);
 }
@@ -220,6 +222,13 @@ async function serveZip(files: UserFiles, folder: string): Promise<Response> {
 /** What a selection's form may weigh: its paths, at most MAX_ZIP_FILES of them. */
 const MAX_SELECTION_FORM = 1024 * 1024;
 
+/** A picked path, normalised. A value that is not a string (an uploaded file, an object) is no path: refused as an empty one. */
+const pickedPath = (value: unknown) => normalisePath(typeof value === "string" ? value : "");
+
+/** `folders` once each, without those inside another of them: the outer one holds all they do. */
+const outermost = (folders: readonly string[]) =>
+  [...new Set(folders)].filter((folder, _, all) => !all.some((other) => folder.startsWith(`${other}/`)));
+
 /**
  * Picked files and folders as one zip: a form (posted by the sidebar into a
  * hidden frame, so the browser saves the answer) with a `file` field per file
@@ -233,11 +242,9 @@ async function serveSelection(request: Request, files: UserFiles): Promise<Respo
   if (Number(request.headers.get("content-length")) > MAX_SELECTION_FORM) return json({ error: "Too many files picked." }, 413);
   const form = await request.formData().catch(() => null);
   if (!form) return json({ error: "Expected a form of file and folder fields." }, 400);
-  // A field that is not a string (an uploaded file) is no path: normalisePath refuses it as an empty one.
-  const fields = (name: string) => form.getAll(name).map((value) => normalisePath(typeof value === "string" ? value : ""));
-  const picked = fields("file");
+  const picked = form.getAll("file").map(pickedPath);
   // A folder inside another picked folder is in it already: listing it again would count its files twice.
-  const folders = [...new Set(fields("folder"))].filter((folder, _, all) => !all.some((other) => folder.startsWith(`${other}/`)));
+  const folders = outermost(form.getAll("folder").map(pickedPath));
   const count = picked.length + folders.length;
   if (count === 0) return json({ error: "Pick at least one file or folder." }, 400);
   const tooMany = zipRefusal(count, 0);
@@ -280,6 +287,32 @@ function zipResponse(files: UserFiles, root: string, paths: readonly string[]): 
   return new Response(zip, {
     headers: { ...SERVED_HEADERS, "content-type": "application/zip", "content-disposition": `attachment; filename="${name}.zip"` },
   });
+}
+
+/** How many folders a delete lists and deletes at once. */
+const FOLDERS_AT_ONCE = 4;
+
+/**
+ * Delete some of the user's files: a JSON body of `files` and `folders` (the sidebar's picks), each folder with
+ * everything under it. Every path is checked before anything goes. Only the signed-in user's own files: someone in a
+ * chat shared with them never deletes the owner's (those are served through the chat, read only). readJson takes only
+ * a JSON body, which another site cannot send without a CORS preflight, so it cannot delete a signed-in user's files.
+ */
+async function deleteFiles(request: Request, files: UserFiles): Promise<Response> {
+  if (Number(request.headers.get("content-length")) > MAX_SELECTION_FORM) return json({ error: "Too many files picked." }, 413);
+  const body = await readJson<{ files?: unknown; folders?: unknown }>(request);
+  if (!body) return json({ error: "Expected a JSON body of files and folders." }, 400);
+  // normalisePath refuses an empty path, so no folder stands for all the files.
+  const paths = (value: unknown = []) => (Array.isArray(value) ? value.map(pickedPath) : null);
+  const picked = paths(body.files);
+  const folders = paths(body.folders);
+  if (!picked || !folders) return json({ error: "Expected a JSON body of files and folders." }, 400);
+  if (picked.length + folders.length === 0) return json({ error: "Pick at least one file or folder." }, 400);
+  if (picked.length + folders.length > MAX_LISTED) return json({ error: "Too many files picked." }, 413);
+  // Deleting is idempotent: a file inside a picked folder is simply gone already. A folder inside another is left to
+  // it, and a few folders go at a time, each a listing and a delete per thousand files.
+  await Promise.all([files.delete(picked), mapLimit(outermost(folders), FOLDERS_AT_ONCE, (folder) => files.deleteFolder(folder))]);
+  return json({});
 }
 
 function tooBig(): string {

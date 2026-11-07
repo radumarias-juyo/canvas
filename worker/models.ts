@@ -1,9 +1,22 @@
 import { clampThinkingLevel, getSupportedThinkingLevels, type Api, type Model, type Models, type ModelThinkingLevel, type Provider, type ThinkingLevelMap } from "@earendil-works/pi-ai";
 import { ANTHROPIC_MODELS } from "@earendil-works/pi-ai/providers/anthropic.models";
+import { createModels } from "@earendil-works/pi-ai/models";
 import { createAI } from "agents/models/pi-ai";
-import { EFFORT_LABELS, modelKey, PROVIDERS, providerLabel, type ModelCatalog, type ModelChoice, type ModelInfo, type ProviderId } from "../shared/models.ts";
+import {
+  AUTO_MODEL,
+  EFFORT_LABELS,
+  modelKey,
+  PROVIDERS,
+  providerLabel,
+  type ModelCatalog,
+  type ModelChoice,
+  type ModelInfo,
+  type ModelSetting,
+  type ProviderId,
+} from "../shared/models.ts";
 import { errorMessage } from "../shared/util.ts";
-import { discoverModels, GATEWAY_PROVIDERS, ROUTED_APIS, SNAPSHOT, type Discovery, type GatewayFetcher, type GatewayProviderId, type ListedModel } from "./gateway-models.ts";
+import { discoverModels, GATEWAY_PROVIDERS, ROUTED_APIS, SNAPSHOT, type Discovery, type GatewayFetcher, type GatewayOptions, type GatewayProviderId, type ListedModel } from "./gateway-models.ts";
+import type { GeminiCompat } from "./gemini.ts";
 import prices from "./prices.json";
 import { tapStream } from "./streams.ts";
 import type { ModelCache } from "./storage/model-cache.ts";
@@ -173,7 +186,7 @@ function byPickerOrder(a: ModelEntry, b: ModelEntry): number {
 const BASIC_EFFORTS: ThinkingLevelMap = { off: null, minimal: null, xhigh: null, max: null };
 const NO_COST: ModelCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 /** What a model pi-ai does not know gets when its provider's list does not say (agents/models/pi-ai's own defaults). */
-const DEFAULT_CONTEXT_WINDOW = 128_000;
+export const DEFAULT_CONTEXT_WINDOW = 128_000;
 const DEFAULT_MAX_TOKENS = 8_192;
 
 /**
@@ -308,8 +321,13 @@ export function catalogFrom(discovery: Discovery | null): Catalog {
 }
 
 /** `level` when it is one of pi's thinking levels. */
-function thinkingLevelOf(level: unknown): ModelThinkingLevel | undefined {
+export function thinkingLevelOf(level: unknown): ModelThinkingLevel | undefined {
   return typeof level === "string" && Object.hasOwn(EFFORT_LABELS, level) ? (level as ModelThinkingLevel) : undefined;
+}
+
+/** A setting from the browser or a user's saved default, checked: Auto, or a model as `Catalog.check` checks it. */
+export function checkSetting(catalog: Catalog, input: { model?: unknown; thinkingLevel?: unknown }): ModelSetting | null {
+  return input.model === AUTO_MODEL ? { model: AUTO_MODEL } : catalog.check(input);
 }
 
 /**
@@ -343,12 +361,9 @@ const MIN_REFRESH_MS = 60_000;
 /** How long an isolate keeps the catalog before reading the shared copy again, which another isolate may have renewed. */
 const REREAD_MS = 5 * 60_000;
 
-export interface CatalogSource {
+/** The AI binding, and the gateway and key alias the chats use. */
+export interface CatalogSource extends GatewayOptions {
   cache: ModelCache;
-  /** The AI binding, and the gateway and key alias the chats use. */
-  ai: GatewayFetcher;
-  gateway: string;
-  byokAlias?: string;
   /** Keeps a background refresh alive after the response (the Worker's waitUntil). */
   waitUntil?: (promise: Promise<unknown>) => void;
 }
@@ -441,4 +456,16 @@ export async function loadCatalog(source: CatalogSource, { refresh = false } = {
 /** Forget what this isolate holds (tests). */
 export function forgetCatalog(): void {
   held = undefined;
+}
+
+/**
+ * pi-ai's models, through the chat's AI Gateway, at the vendors' current prices, each reply marked with its effort and
+ * Gemini's tool calls signed: AI Gateway's catalog and Workers AI's through `provider`, and the models the providers list
+ * (as this isolate's catalog has them now) through one pi provider each.
+ */
+export function piModels(provider: Provider, gemini: GeminiCompat) {
+  const models = createModels();
+  models.setProvider(withCurrentPrices(provider));
+  for (const listed of listedProviders(provider, currentCatalog)) models.setProvider(listed);
+  return gemini.models(withEffortRecorded(models));
 }

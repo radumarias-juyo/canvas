@@ -13,6 +13,9 @@ with `@cloudflare/vite-plugin`, pnpm; configured and deployed with the `cf` CLI 
 - `pnpm test` (hub, broker, Access tokens, storage rules; `LIVE=1` also hits CoinGecko), `pnpm typecheck`,
   `AUTH_MODE=demo pnpm dev`. Without a Cloudflare login or Docker: `AUTH_MODE=demo PI_OFFLINE=1 PI_NO_DOCKER=1 pnpm dev`. Everything but the model and the sandbox (`run_python`, `run_bash`) then works, and
   `POST /api/dev/chats/:id/publish` (with `DEV_TOOLS=true` in the environment) publishes a page without the model.
+- Pages also get `pi.use("storage")` (values per viewer, the author's as defaults, in `UserDirectory`; it replaces the
+  frame's missing `localStorage`) and `pi.use("ai")` (one model answer, no tools, paid from the typing viewer's daily
+  allowance): `worker/artifacts/page-routes.ts`, `page-features.ts`. Both run as the viewer, never the author.
 - `runtime/runtime.d.ts` is load-bearing twice: it documents the page API and is inlined into the agent's system
   prompt. Change it together with `runtime/pi-runtime.js`, `src/artifact/broker.ts`, `shared/protocol.ts` and the
   check's harness, which plays the viewer's part in short (`HARNESS` in `worker/artifacts/check.ts`).
@@ -28,7 +31,12 @@ with `@cloudflare/vite-plugin`, pnpm; configured and deployed with the `cf` CLI 
   pages calling them load only for people in the author's chat. `test/mcp-oauth.test.ts` runs the flow against a stand-in portal.
 - Skills (`shared/skills.ts`, `worker/skills/`, `worker/agent/skills.ts`): built-in `SKILL.md` files in `worker/skills/builtin/` plus each
   user's own, stored in `UserDirectory` and installed through `skills()` from `agents/harness/pi` before every prompt.
-  A skill the agent proposes (`skill_propose`) is saved off until the user turns it on; keep it that way.
+  A skill the agent proposes (`skill_propose`) is saved off until the user turns it on; keep it that way. With
+  `SKILLS_MODEL` set, Jev (Workers AI) picks which skills a message needs (`worker/agent/skill-pick.ts`); a chat's list
+  only grows, so the prompt cache holds, and a failed pick lists them all. A skill imported as a package (a zip) keeps
+  its files in `SkillFiles` (`worker/storage/skill-files.ts`); pages name them as `skill:<name>/<path>`, inlined
+  from the set pinned in the draft at check and publish (`shared/skill-files.ts`), and `run_python`/`run_bash` copy
+  a skill's folder to `./skills/<name>/` when named in `skills`.
 - Shared chats (`worker/chat-routes.ts`, `worker/members.ts`): the owner invites people by single-use link; they share
   the one conversation and the one agent, which always acts as the owner (owner's MCP sign-ins, files, skills; artifacts
   owned by the owner). The chat object checks membership on every socket and prompt; keep it that way. Once a chat
@@ -38,7 +46,9 @@ with `@cloudflare/vite-plugin`, pnpm; configured and deployed with the `cf` CLI 
   and artifacts of the owner's (`ChatAgent.chatFiles`, `contents`), plus their own files.
 - Before a page becomes a version it is checked in a headless browser (`BROWSER` binding, `worker/artifacts/check.ts`):
   the agent saves a page with `artifact_write` (then changes it only by edits), and `artifact_check` and `artifact_publish` take it by draft id and report console errors, failed calls, a screenshot and the agent's tests, and
-  publish refuses a page with errors, or one no browser checked (except with `AUTH_MODE=demo`); keep it that way. Until
+  publish refuses a page with errors, or one no browser checked (except with `AUTH_MODE=demo`); keep it that way. A check
+  with no errors also has a vision classifier (Jev on Workers AI, `CHECK_LOOK_MODEL`, `worker/artifacts/look.ts`) look at
+  its screenshot: a sure blank or error page is an error once per draft, the rest warnings; a failed look changes nothing. Until
   then a page is a draft, in the owner's R2 folder (`worker/storage/drafts.ts`, `ChatDrafts`), never a commit. `test/check.test.ts` runs the check in a local Chrome
   (`CHROME_PATH`, else Playwright's) and skips without one.
 - Each artifact is the repo `artifact-<id>`: one commit and tag `v<n>` per publish, pushed with isomorphic-git

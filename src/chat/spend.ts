@@ -2,7 +2,7 @@ import type { ModelThinkingLevel, Usage } from "@earendil-works/pi-ai";
 import { calculateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import type { EntryRecord, UsageState } from "@earendil-works/pi-durable";
 import { modelKey, modelKeyOfLedger } from "../../shared/models.ts";
-import { CHAT_MESSAGE_KIND, type ChatMessageData } from "../../shared/protocol.ts";
+import { CHAT_MESSAGE_KIND, type ChatMessageData, type RouterSpend } from "../../shared/protocol.ts";
 
 /**
  * What model calls cost. pi-ai prices each model reply when it comes in, from its model's prices (worker/models.ts
@@ -23,6 +23,22 @@ const NONE: Spend = { cost: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 
 
 function spendOf(usage: Usage): Spend {
   return { cost: usage.cost.total, input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite };
+}
+
+/** What one router call (Auto's, or the tool picker's) cost; nothing for none. */
+export function routerSpendOf(call: RouterSpend | undefined): Spend {
+  return call ? { ...NONE, cost: call.cost, input: call.input, output: call.output } : NONE;
+}
+
+/** The tool picker's name, from its id: "cloudflare-workers-ai/typesafe/jev" is "Jev". */
+export function toolPickerName(id: string): string {
+  const name = id.slice(id.lastIndexOf("/") + 1);
+  return name ? name.charAt(0).toUpperCase() + name.slice(1) : id;
+}
+
+/** What the picks for a message cost: Auto's router call and the tool picker's; nothing for a message with neither. */
+function pickSpendOf(data: Partial<ChatMessageData> | undefined): Spend {
+  return plus(routerSpendOf(data?.auto?.router), routerSpendOf(data?.tools?.picker));
 }
 
 function plus(a: Spend, b: Spend): Spend {
@@ -55,8 +71,8 @@ function plusTime(a: Timing, b: Timing): Timing {
 }
 
 /**
- * What each prompt cost and took: the model replies, and the tool results that report a spend, from a person's
- * message up to the next one. Keyed by the id of the prompt's last reply or tool result, which is where the app shows
+ * What each prompt cost and took: Auto's pick of its model, the model replies, and the tool results that report a
+ * spend, from a person's message up to the next one. Keyed by the id of the prompt's last reply or tool result, which is where the app shows
  * it. Messages placed together (sent while the agent was busy) make one prompt; one the model never answered is left
  * out. While `running`, the newest prompt no one has written after is left out too: it may cost more yet. Its time
  * runs from when its messages were placed (where the app's run timer starts too) to when its last reply or tool
@@ -74,7 +90,7 @@ export function promptSpend(entries: readonly EntryRecord[], running: boolean): 
     if (entry.kind === CHAT_MESSAGE_KIND && (entry.data as Partial<ChatMessageData> | undefined)?.aside) continue;
     // A person's message: a prompt starts. `pi.user` is one from before chats were shared.
     if (entry.kind === CHAT_MESSAGE_KIND || entry.kind === "pi.user") {
-      total = NONE;
+      total = pickSpendOf(entry.data as Partial<ChatMessageData> | undefined);
       [modelMs, toolMs, replies, tools, end] = [0, 0, 0, 0, 0];
       // Messages placed together share one time, so the newest one's is the prompt's. An earlier one whose run failed
       // before any reply is not part of it: the person wrote again later.
@@ -111,7 +127,10 @@ export function totalTime(prompts: Iterable<PromptSpend>): Timing {
   return [...prompts].reduce((sum, prompt) => plusTime(sum, prompt.time), NO_TIME);
 }
 
-/** One row of a chat's spend: a model at one effort (none for replies from before efforts were recorded), or a tool. */
+/**
+ * One row of a chat's spend: a model at one effort (none for replies from before efforts were recorded), or a tool (or
+ * Auto's router, under AUTO_LEDGER_PREFIX and its id, or the tool picker, under TOOL_PICK_LEDGER_PREFIX and its id).
+ */
 export type Share = Spend & { model: string; effort?: ModelThinkingLevel };
 
 /** What a model's replies cost at each effort. */
@@ -150,7 +169,7 @@ function byEffort(model: string, total: Spend, efforts: EffortSpend | undefined,
 /**
  * A chat's spend from pi's ledger, by model and the effort each reply in `entries` was asked at, costliest first: model
  * replies, and the calls that summarize a long conversation. A tool that reports a spend of its own counts too, under
- * the tool's name.
+ * the tool's name, and so does each router of Auto's.
  */
 export function chatSpend(usage: UsageState | undefined, entries: readonly EntryRecord[] = []): { total: Spend; models: Share[] } {
   const replies = replySpend(entries);

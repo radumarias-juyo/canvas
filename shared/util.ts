@@ -36,6 +36,35 @@ export function randomHex(n: number): string {
   return toHex(crypto.getRandomValues(new Uint8Array(n)));
 }
 
+/**
+ * `fn` of each item, in order, with at most `limit` running at once. Once one fails no more start, and it throws that
+ * failure only when those running have settled: nothing is still going when the caller cleans up after it.
+ */
+export async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  let failed = false;
+  const worker = async () => {
+    try {
+      for (let i = next++; i < items.length && !failed; i = next++) results[i] = await fn(items[i]);
+    } catch (error) {
+      failed = true;
+      throw error;
+    }
+  };
+  const settled = await Promise.allSettled(Array.from({ length: Math.min(limit, items.length) }, worker));
+  const rejected = settled.find((result): result is PromiseRejectedResult => result.status === "rejected");
+  if (rejected) throw rejected.reason;
+  return results;
+}
+
+/** Standard base64 of `bytes`, built in chunks: a spread of a large array would overflow the call stack. */
+export function toBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(binary);
+}
+
 /** The bytes of standard base64. */
 export function fromBase64(base64: string): Uint8Array<ArrayBuffer> {
   return Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
@@ -60,6 +89,19 @@ export function singleFlight<T>(fn: () => Promise<T>): () => Promise<T> {
     }));
 }
 
+/**
+ * `fn` run one call at a time, in the order called: a call waits for the one before it to settle, whether it resolved
+ * or rejected. Each call gets its own result.
+ */
+export function serial<A extends unknown[], T>(fn: (...args: A) => Promise<T>): (...args: A) => Promise<T> {
+  let last: Promise<unknown> = Promise.resolve();
+  return (...args) => {
+    const next = last.catch(() => {}).then(() => fn(...args));
+    last = next;
+    return next;
+  };
+}
+
 /** A size people read: "512 B", "2.0 KB", "10.0 MB". */
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -81,15 +123,40 @@ export function plural(n: number, noun: string): string {
 /** `promise`, or a rejection once `ms` passed or `signal` aborted, whichever comes first. */
 export function deadline<T>(promise: Promise<T>, ms: number, onTimeout: () => Error, signal?: AbortSignal): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(onTimeout()), ms);
+  });
+  return abortable(Promise.race([promise, timeout]), signal).finally(() => clearTimeout(timer));
+}
+
+/** `promise`, or a rejection once `signal` aborted (at once for one already aborted), whichever comes first. */
+export function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
   let onAbort: (() => void) | undefined;
   const stop = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(onTimeout()), ms);
-    onAbort = () => reject(signal!.reason ?? new Error("Stopped."));
-    if (signal?.aborted) onAbort();
-    else signal?.addEventListener("abort", onAbort, { once: true });
+    onAbort = () => reject(signal.reason ?? new Error("Stopped."));
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
   });
-  return Promise.race([promise, stop]).finally(() => {
-    clearTimeout(timer);
-    signal?.removeEventListener("abort", onAbort!);
-  });
+  return Promise.race([promise, stop]).finally(() => signal.removeEventListener("abort", onAbort!));
+}
+
+/**
+ * The JSON value a model's reply holds: all of it, else a fenced block, else from its first brace to its last, else
+ * from its first square bracket to its last (each kind apart, so prose such as "[1]" around an object leaves it whole).
+ */
+export function jsonIn(text: string): unknown {
+  const attempts = [text, /```(?:json)?\s*([\s\S]*?)```/i.exec(text)?.[1]];
+  for (const [open, close] of [["{", "}"], ["[", "]"]]) {
+    const start = text.indexOf(open);
+    const end = text.lastIndexOf(close);
+    if (start >= 0 && end > start) attempts.push(text.slice(start, end + 1));
+  }
+  for (const attempt of attempts) {
+    if (attempt === undefined) continue;
+    try {
+      return JSON.parse(attempt.trim());
+    } catch {}
+  }
+  return undefined;
 }

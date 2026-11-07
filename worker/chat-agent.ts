@@ -1,7 +1,7 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { createModels } from "@earendil-works/pi-ai/models";
-import type { Provider, UserMessage } from "@earendil-works/pi-ai";
-import { createRegistry, Harness, ROOT_CONVERSATION_ID, type AgentChange, type Cursor, type EntryId, type EntryRecord, type JsonObject, type AgentEvent, type AgentEventStream, type ConversationView, type SnapshotEvent } from "@earendil-works/pi-durable";
+import type { Models, UserMessage } from "@earendil-works/pi-ai";
+import { createRegistry, Harness, ROOT_CONVERSATION_ID, type Agent, type AgentChange, type AgentState, type Submission, type Conversation, type Cursor, type EntryId, type EntryRecord, type Extension, type JsonObject, type AgentEvent, type AgentEventStream, type ConversationView, type SnapshotEvent } from "@earendil-works/pi-durable";
+import { createToolSearchExtension } from "@earendil-works/pi-durable/tool-search";
 import { PiHarness, skills } from "agents/harness/pi";
 import { Lifecycle, LifecycleCapability, type DurableObjectCapability } from "agents/lifecycle";
 import { createAI } from "agents/models/pi-ai";
@@ -13,6 +13,8 @@ import {
   isOwnedBy,
   isReadOnly,
   manifestOf,
+  secondSeat,
+  secondSeatUid,
   SOCKET_NOT_A_MEMBER,
   SOCKET_PING,
   STREAM_STEP_MS,
@@ -21,6 +23,7 @@ import {
   type ChatContents,
   type ChatDeletion,
   type ChatInvite,
+  type AutoPick,
   type ChatMessageData,
   type ChatPeople,
   type ChatPeopleData,
@@ -34,30 +37,57 @@ import {
   type Presence,
   type ProxyRequest,
   type QueuedMessage,
+  type IncomingMessage,
   type ReplyQuote,
+  type ToolPickNote,
   clampStaleMs,
+  incomingKey,
   everyone,
 } from "../shared/protocol.ts";
 import { baseName, type AttachmentInput } from "../shared/attachments.ts";
 import { keptMentions, parseMentions, summonsAgent, taggedPeople, type MentionInput } from "../shared/mentions.ts";
 import { freePath, MAX_LISTED, uploadTargets } from "../shared/uploads.ts";
-import { COMPACTION, type ModelChoice } from "../shared/models.ts";
-import { deadline, errorMessage, memoAsync, sha256Hex, singleFlight } from "../shared/util.ts";
+import {
+  AUTO_LEDGER_PREFIX,
+  AUTO_MODEL,
+  COMPACTION,
+  HINT_LEDGER_PREFIX,
+  isAuto,
+  modelKey,
+  SKILLS_LEDGER_PREFIX,
+  TOOL_PICK_LEDGER_PREFIX,
+  type AutoCandidate,
+  type ModelChoice,
+  type ModelSetting,
+} from "../shared/models.ts";
+import { deadline, errorMessage, formatBytes, memoAsync, serial, sha256Hex, singleFlight } from "../shared/util.ts";
+import type { ChatSystemPrompt } from "../shared/system-prompt.ts";
+import type { SkillFileInfo } from "../shared/skill-files.ts";
 import { attachmentContent, parseAttachments, withoutImageData, type ToMarkdown } from "./agent/attachments.ts";
 import { filesIndex } from "./agent/file-refs.ts";
 import { resolveMentions } from "./agent/mentions.ts";
-import { AGENT_REACTOR, isReactable, isReaction, type EntryReactions, type Reaction, type Reactions } from "../shared/reactions.ts";
+import { AGENT_REACTOR, isReactable, isReaction, type Reaction, type Reactions } from "../shared/reactions.ts";
 import { excerpt, replyLine, replyQuote } from "../shared/replies.ts";
-import { peopleExtension, promptExtension } from "./agent/prompt.ts";
+import { peopleExtension, promptExtension, systemPromptExtension, withoutSystemPrompt, type UserPrompts } from "./agent/prompt.ts";
+import { skillClassifier, skillMessage, type SkillChoice, type SkillClassifier } from "./agent/skill-pick.ts";
+import { isActive, type SkillInfo } from "../shared/skills.ts";
 import { skillSource } from "./agent/skills.ts";
 import { titleFor } from "./agent/title.ts";
+import { autoCandidates, contextTokens, route, routeHistory, routersFrom, routerSpend } from "./agent/route.ts";
+import { callHinter, HINT_MS, HINT_THRESHOLD, worthAsking, type CallHinter } from "./agent/call-hint.ts";
+import { recordSpend } from "./agent/ledger.ts";
+import type { ModelRunner } from "./agent/workers-ai.ts";
 import { RunTracker } from "./chat-status.ts";
 import { mcpExtension, type ServerCatalog } from "./agent/mcp.ts";
+import { deferredTools, MIN_TOOLS_TO_PICK, pickerId, pickFailure, pickTools, TOOL_PICK_MS, toolPicker, toolsToOffer, type PickableTool } from "./agent/tool-pick.ts";
 import { artifactExtension, filesExtension, filesIndexExtension, reactionsExtension, sandboxExtension, sandboxName, skillsExtension, type ChatScope } from "./agent/tools.ts";
+import type { SandboxFile } from "./sandbox.ts";
+import { formatSkillFile } from "./skills/index.ts";
 import { ChatReactions } from "./reactions.ts";
 import { checkDraft, FailedChecks, publishDraft, writeDraft, type PublishTarget, type WriteInput } from "./agent/publish.ts";
 import { CheckBrowser } from "./artifacts/browser.ts";
 import { CHECK_MS, checkPage, type Bridge } from "./artifacts/check.ts";
+import { lookFrom } from "./artifacts/look.ts";
 import type { ChatAnswer } from "./artifacts/page-calls.ts";
 import { chatOutFolder, chatTraces, type ChatTraces } from "./chat-traces.ts";
 import { Storage } from "./storage/index.ts";
@@ -69,17 +99,27 @@ import { McpFailure, McpHub } from "./mcp/hub.ts";
 import { mcpServers, sharesResults, type McpServerConfig } from "./mcp/servers.ts";
 import { GeminiCompat } from "./gemini.ts";
 import { ChatMembers, formatInviteToken } from "./members.ts";
-import { catalogSource, currentCatalog, defaultModelChoice, listedProviders, loadCatalog, withCurrentPrices, withEffortRecorded, type Catalog } from "./models.ts";
+import {
+  catalogSource,
+  checkSetting,
+  currentCatalog,
+  defaultModelChoice,
+  piModels,
+  loadCatalog,
+  type Catalog,
+} from "./models.ts";
 import { inboxIds, queuedIdsOf, queuedMessages } from "./queue.ts";
-import { mcpAuthStore, type Tag } from "./users.ts";
+import { mcpAuthStore, readSystemPrompt, saveSystemPrompt, type Tag } from "./users.ts";
 
 /** Artifacts from the owner's other chats one chat remembers as named with "@" (see ChatAgent.#broughtIn). */
 const MAX_BROUGHT_IN = 200;
+/** How many bytes of skill files a chat object keeps in memory: a design library or two. */
+const SKILL_FILE_CACHE_BYTES = 4_000_000;
 
 /** Why the chat refused a person's request, with the HTTP status the Worker answers it with. */
 export interface ChatRefusal {
   error: string;
-  status: 403 | 404 | 409;
+  status: 400 | 403 | 404 | 409;
 }
 
 function refuse(status: ChatRefusal["status"], error: string): ChatRefusal {
@@ -114,24 +154,30 @@ type OwnFile = Extract<MentionInput, { kind: "file" }>;
  * after, and the spinner should not blink between them.
  */
 const SETTLE_MS = 1_500;
+/** Why an Auto message kept the chat's model, when a reply was running as it came in, or started while the router thought. */
+const RUNNING_WHEN_SENT = "a reply was still running when it was sent, so the router was not asked";
+const RUNNING_WHEN_PICKED = "a reply started while the router picked, so the message went in on the model it runs on";
 /** How often pi commits a streaming answer and running tool output (see STREAM_STEP_MS). */
 const PROGRESS = { partialIntervalMs: STREAM_STEP_MS, outputIntervalMs: STREAM_STEP_MS };
 /** The chat's status as the sidebars last heard it, in this object's storage: after a restart, whether a run may be going. */
 const STATUS_KEY = "status";
 /** Set once the owner's sidebar heard whether this chat has members: chats shared before it kept that tell it once. */
 const SHARED_TOLD_KEY = "sharedTold";
+/** Set while the chat is on Auto: a router picks the model and effort for each message that starts a run. */
+const AUTO_KEY = "auto";
+/** How many of the newest transcript entries the router is shown (routeHistory keeps the people's and agent's words). */
+const ROUTE_ENTRIES = 40;
+/** The names of the skills shown in this chat so far, once SKILLS_MODEL picks them (worker/agent/skill-pick.ts). */
+const SHOWN_SKILLS_KEY = "skillsShown";
 
-/**
- * pi-ai's models, through the chat's AI Gateway, at the vendors' current prices, each reply marked with its effort and
- * Gemini's tool calls signed: AI Gateway's catalog and Workers AI's through `provider`, and the models the providers list
- * (as this isolate's catalog has them now) through one pi provider each.
- */
-function piModels(provider: Provider, gemini: GeminiCompat) {
-  const models = createModels();
-  models.setProvider(withCurrentPrices(provider));
-  for (const listed of listedProviders(provider, currentCatalog)) models.setProvider(listed);
-  return gemini.models(withEffortRecorded(models));
+/** The newest transcript entries, read at most once per message (see #recentEntries). */
+type RecentEntries = () => Promise<readonly EntryRecord[] | undefined>;
+/** A message about to start a run, as the skill classifier reads it, and the end of the conversation before it. */
+interface SkillsFor {
+  text: string;
+  recent: RecentEntries;
 }
+
 
 /** The name of a user's chat object. The uid must come from a verified identity: it is what keeps users apart. */
 export function chatAgentName(uid: string, chatId: string): string {
@@ -178,10 +224,12 @@ export class ChatAgent extends DurableObject<Env> {
       const settings = { afterFailedRun: "continue" as const, progress: PROGRESS, compaction: COMPACTION };
       const pi = await Harness.open(storage, { models, registry: this.registry, onWake, settings }, context);
       try {
-        // A new chat starts on the model its user last picked; PiHarness then finds the root and leaves it as it is.
+        // A new chat starts on the model its user last picked, or on Auto (which starts from the deployment's default);
+        // PiHarness then finds the root and leaves it as it is.
         if (!(await pi.conversation(ROOT_CONVERSATION_ID, context))) {
-          const choice = await this.#savedModel();
-          if (choice) await pi.root(context, { agent: this.#agentChange(choice) });
+          const setting = await this.#savedModel();
+          if (isAuto(setting)) this.ctx.storage.kv.put(AUTO_KEY, true);
+          else if (setting) await pi.root(context, { agent: this.#agentChange(setting) });
         }
       } catch (error) {
         await pi.close(context).catch(() => {});
@@ -197,12 +245,15 @@ export class ChatAgent extends DurableObject<Env> {
   readonly sockets = new ChatSockets({
     events: () => this.harness.session().events(),
     runStartedAt: (snapshot) => this.runStartedAt(snapshot),
+    toolsStartedAt: (snapshot) => this.toolsStartedAt(snapshot),
     admit: (person) => this.admit(person),
     peopleFor: (uid) => this.peopleFor(uid),
     queued: (ids) => this.queued(ids),
+    incoming: () => this.incoming(),
     prompt: (text, author, attachments, mentions, replyTo) => this.prompt(text, author, attachments, mentions, replyTo),
     abort: (by) => this.abort(by),
     setModel: (input, by) => this.setModel(input, by),
+    auto: () => this.#auto(),
     reactions: () => this.reactions.all(),
     react: (by, entry, emoji, on) => this.react(by, entry, emoji, on),
   });
@@ -215,14 +266,21 @@ export class ChatAgent extends DurableObject<Env> {
   /**
    * The servers whose tools the agent has now (`key`), so a refresh reinstalls only on a change, what mcp_discover
    * says about them, and which listing they came from (`generation`): a listing started later has lists at least as new, so one that
-   * finishes after it (a refresh racing a discovery, two discoveries) does not install over it.
+   * finishes after it (a refresh racing a discovery, two discoveries) does not install over it. `deferred`: whether the
+   * tools are deferred, for the tool picker to pick from.
    */
-  #mcp = { key: "", listing: "", generation: 0 };
+  #mcp = { key: "", listing: "", generation: 0, deferred: false };
   #mcpListings = 0;
-  /** The skills version the agent's skills come from, so a refresh fetches and reinstalls them only on a change. */
+  /** The fingerprint of the skills the agent has now, so a refresh reinstalls them only on a change. */
   #skillsInstalled: string | undefined;
+  /** The user's skills as last listed, and their version, so a refresh lists them again only on a change. */
+  #skillsListed: { version: string; skills: SkillInfo[] } | undefined;
+  /** The classifier that picks the skills shown (SKILLS_MODEL); null when it names none, so every skill is shown. */
+  #skillClassifier: SkillClassifier | null | undefined;
   /** The agent's prompt's list of the user's files, so a refresh reinstalls it only on a change. */
   #filesInstalled: string | undefined;
+  /** The owner's own system prompt, as last read (see refreshUserPrompt). */
+  #userPrompt: Promise<string> | undefined;
   /** When members' sidebars were last bumped, and with which title. */
   #membersTouched = { title: "", at: 0 };
   /** The pi event stream the chat's status comes from while it may change: from a prompt until its runs settle. */
@@ -239,6 +297,20 @@ export class ChatAgent extends DurableObject<Env> {
   #queuedRead: { key: string; read: Promise<QueuedMessage[]> } | undefined;
   /** What the transcript names, as far as it was read (see #transcriptTraces). */
   #seen: { through: number; traces: ChatTraces } = { through: -1, traces: chatTraces([]) };
+  /** See #oneShotModels. */
+  #oneShot: Models | undefined;
+  /** What tells whether an aside is meant for the agent (CALL_HINT_MODEL); undefined when hints are off. */
+  readonly #hinter: CallHinter | undefined = callHinter(this.env.AI as unknown as ModelRunner, this.env.CALL_HINT_MODEL);
+  /** See #place. */
+  #placing: Promise<void> = Promise.resolve();
+  /** The deployment's tool picker (TOOL_PICK_MODEL); undefined: every MCP tool is offered with every message. */
+  readonly #toolPicker = toolPicker(this.env.TOOL_PICK_MODEL);
+  /** tool_search, which loads a deferred MCP tool the picker left out: installed while the MCP tools are deferred. */
+  readonly #toolSearch = createToolSearchExtension();
+  /** See incoming. In memory: a restart ends the prompts getting them ready too. */
+  readonly #incoming = new Map<string, IncomingMessage>();
+  /** The last message's sentAt (see prompt). */
+  #lastSentAt = 0;
   /** Set once the owner starts deleting the chat, and kept as its only record after: from then on nobody is in it. */
   #gone = this.#deleted();
 
@@ -262,6 +334,10 @@ export class ChatAgent extends DurableObject<Env> {
         this.#checkBrowser.withPage((page) => checkPage(page, input, this.#checkBridge(input.manifest)), { timeoutMs: CHECK_MS, signal }),
       chatArtifacts: () => this.#directory.listChatArtifacts(this.chatId),
       drafts: memoAsync(() => this.storage.chatDrafts(this.uid, this.chatId)),
+      skillSets: (names) => this.#skillSets(names),
+      readSkillFile: (skill, set, path) => this.#readSkillSetFile(skill, set, path),
+      skillFolders: (names, maxBytes) => this.#skillFolders(names, maxBytes),
+      look: lookFrom(env.CHECK_LOOK_MODEL, env.AI),
       publishUnchecked: env.AUTH_MODE === "demo",
       failedChecks: new FailedChecks(),
       react: (emoji) => this.#agentReact(emoji),
@@ -273,6 +349,7 @@ export class ChatAgent extends DurableObject<Env> {
     this.registry.install(skillsExtension(scope));
     this.registry.install(reactionsExtension(scope));
     if (env.SANDBOX_ENABLED === "true") this.registry.install(sandboxExtension(scope));
+    this.registry.install(systemPromptExtension(() => this.#systemPrompts()));
   }
 
   /** The uid is this object's name, which the Worker sets from a verified identity. */
@@ -309,10 +386,10 @@ export class ChatAgent extends DurableObject<Env> {
   }
 
   /** The user's last pick, checked again: the list of models can change. On a failure, the deployment's default. */
-  async #savedModel(): Promise<ModelChoice | null> {
+  async #savedModel(): Promise<ModelSetting | null> {
     try {
       const saved = await this.#directory.modelChoice();
-      return saved && (await this.#catalog()).check(saved);
+      return saved && checkSetting(await this.#catalog(), saved);
     } catch (error) {
       console.error("model:", errorMessage(error));
       return null;
@@ -348,17 +425,199 @@ export class ChatAgent extends DurableObject<Env> {
   }
 
   /**
-   * Run this chat on another model or effort, from its next model request on, for everyone in it. It also becomes the
-   * default for new chats of whoever picked it, owner or member.
+   * When each call of the snapshot's round that is running now started, by its call id: its tool task's first change to
+   * running. A call whose task can't be read is left out (the browser then counts from when it connected).
+   */
+  async toolsStartedAt(snapshot: SnapshotEvent): Promise<Record<string, number>> {
+    const running = snapshot.tools.filter((slot) => slot.status === "running" && slot.taskId);
+    if (!running.length) return {};
+    try {
+      const pi = await this.harness.pi();
+      // Each on its own: one task that can't be read leaves out only its call.
+      const read = (slot: (typeof running)[number]) =>
+        pi.getTask(slot.taskId!, BACKGROUND_CONTEXT).catch((error: unknown) => (console.error("tool start:", errorMessage(error)), undefined));
+      const tasks = await Promise.all(running.map(read));
+      return Object.fromEntries(running.flatMap((slot, i) => (tasks[i]?.startedAt === undefined ? [] : [[slot.callId, tasks[i].startedAt]])));
+    } catch (error) {
+      console.error("tool start:", errorMessage(error));
+      return {};
+    }
+  }
+
+  /**
+   * Run this chat on another model or effort, from its next model request on, for everyone in it; or on Auto, which picks
+   * them for each message that starts a run (#route), starting with the next. It also becomes the default for new chats
+   * of whoever picked it, owner or member.
    */
   async setModel(input: { model?: unknown; thinkingLevel?: unknown }, by: Person): Promise<void> {
     this.#requireInChat(by);
-    const choice = (await this.#catalog()).check(input);
-    if (!choice) throw new Error(`There is no model named ${String(input.model)} to pick.`);
-    const conversation = await this.#root();
-    await conversation.configure(this.#agentChange(choice), BACKGROUND_CONTEXT);
+    const setting = checkSetting(await this.#catalog(), input);
+    if (!setting) throw new Error(`There is no model named ${String(input.model)} to pick.`);
+    const auto = isAuto(setting);
+    // On Auto the chat keeps the model it runs on until the next message picks one.
+    if (!auto) await (await this.#root()).configure(this.#agentChange(setting), BACKGROUND_CONTEXT);
+    if (auto !== this.#auto()) {
+      this.ctx.storage.kv.put(AUTO_KEY, auto);
+      this.sockets.broadcast({ type: "auto", on: auto });
+    }
     // The chat has changed by now, so a failure to remember the pick for new chats is logged, not reported as a failed change.
-    await this.#index(by.uid).setModelChoice(choice).catch((error: unknown) => console.error("model:", errorMessage(error)));
+    await this.#index(this.#account(by.uid))
+      .setModelChoice(setting)
+      .catch((error: unknown) => console.error("model:", errorMessage(error)));
+  }
+
+  /** Whether the chat is on Auto. */
+  #auto(): boolean {
+    return this.ctx.storage.kv.get<boolean>(AUTO_KEY) === true;
+  }
+
+  /**
+   * Auto's pick for a message about to start a run: the deployment's router (ROUTER_MODEL: of those the picker lists,
+   * the first to pick) reads the end of the conversation and the message (and how many images and other files it attaches),
+   * and picks one of AUTO_MODELS and an effort. The router call counts in pi's ledger like any model call. While a
+   * reply is running (as pi's own queue says: the sidebars' status lags behind it) the router is not asked. Undefined
+   * only when the conversation could not be read. Never throws: when no router picks in time (ROUTE_MS), or one picks a
+   * model the picker does not list, the chat keeps its model, and the pick says why. `recent`: the newest entries
+   * (#recentEntries, read once), which the skill classifier and the tool picker read too.
+   */
+  async #route(message: string, images: number, files: number, recent: RecentEntries): Promise<Routing | undefined> {
+    const started = Date.now();
+    const kept = (failed: string): Routing => ({ kept: { failed, ms: Date.now() - started } });
+    let read;
+    try {
+      const [root, catalog, busy] = await Promise.all([this.#root(), this.#catalog(), this.#replying()]);
+      if (busy) return kept(RUNNING_WHEN_SENT);
+      const [agent, items] = await Promise.all([root.agent(BACKGROUND_CONTEXT), recent()]);
+      if (!items) return undefined;
+      read = { root, catalog, agent, items };
+    } catch (error) {
+      console.error("auto:", errorMessage(error));
+      return undefined;
+    }
+    const { root, catalog, agent, items } = read;
+    const tokens = contextTokens(items);
+    try {
+      const candidates = autoCandidates(catalog.models, this.env.AUTO_MODELS as AutoCandidate[], { images: images > 0, contextTokens: tokens });
+      const request = { message, history: routeHistory(items), images, files, contextTokens: tokens, current: this.#modelOf(agent), candidates };
+      const gateway = catalogSource(this.env, this.storage.models);
+      const routed = await route(routersFrom(this.env.ROUTER_MODEL, catalog, { models: this.#oneShotModels, gateway, ai: this.env.AI }), request);
+      // Paid for whether or not the pick is used. Only a record: a failure is logged.
+      await root
+        .commit((tx) => recordSpend(tx, root.id, `${AUTO_LEDGER_PREFIX}${routed.router.model}`, routed.usage), BACKGROUND_CONTEXT)
+        .catch((error: unknown) => console.error("auto spend:", errorMessage(error)));
+      // An effort the model does not take moves to the nearest it does; none named asks for its usual one.
+      const choice = catalog.check({ model: routed.pick.model, thinkingLevel: routed.pick.thinkingLevel });
+      if (!choice) return kept(`the router picked ${routed.pick.model}, which is not in the picker`);
+      const pick: AutoPick = { ...choice, ...(routed.pick.reason && { reason: routed.pick.reason }), router: routed.router, ms: Date.now() - started };
+      return { pick, choice };
+    } catch (error) {
+      console.error("auto:", errorMessage(error));
+      return kept(`no router could pick: ${errorMessage(error)}`);
+    }
+  }
+
+  /**
+   * Run the chat on Auto's pick, unless a reply is running by now (someone else's message started one while the router
+   * thought): the message then goes to it on the model it runs on, as does one the router did not pick for. The pick as
+   * it stands, against the model the chat runs on now: another message may have changed it since the router was asked.
+   * Called only inside #place, so no other message changes the model between this and its message going in.
+   */
+  async #applyPick(routed: Routing | undefined, now: () => Promise<ChatNow>): Promise<AutoPick | undefined> {
+    if (!routed) return undefined;
+    const { root, busy, agent } = await now();
+    const current = this.#modelOf(agent);
+    if ("kept" in routed || busy) {
+      const kept = "kept" in routed ? routed.kept : { failed: RUNNING_WHEN_PICKED, ms: routed.pick.ms };
+      return { model: current, thinkingLevel: agent.thinkingLevel, ...kept };
+    }
+    if (current !== routed.choice.model || agent.thinkingLevel !== routed.choice.thinkingLevel) {
+      await root.configure(this.#agentChange(routed.choice), BACKGROUND_CONTEXT);
+    }
+    return routed.pick;
+  }
+
+  /** Whether a reply is running or a message waits for one, by pi's own queue. */
+  async #replying(): Promise<boolean> {
+    return (await (await this.harness.pi()).inspect(BACKGROUND_CONTEXT)).submissions.length > 0;
+  }
+
+  /** The picker's id of the model `agent` runs on. */
+  #modelOf(agent: Pick<AgentState, "model">): string {
+    return agent.model ? modelKey(agent.model.provider, agent.model.modelId) : this.env.MODEL;
+  }
+
+  /**
+   * Apply a message's picks (Auto's model, the tool picker's tools) and put the message in, one message at a time: two
+   * picked at once would each change the model or the tools before either went in, and the run would start on the last
+   * one's picks while the first one's say others.
+   */
+  #place(place: () => Promise<void>): Promise<void> {
+    const placed = this.#placing.then(place);
+    this.#placing = placed.catch(() => {});
+    return placed;
+  }
+
+  /** Whether a reply is running, and the agent as it stands: what #applyPick and #applyTools go by, read once. */
+  async #now(): Promise<ChatNow> {
+    const root = await this.#root();
+    const [busy, agent] = await Promise.all([this.#replying(), root.agent(BACKGROUND_CONTEXT)]);
+    return { root, busy, agent };
+  }
+
+  /**
+   * The tool picker's pick for a message about to start a run: the few MCP tools it needs, out of the conversation's
+   * deferred ones. The call counts in pi's ledger like any model call. Undefined when no tool is deferred (no picker, or
+   * too few tools to pick). Never throws: when the picker fails or takes longer than TOOL_PICK_MS, the note says why,
+   * and every tool is offered (#applyTools). `recent`: the newest entries (#recentEntries, read once).
+   */
+  async #pickTools(message: string, recent: RecentEntries): Promise<ToolPickNote | undefined> {
+    const picker = this.#toolPicker;
+    if (!picker) return undefined;
+    const started = Date.now();
+    let tools: PickableTool[] = [];
+    try {
+      const root = await this.#root();
+      tools = deferredTools(await root.agent(BACKGROUND_CONTEXT));
+      if (!tools.length) return undefined;
+      const history = routeHistory((await recent()) ?? []);
+      const picked = await pickTools(this.env.AI, picker, { message, history, tools }, AbortSignal.timeout(TOOL_PICK_MS));
+      const id = pickerId(picker);
+      // Paid for whether or not the pick is used. Only a record, off the prompt's path: a failure is logged.
+      void root
+        .commit((tx) => recordSpend(tx, root.id, `${TOOL_PICK_LEDGER_PREFIX}${id}`, picked.usage), BACKGROUND_CONTEXT)
+        .catch((error: unknown) => console.error("tool pick spend:", errorMessage(error)));
+      return { tools: picked.tools, of: tools.length, picker: routerSpend(id, picked.usage), ms: Date.now() - started };
+    } catch (error) {
+      console.error("tool pick:", errorMessage(error));
+      return tools.length ? { tools: [], of: tools.length, failed: pickFailure(error), ms: Date.now() - started } : undefined;
+    }
+  }
+
+  /**
+   * Offer the model the tools `note` picked, from the message's run on, by the conversation's `modelTools` (which loads
+   * deferred tools); every MCP tool when the pick failed. While a reply is running, the picks are added to the tools it
+   * has, never taking one away from it. Called only inside #place. Never throws: on a failure the model keeps the tools
+   * it has, and can load others with tool_search. Returns the note as it went: `added` when a reply was running.
+   */
+  async #applyTools(note: ToolPickNote | undefined, now: () => Promise<ChatNow>): Promise<ToolPickNote | undefined> {
+    if (!note) return undefined;
+    try {
+      const { root, busy, agent } = await now();
+      const deferred = deferredTools(agent);
+      const wanted = note.failed ? deferred.map((tool) => tool.name) : note.tools;
+      const offered = agent.tools.filter((tool) => tool.deferred).map((tool) => tool.name);
+      const tools = toolsToOffer(deferred, wanted, offered, busy);
+      if (tools) await root.configure({ modelTools: { add: tools } }, BACKGROUND_CONTEXT);
+      return busy && note.tools.length ? { ...note, added: true } : note;
+    } catch (error) {
+      console.error("tool pick:", errorMessage(error));
+      return { ...note, failed: pickFailure(error), unchanged: true };
+    }
+  }
+
+  /** pi-ai's models for the chat's calls outside its runs (Auto's router, the chat's title): made once. */
+  get #oneShotModels(): Models {
+    return (this.#oneShot ??= piModels(this.ai.provider, this.gemini));
   }
 
   /** The chat's one conversation. PiHarness has made it by the time pi() resolves. */
@@ -416,19 +675,184 @@ export class ChatAgent extends DurableObject<Env> {
   /**
    * Install the user's enabled skills, built-in and their own. Runs before every
    * prompt, so a skill added, changed or turned off in any chat applies from the
-   * next message on. Never rejects: a failure is logged, and the agent keeps the skills it has.
+   * next message on. With SKILLS_MODEL set, the agent is shown only the skills
+   * picked for this chat: given the `message` about to start a run, the
+   * classifier is first asked which of the skills not shown yet it needs (see
+   * worker/agent/skill-pick.ts). Never rejects: a failure is logged, and the agent
+   * keeps the skills it has.
    */
-  readonly refreshSkills = singleFlight(async () => {
+  // One at a time, so an older refresh never installs over a newer one.
+  readonly refreshSkills = serial((message?: SkillsFor) => this.#refreshSkills(message));
+
+  async #refreshSkills(message: SkillsFor | undefined): Promise<void> {
     try {
       const directory = this.#directory;
       const version = await directory.skillsVersion();
-      if (version === this.#skillsInstalled) return;
-      this.registry.install(await skills([skillSource(await directory.listSkills(), version)]));
-      this.#skillsInstalled = version;
+      if (this.#skillsListed?.version !== version) this.#skillsListed = { version, skills: await directory.listSkills() };
+      const listed = this.#skillsListed.skills;
+      const classifier = this.#skillPicker();
+      let shown: Set<string> | undefined;
+      if (classifier) {
+        const saved = this.ctx.storage.kv.get<string[]>(SHOWN_SKILLS_KEY);
+        // A chat the agent answered before its skills were picked (or a run resumed with none saved) was shown every
+        // enabled skill: it keeps them, so its list only grows. A chat the agent has not answered yet starts with none.
+        const answered = saved === undefined && (!message || ((await message.recent())?.some(({ kind }) => kind === "pi.assistant") ?? true));
+        shown = new Set(answered ? listed.filter(isActive).map(({ name }) => name) : (saved ?? []));
+        const waiting = listed.filter((skill) => isActive(skill) && !shown!.has(skill.name));
+        if (message && waiting.length) for (const name of await this.#pickSkills(classifier, message.text, message.recent, waiting)) shown.add(name);
+        // Not into a chat deleted meanwhile.
+        if ((saved === undefined || (message && waiting.length)) && !this.#gone) this.ctx.storage.kv.put(SHOWN_SKILLS_KEY, [...shown]);
+      }
+      const source = skillSource(listed, version, shown, {
+        read: (skill, path) => this.#readSkillFile(skill, path),
+        sandbox: this.env.SANDBOX_ENABLED === "true",
+      });
+      if (source.fingerprint === this.#skillsInstalled) return;
+      this.registry.install(await skills([source]));
+      this.#skillsInstalled = source.fingerprint;
     } catch (error) {
       console.error("skills:", errorMessage(error));
     }
-  });
+  }
+
+  /** The classifier SKILLS_MODEL names, made once; undefined when it names none (said once, when it names something else). */
+  #skillPicker(): SkillClassifier | undefined {
+    if (this.#skillClassifier === undefined) {
+      this.#skillClassifier = skillClassifier(this.env.SKILLS_MODEL, this.env.AI) ?? null;
+      if (!this.#skillClassifier && this.env.SKILLS_MODEL.trim()) console.error(`skills: SKILLS_MODEL names no System One model: ${this.env.SKILLS_MODEL}`);
+    }
+    return this.#skillClassifier ?? undefined;
+  }
+
+  /**
+   * Which of `waiting` (skills not shown yet) `message` needs, as `classifier` says with the end of the conversation
+   * (`recent`), and any it could not answer for. Its calls count in pi's ledger, off the prompt's path. Never throws.
+   */
+  async #pickSkills(classifier: SkillClassifier, message: string, recent: RecentEntries, waiting: readonly SkillChoice[]): Promise<string[]> {
+    const history = routeHistory((await recent()) ?? []);
+    const pick = await classifier.pick({ message, history, skills: waiting });
+    if (pick.errors.length) console.error("skills pick:", pick.errors.join("; "));
+    if (pick.usage.totalTokens > 0 || pick.usage.cost.total > 0) {
+      void this.#root()
+        .then((root) => root.commit((tx) => recordSpend(tx, root.id, `${SKILLS_LEDGER_PREFIX}${classifier.id}`, pick.usage), BACKGROUND_CONTEXT))
+        .catch((error: unknown) => console.error("skills spend:", errorMessage(error)));
+    }
+    return pick.add;
+  }
+
+  /**
+   * The newest ROUTE_ENTRIES transcript entries, newest first: what Auto's router and the skill classifier read of the
+   * conversation before a message starts a run, read once for both, and only when one asks. Undefined when they could not
+   * be read.
+   */
+  async #recentEntries(): Promise<readonly EntryRecord[] | undefined> {
+    try {
+      return (await (await this.#root()).entries({}, ROUTE_ENTRIES, undefined, BACKGROUND_CONTEXT)).items;
+    } catch (error) {
+      console.error("recent entries:", errorMessage(error));
+      return undefined;
+    }
+  }
+
+  /** The owner's skill files, encrypted with their key: deriving it is not free, so once per object. */
+  readonly #skillFiles = memoAsync(() => this.storage.skillFiles(this.uid));
+  /** Skill files read lately, by skill, set and path: a set never changes, so a write, its check and its publish read a file once. */
+  readonly #skillFileCache = new Map<string, Uint8Array>();
+  #skillFileCacheSize = 0;
+
+  /** A file of one of the owner's skills, from the set its last import wrote; null when it has none by that path. */
+  #readSkillFile(skill: SkillInfo, path: string): Promise<Uint8Array | null> {
+    if (!skill.fileSet || !skill.files?.some((file) => file.path === path)) return Promise.resolve(null);
+    return this.#readSkillSetFile(skill.name, skill.fileSet, path);
+  }
+
+  async #readSkillSetFile(skill: string, set: string, path: string): Promise<Uint8Array | null> {
+    const key = `${skill}/${set}/${path}`;
+    const cached = this.#skillFileCache.get(key);
+    if (cached !== undefined) return cached;
+    const bytes = await (await this.#skillFiles()).read(skill, set, path);
+    if (bytes === null) return null;
+    if (this.#skillFileCacheSize + bytes.byteLength > SKILL_FILE_CACHE_BYTES) {
+      this.#skillFileCache.clear();
+      this.#skillFileCacheSize = 0;
+    }
+    this.#skillFileCache.set(key, bytes);
+    this.#skillFileCacheSize += bytes.byteLength;
+    return bytes;
+  }
+
+  /**
+   * The folders of the owner's skills named, for the sandbox (ChatScope.skillFolders): SKILL.md (as the skill is now)
+   * and every file. Refused before anything is read when they hold more than `maxBytes`. Read past the cache: a whole
+   * folder would push out the files pages use.
+   */
+  async #skillFolders(names: readonly string[], maxBytes: number): Promise<SandboxFile[]> {
+    const unique = [...new Set(names)];
+    const skills = await this.#skillsWithFiles(unique);
+    const missing = unique.filter((name) => !skills.some((skill) => skill.name === name));
+    if (missing.length) throw new Error(`No skill of the user's that is on and has files: ${missing.join(", ")}.`);
+    // Each SKILL.md counts too: what the run's own files may take is what these leave.
+    const markdowns = skills.map((skill) => new TextEncoder().encode(formatSkillFile(skill)));
+    const bytes = skills.reduce((sum, { files }, i) => sum + markdowns[i].byteLength + files.reduce((total, file) => total + file.size, 0), 0);
+    if (bytes > maxBytes) throw new Error(`Those skills hold ${formatBytes(bytes)}; one run takes at most ${formatBytes(maxBytes)} with its files.`);
+    const store = await this.#skillFiles();
+    const folders = await Promise.all(
+      skills.map(async (skill, s) => {
+        const read = await store.readAll(skill.name, skill.fileSet, skill.files.map((file) => file.path));
+        const lost = skill.files.find((_, i) => !read[i]);
+        if (lost) throw new Error(`The skill "${skill.name}" lost its file ${lost.path}: import it again.`);
+        // SkillFiles.read gives each file a buffer of its own, so it goes as it is.
+        const folder = skill.files.map((file, i) => ({ name: `${skill.name}/${file.path}`, bytes: read[i]!.buffer as ArrayBuffer }));
+        return [{ name: `${skill.name}/SKILL.md`, bytes: markdowns[s].buffer as ArrayBuffer }, ...folder];
+      }),
+    );
+    return folders.flat();
+  }
+
+  /** The file sets of the owner's own skills named that are on and have files (PublishScope.skillSets). */
+  async #skillSets(names: readonly string[]): Promise<Map<string, { set: string; files: SkillFileInfo[] }>> {
+    return new Map((await this.#skillsWithFiles(names)).map((skill) => [skill.name, { set: skill.fileSet, files: skill.files }]));
+  }
+
+  /** Those of the owner's own skills named that are on and have files. */
+  async #skillsWithFiles(names: readonly string[]): Promise<(SkillInfo & { fileSet: string; files: SkillFileInfo[] })[]> {
+    const skills = await Promise.all(names.map((name) => this.#directory.getSkill(name)));
+    return skills.flatMap((skill) => (skill?.enabled && skill.fileSet && skill.files ? [{ ...skill, fileSet: skill.fileSet, files: skill.files }] : []));
+  }
+
+  /**
+   * Read the owner's own system prompt again: runs before every prompt, so a change made in any chat, or in the
+   * account menu, applies from the next message on. Never rejects: on a failure the agent keeps the one it has.
+   */
+  refreshUserPrompt(): Promise<string> {
+    const last = this.#userPrompt;
+    return (this.#userPrompt = this.#directory.systemPrompt().then(({ text }) => text, async (error: unknown) => {
+      console.error("system prompt:", errorMessage(error));
+      return (await last) ?? "";
+    }));
+  }
+
+  /** What the agent's prompt adds from the owner (see systemPromptExtension): read for every model request. */
+  async #systemPrompts(): Promise<UserPrompts> {
+    return { user: await (this.#userPrompt ?? this.refreshUserPrompt()), chat: readSystemPrompt(this.ctx.storage.kv) };
+  }
+
+  /** The chat's system prompt, for someone in it: everyone may read it, only the owner change it. */
+  chatSystemPrompt(uid: string): ChatSystemPrompt | ChatRefusal {
+    if (!this.isInChat(uid)) return refuse(403, "You are not in this chat.");
+    return { text: readSystemPrompt(this.ctx.storage.kv), editable: uid === this.uid };
+  }
+
+  /**
+   * The owner saves the chat's system prompt, which adds to their own: the agent follows it from its next model
+   * request on, a run going included. Empty clears it.
+   */
+  setChatSystemPrompt(by: Person, value: unknown): ChatSystemPrompt | ChatRefusal {
+    if (by.uid !== this.uid) return refuse(403, "Only the chat's owner can change its system prompt.");
+    if (this.#gone) return refuse(404, DELETED);
+    const saved = saveSystemPrompt(this.ctx.storage.kv, value);
+    return "error" in saved ? refuse(400, saved.error) : { ...saved, editable: true };
+  }
 
   /**
    * Show the agent the user's files, newest first, so a file the user names in
@@ -490,14 +914,32 @@ export class ChatAgent extends DurableObject<Env> {
       else catalog.set(server.name, entry);
     });
     if (generation < this.#mcp.generation) return this.#mcp.listing;
+    // With a tool picker and enough tools, they are deferred: each message is offered the few the picker picks for it.
+    const deferred = this.#toolPicker !== undefined && [...catalog.values()].reduce((n, { tools }) => n + tools.length, 0) > MIN_TOOLS_TO_PICK;
     // Everything the extension is built from: a server's new tool list, or a new reason it is unavailable, reinstalls it.
-    const installed = JSON.stringify([[...catalog], [...unavailable]]);
+    const installed = JSON.stringify([deferred, [...catalog], [...unavailable]]);
     if (installed !== this.#mcp.key) {
-      const { extension, listing } = mcpExtension(this.hub, catalog, unavailable, () => this.discoverMcp());
+      const { extension, listing } = mcpExtension(this.hub, catalog, unavailable, () => this.discoverMcp(), { deferred });
       this.registry.install(extension);
-      this.#mcp = { key: installed, listing, generation };
+      if (deferred) this.registry.install(this.#toolSearch);
+      else this.registry.uninstall(this.#toolSearch);
+      const deferring = deferred && !this.#mcp.deferred;
+      this.#mcp = { key: installed, listing, generation, deferred };
+      // Deferred from now on (enough tools came, or the object just started): every one is offered until a message's
+      // pick narrows them, so a running reply (one that just called mcp_discover) keeps the tools it was using.
+      if (deferring) await this.#offerAllTools(extension);
     } else this.#mcp.generation = generation;
     return this.#mcp.listing;
+  }
+
+  /** Offer the model every deferred tool of `extension`, as without the tool picker. A failure is logged. */
+  async #offerAllTools(extension: Extension): Promise<void> {
+    try {
+      const tools = (extension.tools ?? []).filter((tool) => tool.deferred);
+      await (await this.#root()).configure({ modelTools: { add: tools } }, BACKGROUND_CONTEXT);
+    } catch (error) {
+      console.error("tool pick:", errorMessage(error));
+    }
   }
 
   /** Public servers connect as they are; a server with `auth: "oauth"` connects with this chat's user's own tokens. */
@@ -551,7 +993,7 @@ export class ChatAgent extends DurableObject<Env> {
       this.#tellSharedOnce();
       return true;
     }
-    void this.#index(person.uid).removeSharedChat(this.chatId, this.uid);
+    if (this.#hasSidebar(person.uid)) void this.#index(person.uid).removeSharedChat(this.chatId, this.uid);
     return false;
   }
 
@@ -575,6 +1017,9 @@ export class ChatAgent extends DurableObject<Env> {
    *
    * In a shared chat only a message that calls the agent ("@pi") is a prompt; any other is people talking among
    * themselves (#aside), which the agent reads as context the next time it is called.
+   *
+   * Getting it ready (its files, the agent's tools, on Auto the model) can take seconds: everyone sees it as incoming
+   * meanwhile (#announce), until it is in.
    */
   async prompt(
     text: string,
@@ -583,6 +1028,46 @@ export class ChatAgent extends DurableObject<Env> {
     mentionInputs: readonly MentionInput[] = [],
     replyTo?: number,
   ): Promise<void> {
+    // When it came in: the refreshes and copies below can take seconds. Never the same as another's, which would make
+    // two messages of one person, sent in the same millisecond, one incoming message (incomingKey).
+    const sentAt = (this.#lastSentAt = Math.max(Date.now(), this.#lastSentAt + 1));
+    let placed = false;
+    try {
+      placed = await this.#prompt(text, author, attachments, mentionInputs, replyTo, sentAt);
+    } finally {
+      const key = incomingKey({ uid: author.uid, sentAt });
+      if (this.#incoming.delete(key)) this.sockets.broadcast({ type: "incoming", incoming: this.incoming(), ...(placed && { placed: key }) });
+    }
+  }
+
+  /** The messages the chat is getting ready to put in, oldest first (see IncomingMessage). */
+  incoming(): IncomingMessage[] {
+    return [...this.#incoming.values()];
+  }
+
+  /** Show everyone `message` as incoming. */
+  #announce(message: IncomingMessage): void {
+    this.#incoming.set(incomingKey(message), message);
+    this.sockets.broadcast({ type: "incoming", incoming: this.incoming() });
+  }
+
+  /** Show everyone the incoming message `key` no longer waits for Auto's router, while it is still incoming. */
+  #picked(key: string): void {
+    const message = this.#incoming.get(key);
+    if (!message?.picking) return;
+    const { picking: _, ...rest } = message;
+    this.#announce(rest);
+  }
+
+  /** See prompt. Whether the message went in: not when nothing was left of it. */
+  async #prompt(
+    text: string,
+    author: Person,
+    attachments: readonly AttachmentInput[],
+    mentionInputs: readonly MentionInput[],
+    replyTo: number | undefined,
+    sentAt: number,
+  ): Promise<boolean> {
     this.#requireInChat(author);
     const shared = this.members.hasAny();
     const quote = replyTo === undefined ? null : await this.#quote(replyTo);
@@ -590,13 +1075,40 @@ export class ChatAgent extends DurableObject<Env> {
     const repliesToAgent = quote !== null && "agent" in quote;
     const calling = !shared || repliesToAgent || summonsAgent(text);
     const byOwner = author.uid === this.uid;
-    // Someone else's own files they named come as attachments, copied to the owner's files, where the agent works.
-    const own = byOwner ? [] : mentionInputs.filter((input): input is OwnFile => input.kind === "file" && input.own === true);
+    // Someone else's own files they named come as attachments, copied to the owner's files, where the agent works. The
+    // owner's second seat has none of its own.
+    const own = this.#account(author.uid) === this.uid ? [] : mentionInputs.filter((input): input is OwnFile => input.kind === "file" && input.own === true);
     const attaching = Promise.all([
       // Someone else attaches only what they uploaded here, or a file the chat already holds: no other of the owner's.
       byOwner ? attachments : this.#attachable(author.uid, attachments),
       own.length ? this.#copyOwnFiles(author, own) : [],
     ]).then(([given, copied]) => [...given, ...copied]);
+    // On Auto, the router picks the model while the rest gets ready. Its pick is used only if the message is a prompt.
+    const images = attachments.filter((attachment) => attachment.image).length;
+    // What the router, the skill classifier and the tool picker read of the conversation: read once for all, and only if one asks.
+    const recent = calling ? memoAsync(() => this.#recentEntries()) : undefined;
+    const routing = recent && this.#auto() ? this.#route(text, images, attachments.length + own.length - images, recent) : undefined;
+    this.#announce({
+      uid: author.uid,
+      name: author.name,
+      text,
+      sentAt,
+      // What it attaches as far as it is known yet: names, and thumbnails of images.
+      ...(attachments.length && { attachments: attachments.map(({ path, thumb }) => ({ path, ...(thumb && { thumb }) })) }),
+      ...(quote && { replyTo: quote }),
+      ...(routing && { picking: true }),
+    });
+    // What the skill classifier reads: the text, and the names of the files attached (a file alone can need a skill).
+    const attachedPaths = [...attachments, ...own].map(({ path }) => path);
+    const skillText = skillMessage(text, attachedPaths);
+    // Picked (or not): the rest may still take a while, and should not say the router is still at it.
+    void routing?.then(() => this.#picked(incomingKey({ uid: author.uid, sentAt })));
+    // The tool picker reads the tools the refresh installs, while the rest gets ready. Used only if the message is a prompt.
+    const tooling = recent
+      ? this.refreshMcpTools()
+          .catch(() => {})
+          .then(() => this.#pickTools(text, recent))
+      : undefined;
     const [[attached, title], { mentions, note, broughtIn }] = await Promise.all([
       // Named after its text, or its files when it has none: for the sidebars.
       attaching.then(async (inputs) => [
@@ -616,34 +1128,56 @@ export class ChatAgent extends DurableObject<Env> {
         },
       ),
       // A message to the people in the chat starts no run: the agent needs its tools only when it is called.
-      calling && this.refreshMcpTools().catch(() => {}),
-      calling && this.refreshSkills(),
+      tooling,
+      recent && this.refreshSkills({ text: skillText, recent }),
       calling && this.refreshFiles(),
+      calling && this.refreshUserPrompt(),
     ]);
     // The files they named of their own are named too: "@pi notes.md" is not a call.
     const summoned = !shared || repliesToAgent || summonsAgent(text, [...mentions, ...own]);
     // Again after the refreshes, which can take seconds: the author may have been removed meanwhile.
     this.#requireInChat(author);
     // Nothing left to say: every attachment was one they may not attach.
-    if (!text && !attached) return;
+    if (!text && !attached) return false;
     this.#bringIn(broughtIn);
     const written = [quote && replyLine(quote), text, note].filter(Boolean).join("\n\n");
     const said = shared ? `${author.name}: ${written}` : written;
     const content = attached ? [...attached.content, ...(written ? [{ type: "text" as const, text: said }] : [])] : said;
-    const data = {
-      uid: author.uid,
-      name: author.name,
-      text,
-      ...(attached && { attachments: attached.attachments }),
-      ...(mentions.length && { mentions }),
-      ...(quote && { replyTo: quote }),
-    } satisfies ChatMessageData;
-    if (summoned) await this.#summon(content, shared ? ({ ...data, summoned: true } satisfies ChatMessageData) : data);
-    else await this.#aside(content, data);
+    const dataWith = (auto?: AutoPick, tools?: ToolPickNote) =>
+      ({
+        uid: author.uid,
+        name: author.name,
+        text,
+        ...(attached && { attachments: attached.attachments }),
+        ...(mentions.length && { mentions }),
+        ...(quote && { replyTo: quote }),
+        sentAt,
+        ...(auto && { auto }),
+        ...(tools && { tools }),
+      }) satisfies ChatMessageData;
+    const summon = (data: ReturnType<typeof dataWith>) => this.#summon(content, shared ? ({ ...data, summoned: true } satisfies ChatMessageData) : data);
+    // The model and the tools change before the message goes in, so the run it starts is on the picks.
+    if (summoned) {
+      await this.#place(async () => {
+        const now = memoAsync(() => this.#now());
+        const auto = routing && (await this.#applyPick(await routing, now));
+        await summon(dataWith(auto, await this.#applyTools(await tooling, now)));
+      });
+    } else {
+      const aside = await this.#aside(content, dataWith());
+      // Meant for the agent, though it did not call it? Its author may be offered to (#hintCall). Off the prompt's path.
+      // Not while the agent works: it reads the message at its next step. The classifier reads whom it replies to too.
+      const hinter = this.#hinter;
+      if (hinter && this.#status() !== "running" && worthAsking(text)) {
+        const asked = [quote && replyLine(quote), text].filter(Boolean).join("\n\n");
+        void this.#hintCall(hinter, aside, author, asked).catch((error) => console.error("call hint:", errorMessage(error)));
+      }
+    }
     // The sidebars are only a convenience: update them off the prompt's path, and let a failure be.
     // Only a tag whose "@name" is in the text: one sent without it would notify someone of nothing they can see.
     const tags = taggedPeople(keptMentions(text, mentions));
     void this.#touchIndexes(title, author, tags, text).catch((error) => console.error("chat index:", errorMessage(error)));
+    return true;
   }
 
   /** What a reply quotes of the message at transcript entry `id`; null for one it cannot quote. */
@@ -678,11 +1212,41 @@ export class ChatAgent extends DurableObject<Env> {
    * entry everyone sees has no model message, so it lands at once, even mid-run; what the model reads of it is a
    * `chat.aside` entry, which pi places at once when the agent is idle, or between its steps while it works.
    */
-  async #aside(content: UserMessage["content"], data: JsonObject): Promise<void> {
+  async #aside(content: UserMessage["content"], data: JsonObject): Promise<Submission> {
     const root = await this.#root();
-    await root.submit({ type: "write", entry: { kind: CHAT_MESSAGE_KIND, data: { ...data, aside: true } } }, BACKGROUND_CONTEXT);
+    const written = await root.submit({ type: "write", entry: { kind: CHAT_MESSAGE_KIND, data: { ...data, aside: true } } }, BACKGROUND_CONTEXT);
     const message: UserMessage = { role: "user", content, timestamp: Date.now() };
     await root.submit({ type: "write", entry: { kind: CHAT_ASIDE_KIND, model: [message] } }, BACKGROUND_CONTEXT);
+    return written;
+  }
+
+  /**
+   * An aside someone wrote (`written`, its `chat.message`) that may still be meant for the agent ("pi, can you…"): the
+   * deployment's CALL_HINT_MODEL reads it with the end of the conversation, and when it is likely enough
+   * (HINT_THRESHOLD) for the agent, its author's windows are told, and show them Ask pi under it. The call counts in
+   * pi's ledger like the router's. Nothing on a failure or past HINT_MS.
+   */
+  async #hintCall(hinter: CallHinter, written: Submission, author: Person, text: string): Promise<void> {
+    const root = await this.#root();
+    const placed = await written.wait(BACKGROUND_CONTEXT);
+    if (placed.status !== "done") return;
+    const entry = placed.entry;
+    // What came before it, newest first: not what followed it meanwhile.
+    const page = await root.entries({ maxEntryId: (entry - 1) as EntryId }, ROUTE_ENTRIES, undefined, BACKGROUND_CONTEXT);
+    const request = {
+      author: author.name,
+      message: text,
+      people: everyone(this.people()).map((person) => person.name),
+      history: routeHistory(page.items),
+    };
+    const { probability, usage } = await hinter.ask(request, AbortSignal.timeout(HINT_MS));
+    // Paid for whatever it said. Only a record: a failure is logged.
+    if (usage) {
+      await root
+        .commit((tx) => recordSpend(tx, root.id, `${HINT_LEDGER_PREFIX}${hinter.id}`, usage), BACKGROUND_CONTEXT)
+        .catch((error: unknown) => console.error("call hint spend:", errorMessage(error)));
+    }
+    if (probability >= HINT_THRESHOLD) this.sockets.sendTo(author.uid, { type: "callHint", entry });
   }
 
   /**
@@ -784,7 +1348,7 @@ export class ChatAgent extends DurableObject<Env> {
     if (named && titleFrom) void this.#nameChat(titleFrom, title).catch((error: unknown) => console.error("chat title:", errorMessage(error)));
     const all = title !== this.#membersTouched.title || now - this.#membersTouched.at >= MEMBERS_TOUCH_MS;
     if (all) this.#membersTouched = { title, at: now };
-    const members = this.members.list().filter((member) => all || member.uid === author.uid || tagged.has(member.uid));
+    const members = this.#listingMembers().filter((member) => all || member.uid === author.uid || tagged.has(member.uid));
     await Promise.allSettled(
       members.map((member) => this.#index(member.uid).touchSharedChat(this.chatId, this.uid, title, member.uid !== author.uid, tagOf(member.uid), named)),
     );
@@ -795,7 +1359,7 @@ export class ChatAgent extends DurableObject<Env> {
    * message cut to fit), in everyone's sidebar. A chat renamed meanwhile keeps its name.
    */
   async #nameChat(message: string, placeholder: string): Promise<void> {
-    const title = await titleFor(piModels(this.ai.provider, this.gemini), this.ai(this.env.TITLE_MODEL), message);
+    const title = await titleFor(this.#oneShotModels, this.ai(this.env.TITLE_MODEL), message);
     if (!title || title === placeholder) return;
     const indexes = this.#everyonesIndexes();
     await Promise.allSettled(indexes.map((index) => index.nameChat(this.chatId, this.uid, title, placeholder)));
@@ -894,9 +1458,27 @@ export class ChatAgent extends DurableObject<Env> {
     return exports.UserDirectory.getByName(uid);
   }
 
+  /**
+   * Whose account someone in the chat is: their own, or for the owner's second seat (secondSeat) the owner's. Only
+   * someone with an account of their own has a sidebar (a directory) and files; the seat has neither.
+   */
+  #account(uid: string): string {
+    return uid === secondSeatUid(this.uid) ? this.uid : uid;
+  }
+
+  /** Whether `uid`, someone other than the owner, has a sidebar of their own that lists this chat. */
+  #hasSidebar(uid: string): boolean {
+    return this.#account(uid) === uid;
+  }
+
+  /** The members whose sidebars list this chat: all but the owner's second seat. */
+  #listingMembers(): Person[] {
+    return this.members.list().filter((member) => this.#hasSidebar(member.uid));
+  }
+
   /** The owner's directory and each member's: every sidebar that lists this chat. */
   #everyonesIndexes() {
-    return [this.#directory, ...this.members.list().map((member) => this.#index(member.uid))];
+    return [this.#directory, ...this.#listingMembers().map((member) => this.#index(member.uid))];
   }
 
   /** A single-use link's token, shown once to the owner. The chat itself decides who may: only its owner. */
@@ -944,10 +1526,30 @@ export class ChatAgent extends DurableObject<Env> {
       await index.removeSharedChat(this.chatId, this.uid).catch(() => {});
       return refuse(403, failed.error);
     }
+    this.#joined(person);
+    return null;
+  }
+
+  /**
+   * The owner sits in the chat a second time, as a member (secondSeat), to try it as the people they share it with see
+   * it. Taken already, it is just opened again. Its windows join as the owner does, with no invite.
+   */
+  addSecondSeat(by: Person): ChatRefusal | null {
+    if (by.uid !== this.uid) return refuse(403, "Only the chat's owner can join it a second time.");
+    if (this.#gone) return refuse(404, DELETED);
+    const seat = secondSeat(by);
+    if (this.members.has(seat.uid)) return null;
+    const full = this.members.add(seat);
+    if (full) return refuse(409, full.error);
+    this.#joined(seat);
+    return null;
+  }
+
+  /** Someone new is in the chat: everyone's app and the transcript hear it, and the owner's sidebar that it is shared. */
+  #joined(person: Person): void {
     this.sockets.broadcastPeople();
     this.#notePeople(person, "joined");
     this.#tellShared();
-    return null;
   }
 
   /**
@@ -980,7 +1582,7 @@ export class ChatAgent extends DurableObject<Env> {
     this.#tellShared();
     // The agent acts as the owner: a removed person's queued requests must not run after they are out.
     await this.#withdrawQueued(uid).catch((error: unknown) => console.error("withdraw queued:", errorMessage(error)));
-    await this.#index(uid).removeSharedChat(this.chatId, this.uid);
+    if (this.#hasSidebar(uid)) await this.#index(uid).removeSharedChat(this.chatId, this.uid);
     return null;
   }
 
@@ -1001,7 +1603,8 @@ export class ChatAgent extends DurableObject<Env> {
       title: title ?? "",
       artifacts: metas.flatMap((meta) => (meta && isOwnedBy(meta, this.uid, this.chatId) ? [{ id: meta.id, title: meta.title }] : [])),
       files: traces.files.filter((path) => stored.has(path)),
-      members: this.members.list().length,
+      // The people it is shared with: the owner's second seat is the owner.
+      members: this.#listingMembers().length,
     };
   }
 
@@ -1029,7 +1632,7 @@ export class ChatAgent extends DurableObject<Env> {
       // Only files the owner was shown, and only this chat's: never one the preview left out, nor any other path sent.
       const confirmed = new Set(files);
       const toDelete = traces.files.filter((path) => confirmed.has(path));
-      const members = this.members.list();
+      const members = this.#listingMembers();
       this.sockets.disconnect();
       await Promise.all([
         ...members.map((member) => this.#index(member.uid).removeSharedChat(this.chatId, this.uid)),
@@ -1141,13 +1744,14 @@ export class ChatAgent extends DurableObject<Env> {
 
   /** Set a reaction, and tell every socket the entry's reactions when that changed them. */
   #setReaction(entry: number, emoji: Reaction, who: string, on: boolean): void {
-    if (this.reactions.set(entry, emoji, who, on)) this.sockets.broadcastReactions(entry, this.reactions.of(entry));
+    if (this.reactions.set(entry, emoji, who, on)) this.sockets.broadcast({ type: "reacted", entry, reactions: this.reactions.of(entry) });
   }
 
   /** Stop the agent's run, and the messages queued for it. In a shared chat the others see who stopped it. */
   async abort(by: Person): Promise<void> {
     this.#requireInChat(by);
-    const running = this.#status() === "running";
+    // Only for the notice: a failure to read pi's queue must not keep the run from stopping.
+    const running = await this.#replying().catch(() => false);
     await this.harness.abort();
     if (running && this.members.hasAny()) this.#notePeople(by, "stopped");
   }
@@ -1264,6 +1868,18 @@ export class ChatAgent extends DurableObject<Env> {
     return this.hub.server(server)?.auth === "oauth";
   }
 
+  /**
+   * Whether `viewer` may read what the author's views of a page saved (the defaults pi.use("storage") serves). A page
+   * may save what it loaded, so its saved values follow the rule for its data: an artifact with a version that calls a
+   * server only the chat's people may load (#mayLoad) shares its author's values only with them.
+   */
+  async mayReadPageDefaults(artifactId: string, viewer: string): Promise<boolean> {
+    if (this.isInChat(viewer)) return true;
+    const meta = await this.storage.artifacts.readMeta(artifactId);
+    if (!meta || !isOwnedBy(meta, this.uid, this.chatId)) return false;
+    return meta.versions.every((version) => (version.manifest.mcp?.servers ?? []).every((entry) => this.#mayLoad(entry.server, viewer)));
+  }
+
   /** Versions never change once published, so their manifests cache for the object's lifetime. */
   async #manifest(artifactId: string, version: number): Promise<ArtifactManifest | undefined> {
     const key = `${artifactId}:${version}`;
@@ -1279,22 +1895,44 @@ export class ChatAgent extends DurableObject<Env> {
   }
 }
 
+/** Whether a reply is running, and the agent as it stands (see ChatAgent's #now). */
+interface ChatNow {
+  root: Conversation;
+  busy: boolean;
+  agent: Agent;
+}
+
+/** Auto's pick for a message, and the model and effort to run on when a router picked (see ChatAgent's #route). */
+/** What #route found: a router's pick and the model choice it names, or why the chat keeps its model, and how long that took. */
+type Routing = { pick: AutoPick; choice: ModelChoice } | { kept: { failed: string; ms: number } };
+
 /** What the chat's sockets need from the chat. */
 interface ChatSession {
   events(): Promise<AgentEventStream>;
   runStartedAt(snapshot: SnapshotEvent): Promise<number | undefined>;
+  toolsStartedAt(snapshot: SnapshotEvent): Promise<Record<string, number>>;
   admit(person: Person): boolean;
   peopleFor(uid: string): ChatPeopleView;
   queued(ids: readonly number[]): Promise<QueuedMessage[]>;
+  incoming(): IncomingMessage[];
   prompt(text: string, author: Person, attachments: readonly AttachmentInput[], mentions: readonly MentionInput[], replyTo?: number): Promise<void>;
   abort(by: Person): Promise<void>;
   setModel(input: { model?: unknown; thinkingLevel?: unknown }, by: Person): Promise<void>;
+  /** Whether the chat is on Auto. */
+  auto(): boolean;
   reactions(): Reactions;
   react(by: Person, entry: unknown, emoji: unknown, on: boolean): Promise<void>;
 }
 
 /** How long a socket's attach may take to send its snapshot (see ChatSockets.#attach). */
 const ATTACH_MS = 30_000;
+
+/**
+ * A socket attaches again at once when pi ends its stream, but at most once in this long: when pi ends it again sooner,
+ * the socket waits for its next message (or the object's next start). Otherwise a pi that fails each time it opens
+ * would be opened again and again, for every socket.
+ */
+const REATTACH_MS = 10_000;
 
 /** An attach that did not send its snapshot in time. */
 class AttachStalled extends Error {}
@@ -1309,11 +1947,13 @@ type SocketAttachment = { owner: typeof OWNER; person: Person; sent?: string };
  * The chat's browser connections, one or more per person in the chat. Each
  * socket gets its own pi event stream: a snapshot of the conversation first,
  * then one batch per commit. Sockets hibernate; after the object restarts,
- * streams are reattached in onStart.
+ * streams are reattached in onStart, and a stream pi ends is replaced at once.
  */
 class ChatSockets extends LifecycleCapability implements DurableObjectCapability {
   readonly #chat: ChatSession;
   readonly #streams = new Map<WebSocket, Promise<AgentEventStream>>();
+  /** When each socket was last attached again because pi ended its stream (see REATTACH_MS). */
+  readonly #reattached = new WeakMap<WebSocket, number>();
 
   constructor(chat: ChatSession) {
     super("chat-sockets");
@@ -1363,9 +2003,13 @@ class ChatSockets extends LifecycleCapability implements DurableObjectCapability
     }
   }
 
-  /** Tell every open socket an entry's reactions: one of them changed. */
-  broadcastReactions(entry: number, reactions: EntryReactions): void {
-    const message: ChatServerMessage = { type: "reacted", entry, reactions };
+  /** Tell one person's open sockets something only they see. */
+  sendTo(uid: string, message: ChatServerMessage): void {
+    for (const ws of this.lifecycle.sockets.get(SOCKET_TAG)) if (this.#person(ws)?.uid === uid) send(ws, message);
+  }
+
+  /** Tell every open socket the same thing: an entry's reactions changed, or someone turned Auto on or off. */
+  broadcast(message: ChatServerMessage): void {
     for (const ws of this.lifecycle.sockets.get(SOCKET_TAG)) if (this.#person(ws)) send(ws, message);
   }
 
@@ -1457,27 +2101,56 @@ class ChatSockets extends LifecycleCapability implements DurableObjectCapability
     let step = "opening the conversation";
     const opening = (async () => {
       const events = await this.#chat.events();
-      step = "reading its run and queue";
+      // A stream pi ended itself delivers nothing more: its session closed (a storage error fails it, and pi opens again
+      // for the next prompt or wake). The socket stays open, and every later attach would find the dead stream, so the
+      // page heard nothing until it was reloaded. Follow the conversation on a new stream: its snapshot brings what the
+      // socket missed. A stream this class stopped has left #streams already. Followed from here, as the session can
+      // close while the snapshot below is read, and a stream that has ended cannot be started.
+      let ended = false;
+      void events.closed.then((end) => {
+        ended = true;
+        if (end.reason === "stopped" || this.#streams.get(ws) !== attached) return;
+        const cause = "error" in end ? `: ${errorMessage(end.error)}` : "";
+        this.#streams.delete(ws);
+        const now = Date.now();
+        const again = ws.readyState === WebSocket.OPEN && now - (this.#reattached.get(ws) ?? -Infinity) >= REATTACH_MS;
+        const next = again ? "attaching again" : "waiting for the socket's next message";
+        console.error(`chat socket: events ended (${end.reason}${cause}), ${next}`);
+        if (!again) return;
+        this.#reattached.set(ws, now);
+        void this.#attach(ws);
+      });
+      step = "reading its run, calls and queue";
       const attachment = ws.deserializeAttachment() as SocketAttachment;
       send(ws, { type: "people", people: this.#chat.peopleFor(attachment.person.uid) });
       send(ws, { type: "reactions", reactions: this.#chat.reactions() });
-      const snapshot = await this.#events([events.snapshot]);
-      // Not by runElapsedMs, which changes with the time it is sent at.
+      // After events(): a new chat that starts on Auto is set so as pi opens it.
+      send(ws, { type: "auto", on: this.#chat.auto() });
+      send(ws, { type: "incoming", incoming: this.#chat.incoming() });
+      // Timed only once it is to be sent: a wake attaches every socket again, and most find their snapshot already sent.
+      const snapshot = await this.#events([events.snapshot], false);
       const sent = await sha256Hex(JSON.stringify([snapshot.events, snapshot.queued]));
-      if (sent !== attachment.sent && send(ws, snapshot)) ws.serializeAttachment({ ...attachment, sent } satisfies SocketAttachment);
-      events.start(async (batch) => {
-        if (!send(ws, await this.#events(batch))) await this.#detach(ws);
-      });
+      if (sent !== attachment.sent && send(ws, { ...snapshot, ...(await this.#timing(events.snapshot)) })) {
+        ws.serializeAttachment({ ...attachment, sent } satisfies SocketAttachment);
+      }
+      // Ended meanwhile, it has been replaced above (or left for the socket's next message).
+      if (!ended) {
+        events.start(async (batch) => {
+          if (!send(ws, await this.#events(batch))) await this.#detach(ws);
+        });
+      }
       return events;
     })();
     const attached = deadline(opening, ATTACH_MS, () => new AttachStalled(`no snapshot after ${ATTACH_MS / 1000} s, stuck ${step}`));
     this.#streams.set(ws, attached);
     attached.catch((error) => {
+      // Should the stream come after all, it goes unused.
+      if (error instanceof AttachStalled) void opening.then((events) => events.stop()).catch(() => {});
+      // Detached, or replaced as pi ended the stream it was opening: the socket has nothing more to hear from this one.
+      if (this.#streams.get(ws) !== attached) return;
       this.#streams.delete(ws);
       if (error instanceof AttachStalled) {
         console.error("chat socket:", error.message);
-        // Should the stream come after all, it goes unused.
-        void opening.then((events) => events.stop()).catch(() => {});
         close(ws, 1011, "Reconnect");
         // A close the chat makes itself may never come back as onWebSocketClose: the others hear of it now.
         this.#broadcastPresence(new Set([ws]));
@@ -1489,19 +2162,29 @@ class ChatSockets extends LifecycleCapability implements DurableObjectCapability
   }
 
   /**
-   * A batch for the browser. A snapshot (on attach, or when the stream overflowed) comes with how long its run has gone;
-   * a batch that changes pi's inbox, with the people's messages waiting in it.
+   * A batch for the browser. A snapshot (on attach, or when the stream overflowed) comes with how long its run and its
+   * running calls have gone, unless `timed` is false; a batch that changes pi's inbox, with the people's messages waiting in it.
    */
-  async #events(batch: readonly AgentEvent[]): Promise<Extract<ChatServerMessage, { type: "events" }>> {
+  async #events(batch: readonly AgentEvent[], timed = true): Promise<Extract<ChatServerMessage, { type: "events" }>> {
     const snapshot = batch.findLast((event) => event.type === "snapshot");
     const ids = inboxIds(batch);
-    const [started, queued] = await Promise.all([
-      snapshot && this.#chat.runStartedAt(snapshot),
+    const [timing, queued] = await Promise.all([
+      snapshot && timed ? this.#timing(snapshot) : undefined,
       // Only a view of what pi has queued: without it the chat still works.
       ids && this.#chat.queued(ids).catch((error: unknown) => (console.error("queue:", errorMessage(error)), [])),
     ]);
-    const runElapsedMs = started === undefined ? undefined : Math.max(0, Date.now() - started);
-    return { type: "events", events: batch.map(withoutImageData), runElapsedMs, ...(queued && { queued }) };
+    return { type: "events", events: batch.map((event) => withoutImageData(withoutSystemPrompt(event))), ...timing, ...(queued && { queued }) };
+  }
+
+  /** How long the snapshot's run and its running calls have gone, by the server's clock. */
+  async #timing(snapshot: SnapshotEvent): Promise<Pick<ChatServerMessage & { type: "events" }, "runElapsedMs" | "toolsElapsedMs">> {
+    const [started, toolsStarted] = await Promise.all([this.#chat.runStartedAt(snapshot), this.#chat.toolsStartedAt(snapshot)]);
+    const now = Date.now();
+    const since = (at: number) => Math.max(0, now - at);
+    return {
+      runElapsedMs: started === undefined ? undefined : since(started),
+      toolsElapsedMs: Object.fromEntries(Object.entries(toolsStarted).map(([id, at]) => [id, since(at)])),
+    };
   }
 
   async #detach(ws: WebSocket): Promise<void> {

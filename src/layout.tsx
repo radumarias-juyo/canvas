@@ -3,6 +3,7 @@ import {
   useEffect,
   useRef,
   useState,
+  useSyncExternalStore,
   type KeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent,
@@ -68,6 +69,31 @@ export function useDismiss<T extends HTMLElement>(open: boolean, setOpen: (open:
   return box;
 }
 
+/** Each media query's list, made once and shared by every component that follows it. */
+const mediaLists = new Map<string, MediaQueryList>();
+const mediaList = (query: string): MediaQueryList => {
+  let list = mediaLists.get(query);
+  if (!list) mediaLists.set(query, (list = matchMedia(query)));
+  return list;
+};
+
+/** Whether the window matches a media `query`, following it as it changes. */
+export function useMediaQuery(query: string): boolean {
+  const subscribe = useCallback(
+    (onChange: () => void) => {
+      const list = mediaList(query);
+      list.addEventListener("change", onChange);
+      return () => list.removeEventListener("change", onChange);
+    },
+    [query],
+  );
+  return useSyncExternalStore(
+    subscribe,
+    () => mediaList(query).matches,
+    () => false,
+  );
+}
+
 /** A click that should open a link the browser's way (a new tab or window), not in the app. */
 export const opensElsewhere = (event: ReactMouseEvent) => event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey;
 
@@ -111,6 +137,17 @@ export function SectionHead({
         </Icon>
       </button>
     </h3>
+  );
+}
+
+/** Opens the app's menu (the sidebar) where it is hidden: on a phone or in a narrow window. */
+export function MenuButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button type="button" className="icon-button menu-button" onClick={onClick} title="Menu" aria-label="Open the menu">
+      <Icon>
+        <path d="M4 7h16M4 12h16M4 17h16" />
+      </Icon>
+    </button>
   );
 }
 

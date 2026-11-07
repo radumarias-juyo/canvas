@@ -2,6 +2,7 @@
 // The MCP shapes mirror the contract Claude's artifacts use, so pages written
 // for one read naturally against the other.
 
+import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { EntryReactions, Reactions } from "./reactions.ts";
 import type { Attachment, AttachmentInput } from "./attachments.ts";
 import type { Mention, MentionInput } from "./mentions.ts";
@@ -63,6 +64,50 @@ export const MAX_STALE_MS = 24 * 60 * 60_000;
 export function clampStaleMs(staleMs: unknown): number {
   return Math.min(Math.max(Number(staleMs) || 0, 0), MAX_STALE_MS);
 }
+
+/** What went wrong with a page's saved values or model call. */
+export type PageErrorCode = "bad_request" | "too_large" | "rate_limited" | "limit_reached" | "unavailable" | "bad_output";
+
+export interface PageError {
+  code: PageErrorCode;
+  message: string;
+  retryAfterMs?: number;
+}
+
+/**
+ * A page's saved values (pi.use("storage")), as POST /api/artifacts/:id/storage takes them: load them, write changes
+ * (null removes a key), or drop the viewer's own.
+ */
+export type PageStorageRequest = { op: "load" } | { op: "write"; changes: Record<string, string | null> } | { op: "reset" };
+
+/** The values a page sees: the viewer's own over the author's. `isAuthor`: the viewer's values are everyone's defaults. */
+export interface PageValues {
+  values: Record<string, string>;
+  isAuthor: boolean;
+}
+
+export type PageStorageResponse = ({ ok: true } & Partial<PageValues>) | { ok: false; error: PageError };
+
+/**
+ * How much one viewer may save for one page: each key and value, and all their own (removed keys of the author's
+ * included). The runtime gets these numbers when a page is served (worker/artifacts/serve.ts) and refuses an oversized
+ * key or value at once; the totals only the Worker can count, so a write over them fails in the background.
+ */
+export const PAGE_STORAGE_LIMITS = { keyChars: 256, valueChars: 100_000, totalChars: 500_000, keys: 500 } as const;
+
+/** One call to a page's model (pi.use("ai")), as POST /api/artifacts/:id/ai takes it. */
+export interface PageAiRequest {
+  system?: string;
+  messages: { role: "user" | "assistant"; content: string }[];
+  maxTokens?: number;
+  /** Answer with JSON: the reply is parsed (a fenced block too), and one that is not JSON is `bad_output`. */
+  json?: boolean;
+}
+
+export type PageAiResponse = { ok: true; text: string; json?: unknown } | { ok: false; error: PageError };
+
+/** How large a page's model call may be. */
+export const PAGE_AI_LIMITS = { messages: 40, chars: 40_000, systemChars: 8_000, maxTokens: 2_000, defaultMaxTokens: 1_000 } as const;
 
 export interface ToolInfo {
   name: string;
@@ -145,6 +190,15 @@ export const MCP_DISCOVER_TOOL = "mcp_discover";
 
 /** Between the server's slug and the tool's name in an MCP tool's agent name (mcpToolName in worker/agent/mcp.ts). */
 export const MCP_TOOL_SEPARATOR = "__";
+
+/** An MCP tool's server slug and tool, from its agent name (mcpToolName); nothing for a built-in tool. */
+export function mcpParts(name: string): [server: string, tool: string] | undefined {
+  let split = name.indexOf(MCP_TOOL_SEPARATOR);
+  if (split <= 0) return undefined;
+  // A server slug can end in "_" ("Reports (beta)" is "reports_beta_"): the separator is the last two of the run.
+  while (name[split + MCP_TOOL_SEPARATOR.length] === "_") split++;
+  return [name.slice(0, split), name.slice(split + MCP_TOOL_SEPARATOR.length)];
+}
 
 /** The tool that publishes an artifact, and the details its result carries: the chat UI opens the preview from them. */
 export const PUBLISH_TOOL = "artifact_publish";
@@ -235,6 +289,30 @@ export interface Person {
   name: string;
 }
 
+/**
+ * A chat's owner can also sit in it a second time, as a separate person ("Ada (2)") who is a member like anyone they
+ * invited: to try the chat as the people they share it with see it, from the one sign-in. That window's URL says so
+ * (`?as=second`), and its requests carry it; the Worker turns only the verified owner into this person, for their own
+ * chats, so nobody else can be it. Its uid cannot be anyone's own: those are hex (or demo slugs, which prove nothing).
+ */
+export const SEAT_PARAM = "as";
+export const SECOND_SEAT = "second";
+
+const SEAT_SUFFIX = "-seat2";
+
+export function secondSeatUid(uid: string): string {
+  return `${uid.slice(0, 26)}${SEAT_SUFFIX}`;
+}
+
+/** Whether a uid is one a second seat has, which no one may sign in as (demo names are refused it). */
+export function isSecondSeatUid(uid: string): boolean {
+  return uid.endsWith(SEAT_SUFFIX);
+}
+
+export function secondSeat(owner: Person): Person {
+  return { uid: secondSeatUid(owner.uid), name: `${owner.name} (2)` };
+}
+
 /** Everyone in a chat: its owner first, then its members as they joined. */
 export function everyone(people: ChatPeople): Person[] {
   return [people.owner, ...people.members];
@@ -282,7 +360,49 @@ export interface ChatMessageData extends Person {
   summoned?: true;
   /** The message this one answers, quoted as it was when it was sent. */
   replyTo?: ReplyQuote;
+  /** When it was sent (ms since the epoch), which for a message that waited in the queue is before it was written. */
+  sentAt?: number;
+  /** In a chat on Auto, the model and effort picked to answer it. */
+  auto?: AutoPick;
+  /** Which MCP tools were offered to answer it, when the chat has enough of them to pick (worker/agent/tool-pick.ts). */
+  tools?: ToolPickNote;
 }
+
+/**
+ * The tool picker's pick for a message: the agent tool names offered (none for a message that needs no MCP tool), the
+ * picker and what its call cost, and how long it took. With no picker, it failed (`failed` says why), and every tool
+ * was offered. `added`: a reply was running, so the picks were added to the tools it has. `unchanged`: the tools could
+ * not be changed at all (`failed` says why), so the reply had the ones it had. A type, so pi can store it.
+ */
+export type ToolPickNote = {
+  tools: string[];
+  /** How many MCP tools there were to pick from. */
+  of: number;
+  picker?: RouterSpend;
+  failed?: string;
+  added?: true;
+  unchanged?: true;
+  ms: number;
+};
+
+/**
+ * What Auto picked for a message that called the agent: a model (the picker's id) and an effort, why, and the router
+ * that picked. With no router, the chat kept the model it ran on: none could pick (it failed or took too long), or a
+ * reply was running. `ms`: how long picking took. A type, not an interface, so it is JSON pi can store.
+ */
+export type AutoPick = {
+  model: string;
+  thinkingLevel: ModelThinkingLevel;
+  /** The router's reason, a few words. */
+  reason?: string;
+  router?: RouterSpend;
+  /** With no router: why the chat kept its model, as the tooltip shows it (a running reply, or each router's error, cut short). */
+  failed?: string;
+  ms: number;
+};
+
+/** A router call: the router's picker id, and what the call cost, in dollars and tokens. */
+export type RouterSpend = { model: string; cost: number; input: number; output: number };
 
 /** A message a reply quotes: its transcript entry, who wrote it (the agent, or a person) and the start of its text. */
 export type ReplyQuote = { id: number; name: string; text: string } & ({ agent: true } | { uid: string });
@@ -322,6 +442,27 @@ export interface QueuedMessage extends ChatMessageData {
   id: number;
 }
 
+/**
+ * A person's message the chat is getting ready to put in (its files read, the agent's tools refreshed, on Auto the
+ * model picked), which can take seconds: everyone sees it at once, faded, until it is in the transcript or the queue.
+ * `attachments`: their names, and thumbnails of images. `picking`: on Auto, the router is picking the model for it.
+ */
+export type IncomingMessage = Person & {
+  text: string;
+  sentAt: number;
+  attachments?: IncomingAttachment[];
+  replyTo?: ReplyQuote;
+  picking?: true;
+};
+
+/** What an incoming message shows of a file it attaches before the file is read. */
+export type IncomingAttachment = { path: string; thumb?: string };
+
+/** Which incoming message a `chat.message` (or one queued) is: its author's, sent at that time. */
+export function incomingKey(message: { uid: string; sentAt?: number }): string {
+  return `${message.uid}:${message.sentAt}`;
+}
+
 /** Someone with the chat open right now, and in how many windows (or devices). */
 export interface Presence {
   uid: string;
@@ -337,23 +478,37 @@ export type ChatClientMessage =
   | { type: "abort" }
   // Add (`on`) or take back a reaction (shared/reactions.ts) to a transcript entry: a person's message or the agent's reply.
   | { type: "react"; entry: number; emoji: string; on: boolean }
-  // Run the chat on another model or effort (shared/models.ts). The change reaches every socket as pi's agent_changed.
+  // Run the chat on another model or effort (shared/models.ts), or on Auto (AUTO_MODEL). The change reaches every socket
+  // as pi's agent_changed, and a turn to or from Auto as `auto`.
   | { type: "model"; model: string; thinkingLevel?: string };
 
 /**
  * ChatAgent → browser. `events` carries pi-durable AgentEvents verbatim; `people` comes on connect and whenever the people or invites change.
  * A snapshot taken mid-run comes with `runElapsedMs`: how long ago, by the server's clock, the run's first message was
- * placed, which the snapshot does not say. A duration rather than a time, so the browser's clock need not agree.
+ * placed, which the snapshot does not say, and `toolsElapsedMs`: how long each of its running calls has run, by call id.
+ * Durations rather than times, so the browser's clock need not agree.
  */
 export type ChatServerMessage =
   /** `queued`, with a snapshot or a batch that changes pi's inbox: the people's messages waiting in it, oldest first. */
-  | { type: "events"; events: unknown[]; runElapsedMs?: number; queued?: QueuedMessage[] }
+  | { type: "events"; events: unknown[]; runElapsedMs?: number; toolsElapsedMs?: Record<string, number>; queued?: QueuedMessage[] }
   | { type: "people"; people: ChatPeopleView }
   /** Everyone's reactions on connect; then, whenever one changes, its entry's (`entry`, `reactions` all of that entry's). */
   | { type: "reactions"; reactions: Reactions }
   | { type: "reacted"; entry: number; reactions: EntryReactions }
   /** Who has the chat open: whenever a window opens or closes. */
   | { type: "presence"; online: Presence[] }
+  /**
+   * The messages the chat is getting ready to put in, oldest first: on connect, and whenever one comes or goes.
+   * `placed`: the one that went, when it went in (it shows in the transcript or the queue next), not when it was dropped.
+   */
+  | { type: "incoming"; incoming: IncomingMessage[]; placed?: string }
+  /** Whether the chat is on Auto (shared/models.ts AUTO_MODEL): on connect, and whenever someone turns it on or off. */
+  | { type: "auto"; on: boolean }
+  /**
+   * To the author of a message in a shared chat that did not call the agent, but looks meant for it ("pi, can you…"):
+   * its transcript entry, under which the app offers to call the agent on it.
+   */
+  | { type: "callHint"; entry: number }
   /** Sent just before the chat closes a removed person's socket, in case the close code is lost on the way. */
   | { type: "removed" }
   /** Sent to everyone just before the chat closes their sockets, when its owner deleted it. */

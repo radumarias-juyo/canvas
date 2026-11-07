@@ -1,6 +1,7 @@
 import type { Frame, Page } from "@cloudflare/puppeteer";
 import { ARTIFACT_SANDBOX, type ArtifactManifest, type CallToolResult, type McpError, type McpErrorCode, type ToolInfo } from "../../shared/protocol.ts";
 import { clip, deadline, errorMessage } from "../../shared/util.ts";
+import type { PageLook } from "./look.ts";
 import { PAGE_POLICY, renderArtifact } from "./serve.ts";
 
 /**
@@ -31,6 +32,8 @@ export interface CheckInput {
   tests?: readonly CheckTest[];
   /** Desktop by default. */
   viewport?: CheckViewport;
+  /** A line of `html` as a line of the page the agent wrote, when they differ (skill files put in it); the same line by default. */
+  pageLine?: (line: number) => number;
 }
 
 /** What the harness asks the Worker: one call from the page, or one tool's description. */
@@ -64,6 +67,10 @@ export interface CheckReport {
   thumb: string;
   width: number;
   height: number;
+  /** Set when a live call failed for a reason outside the page (a sign-in, an outage): what the page shows for it is no fault. */
+  failedOutside?: true;
+  /** What a vision classifier saw in the screenshot (worker/artifacts/look.ts), when one looked. */
+  look?: PageLook;
 }
 
 const VIEWPORTS: Record<CheckViewport, { width: number; height: number; isMobile?: boolean; hasTouch?: boolean }> = {
@@ -130,7 +137,7 @@ const CAPTURE =
 const HARNESS = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{margin:0;height:100%;background:#fff}iframe{display:block;border:0;width:100%;height:100%}</style></head><body><script>
 const state = { log: [], calls: [], pending: 0, started: Date.now(), active: Date.now(), loaded: false };
 window.__check = state;
-let frame, manifest, connected = false;
+let frame, manifest, connected = false, saved = {};
 const touch = () => { state.active = Date.now(); };
 async function bridge(request) {
   state.pending++;
@@ -164,6 +171,13 @@ function serve(port) {
         reply(r, r.ok && r.tool);
       } else if (m.method === "invalidate") {
         reply({ ok: true });
+      } else if (m.method === "storage") {
+        // Saved values start empty, as for a new viewer, and last as long as the check.
+        if (p.op === "reset") saved = {};
+        if (p.op === "write") for (const [k, v] of Object.entries(p.changes || {})) v === null ? delete saved[k] : (saved[k] = v);
+        reply({ ok: true }, p.op === "write" ? {} : { values: { ...saved }, isAuthor: true });
+      } else if (m.method === "ai") {
+        reply({ ok: false, error: { code: "unavailable", message: "The check has no model; it answers when someone types into the published page." } });
       } else {
         reply({ ok: false, error: { code: "bad_request", message: "Unknown method " + m.method } });
       }
@@ -214,7 +228,7 @@ interface CallRecord {
 }
 
 /** The page as the check renders it: the page policy as a <meta>, the capture script, then the runtime, as when served. */
-export function renderForCheck(html: string): { document: string; mapLine: (line: number) => number | undefined } {
+export function renderForCheck(html: string, pageLine: (line: number) => number = (line) => line): { document: string; mapLine: (line: number) => number | undefined } {
   const prelude = `<meta http-equiv="Content-Security-Policy" content="${PAGE_POLICY.replaceAll('"', "&quot;")}"><script>${CAPTURE}</script>`;
   const document = renderArtifact(html, prelude);
   // What renderArtifact added runs from the prelude to the end of the runtime's script, and starts on startLine.
@@ -223,7 +237,7 @@ export function renderForCheck(html: string): { document: string; mapLine: (line
   const startLine = document.slice(0, start).split("\n").length;
   const added = document.slice(start, end).split("\n").length - 1;
   // A line before it or after it is the page's; the last added line goes on with the page's line it was put into.
-  return { document, mapLine: (line) => (line <= startLine ? line : line >= startLine + added ? line - added : undefined) };
+  return { document, mapLine: (line) => (line <= startLine ? pageLine(line) : line >= startLine + added ? pageLine(line - added) : undefined) };
 }
 
 /** Waits for the frame to lay out and paint what changed (two animation frames), rather than a fixed time. */
@@ -235,7 +249,7 @@ export async function checkPage(page: Page, input: CheckInput, bridge: Bridge): 
   const tests = input.tests ?? [];
   await Promise.all([page.setViewport(viewport), page.exposeFunction("__piBridge", (request: BridgeRequest) => bridge(request))]);
   await page.setContent(HARNESS);
-  const { document, mapLine } = renderForCheck(input.html);
+  const { document, mapLine } = renderForCheck(input.html, input.pageLine);
   // The Worker has no DOM types, so what runs in the harness is written as strings.
   await page.evaluate(`window.__start(${JSON.stringify(document)}, ${JSON.stringify(input.manifest)})`);
   // One wait in the browser, which polls the harness itself.
@@ -280,6 +294,7 @@ export async function checkPage(page: Page, input: CheckInput, bridge: Bridge): 
     errors: judged.errors,
     warnings: [...warnings, ...judged.warnings].slice(0, MAX_LINES),
     calls: judged.calls,
+    ...(judged.failedOutside && { failedOutside: judged.failedOutside }),
     tests: results,
     text: clip(shown.text.trim(), MAX_TEXT),
     screenshot,
@@ -326,7 +341,7 @@ interface Observed {
 const KINDS: Record<string, string> = { exception: "Uncaught ", rejection: "Unhandled rejection: ", error: "console.error: ", warn: "console.warn: " };
 
 /** Sort what the check saw into errors and warnings. */
-export function judge({ log, calls, tests, text, graphics, mapLine, manifest }: Observed): Pick<CheckReport, "errors" | "warnings" | "calls"> {
+export function judge({ log, calls, tests, text, graphics, mapLine, manifest }: Observed): Pick<CheckReport, "errors" | "warnings" | "calls" | "failedOutside"> {
   const errors: string[] = [];
   const warnings: string[] = [];
   const outside = calls.some(failedOutside);
@@ -379,7 +394,7 @@ export function judge({ log, calls, tests, text, graphics, mapLine, manifest }: 
     warnings.push(`The page shows "${word}"${count > 1 ? ` ${count} times` : ""}: a value it rendered without having it?`);
   }
 
-  return { errors: errors.slice(0, MAX_LINES), warnings: [...new Set(warnings)].slice(0, MAX_LINES), calls: callLines };
+  return { errors: errors.slice(0, MAX_LINES), warnings: [...new Set(warnings)].slice(0, MAX_LINES), calls: callLines, ...(outside && { failedOutside: true as const }) };
 }
 
 /** Each distinct item with how often it came, in first-seen order. */
@@ -410,6 +425,8 @@ export function describeReport(report: CheckReport): string {
       tests.map((t) => `${t.ok ? "passed" : "FAILED"}: ${t.name}${t.detail ? ` (${t.detail})` : ""}`),
     ),
     `Visible text:\n${report.text || "(none)"}`,
+    report.look?.verdict === "content" &&
+      `${report.look.by} looked at the screenshot: it shows the page's content (${Math.round(report.look.probability * 100)}% sure).`,
     report.screenshot
       ? `Screenshot at ${report.width}×${report.height}: look at it for anything that renders wrong (overlaps, empty sections, broken charts, unreadable contrast).`
       : "No screenshot: the check did not get that far.",
