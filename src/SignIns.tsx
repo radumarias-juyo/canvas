@@ -20,7 +20,12 @@ export function useSignInAlerts(reload: () => void) {
       reload();
       if ((visible && document.hasFocus()) || typeof Notification === "undefined" || Notification.permission !== "granted") return;
       const { title, body } = signInNoticeText(notice);
-      void showNotification(title, { body, tag: `sign-in:${notice.server}`, onClick: () => window.open(notice.link, "_blank", "noopener") });
+      void showNotification(title, {
+        body,
+        tag: `sign-in:${notice.server}`,
+        url: "/",
+        onClick: () => window.open(notice.link, "_blank", "noopener"),
+      });
     },
     [visible, reload],
   );

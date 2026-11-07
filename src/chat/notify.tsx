@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import type { MentionNotice } from "../../shared/protocol.ts";
 import { Icon } from "../Icon.tsx";
 import { useStoredState } from "../layout.tsx";
-import { enablePush } from "../push.ts";
+import { enablePush, showNotification } from "../push.ts";
 import { useVisible } from "../sidebar.ts";
 
 /** How long a tag shows in the app once the window is in view. */
@@ -81,19 +81,12 @@ export function useMentionNotices(chatId: string | undefined, navigate: (path: s
       if (visible && notice.chatId === chatId) return;
       setToasts((list) => [...list.filter((t) => !(t.chatId === notice.chatId && t.at === notice.at)), notice].slice(-MAX_TOASTS));
       if (focused || !supported || Notification.permission !== "granted") return;
-      try {
-        const shown = new Notification(`${notice.from} mentioned you`, {
-          body: [notice.title, notice.text].filter(Boolean).join("\n"),
-          tag: `mention:${notice.chatId}:${notice.at}`,
-        });
-        shown.onclick = () => {
-          window.focus();
-          open(notice);
-          shown.close();
-        };
-      } catch {
-        // Some browsers (Android Chrome) show notifications only from a service worker: the app's own notice stays.
-      }
+      void showNotification(`${notice.from} mentioned you`, {
+        body: [notice.title, notice.text].filter(Boolean).join("\n"),
+        tag: `mention:${notice.chatId}:${notice.at}`,
+        url: `/c/${notice.chatId}`,
+        onClick: () => open(notice),
+      });
     },
     [chatId, visible, open],
   );

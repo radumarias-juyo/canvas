@@ -10,6 +10,8 @@ import { titleFromMessage, UNNAMED_CHAT } from "./agent/title.ts";
 import type { McpAuthChange, McpAuthRecord, McpAuthStore } from "./mcp/oauth.ts";
 import type { SignInCheck } from "./mcp/background.ts";
 import { McpSignIns } from "./mcp/sign-ins.ts";
+import { chatAgentName } from "./chat-name.ts";
+import { addColumn } from "./members.ts";
 import { PushSubscriptions, vapidKeys, type PushMessage } from "./push/subscriptions.ts";
 import type { PushSubscriptionKeys } from "./push/web-push.ts";
 import { mcpTokensKey } from "./storage/index.ts";
@@ -115,20 +117,16 @@ export class UserDirectory extends DurableObject<Env> {
       changed: () => this.#changed("sign-ins"),
       notify: async (notice, message) => {
         this.#changed(notice);
-        await this.#pushIfAway(message);
+        await this.push(message);
       },
-      // The chat object's name, as chatAgentName (worker/chat-agent.ts) builds it: that module imports this one.
-      signedIn: (chatId, server) => exports.ChatAgent.getByName(`${uid}:${chatId}`).signedIn(server),
+      signedIn: (chatId, server) => exports.ChatAgent.getByName(chatAgentName(uid, chatId)).signedIn(server),
       setAlarm: (at) => void (at === null ? ctx.storage.deleteAlarm() : ctx.storage.setAlarm(at)),
     });
   }
 
   /** Add a column a table made before it lacks; true when it was added. `table`, `column` and `type` are written here, never input. */
   #addColumn(table: string, column: string, type: string): boolean {
-    const columns = this.ctx.storage.sql.exec<{ name: string }>(`SELECT name FROM pragma_table_info('${table}')`).toArray();
-    if (columns.some((row) => row.name === column)) return false;
-    this.ctx.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
-    return true;
+    return addColumn(this.ctx.storage.sql, table, column, type);
   }
 
   /** This user's OAuth state for one MCP server (worker/mcp/oauth.ts): registration, tokens, a sign-in in progress. */
@@ -197,16 +195,12 @@ export class UserDirectory extends DurableObject<Env> {
   }
 
   /**
-   * Push a notification to every browser this user turned notifications on in, for when the app is closed. `body` says
-   * only that something arrived, never data. Nothing happens without the VAPID secrets.
+   * Push a notification to every browser this user turned notifications on in, for when the app is closed: only when
+   * none of their apps is open (an open one hears it on its socket and shows it itself). `body` says only that something
+   * arrived, never data. Nothing happens without the VAPID secrets.
    */
-  push(message: PushMessage): Promise<void> {
-    return this.#push.push(message, vapidKeys(this.env as { PUSH_VAPID_PUBLIC_KEY?: string; PUSH_VAPID_PRIVATE_KEY?: string; PUSH_SUBJECT?: string }));
-  }
-
-  /** Push only when no app of this user's is open: an open one hears it on its socket and shows it itself. */
-  async #pushIfAway(message: PushMessage): Promise<void> {
-    if (this.ctx.getWebSockets().length === 0) await this.push(message);
+  async push(message: PushMessage): Promise<void> {
+    if (this.ctx.getWebSockets().length === 0) await this.#push.push(message, vapidKeys(this.env));
   }
 
   /**
@@ -379,7 +373,7 @@ export class UserDirectory extends DurableObject<Env> {
     const set = "title = ?, updated_at = ?, activity_at = CASE WHEN ? THEN ? ELSE activity_at END, mentioned_at = CASE WHEN ? THEN ? ELSE mentioned_at END";
     if (!this.#updateChat(id, ownerUid, set, title, now, byOther ? 1 : 0, now, tag ? 1 : 0, now) || !tag) return;
     this.#changed({ type: "mention", chatId: id, ...(!named && { title }), ...tag });
-    this.ctx.waitUntil(this.#pushIfAway({ title: "You were mentioned", body: "Someone mentioned you in a chat.", url: `/c/${id}`, tag: `mention:${id}` }));
+    this.ctx.waitUntil(this.push({ title: "You were mentioned", body: "Someone mentioned you in a chat.", url: `/c/${id}`, tag: `mention:${id}` }));
   }
 
   removeSharedChat(id: string, ownerUid: string): void {
@@ -420,6 +414,7 @@ export class UserDirectory extends DurableObject<Env> {
 
   /** Take a deleted chat, and the artifacts it published, out of this user's lists. The chat deletes the rest first. */
   forgetChat(id: string): void {
+    this.#signIns.forgetChat(id);
     // The values its pages saved for this user, which were everyone's defaults.
     this.ctx.storage.sql.exec("DELETE FROM page_values WHERE artifact_id IN (SELECT id FROM artifacts WHERE chat_id = ?)", id);
     if (this.ctx.storage.sql.exec("DELETE FROM artifacts WHERE chat_id = ?", id).rowsWritten) this.#changed("artifacts");

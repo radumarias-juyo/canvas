@@ -22,8 +22,9 @@ export const MAX_PUSH_SUBS = 10;
 const PUSH_HOSTS = [/^fcm\.googleapis\.com$/, /^updates\.push\.services\.mozilla\.com$/, /(^|\.)push\.apple\.com$/, /\.notify\.windows\.com$/];
 
 /** The VAPID keys from the Worker's secrets, or null when the deployment has none (then nothing is pushed). */
-export function vapidKeys(env: { PUSH_VAPID_PUBLIC_KEY?: string; PUSH_VAPID_PRIVATE_KEY?: string; PUSH_SUBJECT?: string }): VapidKeys | null {
-  const { PUSH_VAPID_PUBLIC_KEY: publicKey, PUSH_VAPID_PRIVATE_KEY: privateKey, PUSH_SUBJECT: subject } = env;
+export function vapidKeys(env: object): VapidKeys | null {
+  // Optional secrets, so not in the generated Env.
+  const { PUSH_VAPID_PUBLIC_KEY: publicKey, PUSH_VAPID_PRIVATE_KEY: privateKey, PUSH_SUBJECT: subject } = env as Record<string, string | undefined>;
   if (!publicKey || !privateKey || !subject || !/^(mailto:|https:\/\/)/.test(subject)) return null;
   return { publicKey, privateKey, subject };
 }

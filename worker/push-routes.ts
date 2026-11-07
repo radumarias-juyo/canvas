@@ -12,7 +12,7 @@ import { checkPushSubscription, vapidKeys } from "./push/subscriptions.ts";
 export async function pushRoute(request: Request, env: Env, uid: string): Promise<Response | null> {
   const path = new URL(request.url).pathname;
   if (!path.startsWith("/api/push/")) return null;
-  const vapid = vapidKeys(env as Parameters<typeof vapidKeys>[0]);
+  const vapid = vapidKeys(env);
   if (path === "/api/push/key" && request.method === "GET") {
     return vapid ? json({ publicKey: vapid.publicKey }) : json({ error: "This app does not send push notifications." }, 404);
   }

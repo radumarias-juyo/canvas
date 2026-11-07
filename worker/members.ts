@@ -10,6 +10,13 @@ export interface Sql {
   exec(query: string, ...bindings: (string | number | null)[]): { toArray(): Record<string, unknown>[]; rowsWritten: number };
 }
 
+/** Add a column a table made before it lacks; true when it was added. `table`, `column` and `type` are written in code, never input. */
+export function addColumn(sql: Sql, table: string, column: string, type: string): boolean {
+  if (sql.exec(`SELECT name FROM pragma_table_info('${table}')`).toArray().some((row) => row.name === column)) return false;
+  sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+  return true;
+}
+
 /** An invite link's token: the chat it opens and a secret the chat keeps only the hash of. */
 interface InviteToken {
   ownerUid: string;

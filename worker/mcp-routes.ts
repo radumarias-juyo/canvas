@@ -1,6 +1,6 @@
 import { exports } from "cloudflare:workers";
 import { errorMessage } from "../shared/util.ts";
-import { json } from "./http.ts";
+import { json, readJson } from "./http.ts";
 import { mcpAuthStore } from "./users.ts";
 import { finishSignIn, OAUTH_CALLBACK_PATH, serverOfState, SIGN_IN_PATH, startSignIn } from "./mcp/oauth.ts";
 import { mcpServers } from "./mcp/servers.ts";
@@ -12,6 +12,9 @@ import { mcpServers } from "./mcp/servers.ts";
  *   GET /api/mcp/sign-ins          the account menu's list: each such server, signed in or not, and since when
  *   DELETE /api/mcp/sign-ins/:name Disconnect: forget the stored sign-in, tokens and registration
  *   DELETE /api/mcp/notices/:name  dismiss the sidebar's notice about a sign-in
+ * With DEV_TOOLS=true, to try the notices without scheduled runs:
+ *   POST /api/mcp/dev/:name/runs     { chatId }: that chat's runs use the server (UserDirectory.setRunServers)
+ *   POST /api/mcp/dev/:name/needed   { chatId?, what? }: a run needs a new sign-in (UserDirectory.notifySignInNeeded)
  * Returns null for any other path.
  */
 export async function mcpRoute(request: Request, env: Env, uid: string): Promise<Response | null> {
@@ -25,6 +28,18 @@ export async function mcpRoute(request: Request, env: Env, uid: string): Promise
     const server = servers.find((s) => s.name === decodeURIComponent(change[2]!));
     if (!server) return json({ error: "No server by that name signs in here." }, 404);
     return json(change[1] === "sign-ins" ? await directory().disconnectMcp(server.name) : await directory().dismissSignInNotice(server.name));
+  }
+  const dev = /^\/api\/mcp\/dev\/([^/]+)\/(runs|needed)$/.exec(url.pathname);
+  if (dev && request.method === "POST" && env.DEV_TOOLS === "true") {
+    const server = servers.find((s) => s.name === decodeURIComponent(dev[1]!));
+    const body = (await readJson<{ chatId?: unknown; what?: unknown }>(request)) ?? {};
+    const chatId = typeof body.chatId === "string" ? body.chatId : undefined;
+    if (!server) return json({ error: "No server by that name signs in here." }, 404);
+    if (dev[2] === "runs") {
+      if (!chatId || !(await directory().hasChat(chatId))) return json({ error: "No such chat" }, 404);
+      await directory().setRunServers(chatId, [server.name]);
+    } else await directory().notifySignInNeeded(server.name, { chatId, what: typeof body.what === "string" ? body.what : undefined });
+    return json(await directory().mcpSignIns());
   }
   if (request.method !== "GET") return null;
 

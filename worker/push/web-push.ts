@@ -1,4 +1,4 @@
-import { isObject, toBase64 } from "../../shared/util.ts";
+import { fromBase64url, isObject, toBase64url, tryFromBase64url } from "../../shared/util.ts";
 
 // Web Push from a Worker with WebCrypto alone: the message is encrypted for the browser's subscription (RFC 8291, the
 // aes128gcm content coding of RFC 8188), and the push service is told who sends it with a VAPID token (RFC 8292).
@@ -203,27 +203,4 @@ function copy(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
 
 function base64urlJson(value: unknown): string {
   return toBase64url(utf8(JSON.stringify(value)));
-}
-
-/** Base64url without padding, as JWTs and push subscriptions write it. */
-function toBase64url(bytes: Uint8Array): string {
-  return toBase64(bytes).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
-/** The bytes of base64url, padded or not; throws on anything else. */
-function fromBase64url(value: string): Uint8Array<ArrayBuffer> {
-  const bytes = tryFromBase64url(value);
-  if (!bytes) throw new Error("Not valid base64url.");
-  return bytes;
-}
-
-function tryFromBase64url(value: string): Uint8Array<ArrayBuffer> | undefined {
-  const trimmed = value.replace(/=+$/, "");
-  if (!/^[A-Za-z0-9_-]*$/.test(trimmed) || trimmed.length % 4 === 1) return undefined;
-  const base64 = trimmed.replace(/-/g, "+").replace(/_/g, "/");
-  try {
-    return Uint8Array.from(atob(base64 + "=".repeat((4 - (base64.length % 4)) % 4)), (c) => c.charCodeAt(0));
-  } catch {
-    return undefined;
-  }
 }

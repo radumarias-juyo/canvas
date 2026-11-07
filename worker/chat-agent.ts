@@ -236,10 +236,7 @@ async function* entryPages(
   }
 }
 
-/** The name of a user's chat object. The uid must come from a verified identity: it is what keeps users apart. */
-export function chatAgentName(uid: string, chatId: string): string {
-  return `${uid}:${chatId}`;
-}
+export { chatAgentName } from "./chat-name.ts";
 
 /** The uid and chat id a chat object's name was built from (see chatAgentName). */
 function parseChatAgentName(name: string): { uid: string; chatId: string } {

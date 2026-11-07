@@ -3,7 +3,7 @@ import type { SignInNotice } from "../shared/sign-ins.ts";
 import { assertReadOnly, grantMs, KEEP_ALIVE_MS, readOnlyTools, WARN_AHEAD_MS, warnAt, type SignInCheck } from "../worker/mcp/background.ts";
 import { McpFailure } from "../worker/mcp/hub.ts";
 import { openAuthRecord, sealAuthRecord } from "../worker/mcp/sealed.ts";
-import { McpSignIns } from "../worker/mcp/sign-ins.ts";
+import { McpSignIns, RECENT_REFRESH_MS } from "../worker/mcp/sign-ins.ts";
 import { deriveUserAesKey } from "../worker/storage/keys.ts";
 import { MASTER_KEY, memorySql } from "./fakes.ts";
 
@@ -91,7 +91,7 @@ describe("sealed sign-in records", () => {
     sql.exec("CREATE TABLE mcp_auth (server TEXT PRIMARY KEY, data TEXT NOT NULL)");
     sql.exec("INSERT INTO mcp_auth (server, data) VALUES (?, ?)", "Portal", JSON.stringify({ client: CLIENT, tokens: TOKENS }));
     const s = setup({ sql });
-    expect(s.row()).toMatchObject({ signed_in: 1, signed_in_at: T0 });
+    expect(s.row()).toMatchObject({ signed_in_at: T0 });
     expect(await s.signIns.record("Portal")).toEqual({ client: CLIENT, tokens: TOKENS });
     expect(String(s.row()!.data)).toMatch(/^v1\./);
     expect(await s.signIns.record("Portal")).toEqual({ client: CLIENT, tokens: TOKENS });
@@ -102,7 +102,7 @@ describe("sealed sign-in records", () => {
     const s = setup({ sql });
     const otherKey = await deriveUserAesKey(MASTER_KEY, "FILES_MASTER_KEY", "pi-artifacts/mcp-tokens-from-files/v1", "ada");
     const sealed = await sealAuthRecord(otherKey, "Portal", { client: CLIENT, tokens: TOKENS });
-    sql.exec("INSERT INTO mcp_auth (server, data, signed_in, signed_in_at) VALUES (?, ?, 1, ?)", "Portal", sealed, T0);
+    sql.exec("INSERT INTO mcp_auth (server, data, signed_in_at) VALUES (?, ?, ?)", "Portal", sealed, T0);
     expect(await s.signIns.record("Portal")).toEqual({});
     expect(s.row()).toBeUndefined();
   });
@@ -207,6 +207,39 @@ describe("sign-ins with nobody present", () => {
     expect(s.told).toEqual([expect.objectContaining({ kind: "needed", server: "Portal" })]);
   });
 
+  it("trusts a refresh from the last hour before a run, and refreshes an older one", async () => {
+    const s = setup();
+    await signIn(s, T0);
+    s.at(T0 + RECENT_REFRESH_MS - 1);
+    expect(await s.signIns.check(["Portal"])).toEqual({ Portal: "ok" });
+    expect(s.checks).toEqual([]);
+    s.at(T0 + RECENT_REFRESH_MS + 1);
+    expect(await s.signIns.check(["Portal"])).toEqual({ Portal: "ok" });
+    expect(s.checks).toEqual(["Portal"]);
+  });
+
+  it("forgets a deleted chat's runs: its servers are no longer kept alive, and it is not told", async () => {
+    const s = setup();
+    await signIn(s, T0);
+    s.signIns.setRunServers("chat1", ["Portal"]);
+    await s.signIns.needed("Portal", { chatId: "chat1" });
+    s.signIns.forgetChat("chat1");
+    expect(s.signIns.list()[0]!.usedByRuns).toBe(false);
+    expect(s.alarms.at(-1)).toBeNull();
+    await signIn(s, T0 + DAY);
+    expect(s.chats).toEqual([]);
+  });
+
+  it("sets the alarm only when it changes", async () => {
+    const s = setup();
+    await signIn(s, T0);
+    s.signIns.setRunServers("chat1", ["Portal"]);
+    const set = s.alarms.length;
+    s.signIns.setRunServers("chat1", ["Portal", "Portal"]);
+    s.signIns.setRunServers("chat2", ["Portal"]);
+    expect(s.alarms).toHaveLength(set);
+  });
+
   it("clears the alarm when no run uses a signed-in server", async () => {
     const s = setup();
     await signIn(s, T0);
@@ -220,7 +253,7 @@ describe("sign-ins with nobody present", () => {
     await signIn(s, T0);
     await s.signIns.update("Portal", { clear: ["tokens"] });
     expect(s.signIns.list()[0]).toMatchObject({ signedIn: false });
-    expect(s.row()).toMatchObject({ signed_in: 0, signed_in_at: null });
+    expect(s.row()).toMatchObject({ signed_in_at: null });
     await signIn(s, T0 + DAY);
     expect(await s.signIns.disconnect("Portal")).toBe(true);
     expect(s.row()).toBeUndefined();

@@ -20,7 +20,7 @@ import { isPicked, type Picks } from "./files/picks.ts";
 import { isBoolean, MenuButton, ResizeHandle, SectionHead, useMediaQuery, useStoredState } from "./layout.tsx";
 import { useLatest, useSidebarSocket } from "./sidebar.ts";
 import { SignInNotices, useSignInAlerts } from "./SignIns.tsx";
-import { onPushOpen } from "./push.ts";
+import { disablePush, onPushOpen } from "./push.ts";
 import type { McpSignInView } from "../shared/sign-ins.ts";
 import { SkillsView } from "./skills/SkillsView.tsx";
 
@@ -82,6 +82,8 @@ export function App() {
       showSkills={path === "/skills"}
       navigate={navigate}
       onSignOut={async () => {
+        // This browser stops getting this user's pushes: whoever signs in here next must not see them.
+        await disablePush();
         if (me.auth === "access") {
           location.href = "/cdn-cgi/access/logout";
           return;

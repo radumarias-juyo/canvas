@@ -1,3 +1,4 @@
+import { fromBase64url } from "../shared/util.ts";
 import { api } from "./api.ts";
 
 /**
@@ -26,11 +27,31 @@ async function subscribe(): Promise<void> {
   const serverKey = fromBase64url(key);
   let subscription = await registration.pushManager.getSubscription();
   if (subscription && !sameKey(subscription.options.applicationServerKey, serverKey)) {
-    await subscription.unsubscribe();
+    await forget(subscription);
     subscription = null;
   }
   subscription ??= await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: serverKey });
   await api.subscribePush(subscription.toJSON());
+}
+
+/**
+ * Stop pushes to this browser, before its user signs out: the next person to sign in here must not get theirs. Waits at
+ * most a moment, so signing out never hangs on it.
+ */
+export async function disablePush(): Promise<void> {
+  if (!supported) return;
+  enabling = undefined;
+  const stop = (async () => {
+    const subscription = await (await navigator.serviceWorker.getRegistration())?.pushManager.getSubscription();
+    if (subscription) await forget(subscription);
+  })().catch((error: unknown) => console.warn("push:", error));
+  await Promise.race([stop, new Promise((resolve) => setTimeout(resolve, 2_000))]);
+}
+
+/** Unsubscribe in the browser, and tell the Worker to forget the endpoint. */
+async function forget(subscription: PushSubscription): Promise<void> {
+  await api.unsubscribePush(subscription.endpoint).catch(() => {});
+  await subscription.unsubscribe();
 }
 
 /** A click on a pushed notification, in an open window: the service worker asks it to go to `url` (an app path). */
@@ -44,9 +65,12 @@ export function onPushOpen(navigate: (path: string) => void): () => void {
   return () => navigator.serviceWorker.removeEventListener("message", listener);
 }
 
-/** Show a notice as the system's notification from the open app: through the service worker where there is one (Android shows only those). */
-export async function showNotification(title: string, options: NotificationOptions & { onClick: () => void }): Promise<void> {
-  const { onClick, ...shown } = options;
+/**
+ * Show a notice as the system's notification from the open app. Where the page may not (Android shows only a service
+ * worker's), the service worker shows it, and a click opens `url` (an app path) instead of calling `onClick`.
+ */
+export async function showNotification(title: string, options: NotificationOptions & { url: string; onClick: () => void }): Promise<void> {
+  const { onClick, url, ...shown } = options;
   try {
     const shownHere = new Notification(title, shown);
     shownHere.onclick = () => {
@@ -56,16 +80,8 @@ export async function showNotification(title: string, options: NotificationOptio
     };
   } catch {
     const registration = supported ? await navigator.serviceWorker.getRegistration() : undefined;
-    await registration?.showNotification(title, { ...shown, data: { url: "/" } });
+    await registration?.showNotification(title, { ...shown, data: { url } });
   }
-}
-
-function fromBase64url(value: string): Uint8Array<ArrayBuffer> {
-  const base64 = value
-    .replace(/-/g, "+")
-    .replace(/_/g, "/")
-    .padEnd(Math.ceil(value.length / 4) * 4, "=");
-  return Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
 }
 
 function sameKey(current: ArrayBuffer | null, key: Uint8Array): boolean {

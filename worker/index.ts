@@ -206,17 +206,6 @@ async function route(request: Request, env: Env): Promise<Response> {
     }
   }
 
-  // Try the notices of sign-ins for scheduled runs without a run. Needs DEV_TOOLS=true. Body: { what?, chatId?, runs? }:
-  // `runs` names a chat whose runs use this server (setRunServers); otherwise a run is said to need a new sign-in.
-  const devSignIn = path.match(/^\/api\/dev\/sign-ins\/([^/]+)$/);
-  if (devSignIn && method === "POST" && env.DEV_TOOLS === "true") {
-    const body = ((await readJson<{ what?: string; chatId?: string; runs?: string }>(request)) ?? {}) as { what?: string; chatId?: string; runs?: string };
-    const server = decodeURIComponent(devSignIn[1]!);
-    if (body.runs) await directory.setRunServers(body.runs, [server]);
-    else await directory.notifySignInNeeded(server, { what: body.what, chatId: body.chatId });
-    return json(await directory.mcpSignIns());
-  }
-
   const files = await filesRoute(request, () => storage.userFiles(uid));
   if (files) return files;
 
