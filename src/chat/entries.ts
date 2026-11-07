@@ -3,10 +3,15 @@ import type { EntryRecord } from "@earendil-works/pi-durable";
 import { CHAT_AGENT_KIND, CHAT_TURN_KIND, proposedBy, type ChatAgentReplyData } from "../../shared/agents.ts";
 import { entryItems, mergeItems, type ItemRef } from "../../shared/items.ts";
 import { CHAT_MESSAGE_KIND, CHAT_PEOPLE_KIND, publishedBy, type ChatMessageData, type ChatPeopleData } from "../../shared/protocol.ts";
+import { CHAT_COPY_KIND, CHAT_EVENT_KIND, type ChatCopyData } from "../../shared/chat-kinds.ts";
 
 /** When an entry was sent, for one that has a time: messages from before chats kept `sentAt` have only the time pi wrote them, and asides not even that. */
 export function sentAt(entry: EntryRecord): number | undefined {
   if (entry.kind === CHAT_AGENT_KIND) return (entry.data as unknown as ChatAgentReplyData).endedAt;
+  if (entry.kind === CHAT_COPY_KIND) {
+    const data = entry.data as unknown as ChatCopyData;
+    return data.from === "pi" ? data.sentAt : undefined;
+  }
   const at = entry.kind === CHAT_MESSAGE_KIND ? (entry.data as unknown as ChatMessageData).sentAt : undefined;
   return at ?? entry.model?.[0]?.timestamp;
 }
@@ -16,7 +21,15 @@ export function sentAt(entry: EntryRecord): number | undefined {
  * one. Another agent's reply (`chat.agent`) shows as its own message.
  */
 export function shown(entry: EntryRecord): boolean {
-  return entry.kind === CHAT_MESSAGE_KIND || entry.kind === CHAT_PEOPLE_KIND || entry.kind === CHAT_AGENT_KIND || entry.kind === "pi.user" || isAgent(entry);
+  return (
+    entry.kind === CHAT_MESSAGE_KIND ||
+    entry.kind === CHAT_PEOPLE_KIND ||
+    entry.kind === CHAT_AGENT_KIND ||
+    entry.kind === CHAT_EVENT_KIND ||
+    entry.kind === CHAT_COPY_KIND ||
+    entry.kind === "pi.user" ||
+    isAgent(entry)
+  );
 }
 
 export function isAgent(entry: EntryRecord): boolean {

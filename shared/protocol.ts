@@ -8,6 +8,7 @@ import type { EntryReactions, Reactions } from "./reactions.ts";
 import type { Attachment, AttachmentInput } from "./attachments.ts";
 import type { Mention, MentionInput } from "./mentions.ts";
 import type { AgentColor, ChatAgentView } from "./agents.ts";
+import type { ChatKind, ChatPage } from "./chat-kinds.ts";
 
 export type McpErrorCode =
   | "server_not_connected"
@@ -306,13 +307,33 @@ export interface ChatSummary {
   mentioned?: true;
   /** Set on an agent's own conversation: the agent, shown like a contact (its badge and its last post). */
   agent?: { id: string; name: string; avatar: string; color: AgentColor; preview?: string };
+  /** Who sees it, when its agents answer, what may leave it (shared/chat-kinds.ts). */
+  kind: ChatKind;
+  /** When this user pinned it to the top of their list. */
+  pinnedAt?: number;
+  /** This user closed it: hidden from their list until someone tags them in it again. */
+  closed?: true;
+}
+
+/** The longest name someone gives a chat for themselves. */
+export const MAX_CHAT_TITLE = 200;
+
+/** What one person changes about a chat in their own sidebar (PATCH /api/chats/:id); each field left out stays as it is. */
+export interface ChatRowChange {
+  pinned?: boolean;
+  /** Hidden from their list until someone tags them in it again (or they open it from the closed ones). */
+  closed?: boolean;
+  /** Bold again, as if something new came in, until they next look at it. */
+  unread?: boolean;
+  /** Their own name for it; empty goes back to the chat's own. */
+  title?: string;
 }
 
 /**
  * What the sidebar's socket (GET /api/me/ws) sends: the name of a list that changed, so the app reads it again. A
- * MentionNotice comes as JSON.
+ * MentionNotice, or a SignInNotice (shared/sign-ins.ts), comes as JSON.
  */
-export type SidebarList = "chats" | "artifacts" | "skills" | "agents";
+export type SidebarList = "chats" | "artifacts" | "skills" | "agents" | "sign-ins";
 
 /** Someone tagged this user in a shared chat: the app shows it, and the browser too when it may and the app is not in view. */
 export interface MentionNotice {
@@ -326,6 +347,8 @@ export interface MentionNotice {
   text: string;
   /** When it was sent: one message's notices share it, so windows can show it once. */
   at: number;
+  /** Not a tag: `from` added this user to the chat, which shows them everything said in it so far. */
+  added?: true;
 }
 
 /** Someone in a chat: a verified uid, and the name the others see (their email, or the demo name). */
@@ -376,8 +399,11 @@ export interface ChatInvite {
   expiresAt: number;
 }
 
-/** What one person's app is told about a chat's people: everyone in it, and for its owner the invites still open. */
-export type ChatPeopleView = ChatPeople & { invites?: ChatInvite[] };
+/**
+ * What one person's app is told about a chat's people: everyone in it, and for its owner the invites still open; the
+ * chat's kind, the page it discusses, and the chat it branched off from, if any.
+ */
+export type ChatPeopleView = ChatPeople & { invites?: ChatInvite[]; kind?: ChatKind; page?: ChatPage };
 
 /** POST /api/chats/:id/invites: a single-use link to the chat. */
 export interface CreatedInvite extends ChatInvite {
@@ -499,7 +525,9 @@ export interface ChatPeopleData extends Person {
    * `rejoined`: someone already in the chat opened an invite link to it, in another window or on another device.
    * `stopped`: they stopped the agent mid-run.
    */
-  event: "joined" | "rejoined" | "left" | "removed" | "stopped" | "agent-added" | "agent-removed";
+  event: "joined" | "rejoined" | "left" | "removed" | "stopped" | "agent-added" | "agent-removed" | "added";
+  /** For `added`: who added them (the owner). */
+  by?: string;
   /** For agent-added and agent-removed, and a stopped that stopped one agent only: the agent's handle. */
   agent?: string;
 }

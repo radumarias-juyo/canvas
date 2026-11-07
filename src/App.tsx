@@ -7,7 +7,7 @@ import { AccountMenu } from "./AccountMenu.tsx";
 import { BackToSite } from "./BackToSite.tsx";
 import { api, inSecondSeat, type ArtifactSummary, type FileInfo, type Me } from "./api.ts";
 import { ArtifactPanel } from "./artifact/ArtifactPanel.tsx";
-import { ChatFilterBar, ChatList, isShared, UnreadDot, useChatFilter, useChatList } from "./chat/ChatList.tsx";
+import { ChatFilterBar, ChatList, ChatsHeading, isShared, UnreadDot, useChatFilter, useChatList, useChatOrder } from "./chat/ChatList.tsx";
 import { ChatView } from "./chat/ChatView.tsx";
 import { MentionToasts, useMentionNotices } from "./chat/notify.tsx";
 import { DeleteChat } from "./chat/DeleteChat.tsx";
@@ -19,6 +19,9 @@ import { carriesFiles, fromDrop } from "./files/pick.ts";
 import { isPicked, type Picks } from "./files/picks.ts";
 import { isBoolean, MenuButton, ResizeHandle, SectionHead, useMediaQuery, useStoredState } from "./layout.tsx";
 import { useLatest, useSidebarSocket } from "./sidebar.ts";
+import { SignInNotices, useSignInAlerts } from "./SignIns.tsx";
+import { disablePush, onPushOpen, setPushUser } from "./push.ts";
+import type { McpSignInView } from "../shared/sign-ins.ts";
 import { SkillsView } from "./skills/SkillsView.tsx";
 import { AgentPage } from "./agents/AgentPage.tsx";
 import { AgentsNav } from "./agents/AgentsNav.tsx";
@@ -44,6 +47,8 @@ function usePath(): [URL, (path: string) => void] {
 export function App() {
   const [url, navigate] = usePath();
   const path = url.pathname;
+  // A click on a pushed notification while the app is open, on any of its pages, moves it to the chat the push names.
+  useEffect(() => onPushOpen(navigate), [navigate]);
   // Who is signed in, and how this deployment signs people in. Undefined until the Worker answers.
   const [session, setSession] = useState<{ me: Me | null; auth: Me["auth"] }>();
 
@@ -84,6 +89,8 @@ export function App() {
       agentPage={agentPlace(url) ?? undefined}
       navigate={navigate}
       onSignOut={async () => {
+        // This browser stops getting this user's pushes: whoever signs in here next must not see them.
+        await disablePush();
         if (me.auth === "access") {
           location.href = "/cdn-cgi/access/logout";
           return;
@@ -239,6 +246,7 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, agentP
   const [menuOpen, setMenuOpen] = useState(false);
   const rail = collapsed && !narrow;
   const chatFilter = useChatFilter(chats, chatId);
+  const chatOrder = useChatOrder();
   const [artifactsOpen, setArtifactsOpen] = useStoredState("layout.artifactsOpen", false, isBoolean);
   const [sidebarWidth, setSidebarWidth] = useStoredState("layout.sidebarWidth", SIDEBAR_DEFAULT);
   // The chat column's width beside an open preview; null splits the space 40/60.
@@ -263,7 +271,13 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, agentP
   // may have saved some (run_python), so they are read again after each one.
   // Someone tagging the user shows in the app, and in the browser while it is in the background.
   const notices = useMentionNotices(chatId, navigate);
-  useSidebarSocket({ chats: loadChats, artifacts: loadArtifacts, skills: loadSkills, agents: reloadAgents }, notices.onMention);
+  // Sign-ins to servers that sign in each user: the account menu lists them, and the sidebar shows those that need the
+  // user (a run waiting, or a sign-in about to run out).
+  const [signIns, loadSignIns, setSignIns] = useLatest<McpSignInView[]>(api.signIns, []);
+  const onSignIn = useSignInAlerts(loadSignIns);
+  useSidebarSocket({ chats: loadChats, artifacts: loadArtifacts, skills: loadSkills, "sign-ins": loadSignIns, agents: reloadAgents }, notices.onMention, onSignIn);
+  // Pushes reach this browser for the user signed in here, and no one else.
+  useEffect(() => setPushUser(uid), [uid]);
   // Another chat shows its own artifacts: the one asked for at once, else the newest it published once it loads.
   // Going to the same chat without one asked for (its sidebar link, Back) keeps what it shows: the chat does not load
   // again, so it would not offer its newest artifact.
@@ -292,6 +306,7 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, agentP
     return () => document.removeEventListener("keydown", onKey);
   }, [menuOpen]);
   const openMenu = useCallback(() => setMenuOpen(true), []);
+  const openChat = useCallback((id: string) => navigate(`/c/${id}`), [navigate]);
 
   const openFile = useCallback((file: string) => setPreview({ file }), []);
   const chatFileBase = guestChat && chatFileRoute(guestChat);
@@ -399,11 +414,12 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, agentP
               </button>
             )}
           </div>
+          <SignInNotices list={signIns} onChange={(list) => setSignIns(() => list)} />
           {/* Chats scroll here; artifacts, skills and the files panel stay below them. */}
           <div className="sidebar-scroll">
-            <h3>Chats</h3>
+            <ChatsHeading order={chatOrder} />
             {chatFilter.bar && <ChatFilterBar {...chatFilter} />}
-            <ChatList chats={chatFilter.shown} openId={chatId} navigate={navigate} onDelete={setDeleting} empty={chatFilter.empty} />
+            <ChatList chats={chatFilter.shown} openId={chatId} uid={uid} order={chatOrder} navigate={navigate} onDelete={setDeleting} empty={chatFilter.empty} />
           </div>
           <section className="sidebar-pinned">
             <SectionHead name="Artifacts" count={artifacts.length + chatArtifacts.length} open={artifactsOpen} onToggle={setArtifactsOpen}>
@@ -458,7 +474,7 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, agentP
             onOpenFile={openFile}
             onDeleted={onFilesDeleted}
           />
-          <AccountMenu label={label} onSignOut={onSignOut} />
+          <AccountMenu label={label} onSignOut={onSignOut} signIns={signIns} onSignInsChange={(list) => setSignIns(() => list)} />
         </aside>
       )}
       <ResizeHandle
@@ -511,6 +527,7 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, agentP
               onArtifact={onArtifact}
               onActivity={onActivity}
               onLeft={() => navigate("/")}
+              onOpenChat={openChat}
             />
           </ErrorBoundary>
         ) : (
@@ -565,7 +582,10 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, agentP
             <ArtifactPanel artifactId={preview.artifactId} latestKnown={preview.version} uid={uid} onClose={closePreview} />
           </ErrorBoundary>
         ))}
-      <MentionToasts {...notices} asking={chats.some(isShared)} />
+      <MentionToasts
+        {...notices}
+        asking={{ mentions: chats.some(isShared), signIns: signIns.some((item) => item.usedByRuns || item.notice !== undefined) }}
+      />
     </div>
   );
 }

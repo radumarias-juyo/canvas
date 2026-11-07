@@ -76,6 +76,8 @@ export interface RunHost {
   read(server: string, tool: string, input: StepInput): Promise<Value>;
   /** Which of these servers need their owner to sign in again before a run can read them. */
   needsSignIn(servers: readonly string[]): Promise<string[]>;
+  /** Ask the owner to sign in to these servers again, for `agent`'s run: they are told, and this chat when they do. */
+  signInNeeded(agent: AgentDefinition, servers: readonly string[]): void;
   /** A fresh pi session for one item. */
   newSession(): Promise<string>;
   /** Set an item's session up for its work steps: the agent's model (or `model`), instructions and read tools. */
@@ -263,13 +265,13 @@ export class RunExecutor {
     this.#host.changed(agent.id);
     try {
       const missing = await this.#host.needsSignIn(reads);
-      if (missing.length) return this.#waitForSignIn(run, missing);
+      if (missing.length) return this.#waitForSignIn(agent, run, missing);
       const elements = await this.#elements(agent);
       const outcomes = await mapLimit(elements, RUN_CONCURRENCY, (element) => this.#item(agent, run, element, when));
       const status = await this.#finish(agent, runs.get(agent.id, dueAt)!, outcomes);
       return { status, started };
     } catch (error) {
-      if (error instanceof SignInNeeded) return this.#waitForSignIn(run, [error.server]);
+      if (error instanceof SignInNeeded) return this.#waitForSignIn(agent, run, [error.server]);
       runs.update(agent.id, dueAt, { status: "failed", summary: `Failed: ${errorMessage(error)}` });
       return { status: "failed", started };
     } finally {
@@ -277,7 +279,9 @@ export class RunExecutor {
     }
   }
 
-  #waitForSignIn(run: RunRecord, servers: string[]): RunEnd {
+  #waitForSignIn(agent: AgentDefinition, run: RunRecord, servers: string[]): RunEnd {
+    // The owner is asked to sign in (a notice, a push), and this chat hears when they do (AgentRunner.signedIn).
+    if (!run.test) this.#host.signInNeeded(agent, servers);
     this.#host.runs.update(run.agentId, run.dueAt, {
       status: "needs_sign_in",
       summary: `Waiting for you to sign in to ${servers.join(", ")}.`,

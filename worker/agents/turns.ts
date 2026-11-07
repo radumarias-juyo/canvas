@@ -6,6 +6,7 @@ import type { EntryRecord } from "@earendil-works/pi-durable";
 import { TOOL_SEARCH_TOOL_NAME } from "@earendil-works/pi-durable/tool-search";
 import { CHAT_AGENT_KIND, MAX_HOPS, mayUseServer, speakerLabel, type AgentDefinition, type ChatAgentReplyData } from "../../shared/agents.ts";
 import { textOf } from "../../shared/canonical.ts";
+import { CHAT_CONTEXT_KIND, CHAT_COPY_KIND, type ChatCopyData } from "../../shared/chat-kinds.ts";
 import { entryItems, mergeItems, type ItemRef } from "../../shared/items.ts";
 import { AGENT_NAME, calledNames, type Mention } from "../../shared/mentions.ts";
 import { CHAT_MESSAGE_KIND, incomingKey, publishedBy, type ChatMessageData } from "../../shared/protocol.ts";
@@ -56,7 +57,7 @@ export function assistantText(message: AssistantMessage): string {
   return textOf(message.content.filter(Boolean), "").trim();
 }
 
-function userText(message: UserMessage): string {
+export function userText(message: UserMessage): string {
   return typeof message.content === "string" ? message.content : textOf(message.content, "");
 }
 
@@ -172,10 +173,11 @@ export function askLine(entry: EntryRecord, self: string, ownerUid: string): str
     return `${speakerLabel({ name: data.name, kind: "person", owner: data.uid === ownerUid })}: ${said(data.text)}${files}`;
   }
   if (entry.kind === CHAT_AGENT_KIND) {
-    const data = entry.data as unknown as ChatAgentReplyData;
+    const data = entry.data as unknown as ChatAgentReplyData & { copied?: true };
     if (!data.text) return undefined;
-    // Its own replies are in its session already, but for those of its runs (a report, a reply in a run's own session).
-    if (data.agentId === self) return data.run ? `[you, in a run]: ${said(data.text)}` : undefined;
+    // Its own replies are in its session already (unless copied into a branch, where its session started afresh), but
+    // for those of its runs (a report, a reply in a run's own session).
+    if (data.agentId === self && !data.copied) return data.run ? `[you, in a run]: ${said(data.text)}` : undefined;
     return askOf({ name: data.name, kind: "agent" }, data.text);
   }
   const message = entry.model?.[0];
@@ -186,6 +188,17 @@ export function askLine(entry: EntryRecord, self: string, ownerUid: string): str
   if (entry.kind === "pi.user" && message?.role === "user") {
     const text = userText(message);
     return text ? askOf({ name: "the owner", kind: "person", owner: true }, text) : undefined;
+  }
+  // One of pi's replies copied into a branch; the people's messages and agents' replies are copied as they were.
+  if (entry.kind === CHAT_COPY_KIND) {
+    const data = entry.data as unknown as ChatCopyData;
+    return data.from === "pi" && data.text ? askOf({ name: AGENT_NAME, kind: "agent" }, data.text) : undefined;
+  }
+  // What the app tells the agents: of the page the chat discusses, and of the conversation a branch carries. Never a
+  // person's words.
+  if (entry.kind === CHAT_CONTEXT_KIND && message?.role === "user") {
+    const text = userText(message);
+    return text ? `[the app]: ${said(text)}` : undefined;
   }
   return undefined;
 }

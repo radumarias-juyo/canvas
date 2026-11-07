@@ -7,7 +7,7 @@ import { SourceCore, type Subscriber } from "./agents/runs/source.ts";
 import { connectStreamableHttp } from "./mcp/connect.ts";
 import { McpHub } from "./mcp/hub.ts";
 import { mcpServers, watchableForAll } from "./mcp/servers.ts";
-import { chatAgentName } from "./names.ts";
+import { chatAgentName } from "./chat-name.ts";
 
 /** The Source Durable Object (see SourceCore), named by sourceName. */
 export class Source extends DurableObject<Env> {

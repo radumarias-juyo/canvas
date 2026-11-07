@@ -214,19 +214,72 @@ body.resizing iframe { pointer-events: none; }
   background: var(--accent); color: var(--accent-text); font-size: 11px; font-weight: 700; line-height: 1;
 }
 .sidebar .nav-unread { flex: none; padding: 0; width: 8px; height: 8px; margin: 0 4px; border-radius: 50%; background: var(--accent); }
-/* A chat in the list, with its delete button: shown on hover or focus, and always on touch screens. */
+/* A chat in the list, with its "…" menu (ChatList.tsx): shown on hover or focus, and always on touch screens. */
 .chat-link { position: relative; display: flex; border-radius: 6px; }
 .chat-link > a { flex: 1; min-width: 0; }
-.chat-link:hover, .chat-link.active, .chat-link:focus-within { background: var(--surface-2); }
+.chat-link:hover, .chat-link.active, .chat-link:focus-within, .chat-link.menu-open { background: var(--surface-2); }
 /* The open chat: marked by a bar in the accent at its start, besides its background. */
 .chat-link.active { box-shadow: inset 3px 0 0 var(--accent); }
 .chat-link:hover > a, .chat-link > a:hover { background: none; }
-.chat-delete { flex: none; display: grid; place-items: center; padding: 0 6px; border: 0; background: none; color: var(--muted); opacity: 0; }
-.chat-link:hover .chat-delete, .chat-delete:focus-visible { opacity: 1; }
-.chat-delete:hover { color: var(--error); }
-@media (hover: none) { .chat-delete { opacity: 1; } }
+.chat-more { flex: none; display: grid; place-items: center; padding: 0 6px; border: 0; background: none; color: var(--muted); opacity: 0; }
+.chat-link:hover .chat-more, .chat-link.menu-open .chat-more, .chat-more:focus-visible { opacity: 1; }
+.chat-more:hover { color: var(--text); }
+@media (hover: none) { .chat-more { opacity: 1; } }
 /* With a mouse, the button shows over the chat's status icon on hover, so the icons line up with the other lists'. */
-@media (hover: hover) { .chat-delete { position: absolute; top: 0; right: 0; bottom: 0; border-radius: 0 6px 6px 0; background: var(--surface-2); } }
+@media (hover: hover) { .chat-more { position: absolute; top: 0; right: 0; bottom: 0; border-radius: 0 6px 6px 0; background: var(--surface-2); } }
+.sidebar nav .nav-pin { flex: none; width: 6px; height: 6px; padding: 0; border-radius: 1px; background: var(--muted); transform: rotate(45deg); }
+.sidebar nav .nav-copied { flex: none; padding: 0; color: var(--accent); font-size: 12px; }
+.chat-rename { flex: 1; min-width: 0; margin: 1px 0; padding: 4px 7px; border: 1px solid var(--accent); border-radius: 6px; background: var(--surface); color: var(--text); font: inherit; font-size: 14px; }
+/* A small menu under a sidebar row, and under the chat list's order button. */
+.row-menu {
+  position: absolute; top: calc(100% + 2px); right: 0; z-index: 8; display: flex; flex-direction: column; min-width: 160px; padding: 6px;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow-pop);
+}
+.row-menu > button { padding: 7px 10px; border: 0; border-radius: 6px; background: none; color: var(--text); text-align: left; font-size: 14px; }
+.row-menu > button:hover, .row-menu > button:focus-visible { background: var(--surface-2); }
+.row-menu > .danger-item { color: var(--error); }
+.row-menu > label { display: flex; align-items: center; gap: 8px; padding: 5px 8px; font-size: 13.5px; cursor: pointer; }
+.row-menu > label:nth-of-type(2) { margin-top: 4px; padding-top: 9px; border-top: 1px solid var(--border); }
+.chats-heading { position: relative; display: flex; align-items: center; gap: 4px; }
+.chats-heading h3 { flex: 1; }
+.chats-order { width: 24px; height: 24px; padding: 0; color: var(--muted); }
+.chat-group + .chat-group { margin-top: 2px; }
+.closed-toggle { width: 100%; margin-top: 6px; padding: 5px 8px; border: 0; border-radius: 6px; background: none; color: var(--muted); text-align: left; font-size: 12.5px; }
+.closed-toggle:hover { background: var(--surface-2); color: var(--text); }
+.chat-group.closed .nav-title { color: var(--muted); }
+/* The chat's kind, beside its title (ChatKinds.tsx), and what its owner changes it with. */
+.kind-chip-box { position: relative; flex: none; }
+.kind-chip {
+  padding: 1px 9px; border: 1px solid var(--border); border-radius: 999px; background: none; color: var(--muted);
+  font-size: 12px; line-height: 18px; white-space: nowrap; cursor: pointer;
+}
+.kind-chip:hover, .kind-chip[aria-expanded="true"] { background: var(--surface-2); color: var(--text); }
+.kind-chip.kind-group, .kind-chip.kind-page { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); color: var(--accent); }
+.kind-chip.kind-off_record { border-style: dashed; color: var(--text); }
+.kind-panel {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 9; width: min(340px, calc(100vw - 32px)); padding: 8px;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow-pop);
+}
+.kind-choices { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.kind-choice { width: 100%; padding: 8px 10px; border: 1px solid transparent; border-radius: 8px; background: none; color: var(--text); text-align: left; }
+.kind-choice:hover, .kind-choice:focus-visible { background: var(--surface-2); }
+.kind-choice.active { border-color: color-mix(in srgb, var(--accent) 45%, transparent); background: var(--accent-soft); }
+.kind-lines { display: flex; flex-direction: column; gap: 1px; font-size: 12.5px; color: var(--muted); }
+.kind-lines strong { color: var(--text); font-size: 14px; }
+.kind-panel > .kind-lines { padding: 4px 6px; }
+.kind-confirm { display: flex; flex-direction: column; gap: 6px; padding: 4px 6px; font-size: 13.5px; }
+.kind-confirm p { margin: 0; color: var(--muted); }
+.kind-loses { margin: 0; padding-left: 18px; }
+.kind-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+.kind-panel .form-error { margin: 6px 6px 0; }
+/* Over the composer: someone tagged who is not in the chat. */
+.tag-card { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow-pop); font-size: 14px; }
+.tag-card p { margin: 0; }
+.tag-card .tag-card-note { color: var(--muted); font-size: 13px; }
+.tag-card-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.tag-card-link { display: flex; gap: 8px; }
+.tag-card-link input { flex: 1; min-width: 0; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-2); color: var(--text); font: inherit; font-size: 13px; }
+.chat-notice.branch-line a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
 .confirm-dialog { width: min(440px, calc(100% - 32px)); padding: 20px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); color: var(--text); box-shadow: var(--shadow-pop); }
 .confirm-dialog::backdrop { background: rgb(0 0 0 / 0.35); }
 .confirm-dialog h2 { margin: 0 0 10px; font-size: 20px; }
@@ -1028,6 +1081,7 @@ a.mention-chip:hover { text-decoration: underline; }
 /* Phones: badges and the gutter a little smaller; the people bar overlaps its badges to fit beside the name. */
 @media (max-width: 640px) {
   :root { --byline-avatar: 26px; --byline-gap: 8px; }
+  .kind-panel { position: fixed; top: calc(var(--header-h) + 6px); left: 16px; right: 16px; width: auto; }
   .people-bar { gap: 0; }
   .people-bar .person + .person { margin-left: -6px; }
   .agent-menu { right: 12px; }
@@ -1266,3 +1320,20 @@ a.mention-chip:hover { text-decoration: underline; }
 .chip:hover { color: var(--text); background: var(--surface-2); }
 .chip:is(.active, [aria-pressed="true"]) { border-color: transparent; background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 .sidebar .chat-filter .nav-unread { position: absolute; top: -2px; right: -2px; width: 7px; height: 7px; margin: 0; }
+
+/* Sign-ins to servers that sign in each user (src/SignIns.tsx): the sidebar's notices and the account menu's list. */
+.sign-in-notices { display: flex; flex-direction: column; gap: 6px; }
+.sign-in-notice { display: flex; align-items: flex-start; gap: 8px; padding: 10px 6px 10px 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--accent-soft); }
+.sign-in-notice.needed { box-shadow: inset 3px 0 0 var(--accent); }
+.sign-in-notice > svg { flex: none; margin-top: 2px; color: var(--accent); }
+.sign-in-notice-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
+.sign-in-notice-body strong { font-size: 14px; }
+.sign-in-notice-body .button { align-self: flex-start; margin-top: 6px; padding: 4px 12px; }
+.sign-in-notice .icon-button { width: 24px; height: 24px; color: var(--muted); }
+.account-menu .nav-unread { margin-left: auto; }
+.sign-ins-dialog { width: min(520px, calc(100% - 32px)); }
+.sign-ins { margin: 0 0 12px; padding: 0; list-style: none; display: flex; flex-direction: column; }
+.sign-ins li { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-top: 1px solid var(--border); }
+.sign-ins li:last-child { border-bottom: 1px solid var(--border); }
+.sign-in-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.sign-in-text small { color: var(--muted); font-size: 13px; }

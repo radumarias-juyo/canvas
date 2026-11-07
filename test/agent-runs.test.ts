@@ -79,6 +79,10 @@ class FakeHome implements RunnerHost {
   async needsSignIn(servers: readonly string[]) {
     return servers.filter((server) => this.signIn.has(server));
   }
+  readonly asked: string[] = [];
+  signInNeeded(_agent: AgentDefinition, servers: readonly string[]) {
+    this.asked.push(...servers);
+  }
   async newSession() {
     return `session-${++this.#sessions}`;
   }
@@ -260,6 +264,7 @@ describe("scheduled runs", () => {
     expect(await runner.fired({ agentId: definition.id, dueAt: SEVEN })).toEqual({ status: "needs_sign_in", started: true });
     expect(host.works).toHaveLength(0);
     expect(host.runs.list(definition.id)[0]).toMatchObject({ status: "needs_sign_in", needsSignIn: ["crm"] });
+    expect(host.asked).toEqual(["crm"]);
     // Another alarm for it does not run it again; the sign-in does.
     expect(await runner.executor.start({ agent: definition, dueAt: SEVEN, why: "schedule" })).toMatchObject({ started: false });
     expect(await runner.signedIn("other")).toBe(0);

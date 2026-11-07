@@ -1,16 +1,25 @@
 import { DurableObject, exports } from "cloudflare:workers";
 import type { ModelSetting } from "../shared/models.ts";
-import { PAGE_STORAGE_LIMITS, SOCKET_PING, type ArtifactSummary, type ChatStatus, type ChatSummary, type MentionNotice, type SidebarList } from "../shared/protocol.ts";
+import { PAGE_STORAGE_LIMITS, SOCKET_PING, MAX_CHAT_TITLE, type ArtifactSummary, type ChatStatus, type ChatSummary, type ChatRowChange, type MentionNotice, type Person, type SidebarList } from "../shared/protocol.ts";
 import type { ExportedAgent, ExportedChat, ExportedPageValues, ExportedSkill, ExportStart, ImportedSettings } from "../shared/data-export.ts";
 import type { SkillFileInfo } from "../shared/skill-files.ts";
 import { checkSystemPrompt, type ChatSystemPrompt } from "../shared/system-prompt.ts";
 import { checkSkill, MAX_SKILL_PROPOSALS, MAX_USER_SKILLS, SkillError, type SavedSkillOrigin, type SkillInfo, type SkillInput, type SkillResult } from "../shared/skills.ts";
 import { BUILTIN_SKILLS, builtinSkill, parseSkillFile } from "./skills/index.ts";
 import { titleFromMessage, UNNAMED_CHAT } from "./agent/title.ts";
-import { applyAuthChange, type McpAuthChange, type McpAuthRecord, type McpAuthStore } from "./mcp/oauth.ts";
-import { mcpServers } from "./mcp/servers.ts";
+import type { McpAuthChange, McpAuthRecord, McpAuthStore } from "./mcp/oauth.ts";
+import type { SignInCheck } from "./mcp/background.ts";
+import { McpSignIns } from "./mcp/sign-ins.ts";
+import { oauthServers } from "./mcp/servers.ts";
+import { chatAgentName } from "./chat-name.ts";
+import { PushSubscriptions, vapidKeys, type PushMessage } from "./push/subscriptions.ts";
+import type { PushSubscriptionKeys } from "./push/web-push.ts";
+import { mcpTokensKey } from "./storage/index.ts";
+import type { McpSignInView, SignInNotice } from "../shared/sign-ins.ts";
 import { AgentStore, type AgentSave } from "./agents/store.ts";
-import { chatAgentName } from "./names.ts";
+import { ChatRows } from "./chat-rows.ts";
+import { addColumns } from "./members.ts";
+import type { ChatKind } from "../shared/chat-kinds.ts";
 import {
   withoutSignInShares,
   type AgentChanges,
@@ -21,7 +30,7 @@ import {
   type AgentResult,
 } from "../shared/agents.ts";
 import { excerpt } from "../shared/replies.ts";
-import { errorMessage, randomHex } from "../shared/util.ts";
+import { errorMessage, memoAsync, randomHex } from "../shared/util.ts";
 
 /** One user's OAuth state for one MCP server. `uid` must come from a verified identity. */
 export function mcpAuthStore(uid: string, server: string): McpAuthStore {
@@ -46,8 +55,8 @@ export function saveSystemPrompt(kv: SyncKvStorage, value: unknown): { text: str
   return checked;
 }
 
-/** A message that tagged this user: who wrote it, its start, and when. */
-export type Tag = Pick<MentionNotice, "from" | "text" | "at">;
+/** A message that tagged this user: who wrote it, its start, and when; or (`added`) the owner adding them to the chat. */
+export type Tag = Pick<MentionNotice, "from" | "text" | "at" | "added">;
 
 type ArtifactRow = { id: string; title: string; chat_id: string; latest: number; updated_at: number; seen: number };
 
@@ -81,14 +90,20 @@ function exportedAgent({ version: _version, createdAt: _created, updatedAt: _upd
 export class UserDirectory extends DurableObject<Env> {
   /** The user's agents (worker/agents/store.ts). */
   readonly #agents: AgentStore;
+  /** The user's sign-ins to servers that sign in each user (worker/mcp/sign-ins.ts). */
+  readonly #signIns: McpSignIns;
+  /** The browsers the user turned notifications on in (worker/push/subscriptions.ts). */
+  readonly #push: PushSubscriptions;
+  /** What of each sidebar row is this user's alone (pinned, closed, their name for it), chats' kinds, page chats, people (worker/chat-rows.ts). */
+  readonly #rows: ChatRows;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.#agents = new AgentStore(ctx.storage.sql);
+    this.#push = new PushSubscriptions(ctx.storage.sql);
     ctx.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS chats (id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS artifacts (id TEXT PRIMARY KEY, title TEXT NOT NULL, chat_id TEXT NOT NULL, latest INTEGER NOT NULL, updated_at INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS mcp_auth (server TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS skills (name TEXT PRIMARY KEY, description TEXT NOT NULL, instructions TEXT NOT NULL, tools TEXT NOT NULL, origin TEXT NOT NULL, enabled INTEGER NOT NULL, updated_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS builtin_skills_off (name TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS shared_chats (id TEXT PRIMARY KEY, owner_uid TEXT NOT NULL, owner_name TEXT NOT NULL, title TEXT NOT NULL, joined_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
@@ -99,57 +114,123 @@ export class UserDirectory extends DurableObject<Env> {
     // Added later: what the chat's agent is doing (ChatStatus), when something last came in that this user did not
     // write, and when they last saw the chat. activity_at > seen_at is unread. Then: when someone last tagged them in
     // it; mentioned_at > seen_at is a tag they have not seen.
-    for (const table of ["chats", "shared_chats"]) {
-      this.#addColumn(table, "status", "TEXT");
-      this.#addColumn(table, "activity_at", "INTEGER NOT NULL DEFAULT 0");
-      this.#addColumn(table, "seen_at", "INTEGER NOT NULL DEFAULT 0");
-      this.#addColumn(table, "mentioned_at", "INTEGER NOT NULL DEFAULT 0");
-    }
-    // Whether this user's own chat has members: the chat tells (setChatShared) when that changes, and when it opens.
-    this.#addColumn("chats", "shared", "INTEGER NOT NULL DEFAULT 0");
-    // An agent's own conversation: the agent it is the home of, and its last post, shown like a contact's.
-    this.#addColumn("chats", "agent_id", "TEXT");
-    this.#addColumn("chats", "preview", "TEXT");
-    this.ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS chats_by_agent ON chats (agent_id) WHERE agent_id IS NOT NULL");
+    const sql = ctx.storage.sql;
+    const read = { status: "TEXT", activity_at: "INTEGER NOT NULL DEFAULT 0", seen_at: "INTEGER NOT NULL DEFAULT 0", mentioned_at: "INTEGER NOT NULL DEFAULT 0" };
+    // With, in the user's own chats, whether the chat has members: it tells (setChatShared) when that changes, and when it opens.
+    addColumns(sql, "chats", { ...read, shared: "INTEGER NOT NULL DEFAULT 0" });
+    addColumns(sql, "shared_chats", read);
+    this.#rows = new ChatRows(ctx.storage.sql);
     // The files of a skill imported as a package (SkillPackageFiles as JSON).
-    this.#addColumn("skills", "files", "TEXT");
+    addColumns(sql, "skills", { files: "TEXT" });
     // The newest version of each artifact its owner opened. Artifacts from before count as seen.
-    if (this.#addColumn("artifacts", "seen", "INTEGER NOT NULL DEFAULT 0")) ctx.storage.sql.exec("UPDATE artifacts SET seen = latest");
+    if (addColumns(sql, "artifacts", { seen: "INTEGER NOT NULL DEFAULT 0" }).length) sql.exec("UPDATE artifacts SET seen = latest");
     // A sidebar's socket stays open for hours: answer its keep-alive pings without waking this object.
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair(SOCKET_PING.request, SOCKET_PING.response));
-    // Forget sign-ins to servers this deployment no longer has, tokens included.
-    const configured = mcpServers(env).map((server) => server.name);
-    const placeholders = configured.map(() => "?").join(", ");
-    ctx.storage.sql.exec(`DELETE FROM mcp_auth${configured.length ? ` WHERE server NOT IN (${placeholders})` : ""}`, ...configured);
+    // The uid names the key that opens this user's sign-ins. An object woken only by its alarm may not know its name,
+    // so it is kept: a wrong key would make every record look unreadable, and be forgotten.
+    if (ctx.id.name) ctx.storage.kv.put("uid", ctx.id.name);
+    const uid = ctx.id.name ?? ctx.storage.kv.get<string>("uid");
+    this.#signIns = new McpSignIns({
+      sql: ctx.storage.sql,
+      env,
+      key: memoAsync(async () => {
+        if (!uid) throw new Error("This directory does not know its user.");
+        return mcpTokensKey(env, uid);
+      }),
+      changed: () => this.#changed("sign-ins"),
+      notify: async (notice, message) => {
+        this.#changed(notice);
+        await this.push(message);
+      },
+      signedIn: async (chatId, server) => {
+        if (uid) await exports.ChatAgent.getByName(chatAgentName(uid, chatId)).signedIn(server);
+      },
+      setAlarm: (at) => void (at === null ? ctx.storage.deleteAlarm() : ctx.storage.setAlarm(at)),
+    });
   }
 
-  /** Add a column a table made before it lacks; true when it was added. `table`, `column` and `type` are written here, never input. */
-  #addColumn(table: string, column: string, type: string): boolean {
-    const columns = this.ctx.storage.sql.exec<{ name: string }>(`SELECT name FROM pragma_table_info('${table}')`).toArray();
-    if (columns.some((row) => row.name === column)) return false;
-    this.ctx.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
-    return true;
-  }
 
   /** This user's OAuth state for one MCP server (worker/mcp/oauth.ts): registration, tokens, a sign-in in progress. */
-  mcpAuth(server: string): McpAuthRecord {
-    const row = this.ctx.storage.sql.exec<{ data: string }>("SELECT data FROM mcp_auth WHERE server = ?", server).toArray()[0];
-    return row ? (JSON.parse(row.data) as McpAuthRecord) : {};
+  mcpAuth(server: string): Promise<McpAuthRecord> {
+    return this.#signIns.record(server);
+  }
+
+  /** Read, change and write in one step: McpSignIns runs one record change at a time. */
+  updateMcpAuth(server: string, change: McpAuthChange): Promise<void> {
+    return this.#signIns.update(server, change);
+  }
+
+  /** The account menu's list of sign-ins: each server that signs in each user, with when (no tokens). */
+  mcpSignIns(): McpSignInView[] {
+    return this.#signIns.list();
+  }
+
+  /** Remove the stored sign-in to `server`, tokens and registration. */
+  async disconnectMcp(server: string): Promise<McpSignInView[]> {
+    await this.#signIns.disconnect(server);
+    return this.#signIns.list();
+  }
+
+  dismissSignInNotice(server: string): McpSignInView[] {
+    this.#signIns.dismiss(server);
+    return this.#signIns.list();
+  }
+
+  /**
+   * For scheduled runs (worker/agents/runs): the servers one chat's runs use, kept refreshed daily and warned about
+   * before their grant ends. Replaces that chat's list; empty clears it.
+   */
+  setRunServers(chatId: string, servers: readonly string[]): void {
+    this.#signIns.setRunServers(chatId, servers);
+  }
+
+  /** Before a run: whether each server's sign-in works with nobody present (refreshed now). See McpSignIns.check. */
+  checkSignIns(servers: readonly string[]): Promise<Record<string, SignInCheck>> {
+    return this.#signIns.check(servers);
+  }
+
+  /**
+   * A run needs a new sign-in to `server`: a notice with the sign-in link in the sidebar, the browser, and a push when no
+   * app is open, once until they sign in. With `chatId`, that chat hears `ChatAgent.signedIn(server)` when they do.
+   */
+  notifySignInNeeded(server: string, context: { chatId?: string; what?: string } = {}): Promise<void> {
+    return this.#signIns.needed(server, context);
+  }
+
+  /** The sign-in callback finished for `server` (worker/mcp-routes.ts). */
+  onSignedIn(server: string): Promise<void> {
+    return this.#signIns.onSignedIn(server);
   }
 
   /** The servers this user has signed in to (tokens kept), by name: never the tokens. */
   mcpSignedIn(): string[] {
-    return this.ctx.storage.sql
-      .exec<{ server: string }>("SELECT server FROM mcp_auth WHERE json_extract(data, '$.tokens') IS NOT NULL ORDER BY server")
-      .toArray()
-      .map((row) => row.server);
+    return this.#signIns
+      .list()
+      .filter((item) => item.signedIn)
+      .map((item) => item.server)
+      .sort();
   }
 
-  /** Read, change and write in one step: this object runs one call at a time, and nothing here awaits. */
-  updateMcpAuth(server: string, change: McpAuthChange): void {
-    const record = applyAuthChange(this.mcpAuth(server), change);
-    if (Object.keys(record).length === 0) this.ctx.storage.sql.exec("DELETE FROM mcp_auth WHERE server = ?", server);
-    else this.ctx.storage.sql.exec("INSERT INTO mcp_auth (server, data) VALUES (?, ?) ON CONFLICT(server) DO UPDATE SET data = excluded.data", server, JSON.stringify(record));
+  /** Warnings before sign-ins end, and the daily keep-alive refresh of the ones runs use (McpSignIns.alarm). */
+  async alarm(): Promise<void> {
+    await this.#signIns.alarm();
+  }
+
+  addPushSubscription(sub: PushSubscriptionKeys): void {
+    this.#push.add(sub);
+  }
+
+  removePushSubscription(endpoint: string): void {
+    this.#push.remove(endpoint);
+  }
+
+  /**
+   * Push a notification to every browser this user turned notifications on in, for when the app is closed: only when
+   * none of their apps is open (an open one hears it on its socket and shows it itself). `body` says only that something
+   * arrived, never data. Nothing happens without the VAPID secrets.
+   */
+  async push(message: PushMessage): Promise<void> {
+    if (this.ctx.getWebSockets().length === 0) await this.#push.push(message, vapidKeys(this.env));
   }
 
   /**
@@ -178,7 +259,7 @@ export class UserDirectory extends DurableObject<Env> {
   }
 
   /** Tell the open sidebars that a list changed, or that someone tagged this user. */
-  #changed(message: SidebarList | MentionNotice): void {
+  #changed(message: SidebarList | MentionNotice | SignInNotice): void {
     const sent = typeof message === "string" ? message : JSON.stringify(message);
     for (const ws of this.ctx.getWebSockets()) {
       try {
@@ -191,37 +272,65 @@ export class UserDirectory extends DurableObject<Env> {
 
   /** The user's own chats and the ones shared with them, most recent first. */
   listChats(): ChatSummary[] {
-    return this.ctx.storage.sql
-      .exec<{
-        id: string;
-        title: string;
-        created_at: number;
-        updated_at: number;
-        shared_by: string | null;
-        shared: number;
-        status: ChatStatus;
-        unread: number;
-        mentioned: number;
-        agent_id: string | null;
-        preview: string | null;
-      }>(
-        `SELECT id, title, created_at, updated_at, NULL AS shared_by, shared, status, activity_at > seen_at AS unread, mentioned_at > seen_at AS mentioned,
-           agent_id, preview FROM chats
-         UNION ALL SELECT id, title, joined_at, updated_at, owner_name, 0, status, activity_at > seen_at, mentioned_at > seen_at, NULL, NULL FROM shared_chats
-         ORDER BY updated_at DESC`,
-      )
-      .toArray()
-      .map((row) => ({
-        id: row.id,
-        title: row.title,
-        createdAt: row.created_at,
-        updatedAt: row.updated_at,
-        ...(row.shared_by !== null ? { sharedBy: row.shared_by } : row.shared === 1 && { shared: true as const }),
-        ...(row.status && { status: row.status }),
-        ...(row.unread === 1 && { unread: true as const }),
-        ...(row.mentioned === 1 && { mentioned: true as const }),
-        ...this.#contact(row.agent_id, row.preview),
-      }));
+    return this.#rows.list((agentId, preview) => this.#contact(agentId, preview));
+  }
+
+  /** Change what of chat `id`'s row is this user's alone: pinned, closed, marked unread, their own name for it. */
+  changeChatRow(id: string, change: ChatRowChange): boolean {
+    const changed = this.#rows.change(id, change);
+    if (changed) this.#changed("chats");
+    return changed;
+  }
+
+  /** The chat `id`'s kind, which its chat object told this sidebar (setChatKind); null for a chat it does not list. */
+  chatKind(id: string): ChatKind | null {
+    return this.#rows.kindOf(id);
+  }
+
+  /** The chat `ownerUid`'s chat `id` is now `kind`: told by the chat, to every sidebar that lists it. */
+  setChatKind(id: string, ownerUid: string, kind: ChatKind): void {
+    // Written, and the sidebars told, only on a change: the chat tells a member again each time they open it.
+    const own = ownerUid === this.ctx.id.name;
+    const sql = own
+      ? this.ctx.storage.sql.exec("UPDATE chats SET kind = ? WHERE id = ? AND kind IS NOT ?", kind, id, kind)
+      : this.ctx.storage.sql.exec("UPDATE shared_chats SET kind = ? WHERE id = ? AND owner_uid = ? AND kind IS NOT ?", kind, id, ownerUid, kind);
+    if (sql.rowsWritten) this.#changed("chats");
+  }
+
+  /** The chat that discusses one of this user's artifacts (Discuss on its page), or null. */
+  pageChat(artifactId: string): string | null {
+    return this.#rows.pageChat(artifactId);
+  }
+
+  linkPageChat(artifactId: string, chatId: string): void {
+    this.#rows.linkPage(artifactId, chatId);
+  }
+
+  /** People this user shares chat `chatId` with: what "@" offers to add to a chat (see ChatRows.knowPeople). */
+  knowPeople(chatId: string, people: readonly Person[]): void {
+    this.#rows.knowPeople(chatId, people, this.ctx.id.name!);
+  }
+
+  /** Count a branch of this user's conversation that started in chat `root`, unless it has `max` (ChatRows.takeBranch). */
+  takeBranch(root: string, max: number): boolean {
+    return this.#rows.takeBranch(root, max);
+  }
+
+  returnBranch(root: string): void {
+    this.#rows.returnBranch(root);
+  }
+
+  /** `uid` left chat `chatId`, or was removed from it: this user no longer knows them through it. */
+  forgetPerson(chatId: string, uid: string): void {
+    this.#rows.forgetPeople(chatId, uid);
+  }
+
+  knownPeople(): Person[] {
+    return this.#rows.people();
+  }
+
+  knownPerson(uid: string): Person | null {
+    return this.#rows.person(uid);
   }
 
   /** What an agent's home conversation shows of its agent in the list: its badge and last post. */
@@ -273,12 +382,6 @@ export class UserDirectory extends DurableObject<Env> {
     if (!agent && this.ctx.storage.sql.exec("UPDATE chats SET agent_id = NULL WHERE agent_id = ?", agentId).rowsWritten) this.#changed("chats");
   }
 
-  /** This user signed in to `server`: the runs of their agents that waited for it go again, off the caller's path. */
-  signedInTo(server: string): void {
-    const homes = this.ctx.storage.sql.exec<{ id: string }>("SELECT id FROM chats WHERE agent_id IS NOT NULL").toArray();
-    this.ctx.waitUntil(Promise.allSettled(homes.map(({ id }) => exports.ChatAgent.getByName(chatAgentName(this.ctx.id.name!, id)).signedIn(server))));
-  }
-
   /**
    * Change this user's row for chat `id`, which `ownerUid` owns: in `chats` when that is this user, else in
    * `shared_chats`. `set` is an SQL SET list written here, never input; its `?` take `values`. Tells the open sidebars
@@ -314,16 +417,21 @@ export class UserDirectory extends DurableObject<Env> {
    * since, so the app can mark what is new; null when nothing was unread, or they never looked at the chat.
    */
   markSeen(id: string): number | null {
-    const unread = "WHERE id = ? AND activity_at > seen_at";
+    // Marked unread by hand (ChatRows.change) counts too, though nothing new came in.
+    const unread = "WHERE id = ? AND (activity_at > seen_at OR marked_unread = 1)";
     const before = this.ctx.storage.sql
-      .exec<{ seen_at: number }>(`SELECT seen_at FROM chats ${unread} UNION ALL SELECT seen_at FROM shared_chats ${unread}`, id, id)
+      .exec<{ seen_at: number; activity_at: number }>(
+        `SELECT seen_at, activity_at FROM chats ${unread} UNION ALL SELECT seen_at, activity_at FROM shared_chats ${unread}`,
+        id,
+        id,
+      )
       .toArray()[0];
     if (!before) return null;
     const now = Date.now();
-    this.ctx.storage.sql.exec(`UPDATE chats SET seen_at = ? ${unread}`, now, id);
-    this.ctx.storage.sql.exec(`UPDATE shared_chats SET seen_at = ? ${unread}`, now, id);
+    this.ctx.storage.sql.exec(`UPDATE chats SET seen_at = ?, marked_unread = 0 ${unread}`, now, id);
+    this.ctx.storage.sql.exec(`UPDATE shared_chats SET seen_at = ?, marked_unread = 0 ${unread}`, now, id);
     this.#changed("chats");
-    return before.seen_at > 0 ? before.seen_at : null;
+    return before.seen_at > 0 && before.activity_at > before.seen_at ? before.seen_at : null;
   }
 
   /**
@@ -345,12 +453,15 @@ export class UserDirectory extends DurableObject<Env> {
   }
 
   /** Index a chat this user joined by an invite. Chat ids are random, so one never names both an own and a shared chat. */
-  addSharedChat(chat: { id: string; ownerUid: string; ownerName: string; title: string; status: ChatStatus | null }): void {
+  addSharedChat(chat: { id: string; ownerUid: string; ownerName: string; title: string; status: ChatStatus | null; kind?: ChatKind }): void {
     if (this.hasChat(chat.id)) return;
     const now = Date.now();
+    // Joining again opens a chat this user had closed.
     this.ctx.storage.sql.exec(
-      `INSERT INTO shared_chats (id, owner_uid, owner_name, title, joined_at, updated_at, status) VALUES (?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET owner_name = excluded.owner_name, title = excluded.title, updated_at = excluded.updated_at, status = excluded.status`,
+      `INSERT INTO shared_chats (id, owner_uid, owner_name, title, joined_at, updated_at, status, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET owner_name = excluded.owner_name, title = excluded.title, updated_at = excluded.updated_at, status = excluded.status,
+         kind = COALESCE(excluded.kind, kind), closed_at = 0
+       WHERE owner_uid = excluded.owner_uid`,
       chat.id,
       chat.ownerUid,
       chat.ownerName,
@@ -358,6 +469,7 @@ export class UserDirectory extends DurableObject<Env> {
       now,
       now,
       chat.status,
+      chat.kind ?? null,
     );
     this.#changed("chats");
   }
@@ -380,7 +492,10 @@ export class UserDirectory extends DurableObject<Env> {
     const now = Date.now();
     const set = "title = ?, updated_at = ?, activity_at = CASE WHEN ? THEN ? ELSE activity_at END, mentioned_at = CASE WHEN ? THEN ? ELSE mentioned_at END";
     if (!this.#updateChat(id, ownerUid, set, title, now, byOther ? 1 : 0, now, tag ? 1 : 0, now) || !tag) return;
+    // A tag opens the chat again for someone who closed it.
+    this.#rows.reopen(id);
     this.#changed({ type: "mention", chatId: id, ...(!named && { title }), ...tag });
+    this.ctx.waitUntil(this.push({ title: "You were mentioned", body: "Someone mentioned you in a chat.", url: `/c/${id}`, tag: `mention:${id}` }));
   }
 
   /** The last post of an agent's own conversation, as its contact row shows it. */
@@ -389,14 +504,20 @@ export class UserDirectory extends DurableObject<Env> {
   }
 
   removeSharedChat(id: string, ownerUid: string): void {
-    if (this.ctx.storage.sql.exec("DELETE FROM shared_chats WHERE id = ? AND owner_uid = ?", id, ownerUid).rowsWritten) this.#changed("chats");
+    if (!this.ctx.storage.sql.exec("DELETE FROM shared_chats WHERE id = ? AND owner_uid = ?", id, ownerUid).rowsWritten) return;
+    // Out of the chat, this user shares it with nobody.
+    this.#rows.forgetPeople(id);
+    this.#changed("chats");
   }
 
-  createChat(id: string): ChatSummary {
+  /** A new chat of this user's: unnamed (named after its first message), or with `title` (a branch, a page's chat). */
+  createChat(id: string, made: { title?: string; kind?: ChatKind } = {}): ChatSummary {
     const now = Date.now();
-    this.ctx.storage.sql.exec("INSERT INTO chats (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)", id, UNNAMED_CHAT, now, now);
+    const title = made.title?.slice(0, MAX_CHAT_TITLE) || UNNAMED_CHAT;
+    const kind = made.kind ?? "private";
+    this.ctx.storage.sql.exec("INSERT INTO chats (id, title, created_at, updated_at, kind) VALUES (?, ?, ?, ?, ?)", id, title, now, now, kind);
     this.#changed("chats");
-    return { id, title: UNNAMED_CHAT, createdAt: now, updatedAt: now };
+    return { id, title, createdAt: now, updatedAt: now, kind };
   }
 
   hasChat(id: string): boolean {
@@ -428,10 +549,12 @@ export class UserDirectory extends DurableObject<Env> {
   /** Take a deleted chat, and the artifacts it published, out of this user's lists. The chat deletes the rest first. */
   forgetChat(id: string): void {
     const home = this.ctx.storage.sql.exec<{ agent_id: string | null }>("SELECT agent_id FROM chats WHERE id = ?", id).toArray()[0]?.agent_id;
+    this.#signIns.forgetChat(id);
     this.#agents.forgetChat(id);
     // The values its pages saved for this user, which were everyone's defaults.
     this.ctx.storage.sql.exec("DELETE FROM page_values WHERE artifact_id IN (SELECT id FROM artifacts WHERE chat_id = ?)", id);
     if (this.ctx.storage.sql.exec("DELETE FROM artifacts WHERE chat_id = ?", id).rowsWritten) this.#changed("artifacts");
+    this.#rows.forgetChat(id);
     if (this.ctx.storage.sql.exec("DELETE FROM chats WHERE id = ?", id).rowsWritten) this.#changed("chats");
     // An agent's home deleted while the agent is on: it gets a new one, so its schedule and watches go on there.
     if (home && this.#agents.get(home)?.enabled) this.ensureAgentHome(home);
@@ -607,7 +730,7 @@ export class UserDirectory extends DurableObject<Env> {
    */
   saveAgent(input: unknown, origin: AgentOrigin, enabled?: boolean, save?: AgentSave): AgentResult {
     if (origin === "agent") {
-      const signIn = new Set(mcpServers(this.env).flatMap((server) => (server.auth === "oauth" ? [server.name] : [])));
+      const signIn = new Set(oauthServers(this.env).map((server) => server.name));
       input = withoutSignInShares(input, (server) => signIn.has(server));
     }
     const saved = this.#agents.save(input, origin, enabled, save);
@@ -809,15 +932,16 @@ export class UserDirectory extends DurableObject<Env> {
   }
 
   /** Add a chat an import filled (ChatAgent.importFinish) to this user's list, read: the import is the commit point. */
-  importChat(chat: Pick<ExportedChat, "id" | "title" | "createdAt" | "updatedAt">): void {
+  importChat(chat: Pick<ExportedChat, "id" | "title" | "createdAt" | "updatedAt">, kind: ChatKind = "private"): void {
     const now = Date.now();
     this.ctx.storage.sql.exec(
-      "INSERT OR IGNORE INTO chats (id, title, created_at, updated_at, seen_at) VALUES (?, ?, ?, ?, ?)",
+      "INSERT OR IGNORE INTO chats (id, title, created_at, updated_at, seen_at, kind) VALUES (?, ?, ?, ?, ?, ?)",
       chat.id,
-      chat.title.slice(0, 200) || UNNAMED_CHAT,
+      chat.title.slice(0, MAX_CHAT_TITLE) || UNNAMED_CHAT,
       chat.createdAt || now,
       chat.updatedAt || now,
       now,
+      kind,
     );
     this.#changed("chats");
   }
