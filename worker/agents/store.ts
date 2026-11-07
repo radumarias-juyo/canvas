@@ -54,6 +54,8 @@ export interface AgentSave {
   /** The version the writer read: a save over a newer one is refused, so two editors never undo each other. */
   version?: number;
   copiedFrom?: AgentDefinition["copiedFrom"];
+  /** For the model's proposal: the chat it was proposed in, which alone may revise it while it is a draft (revisable). */
+  proposedIn?: string;
 }
 
 /**
@@ -79,6 +81,30 @@ export class AgentStore {
     `);
     // The chat's owner, for a chat of someone else's the user brought the agent into as a member; added later.
     addColumns(sql, "agent_chats", { owner_uid: "TEXT" });
+    // The chat the model proposed an agent in: proposing it again there revises the draft (revisable).
+    addColumns(sql, "agents", { proposed_in: "TEXT" });
+  }
+
+  /**
+   * Where the model's proposal goes: proposed again, in the chat it proposed it in, under the name of an agent that is
+   * still its draft there (revisable), it revises that draft; anything else is saved as given (a new one, or refused).
+   */
+  proposalSave(input: unknown, save: AgentSave = {}): AgentSave {
+    if (save.id !== undefined || save.proposedIn === undefined || !isObject(input) || typeof input.name !== "string") return save;
+    const draft = this.revisable(input.name, save.proposedIn);
+    return draft ? { ...save, id: draft.id } : save;
+  }
+
+  /**
+   * The draft the model proposed as `name` in chat `chatId` that it may still revise: one it made (never one the user
+   * saved, which makes it theirs, nor one turned on, likewise), still off, and proposed in that same chat. Null for any
+   * other, which a proposal under that name is then refused for (the name is taken).
+   */
+  revisable(name: string, chatId: string): AgentDefinition | null {
+    const row = this.#sql
+      .exec("SELECT * FROM agents WHERE name = ? AND origin = 'agent' AND enabled = 0 AND proposed_in = ?", name.trim().toLowerCase(), chatId)
+      .toArray()[0] as AgentRow | undefined;
+    return row ? definitionOf(row) : null;
   }
 
   list(): AgentDefinition[] {
@@ -105,7 +131,7 @@ export class AgentStore {
    * off, never over one of the user's own, and at most MAX_AGENT_PROPOSALS wait at once. A change the user saves
    * keeps the agent on or off as it was, unless `enabled` says otherwise; one by the model turns it off again for review.
    */
-  save(input: unknown, origin: AgentOrigin, enabled: boolean | undefined, { id, version, copiedFrom }: AgentSave = {}): AgentResult {
+  save(input: unknown, origin: AgentOrigin, enabled: boolean | undefined, { id, version, copiedFrom, proposedIn }: AgentSave = {}): AgentResult {
     let agent: AgentInput;
     try {
       agent = checkAgent(input);
@@ -118,7 +144,7 @@ export class AgentStore {
     if (existing && version !== undefined && existing.version !== version) {
       return { error: `The agent "${existing.name}" changed since you read it (version ${existing.version}); read it again first.`, conflict: true };
     }
-    if (existing && origin === "agent" && existing.origin === "user")
+    if (existing && origin === "agent" && (existing.origin === "user" || existing.enabled))
       return { error: `"${existing.name}" is one of the user's own agents; the model cannot change it.` };
     const named = this.byName(agent.name);
     if (named && named.id !== id) return { error: `There is already an agent named "${agent.name}"; pick another name.` };
@@ -150,7 +176,7 @@ export class AgentStore {
     }
     const newId = randomHex(8);
     this.#sql.exec(
-      "INSERT INTO agents (id, name, definition, origin, enabled, version, created_at, updated_at, copied_from) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)",
+      "INSERT INTO agents (id, name, definition, origin, enabled, version, created_at, updated_at, copied_from, proposed_in) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
       newId,
       agent.name,
       JSON.stringify(agent),
@@ -159,6 +185,7 @@ export class AgentStore {
       now,
       now,
       copiedFrom ? JSON.stringify(copiedFrom) : null,
+      origin === "agent" ? (proposedIn ?? null) : null,
     );
     return this.get(newId)!;
   }
