@@ -6,7 +6,7 @@ import type { EntryRecord } from "@earendil-works/pi-durable";
 import { TOOL_SEARCH_TOOL_NAME } from "@earendil-works/pi-durable/tool-search";
 import { CHAT_AGENT_KIND, MAX_HOPS, speakerLabel, type AgentDefinition, type ChatAgentReplyData } from "../../shared/agents.ts";
 import { textOf } from "../../shared/canonical.ts";
-import { mergeItems, resultItems, type ItemRef } from "../../shared/items.ts";
+import { entryItems, mergeItems, type ItemRef } from "../../shared/items.ts";
 import { AGENT_NAME, calledNames, type Mention } from "../../shared/mentions.ts";
 import { CHAT_MESSAGE_KIND, incomingKey, publishedBy, type ChatMessageData } from "../../shared/protocol.ts";
 import type { McpToolInfo } from "../agent/mcp.ts";
@@ -257,12 +257,7 @@ export function agentInstructions(agent: Pick<AgentDefinition, "name" | "job" | 
 
 /** The records a turn's MCP results held (shared/items.ts), each once, for the chips under its reply. */
 export function itemsIn(entries: readonly EntryRecord[]): ItemRef[] {
-  return mergeItems(
-    entries.flatMap((entry) => {
-      const message = entry.model?.[0];
-      return entry.kind === "pi.tool-result" && message?.role === "toolResult" && !message.isError ? [resultItems(message.details)] : [];
-    }),
-  );
+  return mergeItems(entries.map(entryItems));
 }
 
 /** The artifacts a turn published: the results of artifact_publish among `entries` (its session's, from the turn on). */

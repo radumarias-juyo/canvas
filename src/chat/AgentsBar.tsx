@@ -163,7 +163,7 @@ function AgentMenu({ chatId, agent, uid, isOwner, onClose }: { chatId: string; a
       </div>
       <p className="agent-menu-job">{agent.job}</p>
       <p className="agent-menu-state">
-        {agent.running ? <Working since={agent.running} caller={callerName(agent.running.calledBy)} /> : agentState(agent)}
+        {agent.running ? <Working running={agent.running} /> : agentState(agent)}
       </p>
       <div className="section-head">Runs</div>
       {turns === null && !error && <p className="agent-menu-empty">Loading…</p>}
@@ -188,13 +188,17 @@ function AgentMenu({ chatId, agent, uid, isOwner, onClose }: { chatId: string; a
   );
 }
 
+/** How long since `at`, counting on each second. */
+export function Since({ at }: { at: number }) {
+  return <>{formatElapsed(useElapsed(at))}</>;
+}
+
 /** "Working for 12s, Ana asked", counting on from when the roster said it started. */
-function Working({ since, caller }: { since: { elapsedMs: number }; caller: string }) {
-  const [startedAt] = useState(() => Date.now() - since.elapsedMs);
-  const elapsed = useElapsed(startedAt);
+function Working({ running }: { running: NonNullable<ChatAgentView["running"]> }) {
+  const [startedAt] = useState(() => Date.now() - running.elapsedMs);
   return (
     <>
-      Working for {formatElapsed(elapsed)}, {caller === "its schedule" ? "on its schedule" : `${caller} asked`}
+      Working for <Since at={startedAt} />, {running.calledBy.schedule ? "on its schedule" : `${callerName(running.calledBy)} asked`}
     </>
   );
 }

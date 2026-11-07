@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { createContext, useContext, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import type { ItemRef } from "../../shared/items.ts";
 
 /** How tall a folded reply shows, in CSS pixels: some twelve lines of text. */
@@ -11,14 +11,18 @@ export function folds(height: number): boolean {
   return height > FOLD_PX * FOLD_SLACK;
 }
 
-/** The replies the reader unfolded, by key: one stays open when it remounts (a socket's new snapshot draws it again). */
+/** The replies the reader unfolded, by chat and key: one stays open when it remounts (a socket's new snapshot draws it again). */
 const unfolded = new Set<string>();
+
+/** The chat a Fold's key is named in: entry ids count from 1 in each chat. */
+export const FoldScope = createContext("");
 
 /**
  * A long reply, folded to FOLD_PX with "Show more" under it, so a busy chat stays readable; "Show less" folds it again.
  * Measured as it renders and whenever it resizes (a narrower window makes it taller). `foldKey` names the reply.
  */
-export function Fold({ foldKey, children }: { foldKey: string; children: ReactNode }) {
+export function Fold({ foldKey: key, children }: { foldKey: string; children: ReactNode }) {
+  const foldKey = `${useContext(FoldScope)}:${key}`;
   const body = useRef<HTMLDivElement>(null);
   const [long, setLong] = useState(false);
   const [open, setOpen] = useState(() => unfolded.has(foldKey));
@@ -61,13 +65,14 @@ export function ItemChips({ items }: { items: readonly ItemRef[] }) {
   return (
     <div className="item-chips" aria-label="Built on">
       {items.map((item) => {
+        const key = `${item.server}:${item.id}`;
         const title = `${item.title} · ${item.server} · ${item.id}`;
         return item.url ? (
-          <a key={`${item.server}:${item.id}`} className="item-chip" href={item.url} target="_blank" rel="noreferrer noopener" title={title}>
+          <a key={key} className="item-chip" href={item.url} target="_blank" rel="noreferrer noopener" title={title}>
             {item.title}
           </a>
         ) : (
-          <span key={`${item.server}:${item.id}`} className="item-chip" title={title}>
+          <span key={key} className="item-chip" title={title}>
             {item.title}
           </span>
         );

@@ -1,6 +1,7 @@
 import { useRef } from "react";
 import type { ChatAgentReplyData } from "../../shared/agents.ts";
 import { everyone, type PublishedDetails } from "../../shared/protocol.ts";
+import { callerName } from "./agentLines.ts";
 import { ArtifactCard } from "./ArtifactCard.tsx";
 import { Markdown } from "./Markdown.tsx";
 import { MessageActions } from "./MessageActions.tsx";
@@ -11,8 +12,7 @@ import { SentTime } from "./SentTime.tsx";
 
 /** Who gave an agent the turn it answers, as its byline says it. */
 function calledByLabel(calledBy: ChatAgentReplyData["calledBy"]): string {
-  if (calledBy.schedule) return "on its schedule";
-  return calledBy.agentId ? `for @${calledBy.name}` : `for ${calledBy.name}`;
+  return calledBy.schedule ? "on its schedule" : `for ${callerName(calledBy)}`;
 }
 
 /**

@@ -97,11 +97,6 @@ export function splitCalls(text: string, names: readonly string[] = []): { text:
   return parts;
 }
 
-/** The text split into plain runs and the "@pi"s in it (as typed: "@PI" stays so), for the transcript to show them as chips. */
-export function splitAgent(text: string): { text: string; call: boolean }[] {
-  return splitCalls(text).map((part) => ({ text: part.text, call: part.call !== undefined }));
-}
-
 /** An agent as the "@" picker offers it: its handle and job line, for matching. */
 export interface AgentChoice {
   name: string;

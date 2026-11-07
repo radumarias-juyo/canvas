@@ -426,10 +426,11 @@ export class ChatRoster {
    */
   views(ownerName: (uid: string) => string): ChatAgentView[] {
     // The turns not ended, oldest first: few, so one read serves every agent.
-    const open = this.#turns(`${OPEN} ORDER BY id`);
+    const open = new Map<string, AgentTurn[]>();
+    for (const turn of this.#turns(`${OPEN} ORDER BY id`)) open.set(turn.agentId, [...(open.get(turn.agentId) ?? []), turn]);
     const now = this.#now();
     return this.list().map((entry) => {
-      const mine = open.filter((turn) => turn.agentId === entry.agentId);
+      const mine = open.get(entry.agentId) ?? [];
       const running = mine.find((turn) => turn.status === "running");
       const queued = mine.filter((turn) => turn.status === "queued");
       return {
@@ -452,9 +453,12 @@ export class ChatRoster {
 
   /** The turns running now, each with its agent's session: what the chat's sockets follow live. */
   runningSessions(): { agentId: string; session: string; turn: number }[] {
-    return this.allRunning().flatMap((turn) => {
-      const entry = this.get(turn.agentId);
-      return entry ? [{ agentId: turn.agentId, session: entry.session, turn: turn.id }] : [];
+    const running = this.allRunning();
+    if (!running.length) return [];
+    const sessions = new Map(this.list().map((entry) => [entry.agentId, entry.session]));
+    return running.flatMap((turn) => {
+      const session = sessions.get(turn.agentId);
+      return session ? [{ agentId: turn.agentId, session, turn: turn.id }] : [];
     });
   }
 

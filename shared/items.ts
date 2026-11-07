@@ -1,6 +1,8 @@
 // Item chips: the records a reply is built on, shown under it as chips that open the source item. They come from what
 // MCP servers returned through the hub (a record's id, title and link fields), never from what the model wrote.
 
+import type { EntryRecord } from "@earendil-works/pi-durable";
+import { excerpt } from "./replies.ts";
 import { isObject } from "./util.ts";
 
 /** One record a tool result held: the server it came from, its id there, a title, and a link to it when it has one. */
@@ -10,7 +12,7 @@ export type ItemRef = { server: string; id: string; title: string; url?: string 
 export type McpResultDetails = { items: ItemRef[] };
 
 /** Records one tool result gives at most, and one reply shows. */
-export const MAX_RESULT_ITEMS = 8;
+const MAX_RESULT_ITEMS = 8;
 export const MAX_REPLY_ITEMS = 6;
 const MAX_TITLE = 120;
 const MAX_ID = 80;
@@ -28,10 +30,7 @@ function textField(record: Record<string, unknown>, fields: readonly string[], m
   for (const field of fields) {
     const value = record[field];
     if (typeof value === "number" && Number.isFinite(value)) return String(value);
-    if (typeof value === "string" && value.trim()) {
-      const flat = value.trim().replace(/\s+/g, " ");
-      return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
-    }
+    if (typeof value === "string" && value.trim()) return excerpt(value, max);
   }
   return undefined;
 }
@@ -105,4 +104,10 @@ export function resultItems(details: unknown): ItemRef[] {
       typeof item.title === "string" &&
       (item.url === undefined || (typeof item.url === "string" && /^https?:\/\//i.test(item.url))),
   );
+}
+
+/** The items one entry holds: those of a tool result that did not fail, read back from its details; none for others. */
+export function entryItems(entry: Pick<EntryRecord, "kind" | "model">): ItemRef[] {
+  const message = entry.model?.[0];
+  return entry.kind === "pi.tool-result" && message?.role === "toolResult" && !message.isError ? resultItems(message.details) : [];
 }

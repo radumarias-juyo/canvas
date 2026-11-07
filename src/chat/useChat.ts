@@ -348,14 +348,12 @@ export function reduceAgents(live: AgentsLive, action: AgentAction): AgentsLive 
  * which shows it instead.
  */
 export function shownLive(live: AgentsLive, agents: readonly ChatAgentView[], entries: readonly EntryRecord[]): (AgentLive & { agent: ChatAgentView })[] {
-  if (live === NO_LIVE) return [];
+  if (!Object.keys(live).length) return [];
   const replied = new Set<string>();
-  for (let i = entries.length - 1; i >= 0 && i >= entries.length - 50; i--) {
-    const entry = entries[i];
-    if (entry.kind === CHAT_AGENT_KIND) {
-      const data = entry.data as unknown as ChatAgentReplyData;
-      replied.add(`${data.agentId}:${data.turn}`);
-    }
+  for (const entry of entries) {
+    if (entry.kind !== CHAT_AGENT_KIND) continue;
+    const data = entry.data as unknown as ChatAgentReplyData;
+    replied.add(`${data.agentId}:${data.turn}`);
   }
   return agents.flatMap((agent) => {
     const turn = live[agent.id];

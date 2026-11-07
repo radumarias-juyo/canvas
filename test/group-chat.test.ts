@@ -33,7 +33,8 @@ describe("the working line's phrase", () => {
     const entries = [assistant(2, [{ type: "text", text: "Old step." }, call("a")]), entry(3, "chat.message", [{ role: "user", content: "@pi again", timestamp: 0 }])];
     expect(workingPhrase(entries, undefined, label)).toBeUndefined();
     // An aside written mid-run is no new run.
-    expect(workingPhrase([...entries.slice(0, 1), entry(4, "chat.aside", [{ role: "user", content: "fyi", timestamp: 0 }])], undefined, label)).toBe("Old step");
+    const aside = { ...entry(4, "chat.message"), data: { uid: "ana", name: "Ana", text: "fyi", aside: true } } as EntryRecord;
+    expect(workingPhrase([...entries.slice(0, 1), aside, entry(5, "chat.aside", [{ role: "user", content: "fyi", timestamp: 0 }])], undefined, label)).toBe("Old step");
   });
 });
 

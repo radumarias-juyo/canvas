@@ -1,13 +1,9 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { EntryRecord } from "@earendil-works/pi-durable";
-import { CHAT_TURN_KIND } from "../../shared/agents.ts";
-import { CHAT_MESSAGE_KIND } from "../../shared/protocol.ts";
-
-/** The entries a run starts from: a person's message, or a turn an agent was given. */
-const STARTS_RUN: ReadonlySet<string> = new Set(["pi.user", CHAT_MESSAGE_KIND, CHAT_TURN_KIND]);
+import { startsRun } from "./entries.ts";
 
 /** How long the working line's phrase may be. */
-export const PHRASE_CHARS = 60;
+const PHRASE_CHARS = 60;
 
 /** `text` as a phrase: its first sentence, on one line, without the end mark, cut to PHRASE_CHARS. */
 export function phraseOf(text: string): string | undefined {
@@ -40,7 +36,7 @@ export function workingPhrase(entries: readonly EntryRecord[], partial: Assistan
   const latest: (AssistantMessage | undefined)[] = [partial];
   for (let i = entries.length - 1; i >= 0 && i >= entries.length - 30; i--) {
     const { kind, model } = entries[i];
-    if (STARTS_RUN.has(kind)) break;
+    if (startsRun(entries[i])) break;
     if (kind === "pi.assistant" && model?.[0]?.role === "assistant") latest.push(model[0]);
   }
   for (const message of latest) {

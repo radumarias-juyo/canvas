@@ -11,7 +11,7 @@ export function callerName(calledBy: AgentTurnView["calledBy"]): string {
 }
 
 /** One line under the running agents: who waits for a turn, why, and how far the chain of hand-offs is. */
-export interface QueueLine {
+interface QueueLine {
   agentId: string;
   text: string;
 }

@@ -364,11 +364,9 @@ body.resizing iframe { pointer-events: none; }
 /* Another agent's badge: its own colour (--tone) and up to three letters. */
 .avatar.agent.toned { background: var(--tone); color: var(--on-tint); font-size: calc(var(--size) * 0.4); letter-spacing: -0.02em; }
 /* Another agent's reply: its byline over its parts, indented like pi's. */
-.agent-reply { display: flex; flex-direction: column; gap: 4px; }
-.agent-reply > :not(.byline) { margin-left: var(--gutter); }
-/* An agent working now: its working line (badge, time, the step's phrase, its own Stop), then its steps as they come. */
-.agent-live { display: flex; flex-direction: column; gap: 4px; }
-.agent-live > :not(.byline) { margin-left: var(--gutter); }
+/* An agent's reply, or one working now: its working line (badge, time, the step's phrase, its own Stop), then its steps as they come. */
+:is(.agent-reply, .agent-live) { display: flex; flex-direction: column; gap: 4px; }
+:is(.agent-reply, .agent-live) > :not(.byline) { margin-left: var(--gutter); }
 .working-line { align-items: center; }
 .working-line .working-what { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--working); font-variant-numeric: tabular-nums; }
 .working-stop { flex: none; margin-left: 4px; padding: 0 9px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); font-size: 12px; line-height: 20px; }

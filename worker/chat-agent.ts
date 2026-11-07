@@ -132,7 +132,7 @@ import {
   type ChatTurnData,
 } from "../shared/agents.ts";
 import { AgentTurns, type TurnHost } from "./agents/controller.ts";
-import { TurnFilter } from "./agents/live.ts";
+import { isTurnEntry, TurnFilter } from "./agents/live.ts";
 import { ChatRoster, type AgentTurn, type RosterEntry } from "./agents/roster.ts";
 import { agentsExtension } from "./agents/tools.ts";
 import { agentInstructions, allowedTools, askOf, assistantText, attachedNote, MAX_ASK_CHARS, messageAskKey, speakersFor } from "./agents/turns.ts";
@@ -2120,7 +2120,7 @@ export class ChatAgent extends DurableObject<Env> {
       const found: EntryRecord[] = [];
       for await (const page of entryPages(await conversation(session), { order: "descending" }, 100, 10)) {
         for (const entry of page) {
-          if (entry.kind === CHAT_TURN_KIND && (entry.data as ChatTurnData | undefined)?.turn === turn) return found.reverse();
+          if (isTurnEntry(entry, turn)) return found.reverse();
           found.push(entry);
         }
       }
@@ -2694,7 +2694,10 @@ class ChatSockets extends LifecycleCapability implements DurableObjectCapability
 
   /** Every open socket follows the agents' turns running now, and lets go of those that ended (see #followAgents). */
   followAgents(): void {
-    for (const ws of this.lifecycle.sockets.get(SOCKET_TAG)) if (this.#person(ws) && this.#streams.has(ws)) this.#followAgents(ws);
+    const sockets = this.lifecycle.sockets.get(SOCKET_TAG).filter((ws) => this.#person(ws) && this.#streams.has(ws));
+    if (!sockets.length) return;
+    const running = this.#chat.runningAgents();
+    for (const ws of sockets) this.#followAgents(ws, running);
   }
 
   /**
@@ -2702,10 +2705,10 @@ class ChatSockets extends LifecycleCapability implements DurableObjectCapability
    * one that attaches mid-turn gets the turn's entries, not the agent's whole history. A stream whose turn ended, or
    * whose agent left, stops; one that ends by itself is let go, and the next change of the roster follows it again.
    */
-  #followAgents(ws: WebSocket): void {
+  #followAgents(ws: WebSocket, runs = this.#chat.runningAgents()): void {
     const following = this.#agentStreams.get(ws) ?? new Map<string, AgentFollow>();
     this.#agentStreams.set(ws, following);
-    const running = new Map(this.#chat.runningAgents().map((run) => [run.agentId, run]));
+    const running = new Map(runs.map((run) => [run.agentId, run]));
     for (const [agent, follow] of following) {
       if (running.get(agent)?.turn === follow.turn) continue;
       following.delete(agent);

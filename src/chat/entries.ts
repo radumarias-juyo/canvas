@@ -1,7 +1,7 @@
 import type { UserMessage } from "@earendil-works/pi-ai";
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { CHAT_AGENT_KIND, CHAT_TURN_KIND, type ChatAgentReplyData } from "../../shared/agents.ts";
-import { mergeItems, resultItems, type ItemRef } from "../../shared/items.ts";
+import { entryItems, mergeItems, type ItemRef } from "../../shared/items.ts";
 import { CHAT_MESSAGE_KIND, CHAT_PEOPLE_KIND, publishedBy, type ChatMessageData, type ChatPeopleData } from "../../shared/protocol.ts";
 
 /** When an entry was sent, for one that has a time: messages from before chats kept `sentAt` have only the time pi wrote them, and asides not even that. */
@@ -76,13 +76,20 @@ export function userText(message: UserMessage): string {
         .join("");
 }
 
-/** The entries a reply of pi's ends with: a person's message, another agent's reply, or a turn an agent handed pi. */
-const ENDS_REPLY: ReadonlySet<string> = new Set(["pi.user", CHAT_MESSAGE_KIND, CHAT_AGENT_KIND, CHAT_TURN_KIND]);
+const STARTS_RUN: ReadonlySet<string> = new Set(["pi.user", CHAT_MESSAGE_KIND, CHAT_TURN_KIND]);
+
+/**
+ * Whether `entry` starts a run of pi's, and so ends the reply before it: a person's message, or a turn an agent handed
+ * pi. An aside does not (it can be written while pi works), nor another agent's reply posted meanwhile.
+ */
+export function startsRun(entry: Pick<EntryRecord, "kind" | "data">): boolean {
+  return STARTS_RUN.has(entry.kind) && !(entry.kind === CHAT_MESSAGE_KIND && (entry.data as Partial<ChatMessageData> | undefined)?.aside);
+}
 
 /**
  * The item chips under each of pi's replies, by the entry they show under (its last message with text): the records its
- * MCP results held (shared/items.ts), from the tool results' details, never from its text. An aside does not end a
- * reply: it can be written while pi works.
+ * MCP results held (shared/items.ts), from the tool results' details, never from its text. A reply ends where the
+ * next run starts (startsRun).
  */
 export function replyItems(entries: readonly EntryRecord[]): ReadonlyMap<number, ItemRef[]> {
   const byEntry = new Map<number, ItemRef[]>();
@@ -96,8 +103,8 @@ export function replyItems(entries: readonly EntryRecord[]): ReadonlyMap<number,
   };
   for (const entry of entries) {
     const message = entry.model?.[0];
-    if (ENDS_REPLY.has(entry.kind) && !(entry.kind === CHAT_MESSAGE_KIND && (entry.data as unknown as ChatMessageData).aside)) flush();
-    else if (entry.kind === "pi.tool-result" && message?.role === "toolResult" && !message.isError) found.push(resultItems(message.details));
+    if (startsRun(entry)) flush();
+    else if (entry.kind === "pi.tool-result") found.push(entryItems(entry));
     else if (entry.kind === "pi.assistant" && message?.role === "assistant" && blocks(message.content).some((block) => block.type === "text" && block.text.trim()))
       lastText = entry.id as number;
   }

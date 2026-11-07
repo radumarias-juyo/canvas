@@ -45,10 +45,9 @@ import { ChatPromptButton } from "../SystemPrompt.tsx";
 import { SharePanel } from "./SharePanel.tsx";
 import { promptSpend, totalTime } from "./spend.ts";
 import { shownLive, useChat, waitingOnModel, type AgentLive } from "./useChat.ts";
-import { PeopleBar } from "./AgentsBar.tsx";
+import { PeopleBar, Since } from "./AgentsBar.tsx";
 import { queueLines } from "./agentLines.ts";
-import { formatElapsed, useElapsed } from "./elapsed.ts";
-import { Fold, ItemChips } from "./Fold.tsx";
+import { Fold, FoldScope, ItemChips } from "./Fold.tsx";
 import { workingPhrase } from "./phrase.ts";
 import { ComposerMore } from "./ComposerMore.tsx";
 import { Dictation } from "./Dictation.tsx";
@@ -269,7 +268,7 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
   // A hint comes in after its message: keep it in view for a reader at the bottom.
   useEffect(follow, [follow, hinted]);
   const thinking = state.runStartedAt !== undefined && waitingOnModel(state);
-  const phrase = thinking ? workingPhrase(state.entries, state.partial, stepLabel) : undefined;
+  const phrase = useMemo(() => (thinking ? workingPhrase(state.entries, state.partial, stepLabel) : undefined), [thinking, state.entries, state.partial]);
   // pi's replies' item chips: the records its tool results held, under the reply built on them.
   const items = useMemo(() => replyItems(state.entries), [state.entries]);
   // The agents working now, each with its live steps, its time and its own Stop; then who waits for a turn.
@@ -278,214 +277,216 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
   return (
     <SharedChat.Provider value={group}>
       <ChatAgents.Provider value={agents}>
-      <ReactionsContext.Provider value={chatReactions}>
-        <section className="chat">
-          <header className="chat-header">
-            {onMenu && <MenuButton onClick={onMenu} />}
-            <h1 className="chat-title" title={title}>
-              {title}
-            </h1>
-            {!group && <span className="chat-people">{mine > 1 && `Open in ${mine} of your windows`}</span>}
-            {people && (group || isOwner) && (
-              <PeopleBar chatId={chatId} people={people} online={online} uid={uid} piWorking={state.busy} agents={agents} bar={group !== null} />
-            )}
-            <ChatCost usage={state.usage} entries={state.entries} time={time} />
-            {shared && <NotifyButton />}
-            {people && <ChatPromptButton chatId={chatId} />}
-            {people && (
-              <button type="button" ref={shareButton} className="share-button" onClick={() => setSharing(!sharing)} aria-expanded={sharing}>
-                {/* The owner shares from here also once people have joined; the people bar beside it shows who is in. */}
-                {isOwner ? "Share" : "People"}
-              </button>
-            )}
-          </header>
-          {sharing && people && <SharePanel chatId={chatId} uid={uid} isOwner={isOwner} people={people} onLeft={onLeft} onClose={closeSharing} />}
-          <StepsProvider entries={state.entries} tools={state.tools} busy={state.busy}>
-            <Compact.Provider value={compact}>
-              <div className="messages" ref={list} onScroll={onScroll} data-compact={compact || undefined}>
-                <div className="transcript" ref={track}>
-                  {state.entries.length === 0 && !state.busy && !state.incoming.length && (
-                    <div className="empty-chat">
-                      <h2>What should we build?</h2>
-                      <p>Try: “A live crypto dashboard for BTC, ETH and SOL with 24 h change and a 7-day price chart, refreshing every 30 seconds.”</p>
-                    </div>
-                  )}
-                  {state.entries.map((entry) => {
-                    const spend = prompts.get(entry.id);
-                    const dayStart = dayStarts.get(entry.id);
-                    return (
-                      <Fragment key={entry.id}>
-                        {dayStart !== undefined && <DaySeparator at={dayStart} />}
-                        {entry.id === newAt && <NewDivider />}
-                        {bylines.has(entry.id) && <AgentByline />}
-                        <Entry
-                          entry={entry}
-                          steps={streamed?.grown?.entry === entry.id ? streamed.grown.steps : runs.byEntry.get(entry.id as number)}
-                          reactions={reactions[entry.id]}
-                          uid={uid}
-                          ownerName={ownerName}
-                          onOpen={onArtifact}
-                          onReply={reply}
-                          hinted={hinted.has(entry.id as number)}
-                          onAskAgent={askAgent}
-                          onNoHint={dropHint}
-                          items={items.get(entry.id as number)}
-                        />
-                        {spend && <PromptCost spend={spend} />}
-                      </Fragment>
-                    );
-                  })}
-                  {!agentLast && (state.partial || thinking) && <AgentByline />}
-                  {state.partial && <Assistant message={state.partial} steps={streamed?.steps} streaming onGrow={follow} />}
-                  {thinking && <Thinking since={state.runStartedAt!} phrase={phrase} />}
-                  {state.error && <div className="chat-error">{state.error}</div>}
-                  {liveTurns.map((turn) => (
-                    <AgentTurnLive key={`${turn.agent.id}:${turn.turn}`} live={turn} onStop={connected ? () => abort(turn.agent.id) : undefined} />
-                  ))}
-                  {waiting.map((line) => (
-                    <div key={line.agentId} className="agent-queue-line">
-                      {line.text}
-                    </div>
-                  ))}
-                  <Queue queued={state.queued} incoming={state.incoming} uid={uid} />
-                </div>
-              </div>
-            </Compact.Provider>
-          </StepsProvider>
-          <form className="composer" onSubmit={submit} onDragOver={onDragOver} onDrop={onDrop}>
-            {attachments.error && <div className="chat-error">{attachments.error}</div>}
-            <MentionList mentions={mentions} uid={uid} />
-            {replying && (
-              <div className="replying">
-                <ReplyQuoteView quote={replying} />
-                <button type="button" className="icon-button" onClick={() => setReplying(null)} title="Do not reply to it" aria-label="Do not reply to it">
-                  ×
+        <FoldScope.Provider value={chatId}>
+        <ReactionsContext.Provider value={chatReactions}>
+          <section className="chat">
+            <header className="chat-header">
+              {onMenu && <MenuButton onClick={onMenu} />}
+              <h1 className="chat-title" title={title}>
+                {title}
+              </h1>
+              {!group && <span className="chat-people">{mine > 1 && `Open in ${mine} of your windows`}</span>}
+              {people && (group || isOwner) && (
+                <PeopleBar chatId={chatId} people={people} online={online} uid={uid} piWorking={state.busy} agents={agents} bar={group !== null} />
+              )}
+              <ChatCost usage={state.usage} entries={state.entries} time={time} />
+              {shared && <NotifyButton />}
+              {people && <ChatPromptButton chatId={chatId} />}
+              {people && (
+                <button type="button" ref={shareButton} className="share-button" onClick={() => setSharing(!sharing)} aria-expanded={sharing}>
+                  {/* The owner shares from here also once people have joined; the people bar beside it shows who is in. */}
+                  {isOwner ? "Share" : "People"}
                 </button>
-              </div>
-            )}
-            {/* A click anywhere in the box but a button puts the cursor in the input. */}
-            <div className="composer-box" onClick={(e) => (e.target as Element).closest("button") || input.current?.focus()}>
-              {attachments.pending.length > 0 && (
-                <div className="pending-attachments">
-                  {attachments.pending.map((item) => (
-                    <span key={item.id} className="pending-attachment" title={`${item.file.name} · ${formatBytes(item.file.size)}`}>
-                      {item.preview ? <img src={item.preview} alt="" /> : <span className="file-icon">▤</span>}
-                      <span className="pending-name">{item.file.name}</span>
-                      <button type="button" onClick={() => attachments.remove(item.id)} disabled={attachments.sending} aria-label={`Remove ${item.file.name}`}>
-                        ×
-                      </button>
-                    </span>
-                  ))}
+              )}
+            </header>
+            {sharing && people && <SharePanel chatId={chatId} uid={uid} isOwner={isOwner} people={people} onLeft={onLeft} onClose={closeSharing} />}
+            <StepsProvider entries={state.entries} tools={state.tools} busy={state.busy}>
+              <Compact.Provider value={compact}>
+                <div className="messages" ref={list} onScroll={onScroll} data-compact={compact || undefined}>
+                  <div className="transcript" ref={track}>
+                    {state.entries.length === 0 && !state.busy && !state.incoming.length && (
+                      <div className="empty-chat">
+                        <h2>What should we build?</h2>
+                        <p>Try: “A live crypto dashboard for BTC, ETH and SOL with 24 h change and a 7-day price chart, refreshing every 30 seconds.”</p>
+                      </div>
+                    )}
+                    {state.entries.map((entry) => {
+                      const spend = prompts.get(entry.id);
+                      const dayStart = dayStarts.get(entry.id);
+                      return (
+                        <Fragment key={entry.id}>
+                          {dayStart !== undefined && <DaySeparator at={dayStart} />}
+                          {entry.id === newAt && <NewDivider />}
+                          {bylines.has(entry.id) && <AgentByline />}
+                          <Entry
+                            entry={entry}
+                            steps={streamed?.grown?.entry === entry.id ? streamed.grown.steps : runs.byEntry.get(entry.id as number)}
+                            reactions={reactions[entry.id]}
+                            uid={uid}
+                            ownerName={ownerName}
+                            onOpen={onArtifact}
+                            onReply={reply}
+                            hinted={hinted.has(entry.id as number)}
+                            onAskAgent={askAgent}
+                            onNoHint={dropHint}
+                            items={items.get(entry.id as number)}
+                          />
+                          {spend && <PromptCost spend={spend} />}
+                        </Fragment>
+                      );
+                    })}
+                    {!agentLast && (state.partial || thinking) && <AgentByline />}
+                    {state.partial && <Assistant message={state.partial} steps={streamed?.steps} streaming onGrow={follow} />}
+                    {thinking && <Thinking since={state.runStartedAt!} phrase={phrase} />}
+                    {state.error && <div className="chat-error">{state.error}</div>}
+                    {liveTurns.map((turn) => (
+                      <AgentTurnLive key={`${turn.agent.id}:${turn.turn}`} live={turn} onStop={connected ? () => abort(turn.agent.id) : undefined} />
+                    ))}
+                    {waiting.map((line) => (
+                      <div key={line.agentId} className="agent-queue-line">
+                        {line.text}
+                      </div>
+                    ))}
+                    <Queue queued={state.queued} incoming={state.incoming} uid={uid} />
+                  </div>
+                </div>
+              </Compact.Provider>
+            </StepsProvider>
+            <form className="composer" onSubmit={submit} onDragOver={onDragOver} onDrop={onDrop}>
+              {attachments.error && <div className="chat-error">{attachments.error}</div>}
+              <MentionList mentions={mentions} uid={uid} />
+              {replying && (
+                <div className="replying">
+                  <ReplyQuoteView quote={replying} />
+                  <button type="button" className="icon-button" onClick={() => setReplying(null)} title="Do not reply to it" aria-label="Do not reply to it">
+                    ×
+                  </button>
                 </div>
               )}
-              <div className="composer-row">
-                <textarea
-                  ref={input}
-                  // Each chat mounts its own view, so a new or opened chat starts with the cursor here.
-                  autoFocus
-                  value={draft}
-                  onChange={(e) => {
-                    setDraft(e.target.value);
-                    mentions.track();
-                  }}
-                  onSelect={mentions.track}
-                  onKeyDown={onKey}
-                  onPaste={onPaste}
-                  placeholder={
-                    !connected
-                      ? "Connecting…"
-                      : shared
-                        ? `Message everyone; ${AGENT_TOKEN} asks ${AGENT_NAME}, and @ names someone, a file or an artifact…`
-                        : "Describe a dashboard, or type @ to name a file or artifact…"
-                  }
-                  rows={1}
-                />
-                {/* While the agent works Stop is here. Once something is typed or attached, Send joins it: a message for the
-                    agent waits its turn in the queue, and stopping needs no clearing of the box. */}
-                {working && (
-                  // Stop lands where Send was when a run starts, or when sending empties the box and takes Send away:
-                  // a double click's second click (detail 2) is not a Stop. It goes once the run ends, so the cursor goes
-                  // back to the input, as after Send, rather than to nowhere.
-                  <button
-                    type="button"
-                    className="icon-button composer-stop"
-                    disabled={!connected}
-                    onClick={(e) => {
-                      if (e.detail > 1) return;
-                      abort();
-                      input.current?.focus();
+              {/* A click anywhere in the box but a button puts the cursor in the input. */}
+              <div className="composer-box" onClick={(e) => (e.target as Element).closest("button") || input.current?.focus()}>
+                {attachments.pending.length > 0 && (
+                  <div className="pending-attachments">
+                    {attachments.pending.map((item) => (
+                      <span key={item.id} className="pending-attachment" title={`${item.file.name} · ${formatBytes(item.file.size)}`}>
+                        {item.preview ? <img src={item.preview} alt="" /> : <span className="file-icon">▤</span>}
+                        <span className="pending-name">{item.file.name}</span>
+                        <button type="button" onClick={() => attachments.remove(item.id)} disabled={attachments.sending} aria-label={`Remove ${item.file.name}`}>
+                          ×
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+                <div className="composer-row">
+                  <textarea
+                    ref={input}
+                    // Each chat mounts its own view, so a new or opened chat starts with the cursor here.
+                    autoFocus
+                    value={draft}
+                    onChange={(e) => {
+                      setDraft(e.target.value);
+                      mentions.track();
                     }}
-                    title="Stop"
-                    aria-label="Stop"
-                  >
-                    <Icon>
-                      <rect x="6.5" y="6.5" width="11" height="11" rx="2" fill="currentColor" stroke="none" />
-                    </Icon>
-                  </button>
-                )}
-                {(!working || hasMessage) && (
-                  <button
-                    type="submit"
-                    className="icon-button primary"
-                    disabled={!connected || attachments.sending || !hasMessage}
-                    title={sendLabel}
-                    aria-label={sendLabel}
-                  >
-                    <Icon stroke={2.2}>
-                      <path d="M12 19V5M6 11l6-6 6 6" />
-                    </Icon>
-                  </button>
-                )}
+                    onSelect={mentions.track}
+                    onKeyDown={onKey}
+                    onPaste={onPaste}
+                    placeholder={
+                      !connected
+                        ? "Connecting…"
+                        : shared
+                          ? `Message everyone; ${AGENT_TOKEN} asks ${AGENT_NAME}, and @ names someone, a file or an artifact…`
+                          : "Describe a dashboard, or type @ to name a file or artifact…"
+                    }
+                    rows={1}
+                  />
+                  {/* While the agent works Stop is here. Once something is typed or attached, Send joins it: a message for the
+                      agent waits its turn in the queue, and stopping needs no clearing of the box. */}
+                  {working && (
+                    // Stop lands where Send was when a run starts, or when sending empties the box and takes Send away:
+                    // a double click's second click (detail 2) is not a Stop. It goes once the run ends, so the cursor goes
+                    // back to the input, as after Send, rather than to nowhere.
+                    <button
+                      type="button"
+                      className="icon-button composer-stop"
+                      disabled={!connected}
+                      onClick={(e) => {
+                        if (e.detail > 1) return;
+                        abort();
+                        input.current?.focus();
+                      }}
+                      title="Stop"
+                      aria-label="Stop"
+                    >
+                      <Icon>
+                        <rect x="6.5" y="6.5" width="11" height="11" rx="2" fill="currentColor" stroke="none" />
+                      </Icon>
+                    </button>
+                  )}
+                  {(!working || hasMessage) && (
+                    <button
+                      type="submit"
+                      className="icon-button primary"
+                      disabled={!connected || attachments.sending || !hasMessage}
+                      title={sendLabel}
+                      aria-label={sendLabel}
+                    >
+                      <Icon stroke={2.2}>
+                        <path d="M12 19V5M6 11l6-6 6 6" />
+                      </Icon>
+                    </button>
+                  )}
+                </div>
               </div>
-            </div>
-            <div className="composer-tools">
-              <button
-                type="button"
-                className="icon-button"
-                onClick={() => picker.current?.click()}
-                disabled={attachments.sending || attachments.pending.length >= MAX_ATTACHMENTS}
-                title="Attach images or files"
-                aria-label="Attach images or files"
-              >
-                <Icon>
-                  <path d="M12 4v16M4 12h16" />
-                </Icon>
-              </button>
-              <input
-                ref={picker}
-                type="file"
-                multiple
-                hidden
-                onChange={(e) => {
-                  attachments.add([...(e.target.files ?? [])]);
-                  e.target.value = "";
-                }}
-              />
-              <Dictation disabled={!connected} onText={dictated} />
-              <ComposerMore
-                mentionLabel={shared ? `Ask ${AGENT_NAME}, or name someone, a file or an artifact` : "Name a file or artifact"}
-                onMention={mentions.insertAt}
-                history={history}
-                onRecall={recalling.recall}
-                compact={compact}
-              />
-              {/* The model and the context ring at the right. Stop and the transcript show a run; only an upload needs the spinner. */}
-              <div className="composer-model">
-                {attachments.sending && <span className="spinner" aria-hidden="true" />}
-                <ModelPicker
-                  model={state.model}
-                  thinkingLevel={state.thinkingLevel}
-                  auto={auto}
-                  disabled={!connected}
-                  attachingImages={attachments.pending.some((item) => item.preview)}
-                  onChange={setModel}
+              <div className="composer-tools">
+                <button
+                  type="button"
+                  className="icon-button"
+                  onClick={() => picker.current?.click()}
+                  disabled={attachments.sending || attachments.pending.length >= MAX_ATTACHMENTS}
+                  title="Attach images or files"
+                  aria-label="Attach images or files"
+                >
+                  <Icon>
+                    <path d="M12 4v16M4 12h16" />
+                  </Icon>
+                </button>
+                <input
+                  ref={picker}
+                  type="file"
+                  multiple
+                  hidden
+                  onChange={(e) => {
+                    attachments.add([...(e.target.files ?? [])]);
+                    e.target.value = "";
+                  }}
                 />
-                <ContextMeter entries={state.entries} model={state.model} />
+                <Dictation disabled={!connected} onText={dictated} />
+                <ComposerMore
+                  mentionLabel={shared ? `Ask ${AGENT_NAME}, or name someone, a file or an artifact` : "Name a file or artifact"}
+                  onMention={mentions.insertAt}
+                  history={history}
+                  onRecall={recalling.recall}
+                  compact={compact}
+                />
+                {/* The model and the context ring at the right. Stop and the transcript show a run; only an upload needs the spinner. */}
+                <div className="composer-model">
+                  {attachments.sending && <span className="spinner" aria-hidden="true" />}
+                  <ModelPicker
+                    model={state.model}
+                    thinkingLevel={state.thinkingLevel}
+                    auto={auto}
+                    disabled={!connected}
+                    attachingImages={attachments.pending.some((item) => item.preview)}
+                    onChange={setModel}
+                  />
+                  <ContextMeter entries={state.entries} model={state.model} />
+                </div>
               </div>
-            </div>
-          </form>
-        </section>
-      </ReactionsContext.Provider>
+            </form>
+          </section>
+        </ReactionsContext.Provider>
+        </FoldScope.Provider>
       </ChatAgents.Provider>
     </SharedChat.Provider>
   );
@@ -1021,7 +1022,3 @@ function AgentTurnLive({ live, onStop }: { live: AgentLive & { agent: ChatAgentV
   );
 }
 
-/** How long since `at`, counting on each second. */
-function Since({ at }: { at: number }) {
-  return <>{formatElapsed(useElapsed(at))}</>;
-}

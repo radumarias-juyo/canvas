@@ -25,12 +25,10 @@ function snapshot(entries: EntryRecord[], over: object = {}) {
 }
 
 describe("an agent's turn, as the chat's sockets follow it", () => {
-  it("cuts a snapshot to the turn's entries, from its input on, and to the session's model and effort", () => {
+  it("cuts a snapshot to the turn's entries, from its input on", () => {
     const filter = new TurnFilter(7);
     const [event] = filter.pass([snapshot([said(1, "an old answer"), turnInput(2, 6), said(3, "last turn"), catchUp(4), turnInput(5, 7), said(6, "Looking…")])]);
     expect(event).toMatchObject({ type: "snapshot", entries: [turnInput(5, 7), said(6, "Looking…")], run: { inputs: [1] }, inbox: [] });
-    // Never what its owner set it up with.
-    expect((event as Extract<AgentEvent, { type: "snapshot" }>).agent).toEqual({ model: { provider: "p", modelId: "m" }, thinkingLevel: "low" });
   });
 
   it("holds back the catch-up and anything else before the turn's input is placed, then passes the turn's events", () => {

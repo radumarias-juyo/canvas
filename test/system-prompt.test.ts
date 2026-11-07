@@ -67,7 +67,7 @@ describe("withoutSystemPrompt", () => {
     model: [{ role: "system", content: "", sections: { user_system_prompt: "secret" }, toolsAdded: [{ name: "files_read" }], timestamp: 5 }],
   } as unknown as EntryRecord;
   const user = { kind: "pi.user", id: 3, conversationId: "c", model: [{ role: "user", content: "sections", timestamp: 6 }] } as unknown as EntryRecord;
-  const snapshot = (entries: EntryRecord[]) => ({ type: "snapshot", entries }) as unknown as AgentEvent;
+  const snapshot = (entries: EntryRecord[]) => ({ type: "snapshot", entries, agent: { model: { provider: "p", modelId: "m" } } }) as unknown as AgentEvent;
 
   it("keeps a system entry in its place, without the prompt's sections and tools", () => {
     const event = snapshot([system, user]);
@@ -93,8 +93,16 @@ describe("withoutSystemPrompt", () => {
   });
 
   it("returns an event with no system entry as it is", () => {
-    for (const event of [snapshot([user]), { type: "entry_appended", entry: user } as AgentEvent, { type: "tool_execution_end" } as AgentEvent]) {
+    expect(withoutSystemPrompt(snapshot([user]))).toEqual(snapshot([user]));
+    for (const event of [{ type: "entry_appended", entry: user } as AgentEvent, { type: "tool_execution_end" } as AgentEvent]) {
       expect(withoutSystemPrompt(event)).toBe(event);
     }
+  });
+
+  it("keeps of the session's state only its model and effort, never its instructions or tools", () => {
+    const agent = { model: { provider: "p", modelId: "m" }, thinkingLevel: "low", instructions: "secret", tools: ["files_read"] };
+    const shown = { model: { provider: "p", modelId: "m" }, thinkingLevel: "low" };
+    expect(withoutSystemPrompt({ type: "snapshot", entries: [], agent } as unknown as AgentEvent)).toMatchObject({ agent: shown });
+    expect(withoutSystemPrompt({ type: "agent_changed", agent } as unknown as AgentEvent)).toEqual({ type: "agent_changed", agent: shown });
   });
 });
