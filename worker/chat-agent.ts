@@ -193,6 +193,7 @@ import type { Value } from "../shared/conditions.ts";
 import { runRef, type AgentRunDetail, type AgentRunList, type RunDelivery, type RunRef } from "../shared/runs.ts";
 import type { RoomLink, RoomRef, SeatBatch, SeatLink, SeatResult, SeatTurn } from "./agents/seats/link.ts";
 import { memberAgentName, seatChatId } from "./agents/seats/names.ts";
+import { postedVersion, readableVersion } from "./agent/page-authors.ts";
 import { SeatActions } from "./agents/seats/actions.ts";
 import { addRefusal, mayRemove, mayShare, seatedEntry, type ChatRules } from "./agents/seats/rules.ts";
 import { AgentSeats, type SeatHost } from "./agents/seats/seat.ts";
@@ -260,6 +261,8 @@ import { CHAT_CHECKLIST_KIND, checklistEntry, type ChecklistAuthor, type Checkli
 
 /** Artifacts from the owner's other chats one chat remembers as named with "@" (see ChatAgent.#broughtIn). */
 const MAX_BROUGHT_IN = 200;
+/** How many pages of 100 log entries a read of another person's page looks back through for the replies that posted it. */
+const MAX_POSTED_PAGES = 20;
 /** How many bytes of skill files a chat object keeps in memory: a design library or two. */
 const SKILL_FILE_CACHE_BYTES = 4_000_000;
 
@@ -725,6 +728,7 @@ export class ChatAgent extends DurableObject<Env> {
       onDrafted: (session, id) => this.roster.recordDraft(session, id),
       broughtIn: (id) => this.#broughtIn().includes(id),
       heldIn: (chatId, artifactId) => this.#heldIn(chatId, artifactId),
+      chatPage: (meta, session) => this.#chatPage(meta, session),
       proposeSkill: (skill) => this.#directory.saveSkill(skill, "agent", false),
       proposeAgent: (input) => this.#directory.saveAgent(input, "agent", false),
       checkPage: (input, signal) =>
@@ -3872,6 +3876,37 @@ export class ChatAgent extends DurableObject<Env> {
     return this.turns.seatEnded(agentId, turn, result);
   }
 
+  /**
+   * (RPC, from a seat) The newest version of a page a member's agent may read in this chat (ChatScope.chatPage): one of
+   * this chat's as that member sees it, or another person's as their agent's replies posted it here; 0 for none.
+   */
+  async seatPage(uid: string, agentId: string, artifactId: string): Promise<number> {
+    if (!this.#seated(uid, agentId)) return 0;
+    const meta = await this.storage.artifacts.readMeta(artifactId);
+    if (!meta) return 0;
+    return readableVersion(meta, this.#room, {
+      shown: async () => shownOf(meta, await this.withheldFrom(artifactId, uid))?.latest ?? 0,
+      posted: () => this.#postedVersion(meta),
+    });
+  }
+
+  /**
+   * The newest version of another person's page conversation `session` may read as posted in its chat: in a seat's
+   * session, as its room shows it to this seat's owner (seatPage); else as a member's agent's replies posted it here.
+   */
+  async #chatPage(meta: Pick<ArtifactMeta, "id" | "ownerUid">, session: string): Promise<number> {
+    const seated = this.seats.turnIn(session);
+    if (seated) return exports.ChatAgent.getByName(chatAgentName(seated.room.ownerUid, seated.room.chatId)).seatPage(this.uid, seated.agentId, meta.id);
+    return meta.ownerUid === this.uid ? 0 : this.#postedVersion(meta);
+  }
+
+  /** The newest version of `meta` the replies of its owner's agents posted in this chat's log (postedVersion), within MAX_POSTED_PAGES. */
+  async #postedVersion(meta: Pick<ArtifactMeta, "id" | "ownerUid">): Promise<number> {
+    let newest = 0;
+    for await (const page of this.#log({ order: "descending" }, 100, MAX_POSTED_PAGES)) newest = Math.max(newest, postedVersion(page, meta));
+    return newest;
+  }
+
   /** This object as the host of its user's agents' seats in other people's chats (worker/agents/seats/). */
   #seatHost(): SeatHost {
     const room = (ref: RoomRef, agentId: string): RoomLink => {
@@ -4278,7 +4313,7 @@ export class ChatAgent extends DurableObject<Env> {
       when: run.detail.when ?? "",
       itemsList: this.runs.items(agentId, dueAt),
       deliveries: run.detail.deliveries,
-      used: run.detail.used ?? { skills: [], servers: [], models: [] },
+      used: { skills: [], servers: [], models: [], ...run.detail.used, notes: run.detail.used?.notes?.length ?? 0 },
     };
   }
 
@@ -4450,6 +4485,7 @@ export class ChatAgent extends DurableObject<Env> {
       },
       newSession: async () => (await this.harness.sessions.create()).id,
       configure: (session, agent, model, dueAt) => this.#configureRun(session, agent, model, undefined, dueAt),
+      notesRead: (session) => this.memory.notesIn(session),
       write: (session, text, requestId) => this.#writeTo(session, text, requestId),
       work: async (session, prompt, operationId) => {
         const { result, entries } = await this.#runStep(session, prompt, operationId);

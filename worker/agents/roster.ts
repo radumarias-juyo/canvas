@@ -271,6 +271,14 @@ const PENDING = "reply IS NOT NULL AND delivered_at IS NULL";
 const UNDELIVERED = `${PENDING} AND held = 0`;
 /** A turn's reply held for its owner's review. */
 const HELD = `${PENDING} AND held = 1`;
+/**
+ * A queued turn (`t`) whose chain has no earlier turn still going: queued, running, or ended with its reply not in the
+ * log yet. One held for its owner's review is not waited for: nobody sees it until they post it.
+ */
+const IN_TURN = `NOT EXISTS (
+  SELECT 1 FROM chat_agent_turns e WHERE (e.root = COALESCE(t.root, t.id) OR e.id = COALESCE(t.root, t.id)) AND e.id < t.id
+    AND (e.status IN ('queued', 'running') OR (e.reply IS NOT NULL AND e.delivered_at IS NULL AND e.held = 0))
+)`;
 
 /**
  * One chat's agents and their turns, in the chat object's own SQLite. The roster points at definitions in their
@@ -818,15 +826,17 @@ export class ChatRoster {
   }
 
   /**
-   * Start an agent's next waiting turn, oldest first, unless one is running: at most one at a time per agent. Null
-   * when nothing starts.
+   * Start an agent's next waiting turn, oldest first, unless one is running: at most one at a time per agent. Speakers
+   * go one after another: a turn waits for every earlier turn of its chain (one person's message, the agents it names in
+   * order, then their hand-offs) to end and its reply to reach the log (IN_TURN), so it reads the replies before it. An
+   * agent's turn of another chain may go meanwhile. Null when nothing starts.
    */
   startNext(agentId: string): AgentTurn | null {
     if (this.#turns("agent_id = ? AND status = 'running' LIMIT 1", agentId).length) return null;
     const row = this.#sql
       .exec(
         `UPDATE chat_agent_turns SET status = 'running', started_at = ?
-         WHERE id = (SELECT id FROM chat_agent_turns WHERE agent_id = ? AND status = 'queued' ORDER BY id LIMIT 1) RETURNING *`,
+         WHERE id = (SELECT id FROM chat_agent_turns t WHERE agent_id = ? AND status = 'queued' AND ${IN_TURN} ORDER BY id LIMIT 1) RETURNING *`,
         this.#now(),
         agentId,
       )
