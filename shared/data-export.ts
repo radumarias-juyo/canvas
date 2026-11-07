@@ -1,3 +1,4 @@
+import type { AgentDefinition, AgentInput, AgentOrigin } from "./agents.ts";
 import type { ModelSetting } from "./models.ts";
 import { ID_PATTERN, type ArtifactVersion } from "./protocol.ts";
 import type { SkillFileInfo } from "./skill-files.ts";
@@ -44,6 +45,17 @@ export interface ExportedSkill extends SkillInput {
   files?: SkillFileInfo[];
 }
 
+/**
+ * One of the user's agents, as exported: its fields, whether it is on, and its id, which the rosters of the chats it
+ * is in point at. An import never replaces one of the importer's: one they have by that name is kept.
+ */
+export interface ExportedAgent extends AgentInput {
+  id: string;
+  origin: AgentOrigin;
+  enabled: boolean;
+  copiedFrom?: AgentDefinition["copiedFrom"];
+}
+
 /** What one page saved for the user (pi.use("storage")), by key; null: a key they removed (see UserDirectory.pageValues). */
 export interface ExportedPageValues {
   artifactId: string;
@@ -55,6 +67,8 @@ export interface ExportedAccount {
   model: ModelSetting | null;
   builtinSkillsOff: string[];
   skills: ExportedSkill[];
+  /** None in an export made before agents. */
+  agents?: ExportedAgent[];
   pageValues: ExportedPageValues[];
 }
 
@@ -162,6 +176,11 @@ export interface ChatImportStart {
   from: string;
   /** Artifact ids the plan changed: old to new. */
   artifacts: Record<string, string>;
+  /**
+   * The agents the import brought in or found here, by their id in the export: the id each has here. The chat keeps
+   * only these of its roster; none for an export made before agents.
+   */
+  agents?: Record<string, string>;
 }
 
 /** POST /api/me/import/artifacts/:id/versions: one version, in order, of an artifact of `chatId`. */
@@ -202,6 +221,7 @@ export function checkManifest(value: unknown): ExportManifest | { error: string 
   }
   const lists = [manifest.chats, manifest.artifacts, manifest.files, manifest.sharedWithMe];
   if (typeof manifest.uid !== "string" || !manifest.account || !lists.every(Array.isArray)) return { error: "The export's manifest is damaged." };
+  if (manifest.account.agents !== undefined && !Array.isArray(manifest.account.agents)) return { error: "The export's manifest is damaged." };
   // Ids and skill names go into request paths: only ones this app makes.
   const ids = [...manifest.chats!.flatMap((chat) => [chat?.id]), ...manifest.artifacts!.flatMap((artifact) => [artifact?.id, artifact?.chatId])];
   const skills = Array.isArray(manifest.account.skills) ? manifest.account.skills : [];

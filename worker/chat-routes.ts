@@ -1,4 +1,5 @@
 import { exports } from "cloudflare:workers";
+import { copyInput, type AgentInput, type SharedAgentView } from "../shared/agents.ts";
 import type { MentionOptions } from "../shared/mentions.ts";
 import {
   ID_PATTERN,
@@ -43,6 +44,11 @@ import type { UserDirectory } from "./users.ts";
  *   GET    /api/chats/:id/agents              the chat's agents and their latest turns, for the people in it
  *   POST   /api/chats/:id/agents              (owner) {agentId}: bring one of their agents (turned on) into the chat
  *   DELETE /api/chats/:id/agents/:agentId     (owner) take an agent out of the chat; its replies stay
+ *   GET    /api/chats/:id/agents/:agentId     one agent of the chat, read-only (SharedAgentView): its owner, or anyone
+ *                                             in the chat while the owner shares it there
+ *   PATCH  /api/chats/:id/agents/:agentId     (owner) {shared}: share it with the people of the chat, or stop
+ *   POST   /api/chats/:id/agents/:agentId/copy  {…fields}: someone's own copy of a shared agent, with their changes,
+ *                                             saved off in their directory with copiedFrom; it runs with their sign-ins
  *   POST   /api/invites/accept                {token}: join the chat an invite link is for
  * With `?as=second`, a chat's routes (but its files) take the owner as their second seat in it, and refuse anyone else.
  * Returns null for any other path.
@@ -80,10 +86,12 @@ export async function chatRoute(
   }
 
   const match = url.pathname.match(
-    /^\/api\/chats\/([a-z0-9]+)(?:\/(ws|invites|members|attachments|mentions|contents|deletion|seen|seat|system-prompt|agents)(?:\/([a-z0-9-]+))?)?$/,
+    /^\/api\/chats\/([a-z0-9]+)(?:\/(ws|invites|members|attachments|mentions|contents|deletion|seen|seat|system-prompt|agents)(?:\/([a-z0-9-]+)(?:\/(copy))?)?)?$/,
   );
   if (!match || !ID_PATTERN.test(match[1])) return null;
-  const [, chatId, what, item] = match;
+  const [, chatId, what, item, sub] = match;
+  // Only an agent's copy has a part after its item.
+  if (sub && what !== "agents") return null;
   const isSocket = what === "ws" && !item;
   if (isSocket && request.headers.get("upgrade") !== "websocket") return json({ error: "Expected a WebSocket upgrade" }, 426);
   // Only this user's own sidebar entry changes, so it needs no chat object.
@@ -169,19 +177,40 @@ export async function chatRoute(
       method === "GET" ? await chat.chatSystemPrompt(person.uid) : await chat.setChatSystemPrompt(person, (await readJson<{ text?: unknown }>(request))?.text);
     return "status" in result ? answer(result) : json(result satisfies ChatSystemPrompt);
   }
+  if (what === "agents" && sub === "copy") {
+    if (method !== "POST" || !item) return null;
+    return copyAgent(request, directory, await chat.sharedAgent(person.uid, item));
+  }
   if (what === "agents") {
     const result =
       method === "GET" && !item
         ? await chat.agentsFor(person.uid)
         : method === "POST" && !item
           ? await chat.addAgent(person, (await readJson<{ agentId?: unknown }>(request))?.agentId)
-          : method === "DELETE" && item
-            ? await chat.removeAgent(person, item)
-            : null;
+          : method === "GET" && item
+            ? await chat.sharedAgent(person.uid, item)
+            : method === "PATCH" && item
+              ? await chat.setAgentShared(person, item, (await readJson<{ shared?: unknown }>(request))?.shared)
+              : method === "DELETE" && item
+                ? await chat.removeAgent(person, item)
+                : null;
     if (!result) return null;
     return "status" in result ? answer(result) : json(result);
   }
   if (what === "invites" && method === "DELETE" && item) return answer(await chat.revokeInvite(person, item));
   if (what === "members" && method === "DELETE" && item) return answer(await chat.removeMember(person, item));
   return null;
+}
+
+/**
+ * Someone's own copy of an agent shared with them (`shared`, as the chat let them open it), with the fields they
+ * changed (the body), saved off in their own directory: the original stays as it is and keeps running as its owner.
+ * Its owner copies their own agent the same way. The copy says where it came from, from the chat's word, not the body's.
+ */
+async function copyAgent(request: Request, directory: DurableObjectStub<UserDirectory>, shared: SharedAgentView | ChatRefusal): Promise<Response> {
+  if ("status" in shared) return json({ error: shared.error }, shared.status);
+  const body = await readJson<Record<string, unknown>>(request);
+  if (!body || typeof body !== "object") return json({ error: "Expected the copy's fields as JSON (content-type: application/json)." }, 400);
+  const saved = await directory.copyAgent(copyInput(shared, body) as unknown as AgentInput, { owner: shared.ownerUid, id: shared.id, version: shared.version });
+  return "error" in saved ? json(saved, 400) : json(saved, 201);
 }

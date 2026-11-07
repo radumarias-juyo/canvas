@@ -4,6 +4,7 @@ import {
   isDraftAgent,
   MAX_AGENT_PROPOSALS,
   MAX_AGENTS,
+  type AgentChatUse,
   type AgentDefinition,
   type AgentInput,
   type AgentOrigin,
@@ -366,6 +367,7 @@ interface AgentDirectory {
   saveAgent(input: unknown, origin: AgentOrigin, enabled?: boolean, save?: AgentSave): Promise<AgentResult>;
   setAgentEnabled(id: string, enabled: boolean, version?: number): Promise<AgentResult>;
   deleteAgent(id: string): Promise<{ error: string } | null>;
+  agentChats(id: string): Promise<AgentChatUse[]>;
 }
 
 // The routes take a DurableObjectStub of UserDirectory, a class whose Workers types this test project does not load,
@@ -388,6 +390,8 @@ function directoryOver(store: AgentStore) {
       return store.setEnabled(id, enabled, version);
     },
     deleteAgent: async (id) => (calls.push({ method: "deleteAgent", args: [id] }), store.delete(id)),
+    // The chats' titles are their ids here: the directory's chats table is not in this test.
+    agentChats: async (id) => (calls.push({ method: "agentChats", args: [id] }), store.chatsOf(id).map((use) => ({ ...use, title: use.chatId }))),
   };
   return { directory, calls };
 }

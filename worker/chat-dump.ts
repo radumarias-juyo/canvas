@@ -15,11 +15,13 @@ export interface DumpKv {
 }
 
 /**
- * What of a chat object's storage an export carries: its conversation (pi's tables, `pi_…`), its reactions and its
- * owner's name. Not its members and invites: they are people of the deployment it was made on, whose ids mean nothing
- * on another, so an imported chat starts with nobody in it but its owner. Nor the Lifecycle's jobs (`cf_agents_…`).
+ * What of a chat object's storage an export carries: its conversation (pi's tables, `pi_…`), its reactions, its
+ * owner's name and its agents' roster (their sessions are pi's). Not its members and invites: they are people of the
+ * deployment it was made on, whose ids mean nothing on another, so an imported chat starts with nobody in it but its
+ * owner. Nor the Lifecycle's jobs (`cf_agents_…`), nor the agents' turns (chat_agent_turns): work still to do, which
+ * would run as the importer, unasked.
  */
-const APP_TABLES = ["chat_reactions", "chat_owner"];
+const APP_TABLES = ["chat_reactions", "chat_owner", "chat_agents"];
 const PI_TABLE = /^pi_[a-z0-9_]+$/;
 const isCarried = (table: string) => PI_TABLE.test(table) || APP_TABLES.includes(table);
 
@@ -184,4 +186,26 @@ function fromCell(cell: SqlCell | undefined, remap: (text: string) => string): s
   if (typeof cell === "string") return remap(cell);
   if (typeof cell === "object" && typeof cell.b64 === "string") return fromBase64(cell.b64).buffer;
   throw new DumpError("A cell of the export is not one SQLite stores.");
+}
+
+/**
+ * After an import stored every part: the roster keeps only the agents the import brought into the importer's directory
+ * (`kept`, their ids here, which the parts were remapped to), each the importer's (`uid`) and shared with nobody, as the
+ * chat has nobody else in it. Returns the agents kept, and the newest entry of the conversation, from which pi's
+ * answers start hand-offs: none of the old ones does.
+ */
+export function importedRoster(sql: DumpSql, uid: string, kept: readonly string[]): { agents: string[]; through: number } {
+  const has = (table: string) => sql.exec("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", table).toArray().length > 0;
+  if (!has("chat_agents")) return { agents: [], through: -1 };
+  const keep = new Set(kept);
+  for (const row of sql.exec("SELECT agent_id FROM chat_agents").toArray()) {
+    if (!keep.has(String(row.agent_id))) sql.exec("DELETE FROM chat_agents WHERE agent_id = ?", String(row.agent_id));
+  }
+  sql.exec("UPDATE chat_agents SET owner_uid = ?, shared = 0", uid);
+  const agents = sql
+    .exec("SELECT agent_id FROM chat_agents ORDER BY agent_id")
+    .toArray()
+    .map((row) => String(row.agent_id));
+  const through = has("pi_entries") ? Number(sql.exec("SELECT COALESCE(MAX(id), -1) AS n FROM pi_entries").toArray()[0].n) : -1;
+  return { agents, through };
 }
