@@ -248,6 +248,12 @@ export class ChatMemory {
     return (await this.#refresh(who)).text;
   }
 
+  /** The ids of the notes a session's prompt holds, as its turn started (refresh): none before one. Never rejects. */
+  async notesIn(conversation: string): Promise<string[]> {
+    const kept = this.#sections.get(this.#who(conversation).key);
+    return kept ? (await kept.section.catch(() => ({ ids: [] }))).ids : [];
+  }
+
   /** Read `who`'s section, kept for its turn. Not while a request is prepared (see #section): the next refresh does it. */
   #refresh(who: Who): Promise<Section> {
     const section = this.#read(who.key, who.agent);

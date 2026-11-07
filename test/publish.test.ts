@@ -60,6 +60,7 @@ function chat(check: (html: string) => CheckReport | Error, publishUnchecked = f
     chatId: "0123456789abcdef",
     hub: { servers: () => [] } as unknown as McpHub,
     artifacts: {
+      readMeta: async () => null,
       publishVersion: async (input: { id?: string; title: string; html: string }) => {
         versions.push({ id: input.id, html: input.html });
         const id = input.id ?? "new0000000000001";
@@ -101,7 +102,7 @@ describe("a page's tools that change data", () => {
   const withCrm = (mayPublishWrites: boolean, before?: string[]) => {
     const made = chat(() => report([]));
     const hub = { servers: () => [{ name: "crm" }], tools: async () => tools, tool: async (_: string, name: string) => tools.find((one) => one.name === name) };
-    const meta = { id: "a1", latest: 1, versions: [{ version: 1, manifest: before ? { mcp: { servers: [{ server: "crm", tools: before }] } } : {} }] };
+    const meta = { id: "a1", ownerUid: "ada", chatId: "0123456789abcdef", latest: 1, versions: [{ version: 1, manifest: before ? { mcp: { servers: [{ server: "crm", tools: before }] } } : {} }] };
     made.scope.hub = hub as unknown as McpHub;
     made.scope.artifacts = { ...made.scope.artifacts, readMeta: async () => meta } as unknown as ArtifactStore;
     made.scope.mayPublishWrites = async () => mayPublishWrites;
