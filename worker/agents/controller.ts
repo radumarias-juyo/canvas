@@ -206,12 +206,14 @@ export class AgentTurns {
       // Who it hands work to, within what the chain may still make.
       const left = MAX_HOPS - roster.handOffsFrom(turn.root);
       const next = done && left > 0 ? handOffs(text, entry.agentId, turn.hop, roster.list()).slice(0, left) : [];
-      if (roster.end(turn.id, done ? "done" : "failed", { reply, toPi: next.includes(AGENT_NAME) })) {
+      // A chain no person started never hands pi a turn: pi has the owner's full tools. It reads the reply instead.
+      if (roster.end(turn.id, done ? "done" : "failed", { reply, toPi: !turn.unattended && next.includes(AGENT_NAME) })) {
         const agents = next.filter((id) => id !== AGENT_NAME);
         // A hand-off can only read, whoever started the chain: agents cannot give each other permission.
         const ask = askOf({ name: current.name, kind: "agent" }, text, MAX_ASK_CHARS);
         const calledBy = { name: current.name, agentId: entry.agentId };
-        if (agents.length) this.call(agents, { calledBy, ask, askKey: turnAskKey(turn.id), byOwner: false, hop: turn.hop + 1, root: turn.root });
+        const hop = { calledBy, ask, askKey: turnAskKey(turn.id), byOwner: false, hop: turn.hop + 1, root: turn.root, ...(turn.unattended && { unattended: true as const }) };
+        if (agents.length) this.call(agents, hop);
         delivering = this.#deliver(turn.id);
       }
     }

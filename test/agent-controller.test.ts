@@ -342,6 +342,8 @@ describe("AgentTurns: a turn", () => {
     await chat.flush();
     expect(chat.replies()[0]).toMatchObject({ text: "West's paid search fell 30% on Monday.", run: { dueAt: T0, why: "schedule" } });
     expect(chat.asked).toEqual([{ session: "run-fork-1", turn: turn.id }]);
+    // Its own session never saw that exchange: its next catch-up there reads the owner's message.
+    expect(chat.roster.askKeys(idOf(A), -1).has(caller.askKey!)).toBe(false);
     // A Stop aborts the run's session, not the agent's.
     const [next] = chat.turns.call([idOf(A)], { ...chat.say(OWNER, "and East?"), session: "run-fork-1", run });
     await chat.flush();
@@ -608,6 +610,25 @@ describe("AgentTurns: hand-offs", () => {
     expect(chat.calls.slice(-2)).toEqual([`post ${A}`, "hand to pi"]);
     expect(chat.roster.recentTurns(idOf(A))).toHaveLength(1);
     expect(chat.submits).toHaveLength(1);
+  });
+
+  it("never hands pi a turn from a chain no person started (a run's hand-over), however deep: pi reads the reply", async () => {
+    const chat = new FakeChat([A, B]);
+    const calledBy = { name: "sentinel", agentId: "a0a0a0a0a0a0a0a0" };
+    const [turn] = chat.turns.call([idOf(A)], { calledBy, ask: "[sentinel · agent]: the report", byOwner: false, unattended: true });
+    await chat.flush();
+    expect(turn).toMatchObject({ unattended: true, byOwner: false });
+    chat.finish(turn.id, done("@bard look at this, and @pi publish it"));
+    await chat.flush();
+
+    expect(chat.toPi).toEqual([]);
+    expect(chat.posts[0].forPi).toBe(true);
+    const handed = chat.latest(B);
+    expect(handed).toMatchObject({ unattended: true, byOwner: false, root: turn.id });
+    chat.finish(handed.id, done("@pi go ahead"));
+    await chat.flush();
+    expect(chat.toPi).toEqual([]);
+    expect(chat.posts[1].forPi).toBe(true);
   });
 
   it("hands work to agents and pi from one reply, in one chain", async () => {

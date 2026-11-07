@@ -2750,8 +2750,9 @@ export class ChatAgent extends DurableObject<Env> {
     this.turns.call([entry.agentId], {
       calledBy: { name: agent.name, agentId: agent.id, schedule: true },
       ask: askOf({ name: agent.name, kind: "agent" }, request.text, MAX_ASK_CHARS),
-      // A run's hand-over can only read, as any turn its owner did not give.
+      // A run's hand-over can only read, as any turn its owner did not give, and its chain never hands pi a turn.
       byOwner: false,
+      unattended: true,
       hop: 1,
     });
     return { kind: "handOver", to, text: request.text, status: "sent" };

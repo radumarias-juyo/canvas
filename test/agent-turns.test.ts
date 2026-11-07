@@ -200,6 +200,10 @@ describe("askLine", () => {
   it("labels other agents' replies, and leaves out its own and empty ones", () => {
     expect(askLine(replied("a-builder", "builder", "Built the page.", 1), SELF, OWNER)).toBe("[builder · agent]: Built the page.");
     expect(askLine(replied(SELF, "research", "I found three sources.", 2), SELF, OWNER)).toBeUndefined();
+    // Its runs' replies are not in its own session: it reads them.
+    const fromRun = replied(SELF, "research", "West fell 30%.", 0);
+    (fromRun.data as unknown as ChatAgentReplyData).run = { dueAt: 1, why: "schedule" };
+    expect(askLine(fromRun, SELF, OWNER)).toBe("[you, in a run]: West fell 30%.");
     expect(askLine(replied("a-builder", "builder", "", 3), SELF, OWNER)).toBeUndefined();
   });
 

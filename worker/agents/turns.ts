@@ -173,7 +173,9 @@ export function askLine(entry: EntryRecord, self: string, ownerUid: string): str
   }
   if (entry.kind === CHAT_AGENT_KIND) {
     const data = entry.data as unknown as ChatAgentReplyData;
-    if (data.agentId === self || !data.text) return undefined;
+    if (!data.text) return undefined;
+    // Its own replies are in its session already, but for those of its runs (a report, a reply in a run's own session).
+    if (data.agentId === self) return data.run ? `[you, in a run]: ${said(data.text)}` : undefined;
     return askOf({ name: data.name, kind: "agent" }, data.text);
   }
   const message = entry.model?.[0];
