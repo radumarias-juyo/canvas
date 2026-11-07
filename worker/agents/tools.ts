@@ -6,6 +6,8 @@ import {
   AGENT_PROPOSE_TOOL,
   MAX_AGENT_INSTRUCTIONS,
   MAX_AGENT_JOB,
+  MAX_POSTS_PER_DAY,
+  MAX_WORTH_POSTING,
   type AgentProposedDetails,
   type AgentResult,
 } from "../../shared/agents.ts";
@@ -55,8 +57,17 @@ export function agentsExtension(scope: AgentsScope): Extension {
                 `A watch runs when the value it reads moved and its when holds. ${CONDITIONS_HELP} In when, the value read is named by the step's as ` +
                 '(else its tool name, with other characters as _), and also watch; previous is the value it read before (null at first). ' +
                 'E.g. {kind: "watch", step: {kind: "look", server: SERVER, tool: "get_count", input: {...}, as: "count"}, everyMinutes: 30, ' +
-                'when: "count.total < 10 and (previous == null or previous.total >= 10)"}.',
+                'when: "count.total < 10 and (previous == null or previous.total >= 10)"}. ' +
+                "A watch checks less often as the user's day of model calls nears its cap; add urgent: true only when the user says it must not wait.",
             }),
+          ),
+          worthPosting: Type.Optional(
+            Type.String({
+              description: `What is worth a post from its runs, in the user's words; a run with nothing that meets it posts nothing. Up to ${MAX_WORTH_POSTING} characters.`,
+            }),
+          ),
+          postsPerDay: Type.Optional(
+            Type.Integer({ minimum: 1, maximum: MAX_POSTS_PER_DAY, description: "At most this many posts a day from its runs on their own." }),
           ),
           assumed: Type.Optional(Type.Array(Type.String(), { description: "The fields you guessed, by name." })),
         }),

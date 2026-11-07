@@ -10,6 +10,7 @@ import { readFor, resultName, RunExecutor, startOf, watchFires, type ActionRunRe
 import { turnedOff, type ActedStep, type RunRecord } from "./store.ts";
 import { nextRunAt } from "./schedule.ts";
 import { sourceName } from "./source.ts";
+import { paceFactor, paceGap, paceSlack } from "./pacing.ts";
 import type { Sql } from "../../members.ts";
 
 /** What a run's alarm carries. */
@@ -39,6 +40,13 @@ export interface RunnerHost extends RunHost {
   subscribe(agentId: string, step: LookStep, everyMinutes: number): Promise<void>;
   /** Leave the Source named `source` (sourceName). */
   unsubscribe(agentId: string, source: string): Promise<void>;
+  /**
+   * What the owner's model calls cost today, and their daily cap for runs (RUNS_DAILY_USD): what paces their watches
+   * (pacing.ts). Undefined when there is no cap, or it cannot be read (the watches then keep their intervals).
+   */
+  spend?(): Promise<{ spentUsd: number; capUsd: number } | undefined>;
+  /** A one-shot check of a watch at `at` (as its interval's alarm, once): its schedule id. */
+  watchAt?(at: number, payload: WatchAlarm): Promise<string>;
 }
 
 type ScheduleRow = { agent_id: string; kind: string; key: string; schedule_id: string | null; due_at: number | null };
@@ -80,6 +88,7 @@ export class AgentRunner {
       );
       CREATE TABLE IF NOT EXISTS agent_watch_last (agent_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS agent_versions (agent_id TEXT PRIMARY KEY, version INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS agent_watch_checks (agent_id TEXT PRIMARY KEY, at INTEGER NOT NULL, later INTEGER);
     `);
   }
 
@@ -224,6 +233,7 @@ export class AgentRunner {
     }
     this.#sql.exec("DELETE FROM agent_schedules WHERE agent_id = ?", row.agent_id);
     this.#sql.exec("DELETE FROM agent_watch_last WHERE agent_id = ?", row.agent_id);
+    this.#sql.exec("DELETE FROM agent_watch_checks WHERE agent_id = ?", row.agent_id);
   }
 
   /**
@@ -278,8 +288,55 @@ export class AgentRunner {
       await this.apply(agentId, agent);
       return null;
     }
+    // Paced to the owner's budget: a tick before its widened interval reads nothing (a check later does).
+    const now = this.#host.runs.now();
+    if (!(await this.#due(agent, now))) return null;
     const step = agent.trigger.step;
-    return this.moved(agent, await readFor(this.#host, agent, step, step.input));
+    const value = await readFor(this.#host, agent, step, step.input);
+    this.#checked(agent, now);
+    return this.moved(agent, value);
+  }
+
+  /**
+   * Whether a watch may check now, as its owner's day of model calls paces it (pacing.ts): its last check is at least its
+   * interval, widened, ago (an urgent watch's is never widened). Below half the cap, or with no check yet, any time.
+   */
+  async #due(agent: AgentDefinition, now = this.#host.runs.now()): Promise<boolean> {
+    const trigger = agent.trigger;
+    if (trigger?.kind !== "watch" || trigger.urgent) return true;
+    const last = this.#sql.exec("SELECT at FROM agent_watch_checks WHERE agent_id = ?", agent.id).toArray()[0] as { at: number } | undefined;
+    if (!last || !this.#host.spend) return true;
+    const spend = await this.#host.spend().catch((error: unknown) => {
+      console.error("agent watch, spend:", errorMessage(error));
+      return undefined;
+    });
+    // Not paced (under half the cap): as before, every tick checks, and every value a Source tells is taken.
+    const factor = spend ? paceFactor(spend.spentUsd, spend.capUsd) : 1;
+    return factor === 1 || now - last.at >= paceGap(trigger, factor) - paceSlack(trigger);
+  }
+
+  /** A watch checked (read, and handled what it read) at `now`: its next paced check counts from then. */
+  #checked(agent: AgentDefinition, now: number): void {
+    if (agent.trigger?.kind !== "watch") return;
+    this.#sql.exec("INSERT OR REPLACE INTO agent_watch_checks (agent_id, at, later) VALUES (?, ?, NULL)", agent.id, now);
+  }
+
+  /**
+   * A shared watch's value came before its paced check was due: it is left, and the watch checks once on its own when
+   * that is (watchTick reads the value as it is then), unless such a check is set already.
+   */
+  async #checkLater(agent: AgentDefinition): Promise<void> {
+    const trigger = agent.trigger;
+    if (trigger?.kind !== "watch" || !this.#host.watchAt) return;
+    const row = this.#sql.exec("SELECT at, later FROM agent_watch_checks WHERE agent_id = ?", agent.id).toArray()[0] as
+      | { at: number; later: number | null }
+      | undefined;
+    const now = this.#host.runs.now();
+    if (!row || (row.later !== null && row.later > now)) return;
+    const spend = await this.#host.spend?.().catch(() => undefined);
+    const at = row.at + paceGap(trigger, spend ? paceFactor(spend.spentUsd, spend.capUsd) : 1);
+    await this.#host.watchAt(at, { agentId: agent.id });
+    this.#sql.exec("UPDATE agent_watch_checks SET later = ? WHERE agent_id = ?", at, agent.id);
   }
 
   /**
@@ -298,7 +355,15 @@ export class AgentRunner {
       else if (mayUseServer(agent!, step.server)) await this.#one(() => this.#resubscribe(agentId, agent!, source));
       return null;
     }
-    return this.moved(agent!, value, options);
+    const now = this.#host.runs.now();
+    if (!(await this.#due(agent!, now))) {
+      await this.#checkLater(agent!);
+      return null;
+    }
+    // Checked once what it read is handled: a value that could not be stored comes again, and is not held back then.
+    const end = await this.moved(agent!, value, options);
+    this.#checked(agent!, now);
+    return end;
   }
 
   /** The agent's row says it watches through the Source named `source`, which it left: set its watch again from `agent`. */
