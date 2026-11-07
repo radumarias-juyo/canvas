@@ -101,6 +101,8 @@ export interface RunHost {
    * may. Not asked for a test, which its owner started by hand.
    */
   spendCap?(): Promise<string | undefined>;
+  /** A run went through its items and ended (not one stopped before, by the cap or a sign-in): for the metrics. */
+  ended?(run: { agentId: string; dueAt: number; status: RunStatus; items: number; wallMs: number }): void;
 }
 
 /** A run to start. */
@@ -274,6 +276,7 @@ export class RunExecutor {
     // Ended, or waiting for a sign-in that has not come: an alarm that fires twice sends once.
     if (!started && run.status !== "running") return { status: run.status, started: false };
     this.#host.changed(agent.id);
+    const startedAt = Date.now();
     try {
       const [capped, missing] = await Promise.all([test ? undefined : this.#host.spendCap?.(), this.#host.needsSignIn(reads)]);
       if (capped) {
@@ -284,6 +287,7 @@ export class RunExecutor {
       const elements = await this.#elements(agent);
       const outcomes = await mapLimit(elements, RUN_CONCURRENCY, (element) => this.#item(agent, run, element, when));
       const status = await this.#finish(agent, runs.get(agent.id, dueAt)!, outcomes);
+      this.#host.ended?.({ agentId: agent.id, dueAt, status, items: outcomes.length, wallMs: Date.now() - startedAt });
       return { status, started };
     } catch (error) {
       if (error instanceof SignInNeeded) return this.#waitForSignIn(agent, run, [error.server]);

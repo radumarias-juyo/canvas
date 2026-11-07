@@ -238,8 +238,7 @@ export const api = {
   removeChatAgent: (chatId: string, agentId: string) => request<ChatAgentView[]>(chatPath(chatId, `/agents/${agentId}`), { method: "DELETE" }),
   /** Mute an agent in a chat (it posts nothing unprompted there), or unmute it (its owner, or the chat's). */
   muteChatAgent: (chatId: string, agentId: string, muted: boolean) => request<ChatAgentView[]>(chatPath(chatId, `/agents/${agentId}/mute`), post({ muted })),
-  /** A chat's agent settings: router, speaking up, servers, daily budget, and today's use. */
-  /** (owner) Change them: each field given replaces the stored one, null clears it. */
+  /** (owner) Change a chat's agent settings (router, speaking up, servers, daily budget): each field given replaces the stored one, null clears it. */
   setAgentSettings: (chatId: string, change: { [K in keyof ChatAgentSettings]?: ChatAgentSettings[K] | null }) =>
     request<ChatAgentSettingsView>(chatPath(chatId, "/agent-settings"), send("PUT", change)),
   /** The user's sign-ins to servers that sign in each user: which, since when, and any notice about them. */

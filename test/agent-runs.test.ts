@@ -81,6 +81,11 @@ class FakeHome implements RunnerHost {
   async spendCap() {
     return this.capped;
   }
+  /** The runs that went through their items, as the metrics hear of them. */
+  readonly endedRuns: { agentId: string; status: string; items: number }[] = [];
+  ended({ agentId, status, items }: { agentId: string; status: string; items: number }) {
+    this.endedRuns.push({ agentId, status, items });
+  }
   async needsSignIn(servers: readonly string[]) {
     return servers.filter((server) => this.signIn.has(server));
   }
@@ -194,12 +199,15 @@ describe("scheduled runs", () => {
     expect(host.works).toEqual([]);
     expect(host.delivered).toEqual([]);
     expect(host.runs.list(definition.id)[0]).toMatchObject({ status: "failed", summary: host.capped });
+    // Stopped before its items: no run for the metrics.
+    expect(host.endedRuns).toEqual([]);
     // The next one is still set, and runs once the cap lets it.
     const next = runAlarm(host).at!;
     expect(next).toBeGreaterThan(SEVEN);
     host.capped = undefined;
     host.clock.now = next;
     expect(await runner.fired({ agentId: definition.id, dueAt: next })).toEqual({ status: "sent", started: true });
+    expect(host.endedRuns).toEqual([{ agentId: definition.id, status: "sent", items: 1 }]);
     // Its reads are kept in its own share of the read cache.
     expect(host.reads.map((read) => read.agentId)).toEqual([definition.id]);
   });

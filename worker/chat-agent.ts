@@ -446,10 +446,12 @@ export class ChatAgent extends DurableObject<Env> {
     observe: (event: FunnelEvent) => this.metrics.funnel({ ...event, stage: event.refusal ? `${event.stage}:${event.refusal}` : event.stage }),
     now: () => Date.now(),
   });
+  /** The spend not yet sent to each payer's directory, by uid (#spent). */
+  readonly #ownerSpend = new Map<string, { calls: number; tokens: number; cost: number }>();
   /** What each session's model calls came to since its turn started, for the turn's metrics: tokens, dollars, tool calls. */
-  /** The owner's spend not yet sent to their directory (#spent). */
-  #ownerSpend: { calls: number; tokens: number; cost: number } | undefined;
   readonly #turnSpend = new Map<string, { tokens: number; costUsd: number; toolCalls: number }>();
+  /** What each run's model calls came to so far (by its tag, "<agentId>:<dueAt>"), for the run's metrics. */
+  readonly #runSpend = new Map<string, number>();
   readonly reactions = new ChatReactions(this.ctx.storage.sql);
   readonly sockets = new ChatSockets({
     events: () => this.harness.session().events(),
@@ -1461,7 +1463,9 @@ export class ChatAgent extends DurableObject<Env> {
       home === undefined &&
       !summonsAgent(text) &&
       !mentionInputs.some((input) => input.kind === "person") &&
-      roster.some((entry) => !entry.off);
+      roster.some((entry) => !entry.off) &&
+      // Past the chat's daily budget the agents it would pick could not answer: no pick to pay for.
+      this.spend.refusal() === undefined;
     const agentPicking = routesAgents ? this.#pickAgents(agentRouter, roster, text, everyMessage, recentOnce) : undefined;
     // A new chat is put on Auto as it opens (startingSetting), which its first message may come before: wait for that.
     const onAuto = recent && (this.#auto() || ((await this.harness.pi()) && this.#auto()));
@@ -1822,6 +1826,7 @@ export class ChatAgent extends DurableObject<Env> {
     this.#settle = setTimeout(() => {
       this.#unwatchRuns();
       this.#publishStatus(status);
+      this.#quietFrom(Date.now());
     }, SETTLE_MS);
   }
 
@@ -2368,6 +2373,8 @@ export class ChatAgent extends DurableObject<Env> {
         // The store checks each is this chat's: the transcript's ids come from tool results.
         ...traces.artifacts.map((id) => this.storage.artifacts.delete(id, this.uid, this.chatId)),
         toDelete.length && this.scope.files().then((store) => store.delete(toDelete)),
+        // The tool results kept whole for this chat's turns (#spill): the owner's, never shown as a chat file.
+        this.scope.files().then((store) => store.deleteFolder(`${SPILL_FOLDER}/${this.chatId}`)),
         this.scope.drafts().then((drafts) => drafts.deleteAll()),
         this.env.SANDBOX_ENABLED === "true" && exports.Sandbox.getByName(sandboxName(this.uid, this.chatId)).destroy(),
       ]);
@@ -2704,6 +2711,7 @@ export class ChatAgent extends DurableObject<Env> {
    * may mute an agent that spoke up unasked; only the chat's owner, or the agent's, may unmute it.
    */
   setAgentMuted(by: Person, agentId: string, muted: unknown): ChatAgentView[] | ChatRefusal {
+    if (this.#gone) return refuse(404, DELETED);
     if (!this.isInChat(by.uid)) return refuse(403, "You are not in this chat.");
     if (typeof muted !== "boolean") return refuse(400, "Expected {muted: true | false}.");
     const entry = this.roster.get(agentId);
@@ -2719,13 +2727,14 @@ export class ChatAgent extends DurableObject<Env> {
    * the servers both name. Every reader of `servers` (a turn's tools, a run's tools, its reads and watches) follows it.
    */
   #inThisChat(agent: AgentDefinition | null): AgentDefinition | null {
-    const servers = this.#agentSettings().servers;
-    if (!agent || !servers) return agent;
+    const settings = this.#agentSettings();
+    if (!agent || !settings.servers) return agent;
+    const here = (server: string) => chatAllowsServer(settings, server);
     const mine = agent.servers ?? this.hub.servers().map((server) => server.name);
     return {
       ...agent,
-      servers: mine.filter((server) => servers.includes(server)),
-      ...(agent.sharedServers && { sharedServers: agent.sharedServers.filter((server) => servers.includes(server)) }),
+      servers: mine.filter(here),
+      ...(agent.sharedServers && { sharedServers: agent.sharedServers.filter(here) }),
     };
   }
 
@@ -2792,6 +2801,12 @@ export class ChatAgent extends DurableObject<Env> {
    * The pause check: once the chat was quiet for PAUSE_MS after a person's message, the agents past the gates whose job
    * is close to the conversation may speak up (worker/agents/speak-up.ts). While pi or an agent works, it waits again.
    */
+  /** pi or an agent just finished: a pause waiting counts its quiet from now, not from the person's message. */
+  #quietFrom(at: number): void {
+    const kept = this.ctx.storage.kv.get<PauseState>(PAUSE_KEY);
+    if (kept && kept.after < at) this.ctx.storage.kv.put(PAUSE_KEY, { ...kept, after: at } satisfies PauseState);
+  }
+
   async #afterPause(): Promise<void> {
     const kept = this.ctx.storage.kv.get<PauseState>(PAUSE_KEY);
     if (!kept) return;
@@ -2885,7 +2900,7 @@ export class ChatAgent extends DurableObject<Env> {
   }
 
   /**
-   * One model answer was counted (worker/agents/spend.ts): it adds to its turn's metrics and to the owner's day (sent
+   * One model answer was counted (worker/agents/spend.ts): it adds to its turn's metrics and to its payer's day (sent
    * every OWNER_SPEND_MS, not per answer), and the chat is told once a day when its budget runs out.
    */
   #spent(spent: Spent): void {
@@ -2895,13 +2910,17 @@ export class ChatAgent extends DurableObject<Env> {
       this.#turnSpend.set(spent.conversation, { tokens: kept.tokens + spent.tokens, costUsd: kept.costUsd + spent.costUsd, toolCalls: kept.toolCalls + spent.toolCalls });
       if (this.#turnSpend.size > MAX_TURN_SPEND) this.#turnSpend.delete(this.#turnSpend.keys().next().value!);
     }
-    if (!this.#ownerSpend) {
-      this.#ownerSpend = { calls: 0, tokens: 0, cost: 0 };
-      this.ctx.waitUntil(new Promise((resolve) => setTimeout(resolve, OWNER_SPEND_MS)).then(() => this.#sendOwnerSpend()));
+    if (spent.tags.run) {
+      const kept = this.#runSpend.get(spent.tags.run) ?? 0;
+      this.#runSpend.delete(spent.tags.run);
+      this.#runSpend.set(spent.tags.run, kept + spent.costUsd);
+      if (this.#runSpend.size > MAX_TURN_SPEND) this.#runSpend.delete(this.#runSpend.keys().next().value!);
     }
-    this.#ownerSpend.calls++;
-    this.#ownerSpend.tokens += spent.tokens;
-    this.#ownerSpend.cost += spent.costUsd;
+    // A roster agent's calls are its owner's (a member's own agent is the member's); everything else is the chat owner's.
+    const payer = (spent.tags.agent !== AGENT_NAME && this.roster.get(spent.tags.agent)?.ownerUid) || this.uid;
+    if (!this.#ownerSpend.size) this.ctx.waitUntil(new Promise((resolve) => setTimeout(resolve, OWNER_SPEND_MS)).then(() => this.#sendOwnerSpend()));
+    const pending = this.#ownerSpend.get(payer) ?? { calls: 0, tokens: 0, cost: 0 };
+    this.#ownerSpend.set(payer, { calls: pending.calls + 1, tokens: pending.tokens + spent.tokens, cost: pending.cost + spent.costUsd });
     const refusal = this.spend.refusal();
     if (refusal && this.#firstToday(BUDGET_TOLD_KEY)) {
       this.metrics.budget({ scope: "chat", usedTokens: this.spend.today().tokens });
@@ -2912,13 +2931,18 @@ export class ChatAgent extends DurableObject<Env> {
 
   /** The owner's daily meter, which their runs stop at (RUNS_DAILY_USD): what was spent since it was last sent. */
   async #sendOwnerSpend(): Promise<void> {
-    const pending = this.#ownerSpend;
-    this.#ownerSpend = undefined;
-    if (pending) await Promise.resolve(this.#directory.recordModelSpend(pending)).catch((error: unknown) => console.error("owner spend:", errorMessage(error)));
+    const pending = [...this.#ownerSpend];
+    this.#ownerSpend.clear();
+    await Promise.all(
+      pending.map(([uid, spent]) =>
+        Promise.resolve(this.#index(uid).recordModelSpend(spent)).catch((error: unknown) => console.error("owner spend:", errorMessage(error))),
+      ),
+    );
   }
 
   /** A roster agent's turn ended: its metrics. */
   #turnEnded(turn: AgentTurn, outcome: TurnOutcome): void {
+    this.#quietFrom(outcome.endedAt);
     const entry = this.roster.get(turn.agentId);
     const session = entry ? sessionOf(entry, turn) : undefined;
     const used = (session && this.#turnSpend.get(session)) || { tokens: 0, costUsd: 0, toolCalls: 0 };
@@ -2954,11 +2978,14 @@ export class ChatAgent extends DurableObject<Env> {
     return text;
   }
 
-  /** Keep a tool result too long for a turn whole, in the owner's own files (not a chat file): its path. */
+  /**
+   * Keep a tool result too long for a turn whole, in the owner's own files (not a chat file): its path. Named by its
+   * content, so the same result read again (a watch's) is one file; the chat's folder goes when the chat does.
+   */
   async #spill(tool: string, text: string): Promise<string> {
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const name = tool.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 60);
-    return (await this.scope.files()).put(`${SPILL_FOLDER}/${this.chatId}/${stamp}-${name}.txt`, text, "text/plain; charset=utf-8");
+    const hash = (await sha256Hex(text)).slice(0, 16);
+    return (await this.scope.files()).put(`${SPILL_FOLDER}/${this.chatId}/${name}-${hash}.txt`, text, "text/plain; charset=utf-8");
   }
 
   /**
@@ -3462,6 +3489,12 @@ export class ChatAgent extends DurableObject<Env> {
       },
       deliver: (request) => this.#deliverRun(request),
       spendCap: () => this.#runSpendCap(),
+      ended: ({ agentId, dueAt, status, items, wallMs }) => {
+        const run = `${agentId}:${dueAt}`;
+        const costUsd = this.#runSpend.get(run) ?? 0;
+        this.#runSpend.delete(run);
+        this.metrics.run({ agent: agentId, outcome: status, wallMs, costUsd, items });
+      },
       changed: (agentId) => this.sockets.broadcast({ type: "runs", agentId }),
       alarmAt: async (at, payload) => (await this.scheduler.set(new Date(at), "run", payload)).id,
       alarmEvery: async (seconds, payload) => (await this.scheduler.every(seconds, "watch", payload)).id,

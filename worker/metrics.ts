@@ -12,7 +12,7 @@ import type { EvictReason } from "./mcp/result-cache.ts";
  *   blob2   uid: the user the work is for (a chat's owner)
  *   blob3   chatId
  *   blob4   who: the agent's id, or the cache's owner ("pi", "pages", an agent's id), or the budget's scope
- *   blob5   detail: the turn's status, the run's outcome, the funnel's stage, the router's picked names joined by ","
+ *   blob5   detail: the turn's status, the run's outcome, the funnel's stage, the router's picked agent ids joined by ","
  *   blob6   more detail: the router's failure, else ""
  *
  * The doubles, by kind:
@@ -104,7 +104,7 @@ export class Metrics implements CacheObserver {
     this.flush();
   }
 
-  /** One pick of which agents answer a message: the names picked, out of how many, how long it took, and why it failed. */
+  /** One pick of which agents answer a message: the agent ids picked, out of how many, how long it took, and why it failed. */
   router(r: { picked: readonly string[]; candidates: number; ms: number; failed?: string }): void {
     this.#write("router", "", r.picked.join(","), r.failed ?? "", [r.candidates, r.picked.length, r.ms, flag(r.failed !== undefined)]);
   }
