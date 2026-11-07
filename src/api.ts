@@ -16,6 +16,7 @@ import type {
 import { formatCursor, NEXT_PART_HEADER, parseCursor } from "../shared/data-export.ts";
 import { DICTATION_ROUTE, DICTATION_TYPE } from "../shared/dictation.ts";
 import type { MentionOptions } from "../shared/mentions.ts";
+import type { ChatKind } from "../shared/chat-kinds.ts";
 import type { ModelCatalog } from "../shared/models.ts";
 import type { McpSignInView } from "../shared/sign-ins.ts";
 import type { ChatSystemPrompt } from "../shared/system-prompt.ts";
@@ -30,6 +31,9 @@ import {
   type ArtifactView,
   type ChatContents,
   type ChatDeletion,
+  type ChatPeopleView,
+  type ChatRowChange,
+  type Person,
   type ChatSummary,
   type CloneAccess,
   type CreatedInvite,
@@ -150,6 +154,34 @@ export const api = {
   revokeInvite: (chatId: string, inviteId: string) => request<object>(`/api/chats/${chatId}/invites/${inviteId}`, { method: "DELETE" }),
   /** The owner removes a member; a member passes their own uid to leave. */
   removeMember: (chatId: string, uid: string) => request<object>(chatPath(chatId, `/members/${uid}`), { method: "DELETE" }),
+  /** (owner) Add someone they share another chat with, directly: they see the whole conversation. */
+  addMember: (chatId: string, uid: string) => request<ChatPeopleView>(chatPath(chatId, "/members"), post({ uid })),
+  /** The people the user shares chats with: whom "@" offers to add. */
+  people: () => request<Person[]>("/api/me/people"),
+  /** This user's own sidebar row for a chat: pinned, closed, marked unread, their own name for it. */
+  changeChatRow: (chatId: string, change: ChatRowChange) =>
+    request<object>(`/api/chats/${chatId}`, send("PATCH", change)),
+  /** (owner) Who would lose access if the chat became `kind`. */
+  kindPreview: (chatId: string, kind: ChatKind) => {
+    const path = chatPath(chatId, "/kind");
+    return request<{ loses: Person[] }>(`${path}${path.includes("?") ? "&" : "?"}to=${kind}`);
+  },
+  /** (owner) Make the chat `kind`, removing exactly `loses` (uids, as kindPreview listed them); a 409 carries the new list. */
+  changeKind: async (chatId: string, kind: ChatKind, loses: readonly string[]): Promise<ChatPeopleView> => {
+    const { response, body } = await fetchJson(chatPath(chatId, "/kind"), send("PUT", { kind, loses }));
+    if (response.ok) return body as ChatPeopleView;
+    const changed = (body as { loses?: Person[] } | null)?.loses;
+    throw Object.assign(responseError(response, body), changed && { loses: changed });
+  },
+  /** Branch off a new chat that carries the conversation up to transcript entry `entry`. */
+  branch: (chatId: string, entry: number) => request<{ chatId: string }>(chatPath(chatId, "/branch"), post({ entry })),
+  /** The chat that discusses an artifact: its owner opens or makes it, anyone else joins it. */
+  discuss: async (artifactId: string, create = false): Promise<{ chatId: string } | { canStart: true }> => {
+    const { response, body } = await fetchJson(`/api/artifacts/${artifactId}/discuss`, post({ create }));
+    if (response.ok) return body as { chatId: string };
+    if ((body as { canStart?: unknown } | null)?.canStart === true) return { canStart: true };
+    throw responseError(response, body);
+  },
   /** The owner joins their chat a second time, as a member (secondSeat); open it at secondSeatPath. */
   joinSecondSeat: (chatId: string) => request<object>(`/api/chats/${chatId}/seat`, post({})),
   acceptInvite: (token: string) => request<{ chatId: string }>("/api/invites/accept", post({ token })),

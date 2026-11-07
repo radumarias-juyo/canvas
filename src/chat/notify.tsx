@@ -84,7 +84,7 @@ export function useMentionNotices(chatId: string | undefined, navigate: (path: s
       if (visible && notice.chatId === chatId) return;
       setToasts((list) => [...list.filter((t) => !(t.chatId === notice.chatId && t.at === notice.at)), notice].slice(-MAX_TOASTS));
       if (focused || !supported || Notification.permission !== "granted") return;
-      void showNotification(`${notice.from} mentioned you`, {
+      void showNotification(`${notice.from} ${notice.added ? "added you to a chat" : "mentioned you"}`, {
         body: [notice.title, notice.text].filter(Boolean).join("\n"),
         tag: `mention:${notice.chatId}:${notice.at}`,
         url: `/c/${notice.chatId}`,
@@ -158,7 +158,7 @@ export function MentionToasts({
                 <span className="toast-at" aria-hidden="true">
                   @
                 </span>
-                {notice.from} mentioned you
+                {notice.from} {notice.added ? "added you to a chat" : "mentioned you"}
               </strong>
               {notice.title && <small>{notice.title}</small>}
               {notice.text && <span className="toast-text">{notice.text}</span>}

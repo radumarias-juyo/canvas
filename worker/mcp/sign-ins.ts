@@ -1,6 +1,6 @@
 import { signInNoticeText, type McpSignInView, type SignInNotice, type SignInNoticeKind } from "../../shared/sign-ins.ts";
 import { errorMessage, serial } from "../../shared/util.ts";
-import { addColumn, type Sql } from "../members.ts";
+import { addColumns, type Sql } from "../members.ts";
 import { checkSignIn, grantMs, KEEP_ALIVE_MS, KEEP_ALIVE_RETRY_MS, warnAt, type SignInCheck } from "./background.ts";
 import { applyAuthChange, signInPath, type McpAuthChange, type McpAuthRecord, type McpAuthStore } from "./oauth.ts";
 import { openAuthRecord, sealAuthRecord } from "./sealed.ts";
@@ -61,12 +61,11 @@ export class McpSignIns {
     this.#now = host.now ?? Date.now;
     const { sql } = host;
     sql.exec(`CREATE TABLE IF NOT EXISTS mcp_auth (server TEXT PRIMARY KEY, data TEXT NOT NULL)`);
-    if (addColumn(sql, "mcp_auth", "signed_in_at", "INTEGER")) {
+    const added = addColumns(sql, "mcp_auth", { signed_in_at: "INTEGER", warned_at: "INTEGER NOT NULL DEFAULT 0", keep_at: "INTEGER NOT NULL DEFAULT 0" });
+    if (added.includes("signed_in_at")) {
       // Rows from before are plain JSON: when they were signed in is unknown, so the grant counts from now.
       sql.exec("UPDATE mcp_auth SET signed_in_at = ? WHERE data LIKE '{%' AND json_extract(data, '$.tokens.access_token') IS NOT NULL", this.#now());
     }
-    addColumn(sql, "mcp_auth", "warned_at", "INTEGER NOT NULL DEFAULT 0");
-    addColumn(sql, "mcp_auth", "keep_at", "INTEGER NOT NULL DEFAULT 0");
     sql.exec(`
       CREATE TABLE IF NOT EXISTS mcp_run_servers (chat_id TEXT NOT NULL, server TEXT NOT NULL, PRIMARY KEY (chat_id, server));
       CREATE TABLE IF NOT EXISTS mcp_waiting (server TEXT NOT NULL, chat_id TEXT NOT NULL, PRIMARY KEY (server, chat_id));
