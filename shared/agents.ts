@@ -708,6 +708,8 @@ export function speakerLabel(speaker: { name: string; kind: "person" | "agent"; 
   return `[${name} · ${speaker.kind}${speaker.owner ? " · your owner" : ""}]`;
 }
 
+/** The tool an agent searches its chat's whole log with (worker/agents/history.ts). */
+export const CHAT_HISTORY_TOOL = "chat_history";
 /** The tool the model proposes an agent with (saved off, for its owner to review). */
 export const AGENT_PROPOSE_TOOL = "agent_propose";
 /** What agent_propose's result carries, for the app to show the draft card. A type, so pi can store it. */

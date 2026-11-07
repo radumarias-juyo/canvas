@@ -7,7 +7,7 @@ import type { McpToolInfo } from "../worker/agent/mcp.ts";
 import { AgentTurns, operationId, type Caller, type TurnHost, type TurnOutcome, type TurnResult } from "../worker/agents/controller.ts";
 import { ChatRoster, newestShown, type AgentTurn, type PostedPage, type RosterEntry, type RunningTurn } from "../worker/agents/roster.ts";
 import type { RoomLink, RoomRef, SeatBatch, SeatLink, SeatResult, SeatTurn } from "../worker/agents/seats/link.ts";
-import { memberAgentName, seatChatId } from "../worker/agents/seats/names.ts";
+import { memberAgentName } from "../worker/agents/seats/names.ts";
 import { addRefusal, mayRemove, mayShare, seatedEntry, type ChatRules } from "../worker/agents/seats/rules.ts";
 import { AgentSeats, type SeatHost } from "../worker/agents/seats/seat.ts";
 import { allowedTools, askLine, askOf, messageAskKey, sharedServer, turnSources, UNKNOWN_SOURCE } from "../worker/agents/turns.ts";
@@ -15,6 +15,9 @@ import type { MemoryAgent } from "../worker/memory/chat.ts";
 import { ownWindowEntry, roomWindowSessions, windowObject } from "../worker/agents/window.ts";
 import { steerLine, type SteerResult } from "../shared/agent-window.ts";
 import { memorySql } from "./fakes.ts";
+
+/** The seat chat this harness gives a member's agent (the chat object makes one per room: seatChatId). */
+const seatOf = (agentId: string) => `seat-${agentId}`;
 
 const T0 = 1_000_000;
 const RADU = { uid: "radu", name: "Radu" };
@@ -254,7 +257,7 @@ class Room implements TurnHost {
       avatar: agent.avatar,
       color: agent.color,
       job: agent.job,
-      ...(!mine && { seat: seatChatId(id) }),
+      ...(!mine && { seat: seatOf(id) }),
     });
     if (refused) throw new Error(refused.error);
     return this.roster.get(id)!;
@@ -539,7 +542,7 @@ describe("Member agents: a seat in the member's own object", () => {
   it("runs a member's agent there, with its owner's tools only when they ask, and posts its reply back to the room", async () => {
     const chat = room();
     const planner = chat.add(ANA, "planner", { servers: ["db"] });
-    expect(planner).toMatchObject({ ownerUid: ANA.uid, seat: seatChatId(planner.agentId), session: "" });
+    expect(planner).toMatchObject({ ownerUid: ANA.uid, seat: seatOf(planner.agentId), session: "" });
     chat.say(MIA, "Lunch at noon?");
     const [byRadu] = chat.turns.call([planner.agentId], chat.say(RADU, "@planner what do we know?"));
     await settle();
@@ -650,7 +653,7 @@ describe("Member agents: a seat in the member's own object", () => {
     const hers = chat.add(ANA, "helper");
     const same = { agentId: hers.agentId, name: "analyst", session: "s", avatar: "", color: hers.color, job: "" };
     expect(chat.roster.add({ ...same, ownerUid: RADU.uid })).toEqual({ error: expect.stringContaining("Another agent") });
-    expect(chat.roster.get(hers.agentId)).toMatchObject({ ownerUid: ANA.uid, seat: seatChatId(hers.agentId) });
+    expect(chat.roster.get(hers.agentId)).toMatchObject({ ownerUid: ANA.uid, seat: seatOf(hers.agentId) });
     expect(chat.roster.add({ ...same, ownerUid: ANA.uid })).toBeNull();
   });
 
@@ -1591,7 +1594,7 @@ describe("Member agents: what the review of private turns found", () => {
         avatar: "a",
         color: "teal",
         job: "j",
-        seat: seatChatId(agentId),
+        seat: seatOf(agentId),
         ...(aliasOf && { aliasOf }),
       });
     const view = (name: string) => ({ name, avatar: "a", color: "teal" as const, job: "j", off: false });
