@@ -60,6 +60,7 @@
     "worker/mcp",
     "worker/metrics.ts",
     "worker/agents",
+    "worker/feed",
     "worker/agent/mcp.ts",
     "worker/agent/checklist.ts",
     "worker/agent/output.ts",
