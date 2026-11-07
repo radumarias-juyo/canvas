@@ -247,6 +247,7 @@ import {
   budgetDay,
   chatAllowsServer,
   checkAgentSettings,
+  messageBudget,
   type ChatAgentSettings,
   type ChatAgentSettingsView,
 } from "../shared/agent-settings.ts";
@@ -3759,6 +3760,12 @@ export class ChatAgent extends DurableObject<Env> {
       fork: (session) => this.#fork(session),
       newest: (session) => this.#newestEntry(session),
       alone: () => !this.members.hasAny(),
+      turnTokens: (entry, turn) => this.#turnSpend.get(sessionOf(entry, turn))?.tokens ?? 0,
+      messageBudget: () => messageBudget(this.#agentSettings()),
+      chainStopped: async (root, text) => {
+        const entry = { kind: CHAT_BUDGET_KIND, data: { scope: "message", text } satisfies ChatBudgetData };
+        await (await this.#root()).submit({ type: "write", requestId: `message-budget:${root}`, entry }, BACKGROUND_CONTEXT);
+      },
       sources: async (entry, entries) => {
         const agent = await this.#index(entry.ownerUid).getAgent(entry.agentId);
         return agent ? this.#sources(agent, entries) : { items: [], sources: [] };
