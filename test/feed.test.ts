@@ -42,11 +42,13 @@ describe("feed: keeping items", () => {
     expect(feed.add(tag(2, { id: "turned", kind: "group" }), "off_record")).toBe("refused");
     // A kind nobody knows lets nothing out.
     expect(feed.add(tag(3, { id: "odd", kind: "nonsense" }))).toBe("refused");
+    // The chat says it is off the record now, while this person's row has not heard yet (it is told off the request's path).
+    expect(feed.add(tag(5, { id: "stale", kind: "off_record" }), "group")).toBe("refused");
     expect(feed.add(tag(4, { id: "fine", kind: "page" }), "group")).toBe("added");
     expect(feed.list().items.map((item) => item.title)).toEqual(["ann mentioned you in Signups (4)"]);
   });
 
-  it("keeps read state: by id, all at once, a chat seen, a question answered elsewhere, and unread again", () => {
+  it("keeps read state: by id, all at once, a chat seen, and unread again; what needs the person waits until resolved", () => {
     const feed = new FeedStore(memorySql());
     feed.add(tag(1, { id: "c1", kind: "group" }));
     feed.add(tag(2, { id: "c2", kind: "group" }));
@@ -58,14 +60,44 @@ describe("feed: keeping items", () => {
 
     expect(feed.markChatRead("c1")).toBe(1);
     expect(feed.list({ unread: true }).items.map((item) => item.title)).toEqual(["Confirm what @signups's draft guessed", "ann mentioned you in Signups (2)"]);
-    expect(feed.markRefRead("assumption:a1")).toBe(1);
+    // Read, it still waits on them: only confirming the guesses resolves it.
+    const assumption = feed.list({ needsYou: true }).items[0];
+    feed.mark([assumption.id]);
+    expect(feed.counts()).toEqual({ unread: 1, needsYou: 1 });
+    expect(feed.list({ needsYou: true }).items.map((item) => item.kind)).toEqual(["assumption"]);
+    expect(feed.resolve("assumption:a1")).toBe(1);
     expect(feed.counts()).toEqual({ unread: 1, needsYou: 0 });
+    expect(feed.list({ needsYou: true }).items).toEqual([]);
 
     const [newest] = feed.list().items;
     expect(feed.mark([newest.id], false)).toBe(1);
     expect(feed.mark([newest.id], false)).toBe(0);
     expect(feed.mark("all")).toBe(2);
     expect(feed.counts().unread).toBe(0);
+  });
+
+  it("keeps a question waiting until the person writes in its chat, read or not", () => {
+    const feed = new FeedStore(memorySql());
+    const question = (chatId: string, n: number): FeedInput => ({
+      kind: "question",
+      ref: `question:${chatId}:${n}`,
+      at: T0 + n,
+      title: "@brief asks you something",
+      open: { to: "chat", chatId },
+      chat: { id: chatId, kind: "group" },
+    });
+    feed.add(question("c1", 1));
+    feed.add(question("c2", 2));
+    feed.add({ kind: "run", ref: "run:a1:1", at: T0 + 3, title: "@brief asks you something", status: "sent", needsYou: "reply", open: { to: "chat", chatId: "c1" }, chat: { id: "c1", kind: "group" } });
+    // Opening the chat reads them; they still wait for an answer.
+    feed.markChatRead("c1");
+    expect(feed.counts()).toEqual({ unread: 1, needsYou: 3 });
+    expect(feed.resolveReplies("c1")).toBe(2);
+    expect(feed.list({ needsYou: true }).items.map((item) => item.open)).toEqual([{ to: "chat", chatId: "c2" }]);
+    // An approval or a guess is not answered by a message.
+    feed.add({ kind: "approval", ref: "approval:x", at: T0 + 4, title: "@brief wants to post", open: { to: "chat", chatId: "c2" }, chat: { id: "c2", kind: "group" } });
+    expect(feed.resolveReplies("c2")).toBe(1);
+    expect(feed.list({ needsYou: true }).items.map((item) => item.kind)).toEqual(["approval"]);
   });
 
   it("lets a chat, or a page or agent, take its items along when it goes", () => {
@@ -114,10 +146,25 @@ describe("follows: both sides", () => {
     expect(follows.follows("page", "p1", "ann")).toBe(true);
     // An item that says it is from someone else's target of that id is not this follow's.
     expect(follows.follows("page", "p1", "cai")).toBe(false);
-    follows.retitle("page", "p1", "ann", "Weekly signups");
-    expect(follows.get("page", "p1")?.title).toBe("Weekly signups");
-    expect(follows.unfollow("page", "p1")?.ownerUid).toBe("ann");
-    expect(follows.unfollow("page", "p1")).toBeNull();
+    expect(follows.retitle("page", "p1", "ann", "Weekly signups")).toBe(true);
+    expect(follows.retitle("page", "p1", "ann", "Weekly signups")).toBe(false);
+    expect(follows.get("page", "p1", "ann")?.title).toBe("Weekly signups");
+    expect(follows.unfollow("page", "p1", "ann")?.ownerUid).toBe("ann");
+    expect(follows.unfollow("page", "p1", "ann")).toBeNull();
+  });
+
+  it("tells two people's agents of one id apart, by the chat each was followed from", () => {
+    const follows = new FollowStore(memorySql());
+    follows.follow({ kind: "agent", id: "a1", ownerUid: "ann", title: "@brief", chatOwner: "ann", chatId: "c1" }, T0);
+    follows.follow({ kind: "agent", id: "a1", ownerUid: "eve", title: "@brief", chatOwner: "dan", chatId: "c2" }, T0 + 1);
+    expect(follows.list()).toHaveLength(2);
+    expect(follows.find("agent", "a1", "c1")?.ownerUid).toBe("ann");
+    expect(follows.find("agent", "a1", "c2")?.ownerUid).toBe("eve");
+    expect(follows.through("dan", "c2").map((follow) => follow.ownerUid)).toEqual(["eve"]);
+    expect(follows.unfollow("agent", "a1", "ann")).not.toBeNull();
+    expect(follows.follows("agent", "a1", "eve")).toBe(true);
+    expect(aboutOf("agent", "a1", "ann")).not.toBe(aboutOf("agent", "a1", "eve"));
+    expect(aboutOf("agent", "a1", "ann")).not.toBe(aboutOf("agent", "a1"));
   });
 
   it("refuses past MAX_FOLLOWS and MAX_FOLLOWERS, but following again is not counted twice", () => {
@@ -146,10 +193,12 @@ describe("follows: both sides", () => {
 function host(rights: Record<string, string[]>, following: Set<string>, failing = new Set<string>()) {
   const delivered: string[] = [];
   const forgotten: string[] = [];
+  const lost: string[] = [];
   const asked: string[] = [];
   const fake: FanOutHost = {
     stillIn: async (via, uids) => {
       asked.push(`${via.ownerUid}/${via.chatId}:${uids.join(",")}`);
+      if (failing.has(`${via.ownerUid}/${via.chatId}`)) throw new Error("chat unreachable");
       // A chat answering for someone it was not asked about is not trusted for them.
       return [...(rights[`${via.ownerUid}/${via.chatId}`] ?? []), "mallory"];
     },
@@ -160,8 +209,9 @@ function host(rights: Record<string, string[]>, following: Set<string>, failing 
       return true;
     },
     forget: (uid) => forgotten.push(uid),
+    lost: (uid) => lost.push(uid),
   };
-  return { fake, delivered, forgotten, asked };
+  return { fake, delivered, forgotten, lost, asked };
 }
 
 describe("fan-out to followers", () => {
@@ -181,10 +231,20 @@ describe("fan-out to followers", () => {
       // From before chats were kept with a follow: nothing says they may still open it.
       { uid: "fay" },
     ];
-    const { fake, delivered, asked } = host({ "ann/c1": ["bea"], "eve/c2": ["dan"] }, new Set(["bea", "cai", "dan", "fay", "mallory"]));
+    const { fake, delivered, asked, lost } = host({ "ann/c1": ["bea"], "eve/c2": ["dan"] }, new Set(["bea", "cai", "dan", "fay", "mallory"]));
     expect((await fanOut("agent", followers, fake)).sort()).toEqual(["bea", "dan"]);
     expect(delivered.sort()).toEqual(["bea", "dan"]);
     expect(asked).toEqual(["ann/c1:bea,cai", "eve/c2:dan"]);
+    // Out of the chat, or with no chat at all: they may no longer open it, so they stop following.
+    expect(lost.sort()).toEqual(["cai", "fay"]);
+  });
+
+  it("forgets nobody when a chat cannot be asked", async () => {
+    const followers: Follower[] = [{ uid: "bea", via: { ownerUid: "ann", chatId: "c1" } }];
+    const { fake, delivered, lost } = host({ "ann/c1": ["bea"] }, new Set(["bea"]), new Set(["ann/c1"]));
+    expect(await fanOut("agent", followers, fake)).toEqual([]);
+    expect(delivered).toEqual([]);
+    expect(lost).toEqual([]);
   });
 
   it("lets a chat let in only people in it, while the agent's owner shares it there", () => {

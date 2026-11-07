@@ -2,10 +2,10 @@ import { ARCHIVE, checkManifest, MAX_IMPORT_FILE_BYTES, type ExportedArtifact, t
 import type { ArtifactMeta } from "../../shared/protocol.ts";
 import { readZipFile, storedRange, zipDirectory, type ZipItem, type ZipSource } from "../../shared/unzip.ts";
 import { errorMessage, formatBytes, mapLimit, toBase64 } from "../../shared/util.ts";
-import { dataApi, type DraftJson } from "../api.ts";
+import { api, dataApi, type DraftJson } from "../api.ts";
 import type { Progress } from "./export.ts";
 
-export const KINDS = ["chats", "artifacts", "files", "skills", "agents"] as const;
+export const KINDS = ["chats", "artifacts", "files", "skills", "agents", "follows"] as const;
 type Kind = (typeof KINDS)[number];
 
 /** What an import did: how many of each kind went in, how many were here already, and what failed, with why. */
@@ -179,6 +179,26 @@ export async function importData(zip: Blob, onProgress: (progress: Progress) => 
     const values = manifest.account.pageValues.map((entry) => ({ ...entry, artifactId: newId(entry.artifactId) }));
     if (values.length) await dataApi.importPageValues(values);
   });
+
+  // Last, as following by hand does: only what the importer may open here (the same deployment) is followed again.
+  const follows = (manifest.account.follows ?? []).filter((follow) => typeof follow === "object" && follow !== null);
+  if (follows.length) {
+    const have = new Set((await api.follows().catch(() => [])).map((follow) => `${follow.kind}:${follow.id}:${follow.chatId ?? ""}`));
+    for (const follow of follows) {
+      if (have.has(`${follow.kind}:${follow.id}:${follow.chatId ?? ""}`)) {
+        report.skipped.follows++;
+        continue;
+      }
+      try {
+        await api.follow(follow.kind, follow.id, follow.chatId);
+        report.imported.follows++;
+      } catch (e) {
+        // Not here, or not theirs to open here: what an export from another deployment follows is skipped.
+        if ([400, 403, 404].includes((e as { status?: number }).status ?? 0)) report.skipped.follows++;
+        else report.failed.push(`Follow of ${follow.kind} ${follow.id}: ${errorMessage(e)}`);
+      }
+    }
+  }
   onProgress({ ...steps, now: "Done" });
   return report;
 }

@@ -25,10 +25,16 @@ type FeedRow = { id: number; kind: FeedKind; at: number; read: number; needs: nu
 /** What a feed row keeps as JSON: the item's fields that are not columns. */
 type FeedData = Pick<FeedItem, "title" | "text" | "from" | "open" | "status">;
 
-/** What `about` names an item by, so a page or agent that is gone takes its items with it. */
-export function aboutOf(kind: FollowKind, id: string): string {
-  return `${kind}:${id}`;
+/**
+ * What `about` names an item by, so a page or agent that is gone takes its items with it: a followed one with its owner
+ * (agent ids are unique only per person, and an import keeps them), the person's own agent without.
+ */
+export function aboutOf(kind: FollowKind, id: string, ownerUid?: string): string {
+  return ownerUid ? `${kind}:${ownerUid}:${id}` : `${kind}:${id}`;
 }
+
+/** The `needs` column: nothing waits, it waits until resolved by ref, or until the person writes in its chat. */
+const NEEDS = { none: 0, resolve: 1, reply: 2 } as const;
 
 /** Whether `add` kept an item: a new one, a newer state of one it had, the same again, or refused (off the record). */
 export type FeedAdded = "added" | "updated" | "same" | "refused";
@@ -69,7 +75,8 @@ export class FeedStore {
       ...(input.status && { status: input.status }),
     };
     const json = JSON.stringify(data);
-    const needs = input.needsYou || NEEDS_YOU_KINDS.includes(input.kind) ? 1 : 0;
+    const waits = input.needsYou || (NEEDS_YOU_KINDS.includes(input.kind) && (input.kind === "question" ? "reply" : true));
+    const needs = waits === "reply" ? NEEDS.reply : waits ? NEEDS.resolve : NEEDS.none;
     const read = input.quiet ? 1 : 0;
     const chatId = input.chat?.id ?? (input.open.to === "chat" ? input.open.chatId : null);
     const before = this.#sql.exec("SELECT data FROM feed WHERE ref = ?", input.ref).toArray()[0] as { data: string } | undefined;
@@ -93,16 +100,16 @@ export class FeedStore {
 
   /** The newest items, only the unread ones or only those needing the person when asked, and the counts. */
   list(filter: { unread?: boolean; needsYou?: boolean } = {}, limit = FEED_PAGE): FeedList {
-    const where = [filter.unread && "read = 0", filter.needsYou && "needs = 1"].filter(Boolean);
+    const where = [filter.unread && "read = 0", filter.needsYou && "needs > 0"].filter(Boolean);
     const rows = this.#sql
       .exec(`SELECT id, kind, at, read, needs, data FROM feed ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY at DESC, id DESC LIMIT ?`, limit)
       .toArray() as FeedRow[];
     return { items: rows.map(itemOf), ...this.counts() };
   }
 
-  /** How many items are unread, and of those how many need the person: what the sidebar's entry shows. */
+  /** How many items are unread, and how many still wait on the person, read or not: what the sidebar's entry shows. */
   counts(): { unread: number; needsYou: number } {
-    const row = this.#sql.exec("SELECT COUNT(*) AS unread, COALESCE(SUM(needs), 0) AS needs FROM feed WHERE read = 0").toArray()[0];
+    const row = this.#sql.exec("SELECT COALESCE(SUM(read = 0), 0) AS unread, COALESCE(SUM(needs > 0), 0) AS needs FROM feed").toArray()[0];
     return { unread: Number(row?.unread ?? 0), needsYou: Number(row?.needs ?? 0) };
   }
 
@@ -118,9 +125,14 @@ export class FeedStore {
     return this.#sql.exec("UPDATE feed SET read = 1 WHERE chat_id = ? AND read = 0", chatId).rowsWritten;
   }
 
-  /** What `ref` asked of the person was answered elsewhere (an agent's guesses confirmed by turning it on): read. */
-  markRefRead(ref: string): number {
-    return this.#sql.exec("UPDATE feed SET read = 1 WHERE ref = ? AND read = 0", ref).rowsWritten;
+  /** What `ref` asked of the person is done (an agent's guesses confirmed, an approval decided): it waits no more, and is read. */
+  resolve(ref: string): number {
+    return this.#sql.exec("UPDATE feed SET needs = 0, read = 1 WHERE ref = ? AND (needs > 0 OR read = 0)", ref).rowsWritten;
+  }
+
+  /** The person wrote in chat `chatId`: what waited there for their reply (a question) is answered. */
+  resolveReplies(chatId: string): number {
+    return this.#sql.exec("UPDATE feed SET needs = 0, read = 1 WHERE chat_id = ? AND needs = ?", chatId, NEEDS.reply).rowsWritten;
   }
 
   /** A chat is gone, or the person is out of it: its items go. */
@@ -141,7 +153,7 @@ export class FeedStore {
 
 function itemOf(row: FeedRow): FeedItem {
   const data = JSON.parse(row.data) as FeedData;
-  const flags = { ...(row.read === 1 && { read: true as const }), ...(row.needs === 1 && { needsYou: true as const }) };
+  const flags = { ...(row.read === 1 && { read: true as const }), ...(row.needs > 0 && { needsYou: true as const }) };
   return { id: row.id, kind: row.kind, at: row.at, ...data, ...flags };
 }
 
@@ -170,7 +182,7 @@ export class FollowStore {
     this.#sql = sql;
     sql.exec(`
       CREATE TABLE IF NOT EXISTS follows (kind TEXT NOT NULL, target_id TEXT NOT NULL, owner_uid TEXT NOT NULL, title TEXT NOT NULL,
-        chat_owner TEXT, chat_id TEXT, at INTEGER NOT NULL, PRIMARY KEY (kind, target_id));
+        chat_owner TEXT, chat_id TEXT, at INTEGER NOT NULL, PRIMARY KEY (kind, target_id, owner_uid));
       CREATE TABLE IF NOT EXISTS followers (kind TEXT NOT NULL, target_id TEXT NOT NULL, follower_uid TEXT NOT NULL,
         chat_owner TEXT, chat_id TEXT, at INTEGER NOT NULL, PRIMARY KEY (kind, target_id, follower_uid));
     `);
@@ -178,14 +190,13 @@ export class FollowStore {
 
   /** Follow a target (again: its title and chat updated). Refused past MAX_FOLLOWS. */
   follow(record: Omit<FollowRecord, "at">, now = Date.now()): { ok: true } | { error: string } {
-    const had = this.get(record.kind, record.id);
+    const had = this.get(record.kind, record.id, record.ownerUid);
     if (!had && Number(this.#sql.exec("SELECT COUNT(*) AS n FROM follows").toArray()[0]?.n ?? 0) >= MAX_FOLLOWS) {
       return { error: `You follow ${MAX_FOLLOWS} pages and agents, the most there can be; stop following one first.` };
     }
     this.#sql.exec(
       `INSERT INTO follows (kind, target_id, owner_uid, title, chat_owner, chat_id, at) VALUES (?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(kind, target_id) DO UPDATE SET owner_uid = excluded.owner_uid, title = excluded.title, chat_owner = excluded.chat_owner,
-         chat_id = excluded.chat_id`,
+       ON CONFLICT(kind, target_id, owner_uid) DO UPDATE SET title = excluded.title, chat_owner = excluded.chat_owner, chat_id = excluded.chat_id`,
       record.kind,
       record.id,
       record.ownerUid,
@@ -197,16 +208,32 @@ export class FollowStore {
     return { ok: true };
   }
 
-  /** Stop following; the follow as it was, or null when there was none. */
-  unfollow(kind: FollowKind, id: string): FollowRecord | null {
-    const had = this.get(kind, id);
-    if (had) this.#sql.exec("DELETE FROM follows WHERE kind = ? AND target_id = ?", kind, id);
+  /** Stop following `ownerUid`'s target; the follow as it was, or null when there was none. */
+  unfollow(kind: FollowKind, id: string, ownerUid: string): FollowRecord | null {
+    const had = this.get(kind, id, ownerUid);
+    if (had) this.#sql.exec("DELETE FROM follows WHERE kind = ? AND target_id = ? AND owner_uid = ?", kind, id, ownerUid);
     return had;
   }
 
-  get(kind: FollowKind, id: string): FollowRecord | null {
-    const row = this.#sql.exec("SELECT * FROM follows WHERE kind = ? AND target_id = ?", kind, id).toArray()[0];
+  get(kind: FollowKind, id: string, ownerUid: string): FollowRecord | null {
+    const row = this.#sql.exec("SELECT * FROM follows WHERE kind = ? AND target_id = ? AND owner_uid = ?", kind, id, ownerUid).toArray()[0];
     return row ? followOf(row) : null;
+  }
+
+  /**
+   * The follow the app names (it never knows whose a target is): by kind and id, and for an agent the chat it was
+   * followed from, which tells two people's agents with one id apart.
+   */
+  find(kind: FollowKind, id: string, chatId?: string): FollowRecord | null {
+    const row = this.#sql
+      .exec("SELECT * FROM follows WHERE kind = ? AND target_id = ? AND (? IS NULL OR chat_id = ?) ORDER BY at DESC", kind, id, chatId ?? null, chatId ?? null)
+      .toArray()[0];
+    return row ? followOf(row) : null;
+  }
+
+  /** The follows made through chat `chatId` of `chatOwner`'s: they go when this person leaves it. */
+  through(chatOwner: string, chatId: string): FollowRecord[] {
+    return this.#sql.exec("SELECT * FROM follows WHERE chat_owner = ? AND chat_id = ?", chatOwner, chatId).toArray().map(followOf);
   }
 
   /** Whether this person follows `owner`'s target: what an item from a follow is checked against when it comes in. */
@@ -319,22 +346,27 @@ export interface FanOutHost {
   deliver(uid: string): Promise<boolean>;
   /** Forget a follower who no longer follows it. */
   forget(uid: string): void;
+  /** A follower who may no longer open it (out of the chat they followed it from, or it is not shared there now): forget them, and tell them. */
+  lost(uid: string): void;
 }
 
 /**
  * Hand one item to the followers of a target, `limit` directories at a time. A page's followers all get it: anyone
  * signed in may open a page. An agent's only where the chat each followed it from says they still may (`stillIn`);
- * one without such a chat gets nothing. A follower who no longer follows it is forgotten; a failed delivery is not.
- * Returns who got it.
+ * one without such a chat gets nothing. A follower who no longer follows it is forgotten, and so is one the chat said
+ * may no longer open it (`lost`); a failed check or delivery forgets nobody. Returns who got it.
  */
 export async function fanOut(kind: FollowKind, followers: readonly Follower[], host: FanOutHost, limit = FAN_OUT): Promise<string[]> {
   const allowed =
     kind === "page"
       ? followers.map((follower) => follower.uid)
       : (
-          await mapLimit(byChat(followers), limit, async ({ via, uids }) =>
-            via ? (await host.stillIn(via, uids).catch(() => [] as string[])).filter((uid) => uids.includes(uid)) : [],
-          )
+          await mapLimit(byChat(followers), limit, async ({ via, uids }) => {
+            const still = via ? await host.stillIn(via, uids).catch(() => null) : [];
+            if (!still) return [];
+            for (const uid of uids) if (!still.includes(uid)) host.lost(uid);
+            return uids.filter((uid) => still.includes(uid));
+          })
         ).flat();
   const delivered = await mapLimit(allowed, limit, async (uid) => {
     const got = await host.deliver(uid).catch(() => null);

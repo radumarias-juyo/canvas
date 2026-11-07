@@ -253,6 +253,8 @@ const SHOWN_SKILLS_KEY = "skillsShown";
 const BROUGHT_IN_KEY = "broughtIn";
 /** The settings of a chat its export carries, beside its tables (worker/chat-dump.ts), its own system prompt among them. */
 const EXPORTED_KV = [AUTO_KEY, SHOWN_SKILLS_KEY, BROUGHT_IN_KEY, SYSTEM_PROMPT_KEY, ...KIND_KV];
+/** The accounts something in their feed waits on to reply here (an agent's question): their next message answers it. */
+const FEED_WAITING_KEY = "feedWaiting";
 /** Set once the sidebars of everyone in a chat shared before they remembered people have met (#meetOnce). */
 const PEOPLE_TOLD_KEY = "peopleTold";
 /** How much of a long chat a branch reads to copy, in pages of 200 entries, newest first. */
@@ -488,7 +490,7 @@ export class ChatAgent extends DurableObject<Env> {
       // Deriving the user's key is not free, so derive it once per object.
       files: memoAsync(() => this.storage.userFiles(this.uid)),
       onPublished: async (artifact) => {
-        await this.#directory.recordArtifact({ ...artifact, chatId: this.chatId });
+        await this.#directory.recordArtifact({ ...artifact, chatId: this.chatId }, false, this.kinds.kind());
         // Off the publish's path: the chat that discusses the page hears of its new version.
         void this.#tellPageChat(artifact).catch((error: unknown) => console.error("page chat:", errorMessage(error)));
       },
@@ -1480,7 +1482,8 @@ export class ChatAgent extends DurableObject<Env> {
     // The sidebars are only a convenience: update them off the prompt's path, and let a failure be.
     // Only a tag whose "@name" is in the text: one sent without it would notify someone of nothing they can see.
     const tags = taggedPeople(keptMentions(text, mentions));
-    void this.#touchIndexes(title, author, tags, text).catch((error) => console.error("chat index:", errorMessage(error)));
+    void this.#touchIndexes(title, author, tags, text, `${author.uid}:${sentAt}`).catch((error) => console.error("chat index:", errorMessage(error)));
+    this.#replied(author.uid);
     return true;
   }
 
@@ -1635,13 +1638,14 @@ export class ChatAgent extends DurableObject<Env> {
    * name yet after the prompt, so the first prompt names it, and a small model then gives it a better title.
    * Members' sidebars get a new title at once, but in a busy chat the others' are bumped at most once a minute: each is
    * another object. The author's own always is, and so is everyone the message tagged (`tags`), who hears of it at once
-   * (a Tag). `titleFrom` names an unnamed chat: the message's text, or its files' names.
+   * (a Tag). `titleFrom` names an unnamed chat: the message's text, or its files' names. `key` names the message (the
+   * same one placed again tags nobody twice in the feed); `run`: it is a run's report, which its owner's feed has already.
    */
-  async #touchIndexes(titleFrom: string, author: Person, tags: readonly string[], text: string): Promise<void> {
+  async #touchIndexes(titleFrom: string, author: Person, tags: readonly string[], text: string, key: string, run = false): Promise<void> {
     const now = Date.now();
     // Someone tagging themselves is told nothing; anyone else tagged is, owner or member.
     const tagged = new Set(tags.filter((uid) => uid !== author.uid));
-    const tag: Tag = { from: author.name, text: excerpt(text), at: now };
+    const tag: Tag = { from: author.name, text: excerpt(text), at: now, key, kind: this.kinds.kind(), ...(run && { run: true }) };
     const tagOf = (uid: string) => (tagged.has(uid) ? tag : undefined);
     const { title, named } = await this.#directory.touchChat(this.chatId, titleFrom, author.uid !== this.uid, tagOf(this.uid));
     if (named && titleFrom) void this.#nameChat(titleFrom, title).catch((error: unknown) => console.error("chat title:", errorMessage(error)));
@@ -2001,7 +2005,8 @@ export class ChatAgent extends DurableObject<Env> {
     if (!added) return this.peopleFor(by.uid);
     this.members.setOwnerName(by);
     this.#joined(person, by);
-    const tag: Tag = { from: by.name, text: "added you to this chat", at: Date.now(), added: true };
+    const at = Date.now();
+    const tag: Tag = { from: by.name, text: "added you to this chat", at, added: true, key: `added:${at}`, kind: this.kinds.kind() };
     void this.#index(uid).touchSharedChat(this.chatId, this.uid, title, true, tag).catch((error: unknown) => console.error("chat added:", errorMessage(error)));
     return this.peopleFor(by.uid);
   }
@@ -2679,7 +2684,9 @@ export class ChatAgent extends DurableObject<Env> {
   async #postAgentReply(reply: ChatAgentReplyData, requestId: string, tags: readonly string[] = []): Promise<void> {
     await (await this.#root()).submit({ type: "write", requestId, entry: { kind: CHAT_AGENT_KIND, data: reply } }, BACKGROUND_CONTEXT);
     const author = { uid: `agent:${reply.agentId}`, name: reply.name };
-    void this.#touchIndexes(reply.text || reply.name, author, tags, reply.text).catch((error) => console.error("chat index:", errorMessage(error)));
+    void this.#touchIndexes(reply.text || reply.name, author, tags, reply.text, requestId, Boolean(reply.run)).catch((error) =>
+      console.error("chat index:", errorMessage(error)),
+    );
     this.#feedQuestion(reply, requestId);
   }
 
@@ -2690,8 +2697,10 @@ export class ChatAgent extends DurableObject<Env> {
   #feedQuestion(reply: ChatAgentReplyData, requestId: string): void {
     const asker = reply.calledBy.uid;
     if (reply.run || reply.failed || !asker || reply.calledBy.agentId || !asksUser(reply.text) || !this.isInChat(asker)) return;
-    // Refused by the asker's feed when the chat is off the record (FeedStore.add reads `chat`).
-    const added = this.#index(asker).addFeed({
+    // The owner's second seat has no feed of its own: the owner's has it. Refused there when the chat is off the record.
+    const account = this.#account(asker);
+    this.#waitsOnReply(account);
+    const added = this.#index(account).addFeed({
       kind: "question",
       ref: `question:${this.chatId}:${requestId}`,
       at: reply.endedAt,
@@ -2703,6 +2712,21 @@ export class ChatAgent extends DurableObject<Env> {
     });
     this.ctx.waitUntil(added.catch((error: unknown) => console.error("feed:", errorMessage(error))));
   }
+  /** Something in `account`'s feed waits for their reply in this chat (a question, a run's report that asks). */
+  #waitsOnReply(account: string): void {
+    const waiting = this.ctx.storage.kv.get<string[]>(FEED_WAITING_KEY) ?? [];
+    if (!waiting.includes(account)) this.ctx.storage.kv.put(FEED_WAITING_KEY, [...waiting, account]);
+  }
+
+  /** `uid` wrote here: what their feed waited on them to answer in this chat is answered (UserDirectory.repliedIn). */
+  #replied(uid: string): void {
+    const account = this.#account(uid);
+    const waiting = this.ctx.storage.kv.get<string[]>(FEED_WAITING_KEY) ?? [];
+    if (!waiting.includes(account)) return;
+    this.ctx.storage.kv.put(FEED_WAITING_KEY, waiting.filter((one) => one !== account));
+    this.ctx.waitUntil(this.#index(account).repliedIn(this.chatId).catch((error: unknown) => console.error("feed:", errorMessage(error))));
+  }
+
 
   /**
    * Of `uids`, those who still follow `ownerUid`'s agent `agentId` from here: in this chat, with the agent on its roster
@@ -3132,6 +3156,7 @@ export class ChatAgent extends DurableObject<Env> {
       chatKind: this.kinds.kind(),
       ...(posted?.text && { post: posted.text, ...(asksUser(posted.text) && { asks: true }) }),
     });
+    if (posted?.text && asksUser(posted.text)) this.#waitsOnReply(this.uid);
     this.ctx.waitUntil(ended.catch((error: unknown) => console.error("feed:", errorMessage(error))));
   }
 

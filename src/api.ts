@@ -273,7 +273,9 @@ export const api = {
   follows: () => request<FollowView[]>("/api/follows"),
   /** Follow someone else's page, or an agent shared in a chat (`chatId`). */
   follow: (kind: FollowKind, id: string, chatId?: string) => request<FollowView[]>("/api/follows", post({ kind, id, ...(chatId && { chatId }) })),
-  unfollow: (kind: FollowKind, id: string) => request<FollowView[]>(`/api/follows/${kind}/${id}`, { method: "DELETE" }),
+  /** Stop following; for an agent, `chatId` names which (two people's agents may share an id). */
+  unfollow: (kind: FollowKind, id: string, chatId?: string) =>
+    request<FollowView[]>(`/api/follows/${kind}/${id}${chatId ? `?${new URLSearchParams({ chat: chatId })}` : ""}`, { method: "DELETE" }),
   skills: () => request<SkillInfo[]>("/api/skills"),
   /** Save one of the user's skills, from its fields or from a SKILL.md file's text. */
   saveSkill: (skill: (SkillInput | { markdown: string }) & { enabled?: boolean }) => request<SkillInfo>("/api/skills", post(skill)),

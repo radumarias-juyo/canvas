@@ -82,8 +82,12 @@ export interface FeedInput {
    * and marks it read once the person has seen the chat.
    */
   chat?: { id: string; kind: string };
-  /** It waits on the person: an answer, an approval, a sign-in. The "Needs you" filter shows these. */
-  needsYou?: boolean;
+  /**
+   * It waits on the person: an answer, an approval, a sign-in. "Needs you" lists it until it is resolved, read or not:
+   * true until the code that added it resolves it (UserDirectory.resolveFeed), "reply" until the person next writes in
+   * its chat (a question is answered so). The kinds in NEEDS_YOU_KINDS wait without saying so.
+   */
+  needsYou?: boolean | "reply";
   /** A run's item: how the run ended. */
   status?: RunStatus;
   /** Shown as read from the start: a quiet run (not today) is in the feed, but nothing to look at. */
@@ -106,14 +110,17 @@ export interface FeedItem {
   needsYou?: true;
 }
 
-/** GET /api/feed: the newest items (filtered as asked), and how many are unread in all and of those needing the person. */
+/** GET /api/feed: the newest items (filtered as asked), how many are unread, and how many still wait on the person. */
 export interface FeedList {
   items: FeedItem[];
   unread: number;
   needsYou: number;
 }
 
-/** The kinds that always wait on the person: what "Needs you" lists, beside items marked so (a run waiting for a sign-in). */
+/**
+ * The kinds that always wait on the person, beside items marked so (a run waiting for a sign-in): a question until they
+ * write in its chat again, the others until what they ask is done (an approval decided, an agent's guesses confirmed).
+ */
 export const NEEDS_YOU_KINDS: readonly FeedKind[] = ["approval", "assumption", "question"];
 
 /** The most items one feed keeps; the oldest go first, read ones before unread. */

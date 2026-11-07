@@ -41,28 +41,21 @@ export async function feedRoute(request: Request, uid: string, directory: Durabl
     const target = body.kind === "page" ? await pageTarget(storage, body.id) : await agentTarget(directory, uid, body.id, body.chatId);
     if ("status" in target) return json({ error: target.error }, target.status);
     if (target.ownerUid === uid) return json({ error: `This ${body.kind} is yours: what it does reaches you already.` }, 400);
-    const owner = exports.UserDirectory.getByName(target.ownerUid);
-    const via = target.chat && { ownerUid: target.chat.ownerUid, chatId: target.chat.id };
-    // Its owner first: refused there (too many followers), nothing is kept on either side.
-    const counted = await owner.addFollower(body.kind, body.id, { uid, ...(via && { via }) });
-    if ("error" in counted) return json(counted, 409);
+    // Both sides, the follower's first (UserDirectory.follow).
     const followed = await directory.follow({
       kind: body.kind,
       id: body.id,
       ownerUid: target.ownerUid,
       title: target.title,
-      ...(via && { chatOwner: via.ownerUid, chatId: via.chatId }),
+      ...(target.chat && { chatOwner: target.chat.ownerUid, chatId: target.chat.id }),
     });
-    if ("error" in followed) {
-      await owner.removeFollower(body.kind, body.id, uid);
-      return json(followed, 409);
-    }
+    if ("error" in followed) return json(followed, 409);
     return json(await directory.listFollows(), 201);
   }
   const one = path.match(/^\/api\/follows\/([a-z]+)\/([a-z0-9]+)$/);
   if (one && method === "DELETE" && isFollowKind(one[1])) {
-    const had = await directory.unfollow(one[1], one[2]);
-    if (had) await exports.UserDirectory.getByName(had.ownerUid).removeFollower(had.kind, had.id, uid);
+    const chatId = url.searchParams.get("chat") ?? undefined;
+    await directory.unfollow(one[1], one[2], chatId);
     return json(await directory.listFollows());
   }
   return null;
