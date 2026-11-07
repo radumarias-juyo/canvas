@@ -5,6 +5,7 @@
 
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import type { AgentDefinition, ChatTurnData } from "../../../shared/agents.ts";
+import type { AgentWindowSession } from "../../../shared/agent-window.ts";
 import { isChatKind, type ChatKind } from "../../../shared/chat-kinds.ts";
 import { errorMessage } from "../../../shared/util.ts";
 import { addColumns, type Sql } from "../../members.ts";
@@ -87,11 +88,16 @@ const refOf = (row: Pick<SeatRow, "room_owner" | "room_chat">): RoomRef => ({ ow
 
 /** Whether a turn as given and checked (SeatTurnRow.given) is its owner's; a row from before it was kept had only theirs forked. */
 function checkedByOwner(given: string | null): boolean {
-  if (given === null) return true;
+  return given === null || parsedTurn(given)?.byOwner === true;
+}
+
+/** A turn as given and checked (SeatTurnRow.given); null when none is kept, or it cannot be read. */
+function parsedTurn(given: string | null): SeatTurn | null {
+  if (given === null) return null;
   try {
-    return (JSON.parse(given) as Partial<SeatTurn>).byOwner === true;
+    return JSON.parse(given) as SeatTurn;
   } catch {
-    return false;
+    return null;
   }
 }
 const turnKey = (ref: RoomRef, turn: number) => `${ref.ownerUid}:${ref.chatId}:${turn}`;
@@ -378,7 +384,8 @@ export class AgentSeats {
     const running = () => this.#turn(ref, row.turn)?.status === "running";
     try {
       // Its input goes only into the fork: the seat's session reads the ask as context (the batch left it out).
-      const apart = row.forked === 1 ? this.#host.write(seatSession, askedApart(turn.ask), `apart:${row.turn}`) : undefined;
+      // Not what its owner told it from its window, which is theirs alone.
+      const apart = row.forked === 1 && !turn.calledBy.window ? this.#host.write(seatSession, askedApart(turn.ask), `apart:${row.turn}`) : undefined;
       await Promise.all([apart, this.#host.configure(row.session, agent, turn)]);
       // Stopped, ended by a later give, or dropped meanwhile: its input never goes in.
       if (!running()) return;
@@ -547,6 +554,50 @@ export class AgentSeats {
         await new Promise((resolve) => setTimeout(resolve, delay));
       }
     }
+  }
+
+  /**
+   * Its owner's words for a turn running here (SeatLink.steer): only into a turn of their own, in its fork, as a write
+   * the run reads at its next step. Whether it went in.
+   */
+  async steer(ref: RoomRef, turn: number, line: string): Promise<boolean> {
+    const row = this.#turn(ref, turn);
+    if (row?.status !== "running" || row.forked !== 1 || !checkedByOwner(row.given)) return false;
+    await this.#host.write(row.session, line, `steer:${turn}:${Date.now()}:${line.length}`);
+    return true;
+  }
+
+  /**
+   * What its owner's window shows of an agent seated for a room (shared/agent-window.ts): the seat's session and each
+   * turn's own, newest first. Null when it has no seat there: nobody else's object has one.
+   */
+  window(ref: RoomRef, agentId: string): AgentWindowSession[] | null {
+    const seat = this.#seat(ref, agentId);
+    if (!seat) return null;
+    const rows = this.#sql
+      .exec(
+        "SELECT turn, session, forked, status, given FROM agent_seat_turns WHERE room_owner = ? AND room_chat = ? AND agent_id = ? ORDER BY turn DESC",
+        ref.ownerUid,
+        ref.chatId,
+        agentId,
+      )
+      .toArray() as Pick<SeatTurnRow, "turn" | "session" | "forked" | "status" | "given">[];
+    const forks = rows.flatMap((row): AgentWindowSession[] => {
+      if (row.forked !== 1) return [];
+      const given = parsedTurn(row.given);
+      return [
+        {
+          id: row.session,
+          kind: "fork",
+          turn: row.turn,
+          ...(given && { askedBy: given.calledBy.name }),
+          ...(given?.calledBy.window && { window: true as const }),
+          running: row.status === "running",
+        },
+      ];
+    });
+    const shared = rows.some((row) => row.forked !== 1 && row.status === "running" && row.session === seat.session);
+    return [{ id: seat.session, kind: "shared", running: shared }, ...forks];
   }
 
   /** Stop a turn the room stopped; its result, the stop's, still goes back. */
