@@ -37,10 +37,10 @@ export interface PublishScope {
   /** Whether a page may be published unchecked when there is no browser to check it in: local development only. */
   publishUnchecked: boolean;
   /**
-   * Whether the turn running in a session may give a page tools that change data: only one that runs its changes
+   * Whether the turn running in a session may publish a page that calls tools that change data: only one that runs its changes
    * itself (level 4, the owner's own). A page's calls run as its author's, whoever's turn wrote it. Unset: any may.
    */
-  mayAddWrites?: (session: string) => Promise<boolean>;
+  mayPublishWrites?: (session: string) => Promise<boolean>;
   /** The files of those of the owner's skills named that are on and have any, by name: what a page may name (shared/skill-files.ts). */
   skillSets(names: readonly string[]): Promise<Map<string, { set: string; files: SkillFileInfo[] }>>;
   /** The bytes of one file of a set of a skill's files (SkillFiles), or null when the set has no such file, or is gone. */
@@ -59,20 +59,17 @@ export interface PublishTarget {
 type McpDeclaration = NonNullable<ArtifactManifest["mcp"]>["servers"];
 
 /** A draft to publish, by its id, and where it goes. */
-/** `session`: the pi session whose turn publishes, for PublishScope.mayAddWrites. */
+/** `session`: the pi session whose turn publishes, for PublishScope.mayPublishWrites. */
 export type PublishInput = PublishTarget & { draftId: string; session?: string };
 
-/** The tools a manifest declares that change data (or that their server does not list) and `before` did not declare. */
-export async function addedWrites(hub: McpHub, manifest: ArtifactManifest, before: ArtifactManifest | undefined): Promise<string[]> {
-  const had = new Set((before?.mcp?.servers ?? []).flatMap((entry) => entry.tools.map((tool) => `${entry.server}.${tool}`)));
-  const added = (manifest.mcp?.servers ?? []).flatMap((entry) => entry.tools.map((tool) => ({ server: entry.server, tool })));
+/** The tools a manifest declares that change data (or that their server does not list). */
+export async function declaredWrites(hub: McpHub, manifest: ArtifactManifest): Promise<string[]> {
+  const declared = (manifest.mcp?.servers ?? []).flatMap((entry) => entry.tools.map((tool) => ({ server: entry.server, tool })));
   const writes = await Promise.all(
-    added
-      .filter(({ server, tool }) => !had.has(`${server}.${tool}`))
-      .map(async ({ server, tool }) => {
-        const info = await hub.tool(server, tool).catch(() => undefined);
-        return info && isReadOnly(info) ? [] : [`${server}.${tool}`];
-      }),
+    declared.map(async ({ server, tool }) => {
+      const info = await hub.tool(server, tool).catch(() => undefined);
+      return info && isReadOnly(info) ? [] : [`${server}.${tool}`];
+    }),
   );
   return writes.flat();
 }
@@ -438,14 +435,14 @@ export async function publishDraft(scope: PublishScope, input: PublishInput, sig
   // The version holds the skill files the check ran with: it never changes when the skill does.
   const { html } = await pageToRun(scope, draft, "Not published.");
   const target = await artifactFor(scope, input, draft.artifactId);
-  // A turn that only proposes changes cannot hand a page new ones: they would run as the owner's when they open it.
-  if (input.session !== undefined && scope.mayAddWrites && !(await scope.mayAddWrites(input.session))) {
-    const before = target.id === undefined ? null : await scope.artifacts.readMeta(target.id);
-    const writes = await addedWrites(scope.hub, draft.manifest, before ? manifestOf(before, before.latest) : undefined);
+  // A turn that only proposes changes cannot publish a page that makes any: its calls run as the owner's when they
+  // open it, with whatever arguments this version's code passes (a tool the page had already, called anew, too).
+  if (input.session !== undefined && scope.mayPublishWrites && !(await scope.mayPublishWrites(input.session))) {
+    const writes = await declaredWrites(scope.hub, draft.manifest);
     if (writes.length) {
       throw new Error(
-        `Not published: the page calls ${writes.join(", ")}, which change data, and only the owner's own message can give a page that. ` +
-          "Publish it without those calls, or the owner can ask for them.",
+        `Not published: the page calls ${writes.join(", ")}, which change data, and only the owner's own message can publish a page that does. ` +
+          "Publish it without those calls, or the owner can ask for it.",
       );
     }
   }

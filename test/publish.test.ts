@@ -94,13 +94,13 @@ describe("a page's tools that change data", () => {
     { name: "get_deal", description: "", annotations: { readOnlyHint: true } },
     { name: "update_deal", description: "" },
   ];
-  const withCrm = (mayAddWrites: boolean, before?: string[]) => {
+  const withCrm = (mayPublishWrites: boolean, before?: string[]) => {
     const made = chat(() => report([]));
     const hub = { servers: () => [{ name: "crm" }], tools: async () => tools, tool: async (_: string, name: string) => tools.find((one) => one.name === name) };
     const meta = { id: "a1", latest: 1, versions: [{ version: 1, manifest: before ? { mcp: { servers: [{ server: "crm", tools: before }] } } : {} }] };
     made.scope.hub = hub as unknown as McpHub;
     made.scope.artifacts = { ...made.scope.artifacts, readMeta: async () => meta } as unknown as ArtifactStore;
-    made.scope.mayAddWrites = async () => mayAddWrites;
+    made.scope.mayPublishWrites = async () => mayPublishWrites;
     return made;
   };
   const page = async (made: ReturnType<typeof withCrm>, tools: string[]) => {
@@ -109,15 +109,17 @@ describe("a page's tools that change data", () => {
     return id;
   };
 
-  it("a turn that only proposes cannot give a page a new one; read tools and ones it had are fine", async () => {
+  it("a turn that only proposes cannot publish a page that calls one, even one the page had; read tools are fine", async () => {
     const member = withCrm(false, ["get_deal"]);
     const adds = await page(member, ["get_deal", "update_deal"]);
     await expect(publishDraft(member.scope, { title: "Deals", draftId: adds, session: "0" })).rejects.toThrow(/crm.update_deal, which change data/);
     expect(member.versions).toEqual([]);
     await publishDraft(member.scope, { title: "Deals", draftId: await page(member, ["get_deal"]), session: "0" });
+    expect(member.versions).toHaveLength(1);
+    // The page had it: an edit could call it anew (on load, with other arguments), as the owner's.
     const kept = withCrm(false, ["update_deal"]);
-    await publishDraft(kept.scope, { title: "Deals", draftId: await page(kept, ["update_deal"]), session: "0" });
-    expect(kept.versions).toHaveLength(1);
+    await expect(publishDraft(kept.scope, { title: "Deals", draftId: await page(kept, ["update_deal"]), session: "0" })).rejects.toThrow(/only the owner's own message/);
+    expect(kept.versions).toEqual([]);
   });
 
   it("the owner's own turn can", async () => {
