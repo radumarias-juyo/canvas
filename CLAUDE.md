@@ -59,10 +59,13 @@ with `@cloudflare/vite-plugin`, pnpm; configured and deployed with the `cf` CLI 
 - Agents (`shared/agents.ts`, `worker/agents/`): definitions per user in `UserDirectory` (`AgentStore`); a chat's roster
   and durable turn queue (`ChatRoster`) and the turn controller (`AgentTurns`) run each roster agent in its own pi
   session of the chat object, configured per turn (`#configureAgent`: the session's tools are an allow-list,
-  `allowedTools`, and a turn its owner did not ask for gets only read tools: the shared servers' (all its servers' in a chat with nobody else in it) and `READ_TOOLS`, plus
+  `allowedTools`, and a turn its owner did not ask for gets only read tools: the shared servers' (all its servers' when it runs apart in a chat with nobody else in it) and `READ_TOOLS`, plus
   `DISPLAY_TOOLS`, which only show something (a checklist card, no data; not for an unprompted turn); the owner's Yes to an
   offered next step (`offer_yes`, `ChatAgent.takeOffer`) gets only `draftTools`, reading and `agent_propose`, pi's run too; the
-  harness offers and runs no tool off that list); keep it that way. A turn ends with its reply in its row (an outbox),
+  harness offers and runs no tool off that list); keep it that way. A turn its owner asked for, their Yes, and any turn that
+  starts with nobody but the owner in the chat run apart, in a fork of the agent's session (`runsApart`): only the posted
+  reply goes back, and one built on a private server is held for the owner when someone joined meanwhile. A call such a
+  fork or a run holds shows anyone else only who asks for which tool (`shownToMembers`). A turn ends with its reply in its row (an outbox),
   together with the hand-offs it queues; the reply is then posted as a `chat.agent` entry. `@name` hands off (MAX_HOPS
   per person's message, a hand-off to pi counted on the handing turn); pi's own answers are read from its log for the
   agents they name (`#piScan`, from a cursor).

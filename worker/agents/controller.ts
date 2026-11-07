@@ -32,6 +32,9 @@ export type Outputs = Required<Pick<ChatAgentReplyData, "published" | "drafted" 
   Pick<ChatAgentReplyData, "saved"> & { forked?: boolean; review?: boolean };
 export const NO_OUTPUTS: Outputs = { published: [], drafted: [], items: [], sources: [] };
 
+/** Why a reply waits for its owner when it went apart alone with them and someone came into the chat meanwhile. */
+export const JOINED_WHILE_APART = "Someone joined the chat while it worked, and it read your private servers: only you see it until you post it.";
+
 /** How one operation in an agent's session ended, as PiHarness.wait says. */
 export interface TurnResult {
   status: "done" | "unanswered";
@@ -228,7 +231,8 @@ export class AgentTurns {
         if (!live()) return;
         const { session, from } = await this.#host.fork(entry.session);
         if (!live()) return;
-        roster.setFork(turn.id, session, { from, review: agent.reviewBeforePosting === true });
+        // Whether it went apart alone with the owner: its reply is held for them if someone comes in before it posts.
+        roster.setFork(turn.id, session, { from, review: agent.reviewBeforePosting === true, alone: this.#host.alone() });
         turn = { ...turn, session, forked: true };
         // Its owner follows it live in the fork from now on, and nobody follows the agent's session for it.
         this.#host.changed();
@@ -237,7 +241,7 @@ export class AgentTurns {
         // entry on: what is there already (the report, replies posted before) stays the chat's.
         const from = await this.#host.newest(turn.session);
         if (!live()) return;
-        roster.setApart(turn.session, agent.reviewBeforePosting === true, from, turn.id);
+        roster.setApart(turn.session, agent.reviewBeforePosting === true, from, turn.id, this.#host.alone());
       }
       if (turn.forked) await Promise.all([this.#tellApart(entry, turn), this.#host.configure(entry, agent, turn)]);
       else await Promise.all([turn.session ? undefined : this.#catchUp(entry, turn.id), this.#host.configure(entry, agent, turn)]);
@@ -385,8 +389,10 @@ export class AgentTurns {
       // Only a turn whose input went in has outputs in its session.
       const { published, drafted, items, sources, review, saved, ...out } = outputs ?? (now.submitted ? await this.#outputs(entry, now) : NO_OUTPUTS);
       const forked = out.forked === true || now.forked === true;
-      // Its owner sees a reply built on a private server first, when they review those (`held`).
-      const held = review === true && sources.length > 0;
+      // Its owner sees a reply built on a private server first, when they review those (`held`), or when it went apart
+      // alone with them and someone has come into the chat since: it may say what it read for them alone.
+      const joined = now.alone === true && !this.#host.alone();
+      const held = (review === true || joined) && sources.length > 0;
       // What a turn apart from the chat (a fork, a run's reply session) made stays withheld unless its reply is posted
       // (ChatRoster.release, which posts a done reply with text): a failed or empty one released at once names none of it.
       const shows = !(forked || now.session !== undefined) || held || (done && !!text);
@@ -416,7 +422,7 @@ export class AgentTurns {
       if (held) {
         // Its owner sees it first: nothing of it reaches the chat, pi or other agents until they post it. A failed or
         // empty one too: what its fork published or saved stays withheld until they post or discard it.
-        if (roster.end(turn.id, done ? "done" : "failed", { reply, toPi: false, held: true })) {
+        if (roster.end(turn.id, done ? "done" : "failed", { reply, toPi: false, held: true, ...(joined && { heldWhy: JOINED_WHILE_APART }) })) {
           this.#host.ended?.(turn, ended);
           this.#host.drafted(current.ownerUid);
         }
