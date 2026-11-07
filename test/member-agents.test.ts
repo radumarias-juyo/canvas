@@ -407,6 +407,14 @@ describe("Member agents: tools follow who asks", () => {
     expect(items.map((item) => item.id)).not.toContain("e1");
   });
 
+  it("keeps a private server's records out though its tool is no longer listed, and still names the server", () => {
+    const listed = new Map([...MCP].filter(([name]) => name !== "calendar_events"));
+    const entries = [result("db_query", [{ id: "r1", title: "Row 1" }]), result("calendar_events", [{ id: "e1", title: "West launch" }])];
+    const { items, sources } = turnSources(entries, listed, sharedServer(planner, SIGNS_IN));
+    expect(items.map((item) => item.id)).toEqual(["r1"]);
+    expect(sources).toEqual(["calendar"]);
+  });
+
   it("checks review before posting as a yes or no, and keeps it only when on", () => {
     const base = { name: "planner", job: "Plans.", instructions: "Plan." };
     expect(checkAgent({ ...base, reviewBeforePosting: true }).reviewBeforePosting).toBe(true);

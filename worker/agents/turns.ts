@@ -312,8 +312,11 @@ export function turnSources(
 ): { items: ItemRef[]; sources: string[] } {
   const results = resultsIn(entries, mcp);
   const kept = results.filter((result) => result.server === undefined || shared(result.server)).map((result) => result.entry);
-  const sources = [...new Set(results.flatMap((result) => (result.server !== undefined && !shared(result.server) ? [result.server] : [])))];
-  return { items: itemsIn(kept), sources };
+  // Each record also says which server it came from, as the call recorded it: one whose tool the map no longer knows
+  // (a server gone since, a refresh that failed) still counts as that server's.
+  const items = itemsIn(kept).filter((item) => shared(item.server));
+  const called = [...results.flatMap((result) => (result.server === undefined ? [] : [result.server])), ...itemsIn(entries).map((item) => item.server)];
+  return { items, sources: [...new Set(called.filter((server) => !shared(server)))] };
 }
 
 /**
