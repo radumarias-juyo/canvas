@@ -276,18 +276,21 @@ export class AgentRuns {
     const run = this.get(agentId, dueAt);
     if (!run) return;
     const status = change.status ?? run.status;
+    const endedAt = status === "running" ? null : this.#now();
+    const summary = change.summary ?? run.summary;
+    const detail = { ...run.detail, ...change.detail };
     this.#sql.exec(
       "UPDATE agent_runs SET status = ?, ended_at = ?, summary = ?, detail = ? WHERE agent_id = ? AND due_at = ? AND item = ''",
       status,
-      status === "running" ? null : this.#now(),
-      change.summary ?? run.summary ?? null,
-      JSON.stringify({ ...run.detail, ...change.detail }),
+      endedAt,
+      summary ?? null,
+      JSON.stringify(detail),
       agentId,
       dueAt,
     );
     // Every way a run ends comes through here: its owner's feed hears of it (worker/users.ts runEnded). One waiting for
-    // a held call has not ended: the call's own feed item asks for it.
-    if (change.status && runEnded(status) && !run.test) this.#onEnded?.({ ...this.get(agentId, dueAt)!, status });
+    // a held call has not ended: the call's own feed item asks for it. The row as it is now, without reading it again.
+    if (change.status && runEnded(status) && !run.test) this.#onEnded?.({ ...run, status, endedAt: endedAt!, ...(summary !== undefined && { summary }), detail });
   }
 
   /** Start an item of a run in its session, or find it: an item that ended is not run again. */

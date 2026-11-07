@@ -134,8 +134,7 @@ export class LimitsDirectory {
   }
 
   addNeedsYou(item: NeedsYouItem): void {
-    // Ones whose chat never said they expired go once their time is past.
-    this.#sql.exec("DELETE FROM needs_you WHERE expires_at < ?", this.#now());
+    this.dropExpired();
     this.#sql.exec(
       "INSERT OR REPLACE INTO needs_you (chat_id, id, item, expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
       item.chatId,
@@ -143,6 +142,13 @@ export class LimitsDirectory {
       JSON.stringify(item),
       item.expiresAt,
       item.createdAt,
+    );
+  }
+
+  /** Ones whose chat never said they expired (its alarm or its word lost) go once their time is past: which went. */
+  dropExpired(): { chatId: string; id: string }[] {
+    return (this.#sql.exec("DELETE FROM needs_you WHERE expires_at < ? RETURNING chat_id, id", this.#now()).toArray() as { chat_id: string; id: string }[]).map(
+      (row) => ({ chatId: row.chat_id, id: row.id }),
     );
   }
 

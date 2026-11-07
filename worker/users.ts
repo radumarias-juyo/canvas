@@ -317,11 +317,21 @@ export class UserDirectory extends DurableObject<Env> {
 
   /** This user's feed: the newest items, the unread ones or those needing them when asked, and the counts. */
   feed(filter: { unread?: boolean; needsYou?: boolean }): FeedList {
+    this.#dropExpiredNeedsYou();
     return this.#feed.list(filter);
   }
 
   feedCounts(): Pick<FeedList, "unread" | "needsYou"> {
+    this.#dropExpiredNeedsYou();
     return this.#feed.counts();
+  }
+
+  /** Approvals whose time is past though their chat never said they ended: their feed items wait no more either. */
+  #dropExpiredNeedsYou(): void {
+    const expired = this.#limits.dropExpired();
+    if (!expired.length) return;
+    this.#changed("needs-you");
+    for (const { chatId, id } of expired) this.resolveFeed(approvalRef(chatId, id));
   }
 
   /**
@@ -934,8 +944,9 @@ export class UserDirectory extends DurableObject<Env> {
   }
 
   /** An action of one of the user's chats waits for them: listed, the sidebars told, and a push when no app is open. */
-  async addNeedsYou(view: PendingActionView, chatKind: string): Promise<void> {
+  async addNeedsYou(view: PendingActionView, chatKind: ChatKind): Promise<void> {
     const chatTitle = this.chatTitle(view.chatId) ?? "a chat";
+    this.#dropExpiredNeedsYou();
     this.#limits.addNeedsYou({ ...view, chatTitle });
     this.#changed("needs-you");
     // In the feed's Needs you too (not from a chat off the record), until it is decided or expires.

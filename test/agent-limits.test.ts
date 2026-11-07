@@ -486,7 +486,7 @@ describe("approvals in the feed", () => {
     expect(approvalFeed(held({ kind: "proposal", actor: { name: "pi" } }), "Deals", "group")).toMatchObject({ title: "pi proposes a change in Deals", from: { name: "pi" } });
   });
 
-  it("waits no more once it ends: approved, declined and expired all end through removeNeedsYou, which resolves its ref", () => {
+  it("waits no more once its ref is resolved (what removeNeedsYou does for an approved, declined or expired one)", () => {
     const feed = new FeedStore(memorySql());
     const view = held();
     feed.add(approvalFeed(view, "Deals", "group"));
@@ -564,6 +564,9 @@ describe("the owner's directory of limits", () => {
     expect(limits.needsYou()).toHaveLength(1);
     now += 11;
     expect(limits.needsYou()).toHaveLength(0);
+    // Dropped, they are named, so the feed's items for them wait no more either (UserDirectory).
+    expect(limits.dropExpired()).toEqual([{ chatId: "c1", id: "b".repeat(16) }]);
+    expect(limits.dropExpired()).toEqual([]);
   });
 });
 
