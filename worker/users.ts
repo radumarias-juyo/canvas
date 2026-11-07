@@ -1,7 +1,7 @@
 import { DurableObject, exports } from "cloudflare:workers";
 import type { ModelSetting } from "../shared/models.ts";
 import { PAGE_STORAGE_LIMITS, SOCKET_PING, type ArtifactSummary, type ChatStatus, type ChatSummary, type MentionNotice, type SidebarList } from "../shared/protocol.ts";
-import type { ExportedChat, ExportedPageValues, ExportedSkill, ExportStart, ImportedSettings } from "../shared/data-export.ts";
+import type { ExportedAgent, ExportedChat, ExportedPageValues, ExportedSkill, ExportStart, ImportedSettings } from "../shared/data-export.ts";
 import type { SkillFileInfo } from "../shared/skill-files.ts";
 import { checkSystemPrompt, type ChatSystemPrompt } from "../shared/system-prompt.ts";
 import { checkSkill, MAX_SKILL_PROPOSALS, MAX_USER_SKILLS, SkillError, type SavedSkillOrigin, type SkillInfo, type SkillInput, type SkillResult } from "../shared/skills.ts";
@@ -10,7 +10,7 @@ import { titleFromMessage, UNNAMED_CHAT } from "./agent/title.ts";
 import { applyAuthChange, type McpAuthChange, type McpAuthRecord, type McpAuthStore } from "./mcp/oauth.ts";
 import { mcpServers } from "./mcp/servers.ts";
 import { AgentStore, type AgentSave } from "./agents/store.ts";
-import type { AgentDefinition, AgentOrigin, AgentResult } from "../shared/agents.ts";
+import { withoutSignInShares, type AgentChanges, type AgentChatUse, type AgentDefinition, type AgentInput, type AgentOrigin, type AgentResult } from "../shared/agents.ts";
 
 /** One user's OAuth state for one MCP server. `uid` must come from a verified identity. */
 export function mcpAuthStore(uid: string, server: string): McpAuthStore {
@@ -56,6 +56,11 @@ type SkillRow = {
 export interface SkillPackageFiles {
   set: string;
   list: SkillFileInfo[];
+}
+
+/** An agent as an export carries it: its fields, its state and its id, without its version or times. */
+function exportedAgent({ version: _version, createdAt: _created, updatedAt: _updated, ...agent }: AgentDefinition): ExportedAgent {
+  return agent;
 }
 
 /**
@@ -115,6 +120,14 @@ export class UserDirectory extends DurableObject<Env> {
   mcpAuth(server: string): McpAuthRecord {
     const row = this.ctx.storage.sql.exec<{ data: string }>("SELECT data FROM mcp_auth WHERE server = ?", server).toArray()[0];
     return row ? (JSON.parse(row.data) as McpAuthRecord) : {};
+  }
+
+  /** The servers this user has signed in to (tokens kept), by name: never the tokens. */
+  mcpSignedIn(): string[] {
+    return this.ctx.storage.sql
+      .exec<{ server: string }>("SELECT server FROM mcp_auth WHERE json_extract(data, '$.tokens') IS NOT NULL ORDER BY server")
+      .toArray()
+      .map((row) => row.server);
   }
 
   /** Read, change and write in one step: this object runs one call at a time, and nothing here awaits. */
@@ -334,6 +347,7 @@ export class UserDirectory extends DurableObject<Env> {
 
   /** Take a deleted chat, and the artifacts it published, out of this user's lists. The chat deletes the rest first. */
   forgetChat(id: string): void {
+    this.#agents.forgetChat(id);
     // The values its pages saved for this user, which were everyone's defaults.
     this.ctx.storage.sql.exec("DELETE FROM page_values WHERE artifact_id IN (SELECT id FROM artifacts WHERE chat_id = ?)", id);
     if (this.ctx.storage.sql.exec("DELETE FROM artifacts WHERE chat_id = ?", id).rowsWritten) this.#changed("artifacts");
@@ -509,6 +523,10 @@ export class UserDirectory extends DurableObject<Env> {
    * proposes is saved off, for the user to review and turn on.
    */
   saveAgent(input: unknown, origin: AgentOrigin, enabled?: boolean, save?: AgentSave): AgentResult {
+    if (origin === "agent") {
+      const signIn = new Set(mcpServers(this.env).flatMap((server) => (server.auth === "oauth" ? [server.name] : [])));
+      input = withoutSignInShares(input, (server) => signIn.has(server));
+    }
     const saved = this.#agents.save(input, origin, enabled, save);
     if (!("error" in saved)) this.#changed("agents");
     return saved;
@@ -526,6 +544,34 @@ export class UserDirectory extends DurableObject<Env> {
     const refused = this.#agents.delete(id);
     if (!refused) this.#changed("agents");
     return refused;
+  }
+
+  /** The user's own copy of an agent someone shared with them, saved off (AgentStore.saveCopy). */
+  copyAgent(input: AgentChanges, copiedFrom: NonNullable<AgentDefinition["copiedFrom"]>): AgentResult {
+    const saved = this.#agents.saveCopy(input, copiedFrom);
+    if (!("error" in saved)) this.#changed("agents");
+    return saved;
+  }
+
+  /** An agent from an export (AgentStore.import): the id it has here, `skipped` when the user had one by its name. */
+  importAgent(agent: ExportedAgent): { id: string; skipped?: true } | { error: string } {
+    const result = this.#agents.import(agent);
+    if ("id" in result && !result.skipped) this.#changed("agents");
+    return result;
+  }
+
+  /** One of the user's chats added an agent of theirs, took it out, or changed whether it shares it (AgentStore.noteChat). */
+  noteAgentChat(agentId: string, chatId: string, inChat: boolean, shared = false): void {
+    // Only the index: the agents list the sidebars read is the same.
+    this.#agents.noteChat(agentId, chatId, inChat, shared);
+  }
+
+  /** The chats of the user's an agent is in, by title, with whether it is shared there. */
+  agentChats(agentId: string): AgentChatUse[] {
+    return this.#agents.chatsOf(agentId).flatMap(({ chatId, shared }) => {
+      const title = this.chatTitle(chatId);
+      return title === null ? [] : [{ chatId, title, shared }];
+    });
   }
 
   /** Delete one of the user's skills. Built-in ones can only be turned off. */
@@ -638,6 +684,7 @@ export class UserDirectory extends DurableObject<Env> {
         model: this.modelChoice(),
         builtinSkillsOff: sql.exec<{ name: string }>("SELECT name FROM builtin_skills_off ORDER BY name").toArray().map((row) => row.name),
         skills,
+        agents: this.#agents.list().map(exportedAgent),
         pageValues: [...values].map(([artifactId, entries]): ExportedPageValues => ({ artifactId, values: entries })),
       },
       chats: sql

@@ -86,6 +86,7 @@ describe("ChatRoster: its agents", () => {
       job: "Helps with bob.",
       mirrored: -1,
       off: false,
+      shared: false,
     };
     expect(roster.get("id-bob")).toEqual(entry);
     expect(roster.list()).toEqual([entry]);

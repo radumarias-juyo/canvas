@@ -85,7 +85,7 @@ import { artifactExtension, filesExtension, filesIndexExtension, reactionsExtens
 import type { SandboxFile } from "./sandbox.ts";
 import { formatSkillFile } from "./skills/index.ts";
 import { ChatReactions } from "./reactions.ts";
-import { clearImported, DumpError, dumpChat, hasConversation, restorePart } from "./chat-dump.ts";
+import { clearImported, DumpError, dumpChat, hasConversation, importedRoster, restorePart } from "./chat-dump.ts";
 import { idRemapper, type ChatDumpCursor, type ChatDumpPage, type ChatDumpPart, type ChatImportStart } from "../shared/data-export.ts";
 import { checkDraft, FailedChecks, publishDraft, writeDraft, type PublishTarget, type WriteInput } from "./agent/publish.ts";
 import { CheckBrowser } from "./artifacts/browser.ts";
@@ -124,12 +124,14 @@ import {
   AGENT_ID_PATTERN,
   CHAT_AGENT_KIND,
   CHAT_TURN_KIND,
+  copiedFields,
   type AgentDefinition,
   type AgentTurnView,
   type ChatAgentReplyData,
   type ChatAgents,
   type ChatAgentView,
   type ChatTurnData,
+  type SharedAgentView,
 } from "../shared/agents.ts";
 import { AgentTurns, type TurnHost } from "./agents/controller.ts";
 import { isTurnEntry, TurnFilter } from "./agents/live.ts";
@@ -147,6 +149,9 @@ export interface ChatRefusal {
   error: string;
   status: 400 | 403 | 404 | 409;
 }
+
+/** A turn as the people in the chat see it: never the message that asked for it. */
+const turnView = ({ root: _root, ask: _ask, submitted: _submitted, ...turn }: AgentTurn): AgentTurnView => turn;
 
 function refuse(status: ChatRefusal["status"], error: string): ChatRefusal {
   return { error, status };
@@ -1886,7 +1891,12 @@ export class ChatAgent extends DurableObject<Env> {
   importPart(part: ChatDumpPart): ChatRefusal | null {
     const start = this.ctx.storage.kv.get<ChatImportStart>(IMPORTING_KEY);
     if (!start) return refuse(409, "This chat's import has not begun.");
-    const remap = idRemapper([[start.from, this.uid], [secondSeatUid(start.from), secondSeatUid(this.uid)], ...Object.entries(start.artifacts)]);
+    const remap = idRemapper([
+      [start.from, this.uid],
+      [secondSeatUid(start.from), secondSeatUid(this.uid)],
+      ...Object.entries(start.artifacts),
+      ...Object.entries(start.agents ?? {}),
+    ]);
     try {
       this.ctx.storage.transactionSync(() => restorePart(this.ctx.storage.sql, this.ctx.storage.kv, EXPORTED_KV, part, remap));
     } catch (error) {
@@ -1897,14 +1907,19 @@ export class ChatAgent extends DurableObject<Env> {
   }
 
   /** The import has stored every part: the chat opens as it was, with nobody in it but its owner. */
-  importFinish(): ChatRefusal | null {
+  async importFinish(): Promise<ChatRefusal | null> {
     const kv = this.ctx.storage.kv;
     if (kv.get(IMPORTING_KEY) === undefined) return refuse(409, "This chat's import has not begun.");
     // The chat's system prompt came as the zip had it: keep it only within what a saved one may be.
     const prompt = readSystemPrompt(kv);
     if (prompt && "error" in saveSystemPrompt(kv, prompt)) kv.delete(SYSTEM_PROMPT_KEY);
+    const start = kv.get<ChatImportStart>(IMPORTING_KEY)!;
+    const { agents, through } = this.ctx.storage.transactionSync(() => importedRoster(this.ctx.storage.sql, this.uid, Object.values(start.agents ?? {})));
+    // pi's answers from before the import start no hand-offs (see #piScan).
+    if (agents.length) kv.put(PI_SCAN_KEY, { through } satisfies PiScan);
     kv.delete(IMPORTING_KEY);
     kv.put(IMPORTED_KEY, true);
+    await Promise.all(agents.map((agentId) => this.#noteAgentChat(agentId, true)));
     return null;
   }
 
@@ -2036,7 +2051,13 @@ export class ChatAgent extends DurableObject<Env> {
     if (first) this.ctx.storage.kv.put(PI_SCAN_KEY, { through: (newest?.items[0]?.id as number | undefined) ?? -1 } satisfies PiScan);
     this.#broadcastAgents();
     this.#notePeople(by, "agent-added", agent.name);
+    await this.#noteAgentChat(agentId, true);
     return this.agentViews();
+  }
+
+  /** Tell the owner's directory which chats an agent is in ("used in M chats"). Only an index: a failure is logged. */
+  async #noteAgentChat(agentId: string, inChat: boolean, shared = false): Promise<void> {
+    await this.#directory.noteAgentChat(agentId, this.chatId, inChat, shared).catch((error: unknown) => console.error("agent index:", errorMessage(error)));
   }
 
   /** The owner takes an agent out of the chat: its turns stop, and its past replies stay in the log. */
@@ -2048,15 +2069,62 @@ export class ChatAgent extends DurableObject<Env> {
     this.roster.remove(agentId);
     this.#broadcastAgents();
     this.#notePeople(by, "agent-removed", entry.name);
+    await this.#noteAgentChat(agentId, false);
     return this.agentViews();
+  }
+
+  /**
+   * The owner deleted one of their agents (the Worker calls this for each chat its index lists): it leaves the roster
+   * now, rather than at its next turn, and every open app hears it. Its past replies stay.
+   */
+  async agentDeleted(agentId: string): Promise<void> {
+    if (!this.roster.get(agentId)) return;
+    await this.turns.stop(agentId);
+    this.roster.remove(agentId);
+    this.#broadcastAgents();
+  }
+
+  /**
+   * (owner) Share an agent of the roster with the people of the chat, or stop: they can then open it read-only and
+   * copy it, and it keeps running as its owner.
+   */
+  async setAgentShared(by: Person, agentId: string, shared: unknown): Promise<ChatAgentView[] | ChatRefusal> {
+    if (by.uid !== this.uid) return refuse(403, "Only the chat's owner can share its agents.");
+    if (typeof shared !== "boolean") return refuse(400, "Expected {shared: true | false}.");
+    if (!this.roster.setShared(agentId, shared)) return refuse(404, "No such agent in this chat.");
+    this.#broadcastAgents();
+    await this.#noteAgentChat(agentId, true, shared);
+    return this.agentViews();
+  }
+
+  /**
+   * An agent of the roster as someone in the chat may open it: its owner always; anyone else only while the owner
+   * shares it. Read from the owner's directory, so it is the definition its next turn runs.
+   */
+  async sharedAgent(uid: string, agentId: string): Promise<SharedAgentView | ChatRefusal> {
+    if (!this.isInChat(uid)) return refuse(403, "You are not in this chat.");
+    const entry = this.roster.get(agentId);
+    if (!entry) return refuse(404, "No such agent in this chat.");
+    if (uid !== entry.ownerUid && !entry.shared) return refuse(403, `@${entry.name}'s owner does not share it in this chat.`);
+    const agent = await this.#index(entry.ownerUid).getAgent(agentId);
+    if (!agent) return refuse(404, "This agent was deleted.");
+    return {
+      ...copiedFields(agent),
+      id: agent.id,
+      avatar: agent.avatar,
+      color: agent.color,
+      version: agent.version,
+      ownerUid: entry.ownerUid,
+      ownerName: this.#nameOf(entry.ownerUid),
+      turns: this.roster.recentTurns(agentId).map(turnView),
+    };
   }
 
   /** The chat's agents and their latest turns, for someone in it (a runs list). */
   agentsFor(uid: string): ChatAgents | ChatRefusal {
     if (!this.isInChat(uid)) return refuse(403, "You are not in this chat.");
     const agents = this.agentViews();
-    const view = ({ root: _root, ask: _ask, submitted: _submitted, ...turn }: AgentTurn): AgentTurnView => turn;
-    return { agents, turns: Object.fromEntries(agents.map((agent) => [agent.id, this.roster.recentTurns(agent.id).map(view)])) };
+    return { agents, turns: Object.fromEntries(agents.map((agent) => [agent.id, this.roster.recentTurns(agent.id).map(turnView)])) };
   }
 
   /** Read pi's new answers for the agents they name (#piScan), off the caller's path. Nothing while the chat has no agents. */
