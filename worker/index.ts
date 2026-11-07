@@ -237,7 +237,9 @@ async function route(request: Request, env: Env): Promise<Response> {
   // Add an item to the caller's own feed, to try the feed without runs or a model. Needs DEV_TOOLS=true.
   if (path === "/api/dev/feed" && method === "POST" && env.DEV_TOOLS === "true") {
     const item = await readJson<FeedInput>(request);
-    if (!item || typeof item.ref !== "string" || typeof item.title !== "string" || !item.open) return json({ error: "Expected a feed item (shared/feed.ts)." }, 400);
+    if (!item || typeof item.ref !== "string" || typeof item.title !== "string" || !item.open) {
+      return json({ error: "Expected a feed item (shared/feed.ts)." }, 400);
+    }
     return json({ kept: await directory.addFeed({ ...item, ref: `dev:${item.ref}`, at: item.at || Date.now() }) });
   }
 

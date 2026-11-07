@@ -99,7 +99,11 @@ export function FeedView({ navigate, onMenu }: { navigate: (path: string) => voi
       {error && <p className="form-error">{error}</p>}
       {list && !items.length && (
         <p className="feed-empty">
-          {needsYou ? "Nothing waits on you." : unread ? "You have read everything." : "Nothing here yet. Mentions, your agents' runs, and what you follow show up here."}
+          {needsYou
+            ? "Nothing waits on you."
+            : unread
+              ? "You have read everything."
+              : "Nothing here yet. Mentions, your agents' runs, and what you follow show up here."}
         </p>
       )}
       <ul className="feed-list">
@@ -137,13 +141,21 @@ function FeedRow({ item, onOpen, onMark }: { item: FeedItem; onOpen: (event: Mou
           </button>
         )}
         <div className="feed-meta">
-          <span className={item.needsYou ? "pill feed-kind needs" : "pill feed-kind"}>{item.needsYou && item.kind === "run" ? "Needs you" : KIND_LABEL[item.kind]}</span>
+          <span className={item.needsYou ? "pill feed-kind needs" : "pill feed-kind"}>
+            {item.needsYou && item.kind === "run" ? "Needs you" : KIND_LABEL[item.kind]}
+          </span>
           <time dateTime={new Date(item.at).toISOString()}>{sentLabel(item.at, now)}</time>
         </div>
       </div>
       <div className="feed-side">
         {!item.read && <UnreadDot label="Unread" />}
-        <button type="button" className="icon-button feed-mark" title={item.read ? "Mark unread" : "Mark read"} aria-label={item.read ? "Mark unread" : "Mark read"} onClick={() => onMark(!item.read)}>
+        <button
+          type="button"
+          className="icon-button feed-mark"
+          title={item.read ? "Mark unread" : "Mark read"}
+          aria-label={item.read ? "Mark unread" : "Mark read"}
+          onClick={() => onMark(!item.read)}
+        >
           <Icon size={16}>{item.read ? <circle cx="12" cy="12" r="4" /> : <path d="M5 12.5l4.5 4.5L19 7.5" />}</Icon>
         </button>
       </div>
@@ -204,7 +216,11 @@ function Following() {
       <ul>
         {(follows ?? []).map((follow) => (
           <li key={`${follow.kind}:${follow.id}`}>
-            <a href={feedPath(follow.kind === "page" ? { to: "page", artifactId: follow.id } : { to: "agent", agentId: follow.id, ...(follow.chatId && { chatId: follow.chatId }) })} target={follow.kind === "page" ? "_blank" : undefined} rel="noreferrer">
+            <a
+              href={feedPath(follow.kind === "page" ? { to: "page", artifactId: follow.id } : { to: "agent", agentId: follow.id, ...(follow.chatId && { chatId: follow.chatId }) })}
+              target={follow.kind === "page" ? "_blank" : undefined}
+              rel="noreferrer"
+            >
               {follow.title}
             </a>
             <small>{follow.kind === "page" ? "page" : "agent"}</small>

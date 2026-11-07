@@ -141,7 +141,8 @@ export class FeedStore {
 
 function itemOf(row: FeedRow): FeedItem {
   const data = JSON.parse(row.data) as FeedData;
-  return { id: row.id, kind: row.kind, at: row.at, ...data, ...(row.read === 1 && { read: true as const }), ...(row.needs === 1 && { needsYou: true as const }) };
+  const flags = { ...(row.read === 1 && { read: true as const }), ...(row.needs === 1 && { needsYou: true as const }) };
+  return { id: row.id, kind: row.kind, at: row.at, ...data, ...flags };
 }
 
 /** A follower of one of this person's pages or agents, and the chat that let them follow it (an agent's: it is shared there). */
@@ -226,7 +227,8 @@ export class FollowStore {
 
   /** A followed target's title changed (a page published under a new one), as an item from it says. */
   retitle(kind: FollowKind, id: string, ownerUid: string, title: string): boolean {
-    return this.#sql.exec("UPDATE follows SET title = ? WHERE kind = ? AND target_id = ? AND owner_uid = ? AND title != ?", title, kind, id, ownerUid, title).rowsWritten > 0;
+    const sql = "UPDATE follows SET title = ? WHERE kind = ? AND target_id = ? AND owner_uid = ? AND title != ?";
+    return this.#sql.exec(sql, title, kind, id, ownerUid, title).rowsWritten > 0;
   }
 
   /** Someone follows one of this person's targets. Refused past MAX_FOLLOWERS. */
