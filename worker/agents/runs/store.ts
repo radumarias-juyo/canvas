@@ -64,6 +64,8 @@ export interface RunDetail {
   sent?: string[];
   /** A page rebuild's session, by its delivery's key, kept before it starts: a run that goes on uses it again. */
   sessions?: Record<string, string>;
+  /** Why it sent nothing (its agent's posts for the day were used: postsPerDay), decided once before its deliveries. */
+  quiet?: string;
   /**
    * What each do step came to, by `<item>:<step key>`, kept as it ends: a run that goes on after a restart makes its
    * calls that change data once.
@@ -287,6 +289,23 @@ export class AgentRuns {
   get(agentId: string, dueAt: number): RunRecord | null {
     const row = this.#rows("agent_id = ? AND due_at = ? AND item = ''", agentId, dueAt)[0];
     return row ? recordOf(row) : null;
+  }
+
+  /**
+   * How many of an agent's real runs that started from `since` on, other than `except`, posted something (a delivery
+   * that was sent): what its posts a day count (AgentDefinition.postsPerDay). A run on its own or one asked for.
+   */
+  postedSince(agentId: string, since: number, except: number): number {
+    const row = this.#sql
+      .exec(
+        `SELECT COUNT(*) AS n FROM agent_runs WHERE agent_id = ? AND item = '' AND test = 0 AND due_at != ? AND started_at >= ?
+         AND json_valid(detail) AND EXISTS (SELECT 1 FROM json_each(detail, '$.deliveries') WHERE json_extract(value, '$.status') = 'sent')`,
+        agentId,
+        except,
+        since,
+      )
+      .toArray()[0] as { n: number };
+    return row.n;
   }
 
   /**
@@ -570,9 +589,11 @@ export class AgentRuns {
     };
   }
 
-  /** An agent's runs, newest first. */
-  list(agentId: string, limit = 50): AgentRunView[] {
-    const runs = this.#rows("agent_id = ? AND item = '' ORDER BY due_at DESC LIMIT ?", agentId, limit).map(recordOf);
+  /** An agent's runs, newest first; with `keep`, only those it keeps (of the KEPT_RUNS kept, up to `limit`). */
+  list(agentId: string, limit = 50, keep?: (run: RunRecord) => boolean): AgentRunView[] {
+    const runs = keep
+      ? this.#rows("agent_id = ? AND item = '' ORDER BY due_at DESC", agentId).map(recordOf).filter(keep).slice(0, limit)
+      : this.#rows("agent_id = ? AND item = '' ORDER BY due_at DESC LIMIT ?", agentId, limit).map(recordOf);
     const counts = this.#counts(agentId, runs.map((run) => run.dueAt));
     return runs.map((run) => this.view(run, counts.get(run.dueAt) ?? NO_ITEMS));
   }

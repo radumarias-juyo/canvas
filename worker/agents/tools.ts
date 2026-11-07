@@ -6,6 +6,8 @@ import {
   AGENT_PROPOSE_TOOL,
   MAX_AGENT_INSTRUCTIONS,
   MAX_AGENT_JOB,
+  MAX_POSTS_PER_DAY,
+  MAX_WORTH_POSTING,
   type AgentProposedDetails,
   type AgentResult,
 } from "../../shared/agents.ts";
@@ -33,7 +35,9 @@ export function agentsExtension(scope: AgentsScope): Extension {
           "instructions, model and MCP servers, that people call in a chat with @name, and that can run on a schedule. It is saved turned off; the user reviews it and turns it on. " +
           "Ask only about gaps you cannot fill from the servers' tool lists; list in assumed the fields you guessed (such as servers, trigger, model), so they show as Assumed. " +
           "Write the instructions as numbered plain steps that work on their own, without this conversation's specifics unless they are the point. " +
-          "Its limits (how far it changes things on its own, its rules) are not yours to set: the user sets them on its Limits tab.",
+          "Its limits (how far it changes things on its own, its rules) are not yours to set: the user sets them on its Limits tab. " +
+          "To change a draft you proposed in this chat that is still off (the user asked for a change), call this again with the same name and every field: " +
+          "the draft is revised in place. One the user saved or turned on is theirs: you cannot change it.",
         parameters: Type.Object({
           name: Type.String({
             description: 'Its handle, called as @name: 2 to 24 lowercase letters, digits or hyphens, starting with a letter, e.g. "research".',
@@ -55,8 +59,17 @@ export function agentsExtension(scope: AgentsScope): Extension {
                 `A watch runs when the value it reads moved and its when holds. ${CONDITIONS_HELP} In when, the value read is named by the step's as ` +
                 '(else its tool name, with other characters as _), and also watch; previous is the value it read before (null at first). ' +
                 'E.g. {kind: "watch", step: {kind: "look", server: SERVER, tool: "get_count", input: {...}, as: "count"}, everyMinutes: 30, ' +
-                'when: "count.total < 10 and (previous == null or previous.total >= 10)"}.',
+                'when: "count.total < 10 and (previous == null or previous.total >= 10)"}. ' +
+                "A watch checks less often as the user's day of model calls nears its cap; add urgent: true only when the user says it must not wait.",
             }),
+          ),
+          worthPosting: Type.Optional(
+            Type.String({
+              description: `What is worth a post from its runs, in the user's words; a run with nothing that meets it posts nothing. Up to ${MAX_WORTH_POSTING} characters.`,
+            }),
+          ),
+          postsPerDay: Type.Optional(
+            Type.Integer({ minimum: 1, maximum: MAX_POSTS_PER_DAY, description: "At most this many posts a day from its runs on their own." }),
           ),
           assumed: Type.Optional(Type.Array(Type.String(), { description: "The fields you guessed, by name." })),
         }),
@@ -69,9 +82,11 @@ export function agentsExtension(scope: AgentsScope): Extension {
             version: saved.version,
             ...(saved.assumed && { assumed: saved.assumed }),
           };
+          // Proposed again under its name in this chat while still a draft: that draft was revised (a new version).
+          const what = saved.version > 1 ? `Revised your draft of the agent @${saved.name} (version ${saved.version}), still off.` : `Drafted the agent @${saved.name}, turned off.`;
           return {
             output: text(
-              `Drafted the agent @${saved.name}, turned off. The user reviews it, tests it and turns it on from its card or under Agents in the sidebar. ` +
+              `${what} The user reviews it, tests it and turns it on from its card or under Agents in the sidebar. ` +
                 `How far it may change things on its own (it starts at Inform: it changes nothing), its rules and its approvals are the user's to set, on its Limits tab.`,
             ),
             details,

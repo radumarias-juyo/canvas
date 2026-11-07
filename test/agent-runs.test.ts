@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import type { AgentDefinition, AgentStep, LookStep, StepInput } from "../shared/agents.ts";
+import { checkAgent, type AgentDefinition, type AgentStep, type LookStep, type StepInput } from "../shared/agents.ts";
+import { isQuiet, paceFactor, postDayStart, postsUsedLine, QUIET } from "../worker/agents/runs/pacing.ts";
 import type { Value } from "../shared/conditions.ts";
 import type { PendingActionView } from "../shared/limits.ts";
 import type { ArtifactMeta } from "../shared/protocol.ts";
@@ -174,6 +175,17 @@ class FakeHome implements RunnerHost {
   async unsubscribe(agentId: string, source: string) {
     this.unsubscribed.push(agentId);
     this.left.push(source);
+  }
+  /** The owner's day of model calls against their cap for runs, while set (RunnerHost.spend). */
+  spending: { spentUsd: number; capUsd: number } | undefined;
+  async spend() {
+    return this.spending;
+  }
+  /** The one-shot checks of watches set (RunnerHost.watchAt). */
+  readonly checks: { at: number; payload: WatchAlarm }[] = [];
+  async watchAt(at: number, payload: WatchAlarm) {
+    this.checks.push({ at, payload });
+    return `check-${this.checks.length}`;
   }
   /** A definition read that fails, as at a deploy reset, while set. */
   failDefinition = false;
@@ -2026,5 +2038,106 @@ describe("a run's page step", () => {
       status: "sent",
       detail: "Sales brief v4 published as a snapshot without crm.update_deal, which writes",
     });
+  });
+});
+
+describe("what is worth a post, and checks paced to the budget", () => {
+  const watched = (over: Partial<AgentDefinition> = {}, urgent = false) =>
+    agent({
+      trigger: {
+        kind: "watch",
+        step: { kind: "look", server: "crm", tool: "signups", input: {}, as: "signups" },
+        everyMinutes: 60,
+        when: "signups.count != previous.count",
+        ...(urgent && { urgent: true as const }),
+      },
+      workflow: [{ kind: "work", prompt: "Say what changed." }, { kind: "tell", to: ["owner"], via: "chat" }],
+      ...over,
+    });
+
+  it("paces a watch to its owner's day: twice as far apart from half the cap, four times from three quarters, never an urgent one", () => {
+    expect([paceFactor(0, 5), paceFactor(2.49, 5), paceFactor(2.5, 5), paceFactor(3.75, 5), paceFactor(9, 5)]).toEqual([1, 1, 2, 4, 4]);
+    expect([paceFactor(4, 5, true), paceFactor(4, undefined), paceFactor(4, 0)]).toEqual([1, 1, 1]);
+  });
+
+  it("skips its ticks until its widened interval passed, reading nothing, and keeps an urgent watch's", async () => {
+    for (const urgent of [false, true]) {
+      const { host, runner, definition } = home(watched({}, urgent));
+      host.spending = { spentUsd: 4, capUsd: 5 };
+      let count = 0;
+      host.values.set("crm.signups", () => ({ count: ++count }));
+      for (let n = 0; n < 8; n++) {
+        await runner.watchTick({ agentId: definition.id });
+        // The interval's alarm comes a little early.
+        host.clock.now += 3_600_000 - 30_000;
+      }
+      // At three quarters of the cap the watch reads every fourth tick of its hourly alarm; an urgent one at each.
+      expect(host.reads).toHaveLength(urgent ? 8 : 2);
+    }
+  });
+
+  it("checks a shared watch's value that came too early once on its own, when its paced interval ends", async () => {
+    const definition = watched();
+    const { host, runner } = home(definition);
+    host.shared = true;
+    host.spending = { spentUsd: 3, capUsd: 5 };
+    await runner.apply(definition.id, definition);
+    const source = await sourceName((definition.trigger as Extract<AgentDefinition["trigger"], { kind: "watch" }>).step);
+    expect(await runner.sourceMoved(definition.id, { count: 1 }, source)).toEqual({ status: "sent", started: true });
+    host.clock.now += 3_600_000;
+    // An hour on, at half the cap: not due for another hour. Nothing runs; one check is set for then, once.
+    expect(await runner.sourceMoved(definition.id, { count: 2 }, source)).toBeNull();
+    expect(await runner.sourceMoved(definition.id, { count: 3 }, source)).toBeNull();
+    expect(host.checks).toEqual([{ at: T0 + 2 * 3_600_000, payload: { agentId: definition.id } }]);
+    host.clock.now = T0 + 2 * 3_600_000;
+    host.values.set("crm.signups", { count: 3 });
+    expect(await runner.watchTick({ agentId: definition.id })).toEqual({ status: "sent", started: true });
+  });
+
+  it("asks its work step for the owner's bar, and posts nothing when it answers QUIET: a quiet line in its record", async () => {
+    const { host, runner, definition } = home(agent({ worthPosting: "a drop of more than 5%" }));
+    host.answer = () => ({ status: "done", text: "QUIET", cost: 0.01 });
+    await runner.now(definition.id, false);
+    await host.settled();
+    expect(host.works[0].prompt).toContain("Report only what meets this bar, set by your owner: a drop of more than 5%");
+    expect(host.works[0].prompt).toContain(`answer exactly ${QUIET}`);
+    expect(host.delivered).toEqual([]);
+    expect(host.runs.list(definition.id)[0]).toMatchObject({ status: "not_today", summary: "Not today: nothing met its bar for a post" });
+    expect([isQuiet("**Quiet.**"), isQuiet("Quiet times ahead")]).toEqual([true, false]);
+    // Without a bar the prompt is as before.
+    const plain = home();
+    await plain.runner.now(plain.definition.id, false);
+    await plain.host.settled();
+    expect(plain.host.works[0].prompt).toContain("If there is nothing worth reporting, say so in one line.");
+  });
+
+  it("posts at most its posts a day from its schedule, then keeps quiet lines; a run someone asks for still posts", async () => {
+    const { host, runner, definition } = home(agent({ postsPerDay: 1 }));
+    await runner.apply(definition.id, definition);
+    host.clock.now = SEVEN;
+    expect(await runner.fired({ agentId: definition.id, dueAt: SEVEN })).toEqual({ status: "sent", started: true });
+    // A second run the same day, on its schedule: nothing sent, a quiet line instead.
+    const later = SEVEN + 3 * 3_600_000;
+    host.clock.now = later;
+    await runner.executor.start({ agent: definition, dueAt: later, why: "schedule" });
+    expect(host.delivered).toHaveLength(1);
+    expect(host.runs.get(definition.id, later)).toMatchObject({ status: "not_today", summary: `Not today: ${postsUsedLine(1)}` });
+    await runner.now(definition.id, false);
+    await host.settled();
+    expect(host.delivered).toHaveLength(2);
+    // Its day is its schedule's (Europe/Bucharest, two hours ahead of UTC then).
+    expect(postDayStart(definition, SEVEN)).toBe(Date.parse("2026-11-03T22:00:00Z"));
+  });
+
+  it("takes the bar, the limit and urgent in a definition, and refuses what is out of range", () => {
+    const base = { name: "watcher", job: "Watches.", instructions: "Watch." };
+    const checked = checkAgent({ ...base, worthPosting: "  a deal that closed ", postsPerDay: 3 });
+    expect(checked).toMatchObject({ worthPosting: "a deal that closed", postsPerDay: 3 });
+    expect(() => checkAgent({ ...base, postsPerDay: 0 })).toThrow(/1 to 48/);
+    expect(() => checkAgent({ ...base, postsPerDay: 2.5 })).toThrow(/1 to 48/);
+    const watch = { kind: "watch", step: { kind: "look", server: "crm", tool: "t", input: {} }, everyMinutes: 30, when: "t.n > 1" };
+    expect(checkAgent({ ...base, trigger: { ...watch, urgent: true } }).trigger).toMatchObject({ urgent: true });
+    expect(checkAgent({ ...base, trigger: { ...watch, urgent: false } }).trigger).not.toHaveProperty("urgent");
+    expect(() => checkAgent({ ...base, trigger: { ...watch, urgent: "yes" } })).toThrow(/urgent/);
   });
 });
