@@ -78,7 +78,12 @@ export type PiLogEntry =
 
 /** Whether pi itself is busy, by the harness's queue: a submission of its own conversation, not one of an agent's session. */
 export function piBusy(submissions: readonly Pick<SubmissionRecord, "conversationId">[]): boolean {
-  return submissions.some((submission) => String(submission.conversationId) === String(ROOT_CONVERSATION_ID));
+  return submissions.some((submission) => isPiConversation(submission.conversationId));
+}
+
+/** Whether a conversation id (a number or its string, as sessions are named) is pi's own. */
+export function isPiConversation(id: unknown): boolean {
+  return String(id) === String(ROOT_CONVERSATION_ID);
 }
 
 export function piLogEntry(entry: Pick<EntryRecord, "kind" | "data" | "model">): PiLogEntry | undefined {

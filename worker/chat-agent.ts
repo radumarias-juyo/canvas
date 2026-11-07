@@ -183,6 +183,7 @@ import {
   draftTools,
   MAX_ASK_CHARS,
   messageAskKey,
+  isPiConversation,
   piBusy,
   piLogEntry,
   runTools,
@@ -681,7 +682,7 @@ export class ChatAgent extends DurableObject<Env> {
    */
   #memoryAgent(conversation: string): MemoryAgent | null {
     // pi's own conversation is no agent's, whatever a run's rows hold.
-    if (conversation === String(ROOT_CONVERSATION_ID)) return null;
+    if (isPiConversation(conversation)) return null;
     const entries = this.roster.list();
     const running = this.roster.allRunning();
     const turn = running.find((each) => {
@@ -1528,7 +1529,12 @@ export class ChatAgent extends DurableObject<Env> {
   /** pi's tools back after a Yes, in turn with the messages going in: once a run or turn is over. Never throws. */
   #restorePiTools(): Promise<void> {
     if (!this.#drafting()) return Promise.resolve();
-    return this.#place(() => this.#piTools(false)).catch((error: unknown) => console.error("pi tools:", errorMessage(error)));
+    return this.#place(() => this.#tryRestorePiTools());
+  }
+
+  /** #piTools(false), whose failure is logged, never thrown: pi stays on the narrowed tools, and the mark has it tried again. */
+  #tryRestorePiTools(): Promise<void> {
+    return this.#piTools(false).catch((error: unknown) => console.error("pi tools:", errorMessage(error)));
   }
 
   /** The installed tools `allowed` keeps of them, by name, in install order. */
@@ -1713,7 +1719,7 @@ export class ChatAgent extends DurableObject<Env> {
         // message gets pi all its tools back. First, so what follows reads pi as it will run.
         // A restore that fails leaves pi on a Yes's narrowed tools (the mark stays, so it is tried again): the message
         // still goes in. A Yes that cannot narrow them is refused.
-        await (drafts ? this.#piTools(true) : this.#piTools(false).catch((error: unknown) => console.error("pi tools:", errorMessage(error))));
+        await (drafts ? this.#piTools(true) : this.#tryRestorePiTools());
         const now = memoAsync(() => this.#now());
         const auto = routing && (await this.#applyPick(await routing, now));
         const picked = await tooling;
@@ -3219,7 +3225,7 @@ export class ChatAgent extends DurableObject<Env> {
 
   /** Who a session posts as: pi for the chat's own, the agent for a roster agent's (or its turn's fork); none for another. */
   #checklistAuthor(conversation: string): ChecklistAuthor | undefined {
-    if (String(ROOT_CONVERSATION_ID) === conversation) return { name: AGENT_NAME };
+    if (isPiConversation(conversation)) return { name: AGENT_NAME };
     const running = this.roster.runningSessions().find((turn) => turn.session === conversation);
     const entry = this.roster.list().find((agent) => agent.session === conversation) ?? (running && this.roster.get(running.agentId));
     return entry ? { name: entry.name, agentId: entry.agentId, avatar: entry.avatar, color: entry.color } : undefined;
@@ -3323,13 +3329,16 @@ export class ChatAgent extends DurableObject<Env> {
         // pi's answer is in (#piScan).
         try {
           const operationId = `pi-turn:${data.turn}`;
-          // Placed in turn with the messages, after pi's tools come back from a Yes's narrowing (a Yes's chain hands pi
-          // nothing, unattended, so this is someone's own ask): no Yes narrows them between the two. One that joins a
-          // Yes's run still going gets what that run has, as a message does.
-          await this.#place(async () => {
-            await this.#piTools(false).catch((error: unknown) => console.error("pi tools:", errorMessage(error)));
-            await this.harness.submit(input, { operationId, whenBusy: "followUp", entry: { kind: CHAT_TURN_KIND, data } });
-          });
+          const submit = () => this.harness.submit(input, { operationId, whenBusy: "followUp", entry: { kind: CHAT_TURN_KIND, data } });
+          // After a Yes, placed in turn with the messages once pi's tools are back (a Yes's chain hands pi nothing,
+          // unattended, so this is someone's own ask). One that joins a Yes's run still going gets what that run has, as
+          // a message does; otherwise it waits for no message's picks.
+          if (this.#drafting()) {
+            await this.#place(async () => {
+              await this.#tryRestorePiTools();
+              await submit();
+            });
+          } else await submit();
         } catch (error) {
           this.#resumeSettle();
           throw error;

@@ -449,6 +449,8 @@ describe("piBusy", () => {
     // @atlas works in its session, a run step in another: pi is idle, so a Yes is taken and its tools come back.
     expect(piBusy([of("session-atlas"), of("run-7")])).toBe(false);
     expect(piBusy([of("session-atlas"), of(ROOT_CONVERSATION_ID)])).toBe(true);
+    // A session named by its string is pi's too.
+    expect(piBusy([of(String(ROOT_CONVERSATION_ID))])).toBe(true);
   });
 });
 
