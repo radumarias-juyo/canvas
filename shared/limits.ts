@@ -210,11 +210,39 @@ export function valueAt(value: unknown, path: string): unknown {
   return found;
 }
 
-/** An argument's values: each element of a list, else the value itself; none when the call does not set it. */
+/**
+ * An argument's values: each element of a list, else the value itself; none when the call does not set it. A path
+ * through a list of objects (`items.amount`) reads that field of each of them.
+ */
 export function argValues(input: StepInput, path: string): unknown[] {
-  const value = valueAt(input, path);
-  if (value === undefined || value === null) return [];
-  return Array.isArray(value) ? value : [value];
+  let found: unknown[] = [input];
+  for (const part of path.split(".")) {
+    found = found.flatMap((value): unknown[] => {
+      if (Array.isArray(value)) {
+        if (/^\d+$/.test(part)) return value.length > Number(part) ? [value[Number(part)]] : [];
+        return value.flatMap((item) => (isObject(item) && Object.hasOwn(item, part) ? [item[part]] : []));
+      }
+      return isObject(value) && Object.hasOwn(value, part) ? [value[part]] : [];
+    });
+  }
+  return found.flatMap((value) => (value === undefined || value === null ? [] : Array.isArray(value) ? value : [value]));
+}
+
+/**
+ * Whether a tool's input schema has an argument at `path` (through objects' properties and lists' items); undefined
+ * when the schema does not say (no properties listed, or it allows any others), so nothing can be told from it.
+ */
+export function schemaHasPath(schema: unknown, path: string): boolean | undefined {
+  let node: unknown = schema;
+  for (const part of path.split(".")) {
+    // A list's elements: an index names one of them, and a field's name reads it of each.
+    while (isObject(node) && schemaType(node) === "array") node = node.items;
+    if (/^\d+$/.test(part)) continue;
+    if (!isObject(node) || !isObject(node.properties)) return undefined;
+    if (!Object.hasOwn(node.properties, part)) return node.additionalProperties === true || isObject(node.additionalProperties) ? undefined : false;
+    node = node.properties[part];
+  }
+  return true;
 }
 
 /** A number, or a string that is one; undefined otherwise. */
@@ -224,21 +252,30 @@ export function asNumber(value: unknown): number | undefined {
   return undefined;
 }
 
-/** Whether `text` matches a never rule's value: the same, ignoring case, with * for any characters. */
+/**
+ * Whether a value matches a never rule's value: the same, ignoring case, with * for any characters; a boolean as
+ * "true" or "false". Text that lists several (joined by commas, semicolons or spaces, as recipients often are) matches
+ * when any one of them does.
+ */
 export function matchesValue(pattern: string | number, value: unknown): boolean {
   if (typeof pattern === "number") return asNumber(value) === pattern;
-  if (typeof value !== "string" && typeof value !== "number") return false;
+  if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") return false;
   const text = String(value).trim().toLowerCase();
-  const wanted = pattern.toLowerCase();
-  if (!wanted.includes("*")) return text === wanted;
-  const regex = new RegExp(
-    `^${wanted
-      .split("*")
-      .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
-      .join(".*")}$`,
-    "s",
-  );
-  return regex.test(text);
+  const wanted = pattern.trim().toLowerCase();
+  const matches = (one: string) => {
+    if (!wanted.includes("*")) return one === wanted;
+    const regex = new RegExp(
+      `^${wanted
+        .split("*")
+        .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
+        .join(".*")}$`,
+      "s",
+    );
+    return regex.test(one);
+  };
+  if (matches(text)) return true;
+  const parts = typeof value === "string" ? text.split(/[,;\s]+/).filter(Boolean) : [];
+  return parts.length > 1 && parts.some(matches);
 }
 
 /** The day `at` falls on in `tz`, as "YYYY-MM-DD". */
@@ -353,6 +390,8 @@ export function toolArgs(schema: unknown, prefix = "", depth = 0): ToolArg[] {
     const type = schemaType(property);
     if (type === "object") return toolArgs(property, path, depth + 1);
     const items = isObject(property.items) ? property.items : undefined;
+    // A list of objects: a rule reads a field of each of them (`items.amount`).
+    if (type === "array" && items && schemaType(items) === "object") return toolArgs(items, path, depth + 1);
     const choices = (Array.isArray(property.enum) ? property.enum : Array.isArray(items?.enum) ? items.enum : undefined)?.filter(
       (value): value is string | number => typeof value === "string" || typeof value === "number",
     );

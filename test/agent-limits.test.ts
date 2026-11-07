@@ -95,6 +95,22 @@ describe("guardrail rules", () => {
     );
   });
 
+  it("never matches a boolean as true or false, and each recipient of a joined list", () => {
+    const permanent = rule({ kind: "never", tool: "delete_deal", arg: "permanent", value: ["true"] });
+    expect(violation(permanent, { ...call({ permanent: true }), tool: "delete_deal" })).toMatch(/never allowed/);
+    expect(violation(permanent, { ...call({ permanent: false }), tool: "delete_deal" })).toBeNull();
+    const to = rule({ kind: "never", arg: "to", value: ["leak@blocked.com", "*@rival.example"] });
+    expect(violation(to, call({ to: "boss@ok.com, leak@blocked.com" }))).toMatch(/never allowed/);
+    expect(violation(to, call({ to: "boss@ok.com;x@rival.example" }))).toMatch(/never allowed/);
+    expect(violation(to, call({ to: "boss@ok.com ana@ok.com" }))).toBeNull();
+  });
+
+  it("reads a field of each object in a list", () => {
+    const most = rule({ kind: "max", arg: "items.amount", value: 100 });
+    expect(violation(most, call({ items: [{ amount: 10 }, { amount: 500 }] }))).toMatch(/500, over 100/);
+    expect(violation(most, call({ items: [{ amount: 10 }] }))).toBeNull();
+  });
+
   it("quiet dates hold every year, across the new year too, in the rule's time zone", () => {
     expect(inQuietRange("2026-12-25", { from: "12-24", to: "12-26" })).toBe(true);
     expect(inQuietRange("2027-01-01", { from: "12-30", to: "01-02" })).toBe(true);
@@ -223,7 +239,7 @@ function guarded(callers: Record<string, Partial<Caller>>, userRules: GuardrailR
     const action = actions.move(id, "pending", "running")!;
     return hub.call("crm", action.tool, input ?? action.input, { kind: "approved", action, level: 2 });
   };
-  return { clock, server, hub, actions, logged, held, write, approve };
+  return { clock, server, hub, host, actions, logged, held, write, approve };
 }
 
 /** The verdict a held or refused call came with. */
@@ -345,6 +361,40 @@ describe("the write gate", () => {
     await chat.write("four", {});
     expect(await heldBy(chat.write("four", {}))).toMatchObject({ outcome: "refused", message: expect.stringMatching(/2 times today/) });
     expect(chat.server.calls).toHaveLength(2);
+  });
+
+  it("callsPerDay counts the calls under way: of three at once, only the first runs", async () => {
+    const chat = guarded({ four: { level: 4 } }, [rule({ kind: "callsPerDay", value: 1 })]);
+    const outcomes = await Promise.all(
+      [1, 2, 3].map((n) =>
+        chat.write("four", { discount: n }).then(
+          () => "ran",
+          (error: unknown) => (error instanceof CallHeld ? error.verdict.outcome : "failed"),
+        ),
+      ),
+    );
+    expect(outcomes).toEqual(["ran", "refused", "refused"]);
+    expect(chat.server.calls).toHaveLength(1);
+  });
+
+  it("a rule on an argument the tool no longer has fires, rather than let every call through", async () => {
+    const chat = guarded({ four: { level: 4 } }, [rule({ kind: "max", arg: "discount_pct", value: 10, effect: "approve" })]);
+    expect(await heldBy(chat.write("four", { discount: 50 }))).toMatchObject({
+      outcome: "held",
+      action: { why: expect.stringMatching(/has no argument discount_pct/) },
+    });
+    expect(chat.server.calls).toEqual([]);
+  });
+
+  it("an approved call whose agent cannot be read fails, and can be approved again", async () => {
+    const chat = guarded({ three: { level: 3, actor: { name: "deals", agentId: "a1" } } });
+    const held = await heldBy(chat.write("three", { discount: 3 }));
+    if (held.outcome !== "held") throw new Error("not held");
+    chat.host.agent = async () => {
+      throw new Error("directory unreachable");
+    };
+    await expect(chat.approve(held.action.id)).rejects.toThrow(/unreachable/);
+    expect(chat.server.calls).toEqual([]);
   });
 
   it("a page cannot wait for an approval: what would be held is refused", async () => {
@@ -486,5 +536,16 @@ describe("telling through an outside tool", () => {
       "error",
       expect.stringMatching(/priority/),
     );
+  });
+});
+
+describe("agent drafts", () => {
+  it("offer no limits to the model, and say the owner sets them", async () => {
+    const { agentsExtension } = await import("../worker/agents/tools.ts");
+    const tool = agentsExtension({ proposeAgent: async () => ({ id: "a".repeat(16), name: "deals", version: 1 }) as never }).tools![0];
+    const properties = (tool.parameters as { properties: Record<string, unknown> }).properties;
+    for (const field of ["autonomy", "guardrails", "approvalHours"]) expect(properties).not.toHaveProperty(field);
+    const result = await (tool.execute as unknown as (args: object) => Promise<{ output: { text: string }[] }>)({ name: "deals" });
+    expect(result.output[0].text).toMatch(/Limits tab/);
   });
 });

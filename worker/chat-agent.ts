@@ -3307,7 +3307,11 @@ export class ChatAgent extends DurableObject<Env> {
       },
       callsSince: (server, tool, since) => this.#directory.callsSince(server, tool, since),
       dayStart: (at, tz) => instantOf({ ...wallClock(at, tz), hour: 0, minute: 0 }, tz),
-      log: (entry) => this.ctx.waitUntil(this.#directory.logCall({ ...entry, chatId: this.chatId }).catch((error: unknown) => console.error("call log:", errorMessage(error)))),
+      log: (entry) => {
+        const kept = this.#directory.logCall({ ...entry, chatId: this.chatId }).catch((error: unknown) => console.error("call log:", errorMessage(error)));
+        this.ctx.waitUntil(kept);
+        return kept;
+      },
       hold: (action) => this.#holdAction(action),
     };
   }

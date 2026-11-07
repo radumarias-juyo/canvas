@@ -9,6 +9,7 @@ import {
   actorName,
   argValues,
   asNumber,
+  schemaHasPath,
   DEFAULT_APPROVAL_HOURS,
   hitText,
   ruleApplies,
@@ -59,7 +60,7 @@ export interface GateCall {
 }
 
 export type GateVerdict =
-  | { run: true; warnings: string[]; caller: Caller; actionId?: string }
+  | { run: true; warnings: string[]; caller: Caller; actionId?: string; /** Its place among the calls in flight. */ reservation?: number }
   | { run: false; outcome: "refused"; message: string }
   | { run: false; outcome: "held"; message: string; action: PendingActionView };
 
@@ -77,17 +78,22 @@ export interface GateHost {
   /** Midnight of the day `at` falls on, in `tz`. */
   dayStart(at: number, tz: string): number;
   /** Keep a call in the owner's log of calls. Never throws. */
-  log(entry: { actor: string; agentId?: string; server: string; tool: string; outcome: CallOutcome; detail?: string }): void;
+  log(entry: { actor: string; agentId?: string; server: string; tool: string; outcome: CallOutcome; detail?: string }): Promise<void> | void;
   /** Hold a call as an action: kept, its card posted, the owner told; the action as kept. */
   hold(action: NewAction): Promise<PendingActionView>;
   /** One of the owner's agents, for the rules it has now; null when it is gone. */
   agent(agentId: string): Promise<Pick<AgentDefinition, "guardrails"> | null>;
 }
 
+/** How many calls a callsPerDay rule covers that are under way and not in the log yet (made before the one checked). */
+export type InFlight = (rule: Pick<GuardrailRule, "server" | "tool">) => number;
+
 /** The values a rule needs that the call does not carry: the current value (maxChange), today's calls (callsPerDay). */
-async function factsFor(host: GateHost, rule: GuardrailRule, call: GateCall, at: number) {
-  // The calls the rule is on: of every tool it covers ("*": any), not only the one called now.
-  if (rule.kind === "callsPerDay") return { callsToday: await host.callsSince(rule.server, rule.tool, host.dayStart(at, rule.tz ?? "UTC")) };
+async function factsFor(host: GateHost, rule: GuardrailRule, call: GateCall, at: number, inFlight: InFlight) {
+  // The calls the rule is on: of every tool it covers ("*": any), not only the one called now; with the ones under way.
+  if (rule.kind === "callsPerDay") {
+    return { callsToday: (await host.callsSince(rule.server, rule.tool, host.dayStart(at, rule.tz ?? "UTC"))) + inFlight(rule) };
+  }
   // Read only when the call sets the argument: a rule on it says nothing otherwise.
   if (rule.kind !== "maxChange" || !rule.current || !argValues(call.input, rule.arg!).length) return {};
   try {
@@ -98,12 +104,24 @@ async function factsFor(host: GateHost, rule: GuardrailRule, call: GateCall, at:
   }
 }
 
-/** The rules that fire for a call, of `rules`. */
-export async function hitsFor(host: GateHost, rules: readonly GuardrailRule[], call: GateCall, at: number): Promise<RuleHit[]> {
+/**
+ * The rules that fire for a call, of `rules`. A rule on an argument the tool's listed schema does not have (renamed, or
+ * never there) cannot be checked: it fires, rather than let every call through.
+ */
+export async function hitsFor(
+  host: GateHost,
+  rules: readonly GuardrailRule[],
+  call: GateCall,
+  at: number,
+  inFlight: InFlight = () => 0,
+): Promise<RuleHit[]> {
   const checked = await Promise.all(
     rules.map(async (rule): Promise<RuleHit | null> => {
       if (!ruleApplies(rule, call)) return null;
-      const facts = await factsFor(host, rule, call, at);
+      if (rule.arg && call.info && schemaHasPath(call.info.inputSchema, rule.arg) === false) {
+        return { rule, reason: `${call.server}.${call.tool} has no argument ${rule.arg}, so this rule cannot be checked` };
+      }
+      const facts = await factsFor(host, rule, call, at, inFlight);
       const reason = violation(rule, { server: call.server, tool: call.tool, input: call.input, at }, facts);
       return reason === null ? null : { rule, reason };
     }),
@@ -123,10 +141,34 @@ export class WriteGate {
     this.#host = host;
   }
 
-  /** Whether a call that changes data may run now; when not, it is refused or held (see the file's head). */
+  /** Calls checked and not yet in the log, by the order they came in: what a callsPerDay rule counts besides the log. */
+  readonly #inFlight = new Map<number, Pick<GateCall, "server" | "tool">>();
+  #order = 0;
+
+  /**
+   * Whether a call that changes data may run now; when not, it is refused or held (see the file's head). The call is
+   * counted as under way from the start (calls in parallel see the ones before them) until its log entry is kept.
+   */
   async check(call: GateCall, context: GateContext): Promise<GateVerdict> {
+    const reservation = ++this.#order;
+    this.#inFlight.set(reservation, { server: call.server, tool: call.tool });
+    const inFlight: InFlight = (rule) => [...this.#inFlight].filter(([order, one]) => order < reservation && ruleApplies(rule, one)).length;
+    let verdict: GateVerdict;
+    try {
+      verdict =
+        context.kind === "approved"
+          ? await this.#approved(call, context.action, context.level, inFlight)
+          : await this.#check(call, context, inFlight);
+    } catch (error) {
+      this.#inFlight.delete(reservation);
+      throw error;
+    }
+    if (!verdict.run) this.#inFlight.delete(reservation);
+    return verdict.run ? { ...verdict, reservation } : verdict;
+  }
+
+  async #check(call: GateCall, context: Exclude<GateContext, { kind: "approved" }>, inFlight: InFlight): Promise<GateVerdict> {
     const host = this.#host;
-    if (context.kind === "approved") return this.#approved(call, context.action, context.level);
     const userRules = host.userRules();
     let caller: Caller;
     try {
@@ -137,7 +179,7 @@ export class WriteGate {
     }
     const who = actorName(caller.actor);
     const now = host.now();
-    const hits = await hitsFor(host, [...(caller.agent?.guardrails ?? []), ...(await userRules)], call, now);
+    const hits = await hitsFor(host, [...(caller.agent?.guardrails ?? []), ...(await userRules)], call, now, inFlight);
     const said = (wanted: GuardrailRule["effect"]) => hits.filter((hit) => hit.rule.effect === wanted).map(hitText);
     // The strictest rule wins: block, then approve, then warn.
     const blocks = said("block");
@@ -185,8 +227,8 @@ export class WriteGate {
     return { run: false, outcome: "held", message, action };
   }
 
-  #log(actor: ActionActor | null, call: Pick<GateCall, "server" | "tool">, outcome: CallOutcome, detail?: string): void {
-    this.#host.log({
+  #log(actor: ActionActor | null, call: Pick<GateCall, "server" | "tool">, outcome: CallOutcome, detail?: string): Promise<void> | void {
+    return this.#host.log({
       actor: actor ? actorName(actor) : "unknown",
       ...(actor?.agentId && { agentId: actor.agentId }),
       server: call.server,
@@ -202,24 +244,24 @@ export class WriteGate {
   }
 
   /** An action its owner approved: only while it runs, only its stored call, and not when a rule now blocks it. */
-  async #approved(call: GateCall, action: PendingActionView, level: AutonomyLevel): Promise<GateVerdict> {
+  async #approved(call: GateCall, action: PendingActionView, level: AutonomyLevel, inFlight: InFlight): Promise<GateVerdict> {
     const host = this.#host;
     const same = action.server === call.server && action.tool === call.tool && canonicalJson(action.input) === canonicalJson(call.input);
     if (action.status !== "running" || !same) return this.#refuse(action.actor, call, "Not run: not the call that was approved.");
-    const [agent, userRules] = await Promise.all([
-      action.actor.agentId ? host.agent(action.actor.agentId).catch(() => null) : null,
-      host.userRules(),
-    ]);
+    // A failed lookup fails the action (it can be asked again), never runs it without the agent's rules.
+    const [agent, userRules] = await Promise.all([action.actor.agentId ? host.agent(action.actor.agentId) : null, host.userRules()]);
     // Only the rules that block: the owner's approval answered the rest.
     const blocking = [...(agent?.guardrails ?? []), ...userRules].filter((rule) => rule.effect === "block");
-    const hits = await hitsFor(host, blocking, call, host.now());
+    const hits = await hitsFor(host, blocking, call, host.now(), inFlight);
     if (hits.length) return this.#refuse(action.actor, call, `Not run: a rule blocks it now: ${hits.map(hitText).join("; ")}.`);
     return { run: true, warnings: [], actionId: action.id, caller: { actor: action.actor, level, because: "approved by you", origin: {} } };
   }
 
-  /** A call the gate let through ended: logged with what it came to. */
+  /** A call the gate let through ended: logged with what it came to, and counted from the log once it is kept there. */
   ran(call: Pick<GateCall, "server" | "tool">, verdict: Extract<GateVerdict, { run: true }>, error?: string): void {
     const notes = [...(verdict.actionId ? ["approved"] : []), ...verdict.warnings, ...(error ? [error] : [])];
-    this.#log(verdict.caller.actor, call, error ? "failed" : verdict.warnings.length ? "warned" : "ran", notes.join("; ").slice(0, 500));
+    const kept = this.#log(verdict.caller.actor, call, error ? "failed" : verdict.warnings.length ? "warned" : "ran", notes.join("; ").slice(0, 500));
+    const done = () => verdict.reservation !== undefined && this.#inFlight.delete(verdict.reservation);
+    Promise.resolve(kept).then(done, done);
   }
 }
