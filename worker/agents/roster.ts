@@ -118,7 +118,11 @@ type RosterRow = {
  * A session apart from the chat (ChatRoster.forks): whether its reply was `posted`, whether its turn `ended` (it takes
  * no more entries; never for a session later turns run in again), the newest entry it inherited (`from`, after which its own start), and whether its owner reviews it.
  */
-export type Fork = { posted: boolean; ended: boolean; from?: number; review: boolean };
+/**
+ * A session apart from the chat: `from`, where what is apart starts (a fork's own entries; a reused session's, what came
+ * after its newest entry when its turn apart began); `reused`: later turns run in it again (setApart).
+ */
+export type Fork = { posted: boolean; ended: boolean; from?: number; review: boolean; reused: boolean };
 type ForkRow = { session: string; posted: number; from_entry: number | null; review: number; reused: number; open: number };
 const FORKS = `SELECT f.session, f.posted, f.from_entry, f.review, f.reused,
   EXISTS (SELECT 1 FROM chat_agent_turns t WHERE t.session = f.session AND t.status IN ('queued', 'running')) AS open
@@ -128,6 +132,7 @@ const forkOf = (row: ForkRow): Fork => ({
   ended: row.reused !== 1 && row.open !== 1,
   ...(row.from_entry !== null && { from: row.from_entry }),
   review: row.review === 1,
+  reused: row.reused === 1,
 });
 
 type TurnRow = {
@@ -259,6 +264,8 @@ export class ChatRoster {
       forked: "INTEGER NOT NULL DEFAULT 0",
       by_uid: "TEXT",
     });
+    // A fork's view (FORKS) asks whether a turn still runs in its session, for every session every trace read.
+    sql.exec("CREATE INDEX IF NOT EXISTS chat_agent_turns_by_session ON chat_agent_turns (session)");
   }
 
   /** The roster's clock: what its turns' times are taken from. */
@@ -474,11 +481,14 @@ export class ChatRoster {
    * made before stays as it was: the traces read keep what they read as the chat's, and its pages' versions are kept
    * by turn (recordPage).
    */
-  setApart(session: string, review: boolean): void {
+  setApart(session: string, review: boolean, from?: number): void {
+    // Apart from `from` (its newest entry now) on; one still apart (a turn of it not posted) keeps where it was apart from.
     this.#sql.exec(
-      "INSERT INTO chat_agent_forks (session, review, reused) VALUES (?, ?, 1) ON CONFLICT (session) DO UPDATE SET posted = 0, review = excluded.review",
+      `INSERT INTO chat_agent_forks (session, review, reused, from_entry) VALUES (?, ?, 1, ?) ON CONFLICT (session) DO UPDATE SET
+       from_entry = CASE WHEN posted = 1 THEN excluded.from_entry ELSE from_entry END, posted = 0, review = excluded.review`,
       session,
       review ? 1 : 0,
+      from ?? null,
     );
   }
 
@@ -538,9 +548,12 @@ export class ChatRoster {
     return this.#pageIds("version = 1 AND posted = 0");
   }
 
-  /** The pages `session` published while apart from the chat (recordPage). */
+  /**
+   * The pages `session` published while apart from the chat with its reply not posted (recordPage). Not those of an
+   * earlier turn in it whose reply was posted (a run's reply session): those are the chat's now.
+   */
   pagesOf(session: string): Set<string> {
-    return this.#pageIds("session = ?", session);
+    return this.#pageIds("session = ? AND posted = 0", session);
   }
 
   #pageIds(where: string, ...bindings: string[]): Set<string> {

@@ -230,7 +230,14 @@ export class AgentSeats {
     // The room gives an agent one turn at a time: one still running here is one the room ended (a give it thought
     // failed), and it stops before this turn sets the session up for someone else's tools. First: a stop also drops
     // what waits in the session's inbox, the batch among it.
-    await this.#abort(this.#running(ref, agentId).filter((row) => row.turn !== turn.turn));
+    const stale = this.#running(ref, agentId).filter((row) => row.turn !== turn.turn);
+    await this.#abort(stale);
+    // One whose input never went in has no run whose end ends it: it ends here, or a wake would set it up again.
+    for (const row of stale) {
+      if (row.submitted !== 1 && !this.#starting.has(turnKey(ref, row.turn))) {
+        this.#end(ref, row.turn, { status: "unanswered", reason: "the room gave a later turn", ...NO_OUTPUTS });
+      }
+    }
     const delivered = batch ? await this.deliver(ref, agentId, batch) : seat.delivered;
     const byOwner = turn.byOwner && !turn.unattended && turn.hop === 0 && turn.calledBy.uid === this.#host.uid && !turn.calledBy.agentId;
     const checked: SeatTurn = { ...turn, byOwner };
@@ -377,7 +384,7 @@ export class AgentSeats {
       });
     } catch (error) {
       console.error("agent seat, outputs:", errorMessage(error));
-      if (row.forked !== 1) return { published: [], items: [], sources: [] };
+      if (row.forked !== 1) return NO_OUTPUTS;
       const agent = await this.#host.definition(row.agent_id).catch(() => null);
       return unreadOutputs(true, agent?.reviewBeforePosting === true);
     }

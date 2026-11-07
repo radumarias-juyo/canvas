@@ -195,6 +195,9 @@ class FakeChat implements TurnHost {
   async fork(session: string) {
     return { session };
   }
+  async newest() {
+    return undefined;
+  }
   async sources(_entry: RosterEntry, entries: readonly EntryRecord[]) {
     return { items: itemsIn(entries), sources: [] };
   }

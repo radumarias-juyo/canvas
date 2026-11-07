@@ -1735,8 +1735,13 @@ export class ChatAgent extends DurableObject<Env> {
    */
   async #withheldPage(artifactId: string): Promise<boolean> {
     if (!this.roster.anyWithheld()) return false;
-    if (this.roster.withheldVersion(artifactId, 1)) return true;
-    const forking = () => this.roster.allRunning().some((turn) => turn.forked);
+    return this.roster.withheldVersion(artifactId, 1) || (await this.#hiddenTracePages()).has(artifactId);
+  }
+
+  /** The pages only forks whose replies were not posted named (SessionTraces.hidden), kept while no fork runs (#hiddenPages). */
+  async #hiddenTracePages(): Promise<ReadonlySet<string>> {
+    // A turn apart from the chat (a fork, a run's reply session) adds to them while it runs.
+    const forking = () => this.roster.allRunning().some((turn) => turn.forked || turn.session !== undefined);
     let hidden = this.#hiddenPages;
     if (!hidden || forking()) {
       const changes = this.#rosterChanges;
@@ -1744,12 +1749,12 @@ export class ChatAgent extends DurableObject<Env> {
       // Kept only when no turn started or ended during the read.
       if (changes === this.#rosterChanges && !forking()) this.#hiddenPages = hidden;
     }
-    return hidden.has(artifactId);
+    return hidden;
   }
 
   /** The pages not the chat's yet, but for their makers: those only unposted forks named, and those turns apart made. */
-  #hiddenArtifacts(traces: SessionTraces): Set<string> {
-    return new Set([...traces.hidden.artifacts, ...this.roster.madeApart()]);
+  #hiddenArtifacts(tracePages: ReadonlySet<string>): Set<string> {
+    return new Set([...tracePages, ...this.roster.madeApart()]);
   }
 
   /** Whether `version` of a page is not the chat's yet: the page (#withheldPage), or that version (a fork's of a page the chat has). */
@@ -1764,18 +1769,20 @@ export class ChatAgent extends DurableObject<Env> {
   async #rulesFor(session: string): Promise<SessionRules> {
     // With no turn apart from the chat waiting to be posted, nothing is withheld (and nothing is reviewed).
     if (!this.roster.anyWithheld()) return { hidden: new Set(), hiddenVersion: () => false, own: new Set(), reviewed: false, chatFile: () => true };
-    const traces = await this.#readTraces();
-    const own = this.roster.pagesOf(session);
     const fork = this.roster.fork(session);
+    const reviewed = !!fork && !fork.posted && fork.review;
+    // The chat's files matter only to a reviewed session (which may change none): only it waits for the whole read.
+    const [pages, traces] = await Promise.all([this.#hiddenTracePages(), reviewed ? this.#readTraces() : undefined]);
+    const own = this.roster.pagesOf(session);
     const versions = new Map<string, Set<number>>();
     const withheldOf = (artifactId: string) =>
       versions.get(artifactId) ?? versions.set(artifactId, this.roster.withheldVersions(artifactId, session)).get(artifactId)!;
     return {
-      hidden: new Set([...this.#hiddenArtifacts(traces)].filter((id) => !own.has(id))),
+      hidden: new Set([...this.#hiddenArtifacts(pages)].filter((id) => !own.has(id))),
       hiddenVersion: (artifactId, version) => withheldOf(artifactId).has(version),
       own,
-      reviewed: !!fork && !fork.posted && fork.review,
-      chatFile: (path) => this.#inChat(path, traces),
+      reviewed,
+      chatFile: (path) => !traces || this.#inChat(path, traces),
     };
   }
 
@@ -1788,7 +1795,7 @@ export class ChatAgent extends DurableObject<Env> {
     const owner = uid === this.uid;
     const [{ files, traces }, artifacts] = await Promise.all([this.#chatFiles(owner), this.#directory.listChatArtifacts(this.chatId)]);
     if (owner) return { files: newestFirst(files), artifacts };
-    const hidden = this.#hiddenArtifacts(traces);
+    const hidden = this.#hiddenArtifacts(traces.hidden.artifacts);
     const visible = artifacts.filter((artifact) => !hidden.has(artifact.id));
     return { files: newestFirst(files), artifacts: visible.map(({ unread: _, ...artifact }) => artifact) };
   }
@@ -2632,16 +2639,24 @@ export class ChatAgent extends DurableObject<Env> {
     await mapLimit(await this.harness.sessions.list(), TRACE_READS_AT_ONCE, async ({ id }) => {
       // Asked per session, as a fork may be made while the read goes on (it holds only what it inherited until then).
       const fork = this.roster.fork(id);
-      const seen = fork && !fork.posted ? this.#seenWithheld : this.#seen;
+      const apart = !!fork && !fork.posted;
+      const seen = apart ? this.#seenWithheld : this.#seen;
       // A fork whose turn ended takes no more entries: read to its end once, it is not read again.
       if (seen.settled.has(id)) return;
-      // A fork is read from its own first entry: what it inherited is its parent's, read there.
-      const query = { order: "ascending", minEntryId: ((seen.through.get(id) ?? fork?.from ?? -1) + 1) as EntryId } as const;
-      for await (const page of entryPages(await this.harness.conversation(id), query, 500)) {
-        chatTraces(page, seen.traces);
-        const last = page.at(-1);
-        if (last) seen.through.set(id, last.id as number);
-      }
+      const read = async (into: SeenTraces, after: number, through?: number) => {
+        const from = Math.max(into.through.get(id) ?? -1, after) + 1;
+        if (through !== undefined && from > through) return;
+        const query = { order: "ascending", minEntryId: from as EntryId, ...(through !== undefined && { maxEntryId: through as EntryId }) } as const;
+        for await (const page of entryPages(await this.harness.conversation(id), query, 500)) {
+          chatTraces(page, into.traces);
+          const last = page.at(-1);
+          if (last) into.through.set(id, last.id as number);
+        }
+      };
+      // A fork is read from its own first entry: what it inherited is its parent's, read there. A session later turns
+      // run in again (a run's reply session) is its own from the start, and the chat's up to where its turn apart began.
+      if (fork?.reused && apart && fork.from !== undefined) await read(this.#seen, -1, fork.from);
+      await read(seen, (fork?.reused && !apart ? undefined : fork?.from) ?? -1);
       if (fork?.ended) seen.settled.add(id);
     });
     const [shared, held] = [this.#seen.traces, this.#seenWithheld.traces];
@@ -2968,9 +2983,13 @@ export class ChatAgent extends DurableObject<Env> {
    * A new session that sees `session`'s history so far (an agent's private turn runs in one); a new one when it has none
    * yet. `from`: the newest entry it inherited (or one before it), after which only its own entries come.
    */
-  async #fork(session: string): Promise<{ session: string; from?: number }> {
+  async #newestEntry(session: string): Promise<number | undefined> {
     const { items } = await (await this.#conversation(session)).entries({ order: "descending" }, 1, undefined, BACKGROUND_CONTEXT);
-    const newest = items[0]?.id as number | undefined;
+    return items[0]?.id as number | undefined;
+  }
+
+  async #fork(session: string): Promise<{ session: string; from?: number }> {
+    const newest = await this.#newestEntry(session);
     if (newest === undefined) return { session: (await this.harness.sessions.create()).id };
     return { session: (await this.harness.sessions.fork(session)).id, from: newest };
   }
@@ -3045,6 +3064,7 @@ export class ChatAgent extends DurableObject<Env> {
       changed: () => this.#broadcastAgents(),
       waitUntil: (promise) => this.ctx.waitUntil(promise),
       fork: (session) => this.#fork(session),
+      newest: (session) => this.#newestEntry(session),
       sources: async (entry, entries) => {
         const agent = await this.#index(entry.ownerUid).getAgent(entry.agentId);
         return agent ? this.#sources(agent, entries) : { items: [], sources: [] };

@@ -325,12 +325,17 @@ class Room implements TurnHost {
   async fork(session: string) {
     return { session: this.sessions.fork(session) };
   }
+  async newest(session: string) {
+    return this.newestEntries.get(session);
+  }
   async sources(entry: RosterEntry, entries: readonly EntryRecord[]) {
     const agent = (await this.definition(entry))!;
     return { ...turnSources(entries, MCP, sharedServer(agent, SIGNS_IN)), ...(agent.reviewBeforePosting && { review: true }) };
   }
   /** Errors the next gives to a seat fail with, before reaching it (the RPC was cut off). */
   readonly giveErrors: Error[] = [];
+  /** The newest entry of a session, as the harness would say (none: an empty session). */
+  readonly newestEntries = new Map<string, number>();
   /** The turns the room stopped at a seat. */
   readonly seatAborts: number[] = [];
   seat(entry: RosterEntry): SeatLink {
@@ -1078,10 +1083,12 @@ describe("Member agents: what the review of private turns found", () => {
     const chat = room();
     const planner = chat.add(RADU, "planner", { servers: ["db", "calendar"], reviewBeforePosting: true });
     const reply = (text: string) => chat.turns.call([planner.agentId], { ...chat.say(RADU, text), session: "run-reply" });
+    // The run's report is in the session already: it stays the chat's, and what is apart starts after it.
+    chat.newestEntries.set("run-reply", 7);
     const [first] = reply("@planner and the week after?");
     await settle();
     expect(chat.sessions.sessionOf(first.id)).toBe("run-reply");
-    expect(chat.roster.fork("run-reply")).toMatchObject({ posted: false, ended: false, review: true });
+    expect(chat.roster.fork("run-reply")).toMatchObject({ posted: false, ended: false, review: true, reused: true, from: 7 });
     chat.roster.recordPage("run-reply", "r1", 2);
     chat.sessions.finish(first.id, "Week 42 too.", [result("calendar_events", [{ id: "e1", title: "x" }])]);
     await settle();
@@ -1090,10 +1097,14 @@ describe("Member agents: what the review of private turns found", () => {
     expect(chat.roster.fork("run-reply")).toMatchObject({ posted: false, ended: false });
     expect(await chat.turns.post(RADU.uid, planner.agentId, first.id)).toBeNull();
     expect(chat.roster.withheldVersion("r1", 2)).toBe(false);
-    // The next reply in the same session is apart again; what the first posted stays the chat's.
+    // The next reply in the same session is apart again, from the newest entry then: what the first posted stays the chat's.
+    chat.newestEntries.set("run-reply", 12);
     reply("@planner and after that?");
     await settle();
-    expect(chat.roster.fork("run-reply")).toMatchObject({ posted: false });
+    expect(chat.roster.fork("run-reply")).toMatchObject({ posted: false, from: 12 });
+    // Given again while still apart (its reply not posted): it keeps where it went apart.
+    chat.roster.setApart("run-reply", true, 15);
+    expect(chat.roster.fork("run-reply")).toMatchObject({ posted: false, from: 12 });
     chat.roster.recordPage("run-reply", "r1", 3);
     expect([chat.roster.withheldVersion("r1", 2), chat.roster.withheldVersion("r1", 3)]).toEqual([false, true]);
   });

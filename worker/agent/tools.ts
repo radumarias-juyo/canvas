@@ -285,16 +285,16 @@ async function rulesOf(scope: ChatScope, api: { conversationId: unknown }): Prom
 }
 
 /**
- * The version of `meta` a read takes: `asked`, or the newest this conversation sees (one another conversation apart
- * from the chat published is not the chat's yet). Throws for an asked version it does not see.
+ * The version of `meta` a read takes: `asked`, or the newest up to `newest` this conversation sees (one another
+ * conversation apart from the chat published is not the chat's yet). Throws for an asked version it does not see.
  */
-function versionToRead(meta: ArtifactMeta, asked: number | undefined, rules?: SessionRules): number {
+function versionToRead(meta: ArtifactMeta, asked: number | undefined, rules?: SessionRules, newest = meta.latest): number {
   const hidden = (version: number) => !!rules?.hiddenVersion(meta.id, version);
   if (asked !== undefined) {
     if (hidden(asked)) throw new Error(`Artifact ${meta.id} has no version ${asked} in this chat yet.`);
     return asked;
   }
-  let version = meta.latest;
+  let version = newest;
   while (version > 1 && hidden(version)) version--;
   return version;
 }
@@ -558,7 +558,8 @@ export function artifactExtension(scope: ChatScope): Extension {
           const rules = await rulesOf(scope, api);
           const meta = await ownArtifact(scope, args.artifact_id, rules);
           const to = versionToRead(meta, args.to, rules);
-          const from = versionToRead(meta, args.from ?? to - 1, rules);
+          // By default the newest version before `to` this conversation sees.
+          const from = args.from === undefined ? versionToRead(meta, undefined, rules, to - 1) : versionToRead(meta, args.from, rules);
           const [before, after] = await Promise.all([readPageSource(scope, meta.id, from), readPageSource(scope, meta.id, to)]);
           if (before === null || after === null) throw new Error(`Artifact ${meta.id} has versions 1 to ${versionToRead(meta, undefined, rules)}.`);
           const patch = createTwoFilesPatch(`v${from}/index.html`, `v${to}/index.html`, before, after, undefined, undefined, { context: 3 });

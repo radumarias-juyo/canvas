@@ -69,6 +69,8 @@ export interface TurnHost {
    * it inherited, after which only its own come.
    */
   fork(session: string): Promise<{ session: string; from?: number }>;
+  /** The newest entry of a session; undefined for one with none. */
+  newest(session: string): Promise<number | undefined>;
   /**
    * What a forked turn's reply shows of its sources (turnSources), from its session's entries: only the shared servers'
    * records, the private servers it called, and whether its owner reviews it first.
@@ -197,8 +199,11 @@ export class AgentTurns {
         // Its owner follows it live in the fork from now on, and nobody follows the agent's session for it.
         this.#host.changed();
       } else if (turn.session !== undefined && !turn.forked) {
-        // A reply to a run's report runs in the run's reply session, apart from the chat as a fork is.
-        roster.setApart(turn.session, agent.reviewBeforePosting === true);
+        // A reply to a run's report runs in the run's reply session, apart from the chat as a fork is, from its newest
+        // entry on: what is there already (the report, replies posted before) stays the chat's.
+        const from = await this.#host.newest(turn.session);
+        if (!live()) return;
+        roster.setApart(turn.session, agent.reviewBeforePosting === true, from);
       }
       if (turn.forked) await Promise.all([this.#tellApart(entry, turn), this.#host.configure(entry, agent, turn)]);
       else await Promise.all([turn.session ? undefined : this.#catchUp(entry, turn.id), this.#host.configure(entry, agent, turn)]);
