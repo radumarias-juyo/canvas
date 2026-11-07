@@ -31,6 +31,11 @@ export type McpAuthChange =
    */
   | { clearTokensIf: OAuthTokens }
   /**
+   * A refresh's new tokens, saved only over the ones it refreshed: one that finishes after Disconnect, a new sign-in or
+   * another chat's refresh changes nothing.
+   */
+  | { setTokensIf: { was: OAuthTokens; tokens: OAuthTokens } }
+  /**
    * Start a sign-in for this redirect URL: drop any sign-in in progress, and
    * keep the client registered for the same URL with its tokens (they stay in
    * use until the new sign-in replaces them).
@@ -55,6 +60,7 @@ export function applyAuthChange(stored: McpAuthRecord, change: McpAuthChange): M
     for (const key of change.clear) delete record[key];
     return record;
   }
+  if ("setTokensIf" in change) return sameTokens(stored.tokens, change.setTokensIf.was) ? { ...stored, tokens: change.setTokensIf.tokens } : stored;
   const { tokens, ...rest } = stored;
   return sameTokens(tokens, change.clearTokensIf) ? rest : stored;
 }
@@ -138,8 +144,10 @@ export class McpOAuthClient implements OAuthClientProvider {
   }
 
   async saveTokens(tokens: OAuthTokens): Promise<void> {
+    const was = this.#readTokens;
     this.#readTokens = tokens;
-    await this.#store.update({ set: { tokens } });
+    // A refresh replaces only the tokens it refreshed; a sign-in (which read none) saves its own.
+    await this.#store.update(was ? { setTokensIf: { was, tokens } } : { set: { tokens } });
   }
 
   redirectToAuthorization(url: URL): void {
@@ -176,7 +184,12 @@ function sameTokens(a: OAuthTokens | undefined, b: OAuthTokens | undefined): boo
  * can link to the sign-in route, and following such a link signs no one out.
  * A client registration made for this same redirect URL is kept.
  */
-export async function startSignIn(serverUrl: string, server: string, store: McpAuthStore, redirectUrl: string): Promise<{ url: string } | { signedIn: true }> {
+export async function startSignIn(
+  serverUrl: string,
+  server: string,
+  store: McpAuthStore,
+  redirectUrl: string,
+): Promise<{ url: string } | { signedIn: true }> {
   await store.update({ restart: redirectUrl });
   const client = new McpOAuthClient(store, server, { redirectUrl, interactive: true, newSignIn: true });
   const trace = tracedFetch();
@@ -189,7 +202,8 @@ export async function startSignIn(serverUrl: string, server: string, store: McpA
 /** Finish a sign-in from the callback: check the state, exchange the code for tokens, clear the sign-in in progress. */
 export async function finishSignIn(serverUrl: string, server: string, store: McpAuthStore, code: string, state: string): Promise<void> {
   const record = await store.get();
-  if (!record.state || record.state !== state || !record.redirectUrl) throw new Error("This sign-in did not start here, or a newer one replaced it. Open the sign-in link again.");
+  if (!record.state || record.state !== state || !record.redirectUrl)
+    throw new Error("This sign-in did not start here, or a newer one replaced it. Open the sign-in link again.");
   const client = new McpOAuthClient(store, server, { redirectUrl: record.redirectUrl, interactive: true });
   const trace = tracedFetch();
   await auth(client, { serverUrl, authorizationCode: code, fetchFn: trace.fetch }).catch(trace.explain);

@@ -34,14 +34,14 @@ self.addEventListener("notificationclick", (event) => {
       // A route the Worker serves (a sign-in): a page of its own, which the app cannot show in place.
       if (url.startsWith("/api/")) return self.clients.openWindow(url);
       const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
-      // A window of the app itself, which moves there without a reload (src/push.ts): its workspace first (a chat, the
-      // start page, skills), else any page of the app's. Not a page the Worker serves (a sign-in's result, a file, a
-      // published page, Access's), which would hear nothing.
+      // A window of the app itself, any of its pages, which moves there without a reload (src/push.ts), the focused one
+      // first. Not a page the Worker serves (a sign-in's result, a file, a published page, Access's), which would hear
+      // nothing.
       const app = windows.filter((client) => {
         const at = new URL(client.url);
         return at.origin === self.location.origin && !/^\/(api|u|cdn-cgi)\//.test(at.pathname);
       });
-      const open = app.find((client) => /^\/(c\/|skills$|$)/.test(new URL(client.url).pathname)) ?? app[0];
+      const open = app.find((client) => client.focused) ?? app[0];
       if (!open) return self.clients.openWindow(url);
       open.postMessage({ type: "open", url });
       return open.focus();
@@ -63,8 +63,10 @@ self.addEventListener("pushsubscriptionchange", (event) => {
         if (!key || typeof key.publicKey !== "string") return;
         next = await self.registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key.publicKey });
       }
-      if (old) await post("/api/push/unsubscribe", { endpoint: old.endpoint }).catch(() => {});
-      await post("/api/push/subscribe", next.toJSON());
+      await Promise.all([
+        old && post("/api/push/unsubscribe", { endpoint: old.endpoint }).catch(() => {}),
+        post("/api/push/subscribe", next.toJSON()),
+      ]);
     })().catch(() => {}),
   );
 });

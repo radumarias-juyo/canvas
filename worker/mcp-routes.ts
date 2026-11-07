@@ -3,7 +3,7 @@ import { errorMessage } from "../shared/util.ts";
 import { json, readJson } from "./http.ts";
 import { mcpAuthStore } from "./users.ts";
 import { finishSignIn, OAUTH_CALLBACK_PATH, serverOfState, SIGN_IN_PATH, startSignIn } from "./mcp/oauth.ts";
-import { mcpServers } from "./mcp/servers.ts";
+import { oauthServers } from "./mcp/servers.ts";
 
 /**
  * Sign-in to an MCP server that signs in each user, for a verified `uid`:
@@ -19,7 +19,7 @@ import { mcpServers } from "./mcp/servers.ts";
  */
 export async function mcpRoute(request: Request, env: Env, uid: string): Promise<Response | null> {
   const url = new URL(request.url);
-  const servers = mcpServers(env).filter((server) => server.auth === "oauth");
+  const servers = oauthServers(env);
   const directory = () => exports.UserDirectory.getByName(uid);
 
   if (url.pathname === SIGN_INS_PATH && request.method === "GET") return json(await directory().mcpSignIns());

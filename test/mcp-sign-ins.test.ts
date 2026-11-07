@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { SignInNotice } from "../shared/sign-ins.ts";
 import { assertReadOnly, grantMs, KEEP_ALIVE_MS, readOnlyTools, WARN_AHEAD_MS, warnAt, type SignInCheck } from "../worker/mcp/background.ts";
 import { McpFailure } from "../worker/mcp/hub.ts";
+import { McpOAuthClient } from "../worker/mcp/oauth.ts";
 import { openAuthRecord, sealAuthRecord } from "../worker/mcp/sealed.ts";
 import { McpSignIns, RECENT_REFRESH_MS } from "../worker/mcp/sign-ins.ts";
 import { deriveUserAesKey } from "../worker/storage/keys.ts";
@@ -275,10 +276,20 @@ describe("sign-ins with nobody present", () => {
   it("a refresh that finishes after Disconnect does not sign the user back in", async () => {
     const s = setup();
     await signIn(s, T0);
+    const client = new McpOAuthClient(s.signIns.store("Portal"), "Portal", { redirectUrl: CLIENT.redirect_uris[0]!, interactive: false });
+    await client.tokens();
     await s.signIns.disconnect("Portal");
-    await s.signIns.update("Portal", { set: { tokens: { ...TOKENS, access_token: "at-late" } } });
+    await client.saveTokens({ ...TOKENS, access_token: "at-late" });
     expect(s.row()).toBeUndefined();
     expect(s.signIns.list()[0]).toMatchObject({ signedIn: false });
+
+    // Nor overwrite a new sign-in made meanwhile.
+    const late = new McpOAuthClient(s.signIns.store("Portal"), "Portal", { redirectUrl: CLIENT.redirect_uris[0]!, interactive: false });
+    await signIn(s, T0 + DAY);
+    await late.tokens();
+    await s.signIns.update("Portal", { set: { tokens: { ...TOKENS, access_token: "at-new" } } });
+    await late.saveTokens({ ...TOKENS, access_token: "at-late" });
+    expect((await s.signIns.record("Portal")).tokens?.access_token).toBe("at-new");
   });
 
   it("keeps a chat waiting until it could be told", async () => {

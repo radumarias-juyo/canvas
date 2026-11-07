@@ -4,7 +4,7 @@ import { addColumn, type Sql } from "../members.ts";
 import { checkSignIn, grantMs, KEEP_ALIVE_MS, KEEP_ALIVE_RETRY_MS, warnAt, type SignInCheck } from "./background.ts";
 import { applyAuthChange, signInPath, type McpAuthChange, type McpAuthRecord, type McpAuthStore } from "./oauth.ts";
 import { openAuthRecord, sealAuthRecord } from "./sealed.ts";
-import { mcpServers, type McpServerConfig } from "./servers.ts";
+import { mcpServers, oauthServers, type McpServerConfig } from "./servers.ts";
 
 /** What a row holds besides the sealed record. Signed in = `signed_in_at` is set (there are tokens). */
 type AuthRow = { server: string; signed_in_at: number | null; warned_at: number; keep_at: number };
@@ -90,10 +90,7 @@ export class McpSignIns {
   update(server: string, change: McpAuthChange): Promise<void> {
     return this.#serially(async () => {
       const before = await this.#read(server);
-      const { tokens, ...rest } = applyAuthChange(before, change);
-      // Tokens come only with a sign-in, which registers a client first: tokens with none are a refresh that finished
-      // after Disconnect, and must not sign the user back in.
-      await this.#write(server, before, rest.client && tokens ? { ...rest, tokens } : rest);
+      await this.#write(server, before, applyAuthChange(before, change));
     }) as Promise<void>;
   }
 
@@ -177,7 +174,7 @@ export class McpSignIns {
         if (config.auth !== "oauth") return [name, "ok"];
         // Opening the record first forgets one that no longer opens (a changed key), so the row read after says so.
         const { tokens } = await this.record(name);
-        const row = this.#row(name);
+        const row = this.#rows().find((r) => r.server === name);
         // keep_at is set a day after each new token: KEEP_ALIVE_MS before it is the last refresh.
         if (tokens && row?.signed_in_at != null && row.keep_at - KEEP_ALIVE_MS > this.#now() - RECENT_REFRESH_MS) return [name, "ok"];
         return [name, await this.#check(config)];
@@ -377,12 +374,6 @@ export class McpSignIns {
     }
   }
 
-  #row(server: string): AuthRow | undefined {
-    return this.#host.sql.exec("SELECT server, signed_in_at, warned_at, keep_at FROM mcp_auth WHERE server = ?", server).toArray()[0] as
-      | AuthRow
-      | undefined;
-  }
-
   #rows(): AuthRow[] {
     return this.#host.sql.exec("SELECT server, signed_in_at, warned_at, keep_at FROM mcp_auth").toArray() as AuthRow[];
   }
@@ -399,6 +390,6 @@ export class McpSignIns {
   }
 
   #oauthServers(): McpServerConfig[] {
-    return mcpServers(this.#host.env).filter((server) => server.auth === "oauth");
+    return oauthServers(this.#host.env);
   }
 }

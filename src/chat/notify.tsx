@@ -3,7 +3,7 @@ import type { MentionNotice } from "../../shared/protocol.ts";
 import { Icon } from "../Icon.tsx";
 import { useStoredState } from "../layout.tsx";
 import { enablePush, pushAvailable, showNotification } from "../push.ts";
-import { useVisible } from "../sidebar.ts";
+import { useLatest, useVisible } from "../sidebar.ts";
 
 /** How long a tag shows in the app once the window is in view. */
 const TOAST_MS = 8_000;
@@ -122,14 +122,13 @@ export function MentionToasts({
   const [permission, ask] = useNotificationPermission();
   const [askedAt, setAskedAt] = useStoredState<number>("notify.notNowAt", 0, (value): value is number => typeof value === "number");
   const [now] = useState(Date.now);
-  const push = usePushAvailable();
   const askCard = (asking.mentions || asking.signIns) && permission === "default" && now - askedAt > ASK_AGAIN_MS;
-  const about =
-    asking.mentions && asking.signIns
-      ? "someone mentions you or a sign-in needs you"
-      : asking.mentions
-        ? "someone mentions you"
-        : "a sign-in needs you";
+  // Asked only while the card shows: whether a notice also reaches the user while the app is closed.
+  const [push, loadPush] = useLatest(pushAvailable, false);
+  useEffect(() => {
+    if (askCard) loadPush();
+  }, [askCard, loadPush]);
+  const about = [asking.mentions && "someone mentions you", asking.signIns && "a sign-in needs you"].filter(Boolean).join(" or ");
   if (toasts.length === 0 && !askCard) return null;
   return (
     <div className="toasts">
@@ -138,11 +137,7 @@ export function MentionToasts({
           <BellIcon />
           <div className="toast-body">
             <strong>Get notified when {about}</strong>
-            <span className="toast-text">
-              {push
-                ? "Your browser shows it even while you are in another tab or app, or the app is closed."
-                : "Your browser shows it even while you are in another tab or app."}
-            </span>
+            <span className="toast-text">Your browser shows it even while you are in another tab or app{push && ", or the app is closed"}.</span>
             <div className="notify-ask-actions">
               <button type="button" className="primary" onClick={ask}>
                 Turn on notifications
@@ -176,19 +171,6 @@ export function MentionToasts({
       </div>
     </div>
   );
-}
-
-/** Whether notices reach this browser while the app is closed (push here and on the Worker); false until known. */
-function usePushAvailable(): boolean {
-  const [available, setAvailable] = useState(false);
-  useEffect(() => {
-    let live = true;
-    void pushAvailable().then((yes) => live && setAvailable(yes));
-    return () => {
-      live = false;
-    };
-  }, []);
-  return available;
 }
 
 function BellIcon({ off = false }: { off?: boolean }) {

@@ -1,4 +1,4 @@
-import { fromBase64url } from "../shared/util.ts";
+import { fromBase64url, memoAsync } from "../shared/util.ts";
 import { api } from "./api.ts";
 
 /**
@@ -9,7 +9,6 @@ import { api } from "./api.ts";
 const supported = typeof navigator !== "undefined" && "serviceWorker" in navigator && typeof window !== "undefined" && "PushManager" in window;
 
 let enabling: Promise<void> | undefined;
-let available: Promise<boolean> | undefined;
 /** Who is signed in to this window (setPushUser): a subscription is made for them alone. */
 let user: string | undefined;
 /** Which user this browser's subscription was made for, kept across sessions. */
@@ -34,21 +33,21 @@ export function enablePush(): Promise<void> {
   return enabling;
 }
 
+/** The Worker's VAPID key, or null when it sends no pushes: read once per page load (again after a failure). */
+const pushKey = memoAsync(() => api.pushKey());
+
 /** Whether a notice can reach this browser while the app is closed: push here, and on the Worker (its VAPID key). */
 export function pushAvailable(): Promise<boolean> {
-  if (!supported) return Promise.resolve(false);
-  available ??= api.pushKey().then(
-    (key) => key !== null,
-    () => {
-      available = undefined;
-      return false;
-    },
-  );
-  return available;
+  return supported
+    ? pushKey().then(
+        (key) => key !== null,
+        () => false,
+      )
+    : Promise.resolve(false);
 }
 
 async function subscribe(uid: string): Promise<void> {
-  const key = await api.pushKey();
+  const key = await pushKey();
   if (!key) return;
   await navigator.serviceWorker.register("/sw.js");
   // A worker registered just now is still installing, and only an active one can subscribe.

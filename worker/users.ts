@@ -10,7 +10,7 @@ import { titleFromMessage, UNNAMED_CHAT } from "./agent/title.ts";
 import type { McpAuthChange, McpAuthRecord, McpAuthStore } from "./mcp/oauth.ts";
 import type { SignInCheck } from "./mcp/background.ts";
 import { McpSignIns } from "./mcp/sign-ins.ts";
-import { mcpServers } from "./mcp/servers.ts";
+import { oauthServers } from "./mcp/servers.ts";
 import { chatAgentName } from "./chat-name.ts";
 import { addColumn } from "./members.ts";
 import { PushSubscriptions, vapidKeys, type PushMessage } from "./push/subscriptions.ts";
@@ -615,7 +615,7 @@ export class UserDirectory extends DurableObject<Env> {
    */
   saveAgent(input: unknown, origin: AgentOrigin, enabled?: boolean, save?: AgentSave): AgentResult {
     if (origin === "agent") {
-      const signIn = new Set(mcpServers(this.env).flatMap((server) => (server.auth === "oauth" ? [server.name] : [])));
+      const signIn = new Set(oauthServers(this.env).map((server) => server.name));
       input = withoutSignInShares(input, (server) => signIn.has(server));
     }
     const saved = this.#agents.save(input, origin, enabled, save);
