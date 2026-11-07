@@ -43,7 +43,7 @@ describe("mcpExtension with spill", () => {
     expect(note).toContain("120,000 characters");
     expect(note).toContain("first 15,700 are shown");
     expect(note).toContain("saved at mcp-results/portal__reports_run-1.txt");
-    expect(note).toContain(`files_read (its first ${MAX_TOOL_TEXT.toLocaleString("en")} characters)`);
+    expect(note).toContain("files_read and offset 15700");
     expect(note).toContain("run_python");
   });
 

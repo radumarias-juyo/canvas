@@ -141,9 +141,7 @@ export type ChatEventData =
   | { event: "kind"; kind: ChatKind; from: ChatKind; by?: Who; auto?: true; removed?: Who[] }
   | { event: "page"; page: ChatPage }
   | { event: "branch"; chatId: string; title: string; entry: number; by: Who }
-  | { event: "branched"; from: BranchedFrom; by: Who }
-  /** A daily cap was reached: the chat's token budget (no more model calls in it today), or the owner's spend on runs. */
-  | { event: "budget"; scope: "chat" | "runs"; text: string };
+  | { event: "branched"; from: BranchedFrom; by: Who };
 
 /**
  * A message copied into a branch from the chat it branched off: pi's reply as its text, or an artifact card. People's

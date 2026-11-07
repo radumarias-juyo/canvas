@@ -470,18 +470,20 @@ export class ChatRoster {
   }
 
   /**
-   * An agent's turns nobody asked for (calledBy.unprompted) since `since`, those it passed included: how many, and when
-   * the last one was queued. What the funnel's daily cap and cooldown read (worker/agents/funnel.ts).
+   * An agent's turns nobody asked for (calledBy.unprompted), those it passed included: how many were queued since
+   * `since`, and when the last one was, whenever that was (a cooldown runs across midnight). What the funnel's daily cap
+   * and cooldown read (worker/agents/funnel.ts).
    */
   unpromptedSince(agentId: string, since: number): { count: number; lastAt?: number } {
     const row = this.#sql
       .exec(
-        "SELECT COUNT(*) AS n, MAX(created_at) AS last FROM chat_agent_turns WHERE agent_id = ? AND created_at >= ? AND json_extract(called_by, '$.unprompted') IS NOT NULL",
-        agentId,
+        `SELECT SUM(created_at >= ?) AS n, MAX(created_at) AS last FROM chat_agent_turns
+         WHERE agent_id = ? AND json_extract(called_by, '$.unprompted') IS NOT NULL`,
         since,
+        agentId,
       )
-      .toArray()[0] as { n: number; last: number | null };
-    return { count: row.n, ...(row.last !== null && { lastAt: row.last }) };
+      .toArray()[0] as { n: number | null; last: number | null };
+    return { count: row.n ?? 0, ...(row.last !== null && { lastAt: row.last }) };
   }
 
   /** Whether an agent has a turn waiting or running. */

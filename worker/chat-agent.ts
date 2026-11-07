@@ -180,12 +180,14 @@ import {
   agentRouterOn,
   AgentSettingsError,
   budgetDay,
+  CHAT_BUDGET_KIND,
   chatAllowsServer,
   checkAgentSettings,
   type ChatAgentSettings,
   type ChatAgentSettingsView,
+  type ChatBudgetData,
 } from "../shared/agent-settings.ts";
-import { agentRouterId, agentRouterModel, AGENT_ROUTE_MS, routeAgents } from "./agents/router.ts";
+import { agentRouterId, agentRouterModel, AGENT_ROUTE_MS, piPreparation, routeAgents, routesAgents } from "./agents/router.ts";
 import { answered, embedder, FOLLOW_UP_AFTER_MS, looksLikeAsk, PAUSE_MS } from "./agents/funnel.ts";
 import { SpeakUp, type FunnelEvent } from "./agents/speak-up.ts";
 import { ChatSpend, meterExtension, type Spent } from "./agents/spend.ts";
@@ -293,8 +295,6 @@ const MAX_PAUSE_TRIES = 5;
 const CHECKLIST_KEY = "checklist:";
 /** The sessions whose model calls one turn's metrics add up, at most. */
 const MAX_TURN_SPEND = 200;
-/** Where a tool result too long for a turn is kept, in the owner's own files: not a chat file, so members never see it. */
-const SPILL_FOLDER = "tool-results";
 /** Set once the sidebars of everyone in a chat shared before they remembered people have met (#meetOnce). */
 const PEOPLE_TOLD_KEY = "peopleTold";
 /** How much of a long chat a branch reads to copy, in pages of 200 entries, newest first. */
@@ -585,6 +585,7 @@ export class ChatAgent extends DurableObject<Env> {
         this.#checkBrowser.withPage((page) => checkPage(page, input, this.#checkBridge(input.manifest)), { timeoutMs: CHECK_MS, signal }),
       chatArtifacts: () => this.#directory.listChatArtifacts(this.chatId),
       drafts: memoAsync(() => this.storage.chatDrafts(this.uid, this.chatId)),
+      toolResults: memoAsync(() => this.storage.toolResults(this.uid, this.chatId)),
       skillSets: (names) => this.#skillSets(names),
       readSkillFile: (skill, set, path) => this.#readSkillSetFile(skill, set, path),
       skillFolders: (names, maxBytes) => this.#skillFolders(names, maxBytes),
@@ -1461,23 +1462,25 @@ export class ChatAgent extends DurableObject<Env> {
     const images = attachments.filter((attachment) => attachment.image).length;
     // What the routers, the skill classifier and the tool picker read of the conversation: read once for all, and only if one asks.
     const recentOnce = memoAsync(() => this.#recentEntries());
-    const recent = calling ? recentOnce : undefined;
+    // Past the chat's daily budget pi's call is refused: nothing to pick for it either (picks are paid for and counted).
+    const underBudget = this.spend.refusal() === undefined;
     // A message that names nobody, in a chat whose router is on: the router may pick agents of the roster for it, while
     // the rest gets ready. Its pick is used only if the mentions name nobody either.
     const agentRouter = this.#agentRouter;
-    const routesAgents =
+    const routes =
       agentRouter !== undefined &&
-      agentRouterOn(this.#agentSettings(), this.kinds.kind()) &&
-      !callsAgents &&
-      repliesTo === undefined &&
-      !repliesToAgent &&
-      home === undefined &&
-      !summonsAgent(text) &&
-      !mentionInputs.some((input) => input.kind === "person") &&
-      roster.some((entry) => !entry.off) &&
-      // Past the chat's daily budget the agents it would pick could not answer: no pick to pay for.
-      this.spend.refusal() === undefined;
-    const agentPicking = routesAgents ? this.#pickAgents(agentRouter, roster, text, everyMessage, recentOnce) : undefined;
+      routesAgents({
+        routerOn: agentRouterOn(this.#agentSettings(), this.kinds.kind()),
+        addressed: callsAgents || repliesTo !== undefined || repliesToAgent || home !== undefined || summonsAgent(text),
+        tagsPerson: mentionInputs.some((input) => input.kind === "person"),
+        anyOn: roster.some((entry) => !entry.off),
+        underBudget,
+      });
+    const agentPicking = routes ? this.#pickAgents(agentRouter, roster, text, everyMessage, recentOnce) : undefined;
+    // Its pick (capped at AGENT_ROUTE_MS) comes first: a message it hands to agents is not pi's (piPreparation).
+    const handedOn = agentPicking ? (await agentPicking).length > 0 : false;
+    const prepare = piPreparation({ calling, underBudget, handedOn });
+    const recent = prepare.picks ? recentOnce : undefined;
     // A new chat is put on Auto as it opens (startingSetting), which its first message may come before: wait for that.
     const onAuto = recent && (this.#auto() || ((await this.harness.pi()) && this.#auto()));
     const routing = onAuto ? this.#route(text, images, attachments.length + own.length - images, recent) : undefined;
@@ -1501,7 +1504,12 @@ export class ChatAgent extends DurableObject<Env> {
       ? this.refreshMcpTools()
           .catch(() => {})
           .then(() => this.#pickTools(text, recent))
-      : undefined;
+      : prepare.refreshes
+        ? this.refreshMcpTools().then(
+            () => undefined,
+            () => undefined,
+          )
+        : undefined;
     const [[attached, title], { mentions, note, broughtIn }] = await Promise.all([
       // Named after its text, or its files when it has none: for the sidebars.
       attaching.then(async (inputs) => [
@@ -1522,7 +1530,8 @@ export class ChatAgent extends DurableObject<Env> {
       ),
       // A message to the people in the chat starts no run: the agent needs its tools only when it is called.
       tooling,
-      recent && this.refreshSkills({ text: skillText, recent }),
+      // Without a pick (handed to agents, or past the budget), the skills as they are: no classifier call.
+      recent ? this.refreshSkills({ text: skillText, recent }) : prepare.refreshes && this.refreshSkills(),
       calling && this.refreshFiles(),
       calling && this.refreshUserPrompt(),
     ]);
@@ -1567,7 +1576,7 @@ export class ChatAgent extends DurableObject<Env> {
       // Meant for the agent, though it did not call it? Its author may be offered to (#hintCall). Off the prompt's path.
       // Not while the agent works: it reads the message at its next step. The classifier reads whom it replies to too.
       const hinter = this.#hinter;
-      if (hinter && !speakers.length && this.#status() !== "running" && worthAsking(text)) {
+      if (hinter && underBudget && !speakers.length && this.#status() !== "running" && worthAsking(text)) {
         const asked = [quote && replyLine(quote), text].filter(Boolean).join("\n\n");
         void this.#hintCall(hinter, aside, author, asked).catch((error) => console.error("call hint:", errorMessage(error)));
       }
@@ -2395,8 +2404,8 @@ export class ChatAgent extends DurableObject<Env> {
         // The store checks each is this chat's: the transcript's ids come from tool results.
         ...traces.artifacts.map((id) => this.storage.artifacts.delete(id, this.uid, this.chatId)),
         toDelete.length && this.scope.files().then((store) => store.delete(toDelete)),
-        // The tool results kept whole for this chat's turns (#spill): the owner's, never shown as a chat file.
-        this.scope.files().then((store) => store.deleteFolder(`${SPILL_FOLDER}/${this.chatId}`)),
+        // The tool results kept whole for this chat's turns (#spill).
+        this.scope.toolResults().then((results) => results.deleteAll()),
         this.scope.drafts().then((drafts) => drafts.deleteAll()),
         this.env.SANDBOX_ENABLED === "true" && exports.Sandbox.getByName(sandboxName(this.uid, this.chatId)).destroy(),
       ]);
@@ -2947,7 +2956,7 @@ export class ChatAgent extends DurableObject<Env> {
     const refusal = this.spend.refusal();
     if (refusal && this.#firstToday(BUDGET_TOLD_KEY)) {
       this.metrics.budget({ scope: "chat", usedTokens: this.spend.today().tokens });
-      this.#notice({ kind: CHAT_EVENT_KIND, data: { event: "budget", scope: "chat", text: refusal } satisfies ChatEventData });
+      this.#notice({ kind: CHAT_BUDGET_KIND, data: { scope: "chat", text: refusal } satisfies ChatBudgetData });
       this.#broadcastSettings();
     }
   }
@@ -2996,19 +3005,17 @@ export class ChatAgent extends DurableObject<Env> {
     const text = `Skipped: today's model calls cost $${capped.spent.toFixed(2)}, past the daily cap of $${capped.cap.toFixed(2)} for agents' runs. Runs start again tomorrow (UTC).`;
     if (this.#firstToday(CAP_TOLD_KEY)) {
       this.metrics.budget({ scope: "user", usedUsd: capped.spent });
-      this.#notice({ kind: CHAT_EVENT_KIND, data: { event: "budget", scope: "runs", text } satisfies ChatEventData });
+      this.#notice({ kind: CHAT_BUDGET_KIND, data: { scope: "runs", text } satisfies ChatBudgetData });
     }
     return text;
   }
 
   /**
-   * Keep a tool result too long for a turn whole, in the owner's own files (not a chat file): its path. Named by its
-   * content, so the same result read again (a watch's) is one file; the chat's folder goes when the chat does.
+   * Keep a tool result too long for a turn whole, for the agent to read on (worker/storage/tool-results.ts): outside the
+   * owner's files, a bounded few per chat, gone with the chat. Its path, for the spill note.
    */
   async #spill(tool: string, text: string): Promise<string> {
-    const name = tool.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 60);
-    const hash = (await sha256Hex(text)).slice(0, 16);
-    return (await this.scope.files()).put(`${SPILL_FOLDER}/${this.chatId}/${name}-${hash}.txt`, text, "text/plain; charset=utf-8");
+    return (await this.scope.toolResults()).put(tool, text);
   }
 
   /**
@@ -3187,7 +3194,7 @@ export class ChatAgent extends DurableObject<Env> {
     this.spend.tag(session, { agent: entry.agentId });
     this.#turnSpend.delete(session);
     const allowed = (installed: readonly string[]) =>
-      allowedTools(installed, this.#mcpTools, agent, turn.byOwner, (server) => this.hub.server(server)?.auth === "oauth");
+      allowedTools(installed, this.#mcpTools, agent, turn.byOwner, (server) => this.hub.server(server)?.auth === "oauth", !!turn.calledBy.unprompted);
     await this.#configureSession(session, this.#agentChoice(agent), agentInstructions(agent, this.#nameOf(entry.ownerUid)), allowed);
   }
 

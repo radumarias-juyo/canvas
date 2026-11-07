@@ -1,7 +1,7 @@
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
 import { AGENT_PROPOSE_TOOL, CHAT_AGENT_KIND } from "../shared/agents.ts";
-import { MAX_OFFER, OFFER_PREFIX, OFFER_RULE, offerOf } from "../shared/offers.ts";
+import { MAX_OFFER, OFFER_PREFIX, OFFER_RULE, offerOf, offerYes } from "../shared/offers.ts";
 import { CHAT_MESSAGE_KIND } from "../shared/protocol.ts";
 import { assistantOffer, entryOffer, liveOffer } from "../src/chat/entries.ts";
 
@@ -65,11 +65,19 @@ describe("offerOf", () => {
     expect(offerOf("Report ready.\r\nNext step: Send it on Fridays?\r\n")?.body).toBe("Report ready.");
   });
 
-  it("cuts a long offer", () => {
-    const found = offerOf(`Report ready.\nNext step: ${"word ".repeat(100)}?`);
-    expect(found?.offer.length).toBeLessThanOrEqual(MAX_OFFER);
-    expect(found?.offer.endsWith("…")).toBe(true);
-    expect(found?.offer.startsWith("word word")).toBe(true);
+  it("never cuts an offer: a last line longer than MAX_OFFER is no offer, and stays in the text", () => {
+    const long = `Next step: Send this every Monday? ${"Also write the totals into the shared sheet and email the team. ".repeat(4)}`;
+    expect(long.length).toBeGreaterThan(MAX_OFFER);
+    expect(offerOf(`Report ready.\n${long}`)).toBeNull();
+    const fits = `Send it ${"on Monday ".repeat(10)}?`;
+    expect(offerOf(`Report ready.\nNext step: ${fits}`)?.offer).toBe(fits);
+  });
+
+  it("answers Yes with the offer as it was read, asking only for a draft routine", () => {
+    const said = offerYes("Send this summary every Monday at 09:00?");
+    expect(said).toContain('"Send this summary every Monday at 09:00?"');
+    expect(said).toContain(AGENT_PROPOSE_TOOL);
+    expect(said).toMatch(/Don't do anything else/);
   });
 
   it("states the rule with the prefix and the tool that drafts a routine", () => {

@@ -4,22 +4,30 @@
 // to repeat, a routine: a draft agent with a schedule, saved off until its owner turns it on).
 
 import { AGENT_PROPOSE_TOOL } from "./agents.ts";
-import { excerpt } from "./replies.ts";
 
 /** What starts the line an answer offers its next step on. */
 export const OFFER_PREFIX = "Next step:";
 
-/** The longest offer the app shows, in characters; a longer one is cut. */
+/**
+ * The longest offer, in characters. A longer last line is no offer: it stays in the answer's text, and has no Yes. An
+ * offer is never cut, so its Yes never agrees to more than the owner reads.
+ */
 export const MAX_OFFER = 200;
 
-/** What Yes sends, as a reply to the message that made the offer: a reply calls the agent that wrote it. */
-export const OFFER_YES = "Yes, please set that up.";
+/**
+ * What Yes sends, as a reply to the message that made the offer (a reply calls the agent that wrote it): the offer as
+ * the owner read it, and that it is a routine to draft (AGENT_PROPOSE_TOOL, saved off for the owner to turn on), not
+ * work to do now.
+ */
+export function offerYes(offer: string): string {
+  return `Yes to "${offer}": draft it as a routine with ${AGENT_PROPOSE_TOOL} for me to look over and turn on. Don't do anything else for it now.`;
+}
 
 /** The rule in the agents' instructions (pi's and the roster's) for when and how to offer a next step. */
 export const OFFER_RULE =
   "When doing the same work again would help (a report, a check or a summary someone would want regularly), end your answer with one line " +
-  `\`${OFFER_PREFIX} <a short yes/no question>\`, such as "${OFFER_PREFIX} Send this summary every Monday at 09:00?": at most one, and never after a one-off answer. ` +
-  `If the person says yes to it, set it up: for something to repeat, propose a routine with ${AGENT_PROPOSE_TOOL} and a schedule trigger, so its owner gets a draft to turn on.`;
+  `\`${OFFER_PREFIX} <a short yes/no question>\`, such as "${OFFER_PREFIX} Send this summary every Monday at 09:00?": at most one, under ${MAX_OFFER} characters, and never after a one-off answer. ` +
+  `If the person says yes to it, only draft it: propose a routine with ${AGENT_PROPOSE_TOOL} and a schedule trigger, so its owner gets a draft to turn on.`;
 
 /** The words of the prefix, without its colon, as a pattern: "Next step". */
 const PREFIX_WORDS = OFFER_PREFIX.replace(/:$/, "")
@@ -35,8 +43,8 @@ const OFFER_LINE = new RegExp(`^\\s*(?:>\\s*)*[*_]{0,3}\\s*${PREFIX_WORDS}\\s*(?
 
 /**
  * The next step `text` offers: its last line (after trailing whitespace) when that starts with OFFER_PREFIX, as the
- * question without emphasis, cut to MAX_OFFER, and the text before it. Null when the last line is no offer, when it
- * asks nothing, or when it is the whole text (there would be no answer left to show).
+ * question without emphasis, and the text before it. Null when the last line is no offer, when it asks nothing, when
+ * it is longer than MAX_OFFER (never cut), or when it is the whole text (there would be no answer left to show).
  */
 export function offerOf(text: string): { body: string; offer: string } | null {
   const trimmed = text.trimEnd();
@@ -44,7 +52,7 @@ export function offerOf(text: string): { body: string; offer: string } | null {
   const match = OFFER_LINE.exec(trimmed.slice(start));
   if (!match) return null;
   const body = trimmed.slice(0, start).trim();
-  const offer = match[1].replace(/^[\s*_]+|[\s*_]+$/g, "");
-  if (!body || !offer) return null;
-  return { body, offer: excerpt(offer, MAX_OFFER) };
+  const offer = match[1].replace(/^[\s*_]+|[\s*_]+$/g, "").replace(/\s+/g, " ");
+  if (!body || !offer || offer.length > MAX_OFFER) return null;
+  return { body, offer };
 }

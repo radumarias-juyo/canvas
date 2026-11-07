@@ -12,6 +12,9 @@ export const MASTER_KEY = Buffer.from(new Uint8Array(32).fill(7)).toString("base
 export class FakeBucket {
   readonly objects = new Map<string, string>();
   readonly calls: { op: string; key?: string; prefix?: string; ssecKey?: unknown }[] = [];
+  /** When each object was put, by `clock` (0 unless a test sets it). */
+  readonly uploaded = new Map<string, number>();
+  clock: () => number = () => 0;
 
   constructor(keys: string[] = []) {
     for (const key of keys) this.objects.set(key, "");
@@ -27,7 +30,7 @@ export class FakeBucket {
     const page = keys.slice(0, limit);
     const truncated = limit < keys.length;
     return {
-      objects: page.map((key) => ({ key, size: new TextEncoder().encode(this.objects.get(key)!).byteLength, uploaded: new Date(0) })),
+      objects: page.map((key) => ({ key, size: new TextEncoder().encode(this.objects.get(key)!).byteLength, uploaded: new Date(this.uploaded.get(key) ?? 0) })),
       truncated,
       cursor: truncated ? page.at(-1) : undefined,
     };
@@ -49,6 +52,7 @@ export class FakeBucket {
   async put(key: string, body: unknown, options?: { ssecKey?: unknown }) {
     this.calls.push({ op: "put", key, ssecKey: options?.ssecKey });
     this.objects.set(key, typeof body === "string" ? body : body instanceof Uint8Array ? new TextDecoder().decode(body) : "");
+    this.uploaded.set(key, this.clock());
   }
 
   async head(key: string) {

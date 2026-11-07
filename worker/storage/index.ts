@@ -4,6 +4,7 @@ import { ChatDrafts } from "./drafts.ts";
 import { deriveUserAesKey, deriveUserKey } from "./keys.ts";
 import { ModelCache } from "./model-cache.ts";
 import { SkillFiles } from "./skill-files.ts";
+import { ToolResults } from "./tool-results.ts";
 import { UserFiles } from "./user-files.ts";
 
 export { newId } from "./artifacts.ts";
@@ -11,6 +12,7 @@ export { ArtifactImportError, type ArtifactStore } from "./artifacts.ts";
 export { draftId, MAX_DRAFTS, passed, type ChatDrafts, type Draft, type DraftSummary, type SkillSets } from "./drafts.ts";
 export type { FileEntry, UserFiles } from "./user-files.ts";
 export type { SkillFiles } from "./skill-files.ts";
+export { TOOL_RESULTS, type ToolResults } from "./tool-results.ts";
 export { literalPath, normalisePath, PathError } from "./paths.ts";
 
 /**
@@ -44,6 +46,11 @@ export class Storage {
   /** One chat's drafts, in its owner's folder and encrypted with the owner's key. `uid` as for userFiles. */
   async chatDrafts(uid: string, chatId: string): Promise<ChatDrafts> {
     return new ChatDrafts(this.#env.FILES, uid, chatId, await this.#userKey(uid));
+  }
+
+  /** The tool results kept whole for one chat's turns, in its owner's folder (not their files). `uid` as for userFiles. */
+  async toolResults(uid: string, chatId: string): Promise<ToolResults> {
+    return new ToolResults(this.#env.FILES, uid, chatId, await this.#userKey(uid));
   }
 
   async #userKey(uid: string): Promise<ArrayBuffer> {

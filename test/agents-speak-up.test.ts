@@ -21,7 +21,7 @@ import {
   unpromptedInput,
   type GateState,
 } from "../worker/agents/funnel.ts";
-import { agentRouterModel, MAX_ROUTED, NO_AGENT, routeAgents, ROUTE_THRESHOLD, selectAgents } from "../worker/agents/router.ts";
+import { agentRouterModel, MAX_ROUTED, NO_AGENT, piPreparation, routeAgents, routesAgents, ROUTE_THRESHOLD, selectAgents } from "../worker/agents/router.ts";
 import { routeHistory } from "../worker/agent/route.ts";
 import { ChatRoster } from "../worker/agents/roster.ts";
 import { SpeakUp, type FunnelEvent, type SpeakUpHost } from "../worker/agents/speak-up.ts";
@@ -118,6 +118,23 @@ describe("the agent router", () => {
     await expect(routeAgents(failing, model, request, AbortSignal.timeout(1_000))).rejects.toThrow();
     const odd = { run: async () => ({ state: "Completed", result: { answers: {}, usage: { input_tokens: 1, output_tokens: 1 } } }) };
     await expect(routeAgents(odd, model, request, AbortSignal.timeout(1_000))).rejects.toThrow();
+  });
+
+  it("picks only for a message that names nobody, where it may, and while the chat's budget has room", () => {
+    const open = { routerOn: true, addressed: false, tagsPerson: false, anyOn: true, underBudget: true };
+    expect(routesAgents(open)).toBe(true);
+    expect(routesAgents({ ...open, routerOn: false })).toBe(false);
+    expect(routesAgents({ ...open, addressed: true })).toBe(false);
+    expect(routesAgents({ ...open, tagsPerson: true })).toBe(false);
+    expect(routesAgents({ ...open, anyOn: false })).toBe(false);
+    expect(routesAgents({ ...open, underBudget: false })).toBe(false);
+  });
+
+  it("lets pi pay for its picks only when it answers: not past the budget, nor for a message handed to agents", () => {
+    expect(piPreparation({ calling: true, underBudget: true, handedOn: false })).toEqual({ picks: true, refreshes: true });
+    expect(piPreparation({ calling: true, underBudget: false, handedOn: false })).toEqual({ picks: false, refreshes: true });
+    expect(piPreparation({ calling: true, underBudget: true, handedOn: true })).toEqual({ picks: false, refreshes: true });
+    expect(piPreparation({ calling: false, underBudget: true, handedOn: false })).toEqual({ picks: false, refreshes: false });
   });
 
   it("names no router for an empty or unknown model id", () => {
@@ -372,6 +389,18 @@ describe("agents that speak up", () => {
     chat.clock.now += UNPROMPTED_COOLDOWN_MS;
     expect(await chat.speakUp.afterPause(talk, { line: "x" })).toBeUndefined();
     expect(chat.events.at(-1)?.refusal).toBe("daily");
+  });
+
+  it("keeps to the cooldown across midnight (UTC), while the posts a day start again", async () => {
+    const chat = speakUpChat(["finance"]);
+    jobs(chat);
+    chat.clock.now = Date.parse("2026-11-07T23:55:00Z");
+    expect(await chat.speakUp.afterPause(talk, { line: "x" })).toBe("id-finance");
+    chat.roster.end(chat.roster.startNext("id-finance")!.id, "done");
+    chat.clock.now = Date.parse("2026-11-08T00:05:00Z");
+    expect(await chat.speakUp.afterPause(talk, { line: "x" })).toBeUndefined();
+    expect(chat.events.at(-1)?.refusal).toBe("cooldown");
+    expect(chat.roster.unpromptedSince("id-finance", Date.parse("2026-11-08T00:00:00Z")).count).toBe(0);
   });
 
   it("is not possible where the chat does not allow it, or the deployment has no embeddings model", async () => {

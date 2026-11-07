@@ -28,8 +28,8 @@ export interface ServerCatalog {
 export function spillNote(path: string, totalChars: number, shownChars: number): string {
   const n = (count: number) => count.toLocaleString("en");
   return (
-    `[The result is ${n(totalChars)} characters long; the first ${n(shownChars)} are shown. The whole result is saved at ${path}: ` +
-    `read it with files_read (its first ${n(MAX_TOOL_TEXT)} characters) or with run_python.]`
+    `[The result is ${n(totalChars)} characters long; the first ${n(shownChars)} are shown. The whole result is saved at ${path} ` +
+    `for a while: read on with files_read and offset ${shownChars}, or pass it in files to run_python.]`
   );
 }
 

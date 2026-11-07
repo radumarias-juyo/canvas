@@ -25,7 +25,7 @@ import { describeReport, type CheckReport } from "../artifacts/check.ts";
 import type { PageReview } from "../artifacts/review.ts";
 import { chatOutFolder, FILES_WRITE_TOOL, RUN_BASH_TOOL, RUN_PYTHON_TOOL, savedReport, wroteReport } from "../chat-traces.ts";
 import { MAX_RUN_STDERR, MAX_RUN_STDOUT, type SandboxFile, type SandboxRun } from "../sandbox.ts";
-import { literalPath, MAX_DRAFTS, type FileEntry, type UserFiles } from "../storage/index.ts";
+import { literalPath, MAX_DRAFTS, TOOL_RESULTS, type FileEntry, type ToolResults, type UserFiles } from "../storage/index.ts";
 import { checkDraft, draftLine, draftNamed, FailedChecks, publishDraft, readPageSource, writeDraft, type PublishScope } from "./publish.ts";
 import { FileRefError, MAX_SANDBOX_BYTES, outputPaths, resolveFile, resolveRef, sandboxLayout } from "./file-refs.ts";
 import { clip, MAX_TOOL_TEXT, text } from "./output.ts";
@@ -36,6 +36,8 @@ import type { AgentsScope } from "../agents/tools.ts";
 export interface ChatScope extends PublishScope, AgentsScope {
   /** This chat's user's files: scoped to the uid and encrypted with that user's key. */
   files: () => Promise<UserFiles>;
+  /** The tool results too long for a turn, kept whole for this chat (worker/storage/tool-results.ts). */
+  toolResults: () => Promise<ToolResults>;
   /** Whether the owner named this artifact from another of their chats with "@" here, so the agent may read it. */
   broughtIn(id: string): boolean;
   /** Save a skill for the user, turned off until they turn it on. */
@@ -93,10 +95,21 @@ export function filesExtension(scope: ChatScope): Extension {
         name: "files_read",
         description:
           `Read one of the user's files as UTF-8 text (the first ${MAX_TOOL_TEXT.toLocaleString("en")} characters). ` +
-          "Takes its path, or its name or the end of its path when only one file matches.",
-        parameters: Type.Object({ path: Type.String() }),
+          `Takes its path, or its name or the end of its path when only one file matches. Also reads a tool result saved whole (${TOOL_RESULTS}…), ` +
+          "from `offset` (characters) on.",
+        parameters: Type.Object({
+          path: Type.String(),
+          offset: Type.Optional(Type.Integer({ minimum: 0, description: `For a saved tool result (${TOOL_RESULTS}…): the character to start from.` })),
+        }),
         replay: "safe",
         execute: async (args) => {
+          if (args.path.startsWith(TOOL_RESULTS)) {
+            const saved = await (await scope.toolResults()).get(args.path);
+            if (saved === null) throw new Error(`There is no tool result ${args.path} (any more): call the tool again.`);
+            const from = Math.min(args.offset ?? 0, saved.length);
+            const part = clip(saved.slice(from));
+            return { output: text(`${args.path}, characters ${from.toLocaleString("en")} on of ${saved.length.toLocaleString("en")}:\n${part}`) };
+          }
           const files = await scope.files();
           // Only what clip() can show: at most 4 bytes per character.
           const range = { offset: 0, length: MAX_TOOL_TEXT * 4 };
@@ -177,6 +190,19 @@ async function sandboxInputs(files: UserFiles, refs: readonly string[], ownFolde
   );
 }
 
+/** The saved tool results `refs` name, for ./files/tool-results/. */
+async function savedResults(scope: ChatScope, refs: readonly string[]): Promise<SandboxFile[]> {
+  if (!refs.length) return [];
+  const results = await scope.toolResults();
+  return Promise.all(
+    [...new Set(refs)].map(async (ref) => {
+      const saved = await results.get(ref);
+      if (saved === null) throw new Error(`There is no tool result ${ref} (any more): call the tool again.`);
+      return { name: ref, bytes: new TextEncoder().encode(saved).buffer as ArrayBuffer };
+    }),
+  );
+}
+
 function tooMuch(bytes: number, maxBytes: number): string {
   return `Those files hold ${formatBytes(bytes)}; one run takes at most ${formatBytes(maxBytes)}${maxBytes < MAX_SANDBOX_BYTES ? " besides the skills" : ""}. Pass fewer.`;
 }
@@ -200,7 +226,12 @@ async function runInSandbox(
   const folder = chatOutFolder(scope.chatId);
   // The skills first: their sizes are known before they are read, and the files get what they leave of the limit.
   const skills = args.skills?.length ? await scope.skillFolders(args.skills, MAX_SANDBOX_BYTES) : [];
-  const inputs = await sandboxInputs(files, args.files ?? [], folder, MAX_SANDBOX_BYTES - skills.reduce((sum, file) => sum + file.bytes.byteLength, 0));
+  // Tool results saved whole (TOOL_RESULTS…) come from their own store, to ./files/tool-results/.
+  const refs = args.files ?? [];
+  const results = await savedResults(scope, refs.filter((ref) => ref.startsWith(TOOL_RESULTS)));
+  const room = MAX_SANDBOX_BYTES - [...skills, ...results].reduce((sum, file) => sum + file.bytes.byteLength, 0);
+  if (room < 0) throw new Error(tooMuch(MAX_SANDBOX_BYTES - room, MAX_SANDBOX_BYTES));
+  const inputs = [...results, ...(await sandboxInputs(files, refs.filter((ref) => !ref.startsWith(TOOL_RESULTS)), folder, room))];
   const result = await run(exports.Sandbox.getByName(sandboxName(scope.uid, scope.chatId)), inputs, skills);
   const { toSave, skipped } = outputPaths(folder, result.outputs);
   const saved = await Promise.all([...toSave].map(([path, bytes]) => files.put(path, bytes)));

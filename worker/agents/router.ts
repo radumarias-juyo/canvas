@@ -27,6 +27,34 @@ export const NO_AGENT = "no_agent";
 /** How much of an agent's job line the router reads. */
 const MAX_JOB_CHARS = 200;
 
+/** What the chat knows of a message before its mentions are resolved, as the router's gate reads it. */
+export interface RoutingState {
+  /** The chat's router model is set, and its settings and kind let it pick. */
+  routerOn: boolean;
+  /** The text names an agent, or the message replies to one, or summons pi, or sits in an agent's home conversation. */
+  addressed: boolean;
+  /** It tags a person. */
+  tagsPerson: boolean;
+  /** The roster has an agent that is on. */
+  anyOn: boolean;
+  /** The chat's daily budget has room: past it, the agents it would pick could not answer. */
+  underBudget: boolean;
+}
+
+/** Whether the router picks agents for a message: one that names nobody, in a chat where it may and they could answer. */
+export function routesAgents(state: RoutingState): boolean {
+  return state.routerOn && !state.addressed && !state.tagsPerson && state.anyOn && state.underBudget;
+}
+
+/**
+ * What pi gets ready for a message before it knows it answers: the paid picks (Auto's router, the tools, the skills)
+ * only when it is called, the chat has budget left, and the router did not hand the message to agents; the free
+ * refreshes (tools, skills and files as they are) whenever it is called, in case it answers after all.
+ */
+export function piPreparation(state: { calling: boolean; underBudget: boolean; handedOn: boolean }): { picks: boolean; refreshes: boolean } {
+  return { picks: state.calling && state.underBudget && !state.handedOn, refreshes: state.calling };
+}
+
 /** An agent of the chat's roster, as the router reads it. */
 export interface RoutableAgent {
   id: string;

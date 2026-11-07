@@ -65,9 +65,10 @@ import { OrphanResult, StepRun, StepsProvider, stepLabel } from "./Steps.tsx";
 import { endedEarly, stepRuns, streamingSteps, type MessageSteps, type StepRuns, type StreamingSteps } from "./stepRuns.ts";
 import { Thinking } from "./Thinking.tsx";
 import { useRevealedText } from "./reveal.ts";
-import { assistantOffer, blocks, firstNew, inReply, isAgent, liveOffer, openHints, published, replyItems, sentAt, shown, showsAsCard, userText } from "./entries.ts";
+import { assistantOffer, blocks, entryOffer, firstNew, inReply, isAgent, liveOffer, openHints, published, replyItems, sentAt, shown, showsAsCard, userText } from "./entries.ts";
 import { OfferRow } from "./Offer.tsx";
-import { OFFER_YES } from "../../shared/offers.ts";
+import { offerYes } from "../../shared/offers.ts";
+import { CHAT_BUDGET_KIND, type ChatBudgetData } from "../../shared/agent-settings.ts";
 import { answersEveryMessage, CHAT_COPY_KIND, CHAT_EVENT_KIND, legacyKind, type ChatCopyData, type ChatEventData } from "../../shared/chat-kinds.ts";
 import { BranchOff, ChatEventNotice, EntryOf, KindChip, TagCard } from "./ChatKinds.tsx";
 
@@ -146,11 +147,13 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
   const offered = useMemo(() => (isOwner ? liveOffer(state.entries) : undefined), [isOwner, state.entries]);
   const takeOffer = useCallback(
     (entry: number) => {
-      if (!prompt(OFFER_YES, undefined, undefined, entry)) return false;
+      const offer = state.entries.find((each) => each.id === entry);
+      const said = offer && entryOffer(offer);
+      if (!said || !prompt(offerYes(said), undefined, undefined, entry)) return false;
       following.current = true;
       return true;
     },
-    [prompt],
+    [prompt, state.entries],
   );
   // Branch off a new chat from a message, and go to it.
   // One branch at a time: a second click while one is made does nothing.
@@ -669,6 +672,7 @@ const Entry = memo(function Entry({
     const [them, you] = PEOPLE_EVENTS[data.event].map((said) => said.replace("{agent}", agent).replace("{by}", data.by ?? "the owner"));
     return <div className="chat-notice">{data.uid === uid ? `You ${you}` : `${data.name} ${them}`}</div>;
   }
+  if (entry.kind === CHAT_BUDGET_KIND) return <div className="chat-notice budget-notice">{(entry.data as unknown as ChatBudgetData).text}</div>;
   if (entry.kind === CHAT_EVENT_KIND) return <ChatEventNotice data={entry.data as unknown as ChatEventData} uid={uid} onOpenChat={onOpenChat} />;
   if (entry.kind === CHAT_COPY_KIND) {
     const data = entry.data as unknown as ChatCopyData;

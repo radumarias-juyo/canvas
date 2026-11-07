@@ -238,8 +238,9 @@ const DISPLAY_TOOLS = [CHECKLIST_TOOL];
  * The tools a turn may use, by name, of `tools` (every tool installed), as an allow-list: a tool installed after the
  * turn was set up stays off. A turn its owner asked for gets every tool but the MCP tools of servers the agent may not
  * use. A turn its owner did not ask for (a member's, another agent's hand-off, a schedule's) gets only the app's read
- * tools (READ_TOOLS), the display ones (DISPLAY_TOOLS) and the read-only MCP tools of its servers for shared chats. Its owner then approves any write in
- * their own view.
+ * tools (READ_TOOLS), the display ones (DISPLAY_TOOLS) and the read-only MCP tools of its servers for shared chats. Its
+ * owner then approves any write in their own view. A turn nobody asked for (`unprompted`) gets no display tools either:
+ * it may still answer PASS, and then nothing of it shows.
  *
  * `servers`: the agent's own list (every server when absent); `sharedServers`: the one for shared chats (when absent,
  * those of its servers that do not sign in each user, `signsIn`).
@@ -250,6 +251,7 @@ export function allowedTools(
   agent: Pick<AgentDefinition, "servers" | "sharedServers">,
   byOwner: boolean,
   signsIn: (server: string) => boolean,
+  unprompted = false,
 ): string[] {
   const own = (server: string) => mayUseServer(agent, server);
   const shared = (server: string) => own(server) && (agent.sharedServers ? agent.sharedServers.includes(server) : !signsIn(server));
@@ -257,7 +259,7 @@ export function allowedTools(
     if (NEVER_FOR_AGENTS.includes(name)) return false;
     const info = mcp.get(name);
     if (byOwner) return !info || own(info.server);
-    return info ? info.readOnly && shared(info.server) : READ_TOOLS.includes(name) || DISPLAY_TOOLS.includes(name);
+    return info ? info.readOnly && shared(info.server) : READ_TOOLS.includes(name) || (!unprompted && DISPLAY_TOOLS.includes(name));
   });
 }
 
