@@ -9,6 +9,7 @@ import { reviewLook, type Look, type Reviewed } from "../artifacts/look.ts";
 import { checkManifest, MAX_HTML_BYTES } from "../artifacts/manifest.ts";
 import { ReviewStopped, withReview, type PageReview, type PageReviewer } from "../artifacts/review.ts";
 import { newestShown } from "../agents/roster.ts";
+import { versionRefusal } from "./page-authors.ts";
 import type { McpHub } from "../mcp/hub.ts";
 import type { ArtifactStore } from "../storage/artifacts.ts";
 import { draftId, passed, type ChatDrafts, type Draft, type DraftCheck, type DraftSummary, type SkillSets } from "../storage/drafts.ts";
@@ -518,7 +519,7 @@ export function artifactByTitle(artifacts: readonly ArtifactSummary[], title: st
  * The artifact a publish goes to: the one it names; a new one with newArtifact; else the one the draft was written as a
  * version of (`writtenFor`); else this chat's by its title (artifactByTitle); else a new one. Never a page `rules` hide
  * from the publishing conversation: by title it is not found, and named it is no artifact of this chat. With `rules`
- * reviewed, never a page the chat already has.
+ * reviewed, never a page the chat already has. Never another chat's page, nor another person's (versionRefusal).
  */
 async function artifactFor(scope: PublishScope, target: PublishTarget, writtenFor?: string, rules?: SessionRules): Promise<{ id?: string; byTitle?: boolean }> {
   const named = target.artifactId ?? (target.newArtifact ? undefined : writtenFor);
@@ -530,6 +531,13 @@ async function artifactFor(scope: PublishScope, target: PublishTarget, writtenFo
     if (same) chosen = { id: same.id, byTitle: true };
   }
   if (chosen.id !== undefined && rules?.reviewed && !rules.own.has(chosen.id)) throw new Error(reviewedRefusal("page"));
+  // Named: only a page of this chat takes a new version (ArtifactStore.publishVersion refuses the rest anyway); another
+  // chat's, or another person's page, is refused here with what to do instead.
+  if (named !== undefined) {
+    const meta = await scope.artifacts.readMeta(named);
+    const refused = meta && versionRefusal(meta, scope.uid, scope.chatId, "Not published:");
+    if (refused) throw new Error(refused);
+  }
   return chosen;
 }
 
