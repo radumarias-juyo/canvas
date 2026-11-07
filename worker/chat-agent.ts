@@ -2823,7 +2823,7 @@ export class ChatAgent extends DurableObject<Env> {
         `${CHECK_TOOL} and fix what it finds. The newest draft that passes is published for you. Answer with one line on what changed.`,
     ].join("\n\n");
     const { result } = await this.#runStep(session, prompt, operationId);
-    const delivery = await publishRebuilt(scope, meta, seed.id, run.dueAt, `Snapshot, ${whenOf(agent)}`, mark);
+    const delivery = await publishRebuilt(scope, meta, seed, run.dueAt, `Snapshot, ${whenOf(agent)}`, mark);
     // The seed is only the page as it was: left behind, each run's would push the owner's own drafts out of the chat's.
     await (await scope.drafts()).remove(seed.id).catch((error: unknown) => console.error("draft:", errorMessage(error)));
     return delivery.status === "failed" && result.reason ? { ...delivery, detail: `${delivery.detail} (${result.reason})` } : delivery;

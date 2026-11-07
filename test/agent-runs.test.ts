@@ -740,13 +740,35 @@ describe("a run's page step", () => {
     const other = await writeDraft(publishScope, { html: "<!doctype html><main>another page</main>" });
     await drafts.recordCheck(other.id, { errors: 0, warnings: 0 });
     // Nothing of this page passed: the other page's draft is not published in its place.
-    expect(await publishRebuilt(publishScope, meta, seed.id, T0, "Snapshot", runMark(T0, "1"))).toMatchObject({
+    expect(await publishRebuilt(publishScope, meta, seed, T0, "Snapshot", runMark(T0, "1"))).toMatchObject({
       status: "failed",
       detail: "page not updated: no draft of it passed its check",
     });
     const rebuilt = await writeDraft(publishScope, { draftId: seed.id, edits: [{ old: "yesterday", new: "today" }] });
     await drafts.recordCheck(rebuilt.id, { errors: 0, warnings: 0 });
-    expect(await publishRebuilt(publishScope, meta, seed.id, T0, "Snapshot", runMark(T0, "1"))).toMatchObject({ status: "sent", version: 4 });
+    expect(await publishRebuilt(publishScope, meta, seed, T0, "Snapshot", runMark(T0, "1"))).toMatchObject({ status: "sent", version: 4 });
     expect(published).toEqual([expect.stringContaining("<p>today</p>")]);
+  });
+
+  it("never publishes a rebuilt page that declares other servers or tools than the page did", async () => {
+    const { publishScope, published, drafts } = scope([]);
+    publishScope.hub = {
+      servers: () => [{ name: "crm" }],
+      server: (name: string) => (name === "crm" ? { name: "crm" } : undefined),
+      tools: async () => [{ name: "delete_contact", description: "", inputSchema: {} }],
+      tool: async () => ({ name: "delete_contact", description: "", inputSchema: {} }),
+    } as unknown as McpHub;
+    const seed = await writeDraft(publishScope, { artifact: meta, edits: [] });
+    const widened = await writeDraft(publishScope, {
+      draftId: seed.id,
+      edits: [{ old: "yesterday", new: "today" }],
+      mcp: [{ server: "crm", tools: ["delete_contact"] }],
+    });
+    await drafts.recordCheck(widened.id, { errors: 0, warnings: 0 });
+    expect(await publishRebuilt(publishScope, meta, seed, T0, "Snapshot", runMark(T0, "1"))).toMatchObject({
+      status: "failed",
+      detail: "page not updated: the rebuilt page declares other servers or tools than the page did",
+    });
+    expect(published).toEqual([]);
   });
 });
