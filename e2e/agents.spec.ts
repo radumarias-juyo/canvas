@@ -232,9 +232,14 @@ test("h. a run that needs a sign-in says so, and goes on once signed in", async 
   // The link opens the sign-in in a tab of its own; the chat hears the run's reply and the sign-in over its sockets.
   const popup = page.waitForEvent("popup");
   await page.getByRole("link", { name: "Sign in" }).click();
-  await (await popup).waitForLoadState();
+  const signInTab = await popup;
+  await signInTab.waitForLoadState();
   await expect(agentReply(page, "notes", "Two notes: the quarterly review and the renewals.")).toBeVisible();
   await expect(page.getByText("Sign in to vault", { exact: true })).toHaveCount(0);
+  // Closed once done, as a person would: left open, it keeps ada's tab in the background, where the browser slows its
+  // frames to about one a second and every later click waits on them.
+  await signInTab.close();
+  await page.bringToFront();
   await shot(page, "h-signed-in");
 });
 
