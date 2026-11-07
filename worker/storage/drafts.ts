@@ -35,6 +35,11 @@ export interface DraftPage {
    * the index, like the check.
    */
   reviewed?: true;
+  /**
+   * The conversation that saved it, when a model's turn did (SessionRules.hiddenSession): a draft a turn apart from the
+   * chat saved is not the chat's until its reply is posted. Saved again from another conversation, it is no one's: both knew it.
+   */
+  session?: string;
 }
 
 /** What a page's check found: errors is null when no browser could check it. */
@@ -88,7 +93,7 @@ export class ChatDrafts {
     if (!DRAFT_ID.test(id)) return null;
     const [object, index] = await Promise.all([this.#bucket.get(this.#draftKey(id), { ssecKey: this.#key }), this.#index()]);
     if (!object) return null;
-    const { html, manifest, artifactId, skillSets, savedAt } = (await object.json()) as Draft;
+    const { html, manifest, artifactId, skillSets, savedAt, session } = (await object.json()) as Draft;
     const entry = index.find((e) => e.id === id);
     const stopped = entry?.lookStopped;
     return {
@@ -98,6 +103,7 @@ export class ChatDrafts {
       artifactId,
       skillSets,
       savedAt,
+      ...(session !== undefined && { session }),
       errors: entry?.errors ?? null,
       warnings: entry?.warnings ?? 0,
       ...(stopped && { lookStopped: stopped }),
@@ -129,8 +135,11 @@ export class ChatDrafts {
   async #save(page: DraftPage, check: DraftCheck | null): Promise<Draft & { bytes: number }> {
     const index = await this.#index();
     const before = index.find((entry) => entry.id === page.id);
+    const { session: by, ...rest } = page;
+    const session = before && before.session !== by ? undefined : by;
     const draft: Draft = {
-      ...page,
+      ...rest,
+      ...(session !== undefined && { session }),
       artifactId: page.artifactId ?? before?.artifactId,
       savedAt: Date.now(),
       ...(check ?? { errors: before?.errors ?? null, warnings: before?.warnings ?? 0, ...(before?.lookStopped && { lookStopped: before.lookStopped }) }),
@@ -141,7 +150,15 @@ export class ChatDrafts {
     const kept = [...index.filter((entry) => entry.id !== page.id), { ...summary, bytes }];
     const dropped = kept.splice(0, Math.max(0, kept.length - MAX_DRAFTS));
     await Promise.all([
-      this.#putJson(this.#draftKey(page.id), { id: page.id, html, manifest, artifactId: draft.artifactId, skillSets, savedAt: draft.savedAt }),
+      this.#putJson(this.#draftKey(page.id), {
+        id: page.id,
+        html,
+        manifest,
+        artifactId: draft.artifactId,
+        skillSets,
+        savedAt: draft.savedAt,
+        session,
+      }),
       this.#putJson(this.#indexKey, kept),
       dropped.length && this.#bucket.delete(dropped.map((entry) => this.#draftKey(entry.id))),
     ]);

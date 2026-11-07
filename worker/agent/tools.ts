@@ -458,12 +458,24 @@ export function artifactExtension(scope: ChatScope): Extension {
                 `rather than writing the whole page again (${DRAFTS_TOOL} with its draft_id shows the page). Only a page that is not that one goes as html.`,
             );
           }
-          // Opening the drafts (memoised) while the artifact and the conversation's rules are read, rather than after.
-          const [rules] = await Promise.all([args.artifact_id === undefined ? undefined : rulesOf(scope, api), scope.drafts()]);
+          // Opening the drafts (memoised) while the artifact and the conversation's rules are read, rather than after. A
+          // new page needs no rules: it builds on nothing of the chat's.
+          const builds = args.artifact_id !== undefined || args.draft_id !== undefined;
+          const [rules] = await Promise.all([builds ? rulesOf(scope, api) : undefined, scope.drafts()]);
           const artifact = args.artifact_id === undefined ? undefined : await chatArtifact(scope, args.artifact_id, rules);
           // Edits change the newest version this conversation sees: one a turn apart from the chat published is not the chat's yet.
           const version = artifact && args.html === undefined && args.draft_id === undefined ? versionToRead(artifact, args.version, rules) : args.version;
-          const draft = await writeDraft(scope, { html: args.html, draftId: args.draft_id, edits: args.edits, mcp: args.mcp, artifact, version });
+          const session = String(api.conversationId);
+          const draft = await writeDraft(scope, {
+            html: args.html,
+            draftId: args.draft_id,
+            edits: args.edits,
+            mcp: args.mcp,
+            artifact,
+            version,
+            session,
+            rules,
+          });
           const next =
             draft.errors === null
               ? `Check it with ${CHECK_TOOL} and draft_id "${draft.id}".`
@@ -499,13 +511,14 @@ export function artifactExtension(scope: ChatScope): Extension {
           ),
           viewport: Type.Optional(Type.Union([Type.Literal("desktop"), Type.Literal("mobile")], { description: "desktop (1280 wide, the default) or mobile (390 wide)." })),
         }),
-        execute: async (args, _api, context) => {
+        execute: async (args, api, context) => {
           scope.failedChecks.allow();
           const { draft, report, unchecked, usage, lookStopped, review } = await checkDraft(
             scope,
             args.draft_id,
             { tests: args.tests, viewport: args.viewport },
             context.abortSignal,
+            await rulesOf(scope, api),
           );
           const { id } = draft;
           const failed = report ? report.errors.length > 0 : undefined;
@@ -566,14 +579,15 @@ export function artifactExtension(scope: ChatScope): Extension {
           "when the user asks for an earlier attempt, or when you no longer have the page you were working on.",
         parameters: Type.Object({ draft_id: Type.Optional(Type.String()), part: pagePartParameter }),
         replay: "safe",
-        execute: async (args) => {
-          const drafts = await scope.drafts();
+        execute: async (args, api) => {
+          // Not the drafts another conversation apart from the chat saved: they are not the chat's yet.
+          const [drafts, rules] = await Promise.all([scope.drafts(), rulesOf(scope, api)]);
           if (args.draft_id === undefined) {
-            const list = await drafts.list();
+            const list = (await drafts.list()).filter((draft) => !rules?.hiddenSession(draft.session));
             const lines = list.length ? `${plural(list.length, "draft")}, newest first:\n${list.map(draftLine).join("\n")}` : "This chat has no drafts.";
             return { output: text(lines) };
           }
-          const draft = await draftNamed(drafts, args.draft_id);
+          const draft = await draftNamed(drafts, args.draft_id, "", rules);
           const declared = JSON.stringify(draft.manifest.mcp?.servers ?? []);
           return { output: text(`Draft ${draftLine(draft)}, mcp ${declared}:\n\n${pagePart(draft.html, args.part)}`) };
         },

@@ -102,6 +102,11 @@ export interface SessionRules {
   reviewed: boolean;
   /** Whether a file is the chat's (not one only a conversation apart from it saved). */
   chatFile(path: string): boolean;
+  /**
+   * Whether `session` is another conversation apart from the chat with its reply not posted: the drafts it saved
+   * (DraftPage.session) are not the chat's, so this one neither lists, reads, checks nor publishes them.
+   */
+  hiddenSession(session: string | undefined): boolean;
 }
 
 /** Why a reviewed turn apart from the chat may not change a page or file the chat already has, and what to do instead. */
@@ -250,12 +255,15 @@ export interface WriteInput {
   mcp?: McpDeclaration;
   artifact?: ArtifactMeta;
   version?: number;
+  /** The conversation saving it (DraftPage.session), and what it may see: not a draft of another one apart from the chat. */
+  session?: string;
+  rules?: SessionRules;
 }
 
-/** A draft of the chat by its id; else throws, starting with `what`. */
-export async function draftNamed(drafts: ChatDrafts, id: string, what = ""): Promise<Draft> {
+/** A draft of the chat by its id, but none another conversation apart from the chat saved (`rules`); else throws, starting with `what`. */
+export async function draftNamed(drafts: ChatDrafts, id: string, what = "", rules?: SessionRules): Promise<Draft> {
   const draft = await drafts.get(id);
-  if (!draft)
+  if (!draft || rules?.hiddenSession(draft.session))
     throw new Error(`${what && `${what} `}No draft "${id}" in this chat: it was published, or dropped as one of the oldest. List them with ${DRAFTS_TOOL}.`);
   return draft;
 }
@@ -266,7 +274,7 @@ export async function draftNamed(drafts: ChatDrafts, id: string, what = ""): Pro
  * Saving a page that is already a draft keeps how its check went.
  */
 export async function writeDraft(scope: PublishScope, input: WriteInput): Promise<Draft & { bytes: number }> {
-  const { draftId: from, edits = [], artifact, version } = input;
+  const { draftId: from, edits = [], artifact, version, session, rules } = input;
   if (input.html !== undefined && (from !== undefined || edits.length))
     throw new Error("Pass a new page as html, or edits with the draft_id or artifact_id they change: not both.");
   if (version !== undefined && (input.html !== undefined || from !== undefined))
@@ -277,7 +285,7 @@ export async function writeDraft(scope: PublishScope, input: WriteInput): Promis
   let reviewed: true | undefined;
   if (html === undefined) {
     if (from !== undefined) {
-      const draft = await draftNamed(drafts, from, "Not saved.");
+      const draft = await draftNamed(drafts, from, "Not saved.", rules);
       html = applyEdits(draft.html, edits);
       mcp ??= draft.manifest.mcp?.servers;
       artifactId ??= draft.artifactId;
@@ -293,7 +301,18 @@ export async function writeDraft(scope: PublishScope, input: WriteInput): Promis
   const manifest = await validPage(scope, html, mcp, "Not saved.");
   const skillSets = await pinSkillFiles(scope, html, "Not saved.");
   const id = await draftId(html, manifest, skillSets);
-  return drafts.save({ id, html, manifest, artifactId, ...(Object.keys(skillSets).length && { skillSets }), ...(reviewed && { reviewed }) }, null);
+  return drafts.save(
+    {
+      id,
+      html,
+      manifest,
+      artifactId,
+      ...(Object.keys(skillSets).length && { skillSets }),
+      ...(reviewed && { reviewed }),
+      ...(session !== undefined && { session }),
+    },
+    null,
+  );
 }
 
 /** What checking a draft came to: the draft, and the check's report, or why no browser checked it; what the look cost. */
@@ -318,9 +337,10 @@ export async function checkDraft(
   id: string,
   { review: reviewIt = true, ...options }: Pick<CheckInput, "tests" | "viewport"> & { review?: boolean },
   signal?: AbortSignal,
+  rules?: SessionRules,
 ): Promise<CheckedDraft> {
   const drafts = await scope.drafts();
-  const draft = await draftNamed(drafts, id, "Not checked.");
+  const draft = await draftNamed(drafts, id, "Not checked.", rules);
   const { html, pageLine } = await pageToRun(scope, draft, "Not checked.");
   // Stops the review when the check fails or could not run: it is no longer waited for, and a review costs.
   const stop = new AbortController();
@@ -479,8 +499,8 @@ async function artifactFor(scope: PublishScope, target: PublishTarget, writtenFo
  * with errors is never published. A published draft goes: its version holds it now.
  */
 export async function publishDraft(scope: PublishScope, input: PublishInput, signal?: AbortSignal, session?: string): Promise<Published> {
-  const drafts = await scope.drafts();
-  let draft = await draftNamed(drafts, input.draftId, "Not published.");
+  const [drafts, rules] = await Promise.all([scope.drafts(), session === undefined ? undefined : scope.rulesFor?.(session)]);
+  let draft = await draftNamed(drafts, input.draftId, "Not published.", rules);
   // Without the code review: its findings would stop the publish unseen, and the draft would then be reviewed already.
   if (draft.errors === null && scope.publishUnchecked) draft = (await checkDraft(scope, draft.id, { review: false }, signal)).draft;
   const unchecked = draft.errors === null;
@@ -494,7 +514,6 @@ export async function publishDraft(scope: PublishScope, input: PublishInput, sig
   await validPage(scope, draft.html, draft.manifest.mcp?.servers, "Not published.");
   // The version holds the skill files the check ran with: it never changes when the skill does.
   const { html } = await pageToRun(scope, draft, "Not published.");
-  const rules = session === undefined ? undefined : await scope.rulesFor?.(session);
   const target = await artifactFor(scope, input, draft.artifactId, rules);
   const meta = await scope.artifacts.publishVersion({
     id: target.id,

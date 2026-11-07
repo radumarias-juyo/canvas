@@ -192,6 +192,7 @@ describe("publishing from a conversation apart from the chat", () => {
       own: new Set(),
       reviewed: false,
       chatFile: () => true,
+      hiddenSession: () => false,
       ...rules(session),
     });
     const publish = async (target: { title: string; artifactId?: string; newArtifact?: boolean }, session: string) => {
@@ -223,6 +224,30 @@ describe("publishing from a conversation apart from the chat", () => {
     await expect(publish({ title: "Other", artifactId: "w1" }, "fork")).rejects.toThrow(reviewedRefusal("page"));
     // A new page it may make: hidden until its reply is posted.
     expect((await publish({ title: "Week", newArtifact: true }, "fork")).meta.id).toBe("new0000000000001");
+  });
+
+  it("keeps the drafts a conversation apart saved from every other one: none edited from, checked or published", async () => {
+    // "fork" runs apart with its reply not posted; "1" is the chat's own conversation.
+    const { scope, drafts, versions } = apart((session) => ({ hiddenSession: (other) => other === "fork" && session !== "fork" }));
+    const rules = (session: string) => scope.rulesFor!(session);
+    const secret = await writeDraft(scope, { html: "<p>salaries</p>", session: "fork" });
+    await checkDraft(scope, secret.id, {}, undefined, await rules("fork"));
+    expect(await drafts.get(secret.id)).toMatchObject({ session: "fork", errors: 0 });
+    const shared = await writeDraft(scope, { html: "<p>week</p>", session: "1" });
+    // The chat's conversation reads none of it: no edits from it, no check, no publish, whatever its id.
+    const hidden = `No draft "${secret.id}"`;
+    await expect(writeDraft(scope, { draftId: secret.id, edits: [], session: "1", rules: await rules("1") })).rejects.toThrow(hidden);
+    await expect(checkDraft(scope, secret.id, {}, undefined, await rules("1"))).rejects.toThrow(hidden);
+    await expect(publishDraft(scope, { title: "Pay", draftId: secret.id }, undefined, "1")).rejects.toThrow(hidden);
+    expect(versions).toEqual([]);
+    // The fork goes on from its own draft, and the chat's from its own.
+    const forkRules = await rules("fork");
+    const edited = await writeDraft(scope, { draftId: secret.id, edits: [{ old: "salaries", new: "pay" }], session: "fork", rules: forkRules });
+    expect(edited).toMatchObject({ session: "fork" });
+    await checkDraft(scope, shared.id, {}, undefined, await rules("1"));
+    expect((await publishDraft(scope, { title: "Week", draftId: shared.id }, undefined, "1")).meta.id).toBe("w1");
+    // The same page saved from the chat's conversation too is no one's: both had it.
+    expect(await writeDraft(scope, { html: "<p>salaries</p>", session: "1" })).not.toHaveProperty("session");
   });
 });
 

@@ -1975,12 +1975,14 @@ export class ChatAgent extends DurableObject<Env> {
    */
   async #rulesFor(session: string): Promise<SessionRules> {
     // With no turn apart from the chat waiting to be posted, nothing is withheld (and nothing is reviewed).
-    if (!this.roster.anyWithheld()) return { hidden: new Set(), hiddenVersion: () => false, own: new Set(), reviewed: false, chatFile: () => true };
+    if (!this.roster.anyWithheld())
+      return { hidden: new Set(), hiddenVersion: () => false, own: new Set(), reviewed: false, chatFile: () => true, hiddenSession: () => false };
     const fork = this.roster.fork(session);
     const reviewed = !!fork && !fork.posted && fork.review;
     // The chat's files matter only to a reviewed session (which may change none): only it waits for the whole read.
     const [pages, traces] = await Promise.all([this.#hiddenTracePages(), reviewed ? this.#readTraces() : undefined]);
     const own = this.roster.pagesOf(session);
+    const apart = this.roster.withheld();
     const versions = new Map<string, Set<number>>();
     const withheldOf = (artifactId: string) =>
       versions.get(artifactId) ?? versions.set(artifactId, this.roster.withheldVersions(artifactId, session)).get(artifactId)!;
@@ -1990,6 +1992,7 @@ export class ChatAgent extends DurableObject<Env> {
       own,
       reviewed,
       chatFile: (path) => !traces || this.#inChat(path, traces),
+      hiddenSession: (other) => other !== undefined && other !== session && apart.has(other),
     };
   }
 
