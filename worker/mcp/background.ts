@@ -17,7 +17,7 @@ export type SignInCheck = "ok" | "needs_sign_in" | "unavailable";
 
 /** The grant length when MCP_GRANT_DAYS is not set: Access's default for a portal's grant session is longer; 30 days is a safe count. */
 export const DEFAULT_GRANT_DAYS = 30;
-/** How long before a grant ends its owner is warned, once. */
+/** How long before a grant ends its owner is warned, once: this, or a tenth of a shorter grant. */
 export const WARN_AHEAD_MS = 3 * 24 * 60 * 60 * 1000;
 /**
  * How often a sign-in that runs use is refreshed when nothing else refreshed it: a little under a day, in case the
@@ -26,6 +26,8 @@ export const WARN_AHEAD_MS = 3 * 24 * 60 * 60 * 1000;
 export const KEEP_ALIVE_MS = 20 * 60 * 60 * 1000;
 /** After a keep-alive the server did not answer, how soon it is tried again. */
 export const KEEP_ALIVE_RETRY_MS = 60 * 60 * 1000;
+/** How long each request of a check may take: a token endpoint that stalls is `unavailable`, and the alarm moves on. */
+export const CHECK_REQUEST_MS = 15_000;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -35,9 +37,9 @@ export function grantMs(env: { MCP_GRANT_DAYS?: unknown }): number {
   return (Number.isInteger(days) && days >= 1 && days <= 365 ? days : DEFAULT_GRANT_DAYS) * DAY_MS;
 }
 
-/** When to warn about a grant that started at `signedInAt`: WARN_AHEAD_MS before it ends, or at once for a grant shorter than that. */
+/** When to warn about a grant that started at `signedInAt`: WARN_AHEAD_MS before it ends, or a tenth of a grant shorter than 30 days before. */
 export function warnAt(signedInAt: number, grant: number): number {
-  return signedInAt + Math.max(0, grant - WARN_AHEAD_MS);
+  return signedInAt + grant - Math.min(WARN_AHEAD_MS, grant / 10);
 }
 
 /** The callback URL a record's client was registered with: refreshes send the same one. */
@@ -64,7 +66,7 @@ export async function checkSignIn(
   const client = new McpOAuthClient(store, server.name, { redirectUrl, interactive: false });
   try {
     if (record.tokens.refresh_token) {
-      if ((await auth(client, { serverUrl: server.url })) === "AUTHORIZED") return "ok";
+      if ((await auth(client, { serverUrl: server.url, fetchFn: timedFetch })) === "AUTHORIZED") return "ok";
       // A refused grant clears the tokens (invalidateCredentials). The SDK also gives up on a refresh the server could
       // not answer (a server_error, a 5xx) and asks for a sign-in instead: with the tokens kept, that is the server.
       return (await store.get()).tokens ? "unavailable" : "needs_sign_in";
@@ -78,6 +80,12 @@ export async function checkSignIn(
     return "unavailable";
   }
 }
+
+/** fetch, with each request given up after CHECK_REQUEST_MS (an abort the SDK asked for still works). */
+const timedFetch = (url: string | URL, init?: RequestInit): Promise<Response> => {
+  const timeout = AbortSignal.timeout(CHECK_REQUEST_MS);
+  return fetch(url, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout });
+};
 
 /**
  * The tools of `server` a run may use: only those the server marks read-only. A scheduled run reads; anything that

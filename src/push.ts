@@ -9,6 +9,7 @@ import { api } from "./api.ts";
 const supported = typeof navigator !== "undefined" && "serviceWorker" in navigator && typeof window !== "undefined" && "PushManager" in window;
 
 let enabling: Promise<void> | undefined;
+let available: Promise<boolean> | undefined;
 /** Who is signed in to this window (setPushUser): a subscription is made for them alone. */
 let user: string | undefined;
 /** Which user this browser's subscription was made for, kept across sessions. */
@@ -33,10 +34,25 @@ export function enablePush(): Promise<void> {
   return enabling;
 }
 
+/** Whether a notice can reach this browser while the app is closed: push here, and on the Worker (its VAPID key). */
+export function pushAvailable(): Promise<boolean> {
+  if (!supported) return Promise.resolve(false);
+  available ??= api.pushKey().then(
+    (key) => key !== null,
+    () => {
+      available = undefined;
+      return false;
+    },
+  );
+  return available;
+}
+
 async function subscribe(uid: string): Promise<void> {
   const key = await api.pushKey();
   if (!key) return;
-  const registration = await navigator.serviceWorker.register("/sw.js");
+  await navigator.serviceWorker.register("/sw.js");
+  // A worker registered just now is still installing, and only an active one can subscribe.
+  const registration = await navigator.serviceWorker.ready;
   const serverKey = fromBase64url(key);
   let subscription = await registration.pushManager.getSubscription();
   // Another user's subscription is ended at the push service, so their directory forgets it on its next push (410).
@@ -73,19 +89,30 @@ export async function disablePush(): Promise<void> {
   if (!supported) return;
   const pending = enabling;
   enabling = undefined;
-  const stop = (async () => {
-    // A subscribe still going would otherwise finish after this, and subscribe the browser again.
-    await pending;
+  const unsubscribe = async () => {
     const subscription = await (await navigator.serviceWorker.getRegistration())?.pushManager.getSubscription();
     if (subscription) await forget(subscription);
+  };
+  const stop = (async () => {
+    await unsubscribe();
+    // A subscribe still going may finish after that, and subscribe the browser again: undo it too.
+    if (pending) {
+      await pending;
+      await unsubscribe();
+    }
   })().catch((error: unknown) => console.warn("push:", error));
   await Promise.race([stop, new Promise((resolve) => setTimeout(resolve, 2_000))]);
 }
 
-/** Unsubscribe in the browser, and tell the Worker to forget the endpoint. */
+/**
+ * Unsubscribe in the browser, then tell the Worker to forget the endpoint. The browser goes first: on a slow network the
+ * Worker's answer may never come before sign-out moves on, and the push service refuses an ended subscription anyway (the
+ * Worker then forgets it).
+ */
 async function forget(subscription: PushSubscription): Promise<void> {
-  await api.unsubscribePush(subscription.endpoint).catch(() => {});
+  const { endpoint } = subscription;
   await subscription.unsubscribe();
+  await api.unsubscribePush(endpoint).catch(() => {});
 }
 
 /** A click on a pushed notification, in an open window: the service worker asks it to go to `url` (an app path). */
@@ -93,7 +120,7 @@ export function onPushOpen(navigate: (path: string) => void): () => void {
   if (!supported) return () => {};
   const listener = (event: MessageEvent) => {
     const data = event.data as { type?: unknown; url?: unknown } | null;
-    if (data?.type === "open" && typeof data.url === "string" && /^\/(?![/\\])/.test(data.url) && !data.url.includes("\\")) navigate(data.url);
+    if (data?.type === "open" && typeof data.url === "string" && /^\/(?![/\\])/.test(data.url) && !data.url.includes("\\") && !data.url.startsWith("/api/")) navigate(data.url);
   };
   navigator.serviceWorker.addEventListener("message", listener);
   return () => navigator.serviceWorker.removeEventListener("message", listener);

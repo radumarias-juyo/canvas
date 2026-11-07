@@ -52,6 +52,8 @@ export class McpSignIns {
   readonly #now: () => number;
   readonly #serially = serial((fn: () => Promise<unknown>) => fn());
   readonly #opened = new Map<string, McpAuthRecord>();
+  /** The check of each server under way: a run's check and the keep-alive share one refresh (a rotated refresh token used twice can sign the user out). */
+  readonly #checks = new Map<string, Promise<SignInCheck>>();
   #alarmAt: number | null | undefined;
 
   constructor(host: SignInsHost) {
@@ -88,7 +90,10 @@ export class McpSignIns {
   update(server: string, change: McpAuthChange): Promise<void> {
     return this.#serially(async () => {
       const before = await this.#read(server);
-      await this.#write(server, before, applyAuthChange(before, change));
+      const { tokens, ...rest } = applyAuthChange(before, change);
+      // Tokens come only with a sign-in, which registers a client first: tokens with none are a refresh that finished
+      // after Disconnect, and must not sign the user back in.
+      await this.#write(server, before, rest.client && tokens ? { ...rest, tokens } : rest);
     }) as Promise<void>;
   }
 
@@ -165,15 +170,16 @@ export class McpSignIns {
    */
   async check(servers: readonly string[]): Promise<Record<string, SignInCheck>> {
     const configs = new Map(mcpServers(this.#host.env).map((server) => [server.name, server]));
-    const rows = new Map(this.#rows().map((row) => [row.server, row]));
     const results = await Promise.all(
       [...new Set(servers)].map(async (name): Promise<[string, SignInCheck]> => {
         const config = configs.get(name);
         if (!config) return [name, "unavailable"];
         if (config.auth !== "oauth") return [name, "ok"];
-        const row = rows.get(name);
+        // Opening the record first forgets one that no longer opens (a changed key), so the row read after says so.
+        const { tokens } = await this.record(name);
+        const row = this.#row(name);
         // keep_at is set a day after each new token: KEEP_ALIVE_MS before it is the last refresh.
-        if (row?.signed_in_at != null && row.keep_at - KEEP_ALIVE_MS > this.#now() - RECENT_REFRESH_MS) return [name, "ok"];
+        if (tokens && row?.signed_in_at != null && row.keep_at - KEEP_ALIVE_MS > this.#now() - RECENT_REFRESH_MS) return [name, "ok"];
         return [name, await this.#check(config)];
       }),
     );
@@ -208,11 +214,19 @@ export class McpSignIns {
       .exec("SELECT chat_id FROM mcp_waiting WHERE server = ?", server)
       .toArray()
       .map((row) => row.chat_id as string);
-    sql.exec("DELETE FROM mcp_waiting WHERE server = ?", server);
     this.#host.changed();
     this.#schedule();
-    const told = await Promise.allSettled(chats.map((chatId) => this.#host.signedIn(chatId, server)));
-    for (const result of told) if (result.status === "rejected") console.error("signed in: telling a chat failed:", result.reason);
+    // A chat stays waiting until it heard: one that could not be told is told at the next sign-in.
+    await Promise.all(
+      chats.map(async (chatId) => {
+        try {
+          await this.#host.signedIn(chatId, server);
+          sql.exec("DELETE FROM mcp_waiting WHERE server = ? AND chat_id = ?", server, chatId);
+        } catch (error) {
+          console.error("signed in: telling a chat failed:", errorMessage(error));
+        }
+      }),
+    );
   }
 
   /** Dismiss a notice; it comes back when a run needs the sign-in again. */
@@ -239,8 +253,8 @@ export class McpSignIns {
       if (!config || row.keep_at > now) return;
       const result = await this.#check(config);
       if (result === "needs_sign_in") await this.needed(row.server);
-      // An ok refresh saved new tokens, which set the next one; any other result tries again soon. A sign-in still
-      // signed in after `needs_sign_in` (its tokens kept) must move on too, or the next alarm is due at once, forever.
+      // An ok refresh saved new tokens, which set the next one; `unavailable` tries again soon (`needs_sign_in` ended
+      // the grant). It always moves on, or the next alarm is due at once, forever.
       this.#host.sql.exec(
         "UPDATE mcp_auth SET keep_at = ? WHERE server = ?",
         this.#now() + (result === "ok" ? KEEP_ALIVE_MS : KEEP_ALIVE_RETRY_MS),
@@ -283,14 +297,30 @@ export class McpSignIns {
     return true;
   }
 
-  async #check(config: McpServerConfig): Promise<SignInCheck> {
-    return (this.#host.check ?? checkSignIn)(config, this.store(config.name));
+  /**
+   * Check one server's sign-in, joining a check of it under way. A sign-in that needs the user again ends its grant: tokens
+   * a refresh cannot renew (none to refresh with, or refused) are not kept, so it shows as signed out and is not kept alive.
+   */
+  #check(config: McpServerConfig): Promise<SignInCheck> {
+    const { name } = config;
+    const running = this.#checks.get(name);
+    if (running) return running;
+    const checking = (async () => {
+      const { tokens } = await this.record(name);
+      const result = await (this.#host.check ?? checkSignIn)(config, this.store(name));
+      // Only the tokens checked: a sign-in that finished meanwhile stays.
+      if (result === "needs_sign_in" && tokens) await this.update(name, { clearTokensIf: tokens });
+      return result;
+    })().finally(() => this.#checks.delete(name));
+    this.#checks.set(name, checking);
+    return checking;
   }
 
   /** The notice reaches every open app, which reads the list again on it: no separate list change. */
   async #tell(notice: SignInNotice): Promise<void> {
     const { title, body } = signInNoticeText({ ...notice, what: undefined });
-    await this.#host.notify(notice, { title, body, url: "/", tag: `sign-in:${notice.server}` });
+    // A click on the push starts the sign-in.
+    await this.#host.notify(notice, { title, body, url: notice.link, tag: `sign-in:${notice.server}` });
   }
 
   async #read(server: string): Promise<McpAuthRecord> {
@@ -345,6 +375,10 @@ export class McpSignIns {
       this.#host.changed();
       this.#schedule();
     }
+  }
+
+  #row(server: string): AuthRow | undefined {
+    return this.#host.sql.exec("SELECT server, signed_in_at, warned_at, keep_at FROM mcp_auth WHERE server = ?", server).toArray()[0] as AuthRow | undefined;
   }
 
   #rows(): AuthRow[] {

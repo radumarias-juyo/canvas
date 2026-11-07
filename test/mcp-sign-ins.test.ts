@@ -27,6 +27,8 @@ function setup(options: { sql?: ReturnType<typeof memorySql>; check?: SignInChec
   const chats: string[] = [];
   const alarms: (number | null)[] = [];
   const checks: string[] = [];
+  const failing = new Set<string>();
+  let gate: Promise<void> | undefined;
   let result: SignInCheck = options.check ?? "ok";
   const signIns = new McpSignIns({
     sql,
@@ -37,10 +39,14 @@ function setup(options: { sql?: ReturnType<typeof memorySql>; check?: SignInChec
       told.push(notice);
       pushed.push(`${push.title} | ${push.body}`);
     },
-    signedIn: async (chatId, server) => void chats.push(`${chatId}:${server}`),
+    signedIn: async (chatId, server) => {
+      if (failing.has(chatId)) throw new Error("chat down");
+      chats.push(`${chatId}:${server}`);
+    },
     setAlarm: (at) => void alarms.push(at),
     check: async (server, store) => {
       checks.push(server.name);
+      await gate;
       // An ok check refreshes, as the real one does: new tokens.
       if (result === "ok") await store.update({ set: { tokens: { ...TOKENS, access_token: `at-${checks.length + 1}` } } });
       return result;
@@ -57,6 +63,13 @@ function setup(options: { sql?: ReturnType<typeof memorySql>; check?: SignInChec
     checks,
     at: (to: number) => void (now = to),
     answer: (next: SignInCheck) => void (result = next),
+    failing,
+    /** Hold checks until the returned function is called. */
+    hold: () => {
+      let release!: () => void;
+      gate = new Promise((resolve) => (release = resolve));
+      return release;
+    },
     row: (server = "Portal") => sql.exec("SELECT * FROM mcp_auth WHERE server = ?", server).toArray()[0] as Record<string, unknown> | undefined,
   };
 }
@@ -72,7 +85,7 @@ describe("sealed sign-in records", () => {
   it("round trips, and opens only for the server it was sealed for", async () => {
     const record = { client: CLIENT, tokens: TOKENS };
     const sealed = await sealAuthRecord(await key(), "Portal", record);
-    expect(sealed).toMatch(/^v1\./);
+    expect(JSON.parse(sealed)).toEqual({ sealed: expect.stringMatching(/^v1\./) });
     expect(sealed).not.toContain("rt-1");
     expect(await openAuthRecord(await key(), "Portal", sealed)).toEqual({ record, plain: false });
     await expect(openAuthRecord(await key(), "Other", sealed)).rejects.toThrow();
@@ -93,7 +106,7 @@ describe("sealed sign-in records", () => {
     const s = setup({ sql });
     expect(s.row()).toMatchObject({ signed_in_at: T0 });
     expect(await s.signIns.record("Portal")).toEqual({ client: CLIENT, tokens: TOKENS });
-    expect(String(s.row()!.data)).toMatch(/^v1\./);
+    expect(String(s.row()!.data)).toMatch(/^\{"sealed":"v1\./);
     expect(await s.signIns.record("Portal")).toEqual({ client: CLIENT, tokens: TOKENS });
   });
 
@@ -105,6 +118,26 @@ describe("sealed sign-in records", () => {
     sql.exec("INSERT INTO mcp_auth (server, data, signed_in_at) VALUES (?, ?, ?)", "Portal", sealed, T0);
     expect(await s.signIns.record("Portal")).toEqual({});
     expect(s.row()).toBeUndefined();
+  });
+
+  it("stays JSON with no sign-in for code from before, and takes what that code wrote over it", async () => {
+    const sealed = await sealAuthRecord(await key(), "Portal", { client: CLIENT, tokens: TOKENS });
+    // What code from before encryption makes of it: a record with no client and no tokens.
+    expect(JSON.parse(sealed)).not.toHaveProperty("tokens");
+    const newer = { ...JSON.parse(sealed), client: CLIENT, tokens: { ...TOKENS, access_token: "at-old-code" } };
+    expect(await openAuthRecord(await key(), "Portal", JSON.stringify(newer))).toEqual({
+      record: { client: CLIENT, tokens: { ...TOKENS, access_token: "at-old-code" } },
+      plain: true,
+    });
+  });
+
+  it("does not trust a recent refresh of a record that no longer opens", async () => {
+    const sql = memorySql();
+    const s = setup({ sql, check: "needs_sign_in" });
+    const otherKey = await deriveUserAesKey(MASTER_KEY, "FILES_MASTER_KEY", "pi-artifacts/mcp-tokens-from-files/v1", "ada");
+    const sealed = await sealAuthRecord(otherKey, "Portal", { client: CLIENT, tokens: TOKENS });
+    sql.exec("INSERT INTO mcp_auth (server, data, signed_in_at, keep_at) VALUES (?, ?, ?, ?)", "Portal", sealed, T0, T0 + KEEP_ALIVE_MS);
+    expect(await s.signIns.check(["Portal"])).toEqual({ Portal: "needs_sign_in" });
   });
 
   it("forgets sign-ins to servers no longer configured", () => {
@@ -175,6 +208,11 @@ describe("sign-ins with nobody present", () => {
     expect(s.told).toHaveLength(2);
   });
 
+  it("warns a tenth of a short grant before it ends, not right after the sign-in", () => {
+    expect(warnAt(T0, DAY)).toBe(T0 + DAY - DAY / 10);
+    expect(warnAt(T0, 3 * DAY)).toBe(T0 + 3 * DAY - (3 * DAY) / 10);
+  });
+
   it("follows MCP_GRANT_DAYS", () => {
     expect(grantMs({ MCP_GRANT_DAYS: "7" })).toBe(7 * DAY);
     expect(grantMs({ MCP_GRANT_DAYS: "nonsense" })).toBe(30 * DAY);
@@ -205,6 +243,54 @@ describe("sign-ins with nobody present", () => {
     s.at(T0 + 3 * KEEP_ALIVE_MS);
     await s.signIns.alarm();
     expect(s.told).toEqual([expect.objectContaining({ kind: "needed", server: "Portal" })]);
+  });
+
+  it("ends the grant when a sign-in needs the user again, so it is neither shown signed in nor kept alive", async () => {
+    const s = setup();
+    await signIn(s, T0);
+    s.signIns.setRunServers("chat1", ["Portal"]);
+    s.answer("needs_sign_in");
+    s.at(T0 + RECENT_REFRESH_MS + 1);
+    expect(await s.signIns.check(["Portal"])).toEqual({ Portal: "needs_sign_in" });
+    expect(s.signIns.list()[0]).toMatchObject({ signedIn: false });
+    expect((await s.signIns.record("Portal")).tokens).toBeUndefined();
+    expect(s.alarms.at(-1)).toBeNull();
+  });
+
+  it("runs one refresh at a time per server: a run's check and the keep-alive share it", async () => {
+    const s = setup();
+    await signIn(s, T0);
+    s.signIns.setRunServers("chat1", ["Portal"]);
+    s.at(T0 + KEEP_ALIVE_MS);
+    const release = s.hold();
+    const both = Promise.all([s.signIns.check(["Portal"]), s.signIns.check(["Portal"]), s.signIns.alarm()]);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    release();
+    const [a, b] = await both;
+    expect(a).toEqual({ Portal: "ok" });
+    expect(b).toEqual({ Portal: "ok" });
+    expect(s.checks).toEqual(["Portal"]);
+  });
+
+  it("a refresh that finishes after Disconnect does not sign the user back in", async () => {
+    const s = setup();
+    await signIn(s, T0);
+    await s.signIns.disconnect("Portal");
+    await s.signIns.update("Portal", { set: { tokens: { ...TOKENS, access_token: "at-late" } } });
+    expect(s.row()).toBeUndefined();
+    expect(s.signIns.list()[0]).toMatchObject({ signedIn: false });
+  });
+
+  it("keeps a chat waiting until it could be told", async () => {
+    const s = setup();
+    await s.signIns.needed("Portal", { chatId: "chat1" });
+    await s.signIns.needed("Portal", { chatId: "chat2" });
+    s.failing.add("chat2");
+    await signIn(s, T0);
+    expect(s.chats).toEqual(["chat1:Portal"]);
+    s.failing.clear();
+    await signIn(s, T0 + DAY);
+    expect(s.chats).toEqual(["chat1:Portal", "chat2:Portal"]);
   });
 
   it("trusts a refresh from the last hour before a run, and refreshes an older one", async () => {

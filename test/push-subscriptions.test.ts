@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { checkPushSubscription, MAX_PUSH_SUBS, PushSubscriptions, vapidKeys } from "../worker/push/subscriptions.ts";
+import { checkPushSubscription, MAX_PUSH_SUBS, PushSubscriptions, topicOf, vapidKeys } from "../worker/push/subscriptions.ts";
 import type { sendPush } from "../worker/push/web-push.ts";
 import { memorySql } from "./fakes.ts";
 
@@ -30,6 +30,15 @@ describe("push subscriptions", () => {
       privateKey: "b",
       subject: "mailto:ops@example.com",
     });
+  });
+
+  it("sends a topic that says nothing of the tag, and differs per tag", async () => {
+    const topic = await topicOf("sign-in:Portal", VAPID);
+    expect(topic).toMatch(/^[A-Za-z0-9_-]{32}$/);
+    expect(topic).not.toContain("Portal");
+    expect(await topicOf("sign-in:Portal", VAPID)).toBe(topic);
+    const long = "sign-in:" + "x".repeat(40);
+    expect(await topicOf(`${long}a`, VAPID)).not.toBe(await topicOf(`${long}b`, VAPID));
   });
 
   it("pushes to every browser, forgets the gone ones, and keeps the newest few", async () => {

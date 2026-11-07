@@ -1,4 +1,4 @@
-import { errorMessage } from "../../shared/util.ts";
+import { errorMessage, toBase64url } from "../../shared/util.ts";
 import type { Sql } from "../members.ts";
 import { checkSubscription, sendPush, type PushSubscriptionKeys, type VapidKeys } from "./web-push.ts";
 
@@ -73,10 +73,12 @@ export class PushSubscriptions {
   async push(message: PushMessage, vapid: VapidKeys | null): Promise<void> {
     if (!vapid) return;
     const subs = this.#sql.exec("SELECT endpoint, p256dh, auth FROM push_subs").toArray() as unknown as PushSubscriptionKeys[];
+    if (subs.length === 0) return;
+    const topic = await topicOf(message.tag, vapid);
     await Promise.all(
       subs.map(async (sub) => {
         try {
-          const sent = await this.#send(sub, message, vapid, { topic: topicOf(message.tag), urgency: "normal" });
+          const sent = await this.#send(sub, message, vapid, { topic, urgency: "normal" });
           if (sent.gone) this.remove(sub.endpoint);
           else if (!sent.ok) console.warn("push:", sent.status);
         } catch (error) {
@@ -87,7 +89,15 @@ export class PushSubscriptions {
   }
 }
 
-/** The push service's topic for a tag (a newer push with the same topic replaces one not yet delivered): base64url, at most 32. */
-function topicOf(tag: string): string {
-  return tag.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 32);
+/**
+ * The push service's topic for a tag (a newer push with the same topic replaces one not yet delivered): base64url, at
+ * most 32. The push service sees it, so it is an HMAC of the tag under the VAPID private key, never the tag (a server's
+ * name, a chat id), and two tags do not collide.
+ */
+export async function topicOf(tag: string, vapid: VapidKeys): Promise<string> {
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(`pi-artifacts/push-topic/${vapid.privateKey}`), { name: "HMAC", hash: "SHA-256" }, false, [
+    "sign",
+  ]);
+  const mac = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(tag));
+  return toBase64url(new Uint8Array(mac)).slice(0, 32);
 }

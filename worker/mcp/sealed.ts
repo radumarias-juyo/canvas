@@ -7,8 +7,9 @@ import type { McpAuthRecord } from "./oauth.ts";
  * (`mcpTokensKey` in worker/storage/), with the server's name as additional data: a copy of the storage alone reads
  * nothing, and a record moved to another server's row does not open.
  *
- * Stored as `v1.<base64 of iv | ciphertext>`. A record written before encryption is plain JSON and still opens
- * (`plain` says so, so the caller writes it again sealed).
+ * Stored as `{"sealed":"v1.<base64 of iv | ciphertext>"}`: JSON, so code from before encryption (a rollback) reads it as
+ * a record with no sign-in, and the user can sign in again. A record written before encryption is plain JSON and still
+ * opens (`plain` says so, so the caller writes it again sealed).
  */
 const PREFIX = "v1.";
 const IV_BYTES = 12;
@@ -20,12 +21,15 @@ export async function sealAuthRecord(key: CryptoKey, server: string, record: Mcp
   const out = new Uint8Array(IV_BYTES + sealed.byteLength);
   out.set(iv);
   out.set(sealed, IV_BYTES);
-  return PREFIX + toBase64(out);
+  return JSON.stringify({ sealed: PREFIX + toBase64(out) });
 }
 
 export async function openAuthRecord(key: CryptoKey, server: string, stored: string): Promise<{ record: McpAuthRecord; plain: boolean }> {
-  if (!stored.startsWith(PREFIX)) return { record: JSON.parse(stored) as McpAuthRecord, plain: true };
-  const bytes = fromBase64(stored.slice(PREFIX.length));
+  const { sealed, ...rest } = JSON.parse(stored) as McpAuthRecord & { sealed?: unknown };
+  // Fields beside `sealed` are a plain record that code from before encryption wrote over it: those are the newer.
+  if (typeof sealed !== "string" || Object.keys(rest).length > 0) return { record: rest, plain: true };
+  if (!sealed.startsWith(PREFIX)) throw new Error("Unknown sealed record version.");
+  const bytes = fromBase64(sealed.slice(PREFIX.length));
   const data = await crypto.subtle.decrypt(
     { name: "AES-GCM", iv: bytes.subarray(0, IV_BYTES), additionalData: aad(server) },
     key,

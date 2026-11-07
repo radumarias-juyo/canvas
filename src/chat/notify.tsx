@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import type { MentionNotice } from "../../shared/protocol.ts";
 import { Icon } from "../Icon.tsx";
 import { useStoredState } from "../layout.tsx";
-import { enablePush, showNotification } from "../push.ts";
+import { enablePush, pushAvailable, showNotification } from "../push.ts";
 import { useVisible } from "../sidebar.ts";
 
 /** How long a tag shows in the app once the window is in view. */
@@ -106,14 +106,22 @@ export function useMentionNotices(chatId: string | undefined, navigate: (path: s
 
 /**
  * The tags of the user, in a corner of the app: a click opens the chat. Above them, while the browser has not been
- * answered and the user has a shared chat (`asking`), a card asks to show tags as the system's notifications, so one
- * reaches them in another tab or app; "Not now" puts it off for a few days.
+ * answered and something could need the user while they are away (`asking`: tags in a shared chat, a sign-in that
+ * scheduled runs use), a card asks to show those as the system's notifications, so one reaches them in another tab or
+ * app, and with push while the app is closed; "Not now" puts it off for a few days.
  */
-export function MentionToasts({ toasts, dismiss, open, asking }: ReturnType<typeof useMentionNotices> & { asking: boolean }) {
+export function MentionToasts({
+  toasts,
+  dismiss,
+  open,
+  asking,
+}: ReturnType<typeof useMentionNotices> & { asking: { mentions: boolean; signIns: boolean } }) {
   const [permission, ask] = useNotificationPermission();
   const [askedAt, setAskedAt] = useStoredState<number>("notify.notNowAt", 0, (value): value is number => typeof value === "number");
   const [now] = useState(Date.now);
-  const askCard = asking && permission === "default" && now - askedAt > ASK_AGAIN_MS;
+  const push = usePushAvailable();
+  const askCard = (asking.mentions || asking.signIns) && permission === "default" && now - askedAt > ASK_AGAIN_MS;
+  const about = asking.mentions && asking.signIns ? "someone mentions you or a sign-in needs you" : asking.mentions ? "someone mentions you" : "a sign-in needs you";
   if (toasts.length === 0 && !askCard) return null;
   return (
     <div className="toasts">
@@ -121,8 +129,12 @@ export function MentionToasts({ toasts, dismiss, open, asking }: ReturnType<type
         <div className="toast notify-ask">
           <BellIcon />
           <div className="toast-body">
-            <strong>Get notified when someone mentions you</strong>
-            <span className="toast-text">Your browser shows it even while you are in another tab or app, or the app is closed.</span>
+            <strong>Get notified when {about}</strong>
+            <span className="toast-text">
+              {push
+                ? "Your browser shows it even while you are in another tab or app, or the app is closed."
+                : "Your browser shows it even while you are in another tab or app."}
+            </span>
             <div className="notify-ask-actions">
               <button type="button" className="primary" onClick={ask}>
                 Turn on notifications
@@ -156,6 +168,19 @@ export function MentionToasts({ toasts, dismiss, open, asking }: ReturnType<type
       </div>
     </div>
   );
+}
+
+/** Whether notices reach this browser while the app is closed (push here and on the Worker); false until known. */
+function usePushAvailable(): boolean {
+  const [available, setAvailable] = useState(false);
+  useEffect(() => {
+    let live = true;
+    void pushAvailable().then((yes) => live && setAvailable(yes));
+    return () => {
+      live = false;
+    };
+  }, []);
+  return available;
 }
 
 function BellIcon({ off = false }: { off?: boolean }) {

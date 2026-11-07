@@ -23,7 +23,8 @@ export function useSignInAlerts(reload: () => void) {
       void showNotification(title, {
         body,
         tag: `sign-in:${notice.server}`,
-        url: "/",
+        // Where the page may not show it (the service worker does), a click opens the sign-in, as the push's does.
+        url: notice.link,
         onClick: () => window.open(notice.link, "_blank", "noopener"),
       });
     },

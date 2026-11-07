@@ -31,17 +31,41 @@ self.addEventListener("notificationclick", (event) => {
   const url = appPath(event.notification.data && event.notification.data.url);
   event.waitUntil(
     (async () => {
+      // A route the Worker serves (a sign-in): a page of its own, which the app cannot show in place.
+      if (url.startsWith("/api/")) return self.clients.openWindow(url);
       const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
-      // A window of the app itself: not a page the Worker serves (a sign-in's result, a file, a published page), which
-      // would hear nothing.
-      const open = windows.find((client) => {
+      // A window of the app itself, which moves there without a reload (src/push.ts): its workspace first (a chat, the
+      // start page, skills), else any page of the app's. Not a page the Worker serves (a sign-in's result, a file, a
+      // published page, Access's), which would hear nothing.
+      const app = windows.filter((client) => {
         const at = new URL(client.url);
-        return at.origin === self.location.origin && !at.pathname.startsWith("/api/") && !at.pathname.startsWith("/u/");
+        return at.origin === self.location.origin && !/^\/(api|u|cdn-cgi)\//.test(at.pathname);
       });
+      const open = app.find((client) => /^\/(c\/|skills$|$)/.test(new URL(client.url).pathname)) ?? app[0];
       if (!open) return self.clients.openWindow(url);
-      // The app moves there itself (src/push.ts), without a reload.
       open.postMessage({ type: "open", url });
       return open.focus();
     })(),
+  );
+});
+
+// The browser replaced the subscription (it expired, or the push service rotated it) while the app may be closed: hand
+// the Worker the new one, so pushes keep coming. The app's next load does the same, so a failure here loses nothing for
+// long.
+self.addEventListener("pushsubscriptionchange", (event) => {
+  const post = (path, body) =>
+    fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  event.waitUntil(
+    (async () => {
+      const old = event.oldSubscription;
+      let next = event.newSubscription;
+      if (!next) {
+        const key = await fetch("/api/push/key").then((response) => (response.ok ? response.json() : null));
+        if (!key || typeof key.publicKey !== "string") return;
+        next = await self.registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key.publicKey });
+      }
+      if (old) await post("/api/push/unsubscribe", { endpoint: old.endpoint }).catch(() => {});
+      await post("/api/push/subscribe", next.toJSON());
+    })().catch(() => {}),
   );
 });

@@ -43,6 +43,8 @@ function usePath(): [URL, (path: string) => void] {
 export function App() {
   const [url, navigate] = usePath();
   const path = url.pathname;
+  // A click on a pushed notification while the app is open, on any of its pages, moves it to the chat the push names.
+  useEffect(() => onPushOpen(navigate), [navigate]);
   // Who is signed in, and how this deployment signs people in. Undefined until the Worker answers.
   const [session, setSession] = useState<{ me: Me | null; auth: Me["auth"] }>();
 
@@ -266,8 +268,6 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, naviga
   const [signIns, loadSignIns, setSignIns] = useLatest<McpSignInView[]>(api.signIns, []);
   const onSignIn = useSignInAlerts(loadSignIns);
   useSidebarSocket({ chats: loadChats, artifacts: loadArtifacts, skills: loadSkills, "sign-ins": loadSignIns }, notices.onMention, onSignIn);
-  // A click on a pushed notification while the app is open moves it to the chat the push names.
-  useEffect(() => onPushOpen(navigate), [navigate]);
   // Pushes reach this browser for the user signed in here, and no one else.
   useEffect(() => setPushUser(uid), [uid]);
   // Another chat shows its own artifacts: the one asked for at once, else the newest it published once it loads.
@@ -566,7 +566,10 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, naviga
             <ArtifactPanel artifactId={preview.artifactId} latestKnown={preview.version} uid={uid} onClose={closePreview} />
           </ErrorBoundary>
         ))}
-      <MentionToasts {...notices} asking={chats.some(isShared)} />
+      <MentionToasts
+        {...notices}
+        asking={{ mentions: chats.some(isShared), signIns: signIns.some((item) => item.usedByRuns || item.notice !== undefined) }}
+      />
     </div>
   );
 }
