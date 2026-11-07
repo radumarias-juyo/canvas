@@ -3458,7 +3458,8 @@ export class ChatAgent extends DurableObject<Env> {
     this.spend.tag(session, { agent: entry.agentId });
     this.#turnSpend.delete(session);
     // Only a turn that runs (turnLevel: its owner's own message that named it) gets tools that change data: one the
-    // router picked it for, or took on its own, only reads, as any turn its owner did not ask of it.
+    // router picked it for, or took on its own, only reads, as any turn its owner did not ask of it. With nobody but
+    // the owner in the chat, it reads every server of the agent's (those that sign in each user too), as a run does.
     const allowed = (installed: readonly string[]) =>
       turn.calledBy.drafts
         ? draftTools(installed, this.#mcpTools, agent)
@@ -3469,6 +3470,7 @@ export class ChatAgent extends DurableObject<Env> {
             turnLevel(turn).level === 4,
             (server) => this.hub.server(server)?.auth === "oauth",
             !!turn.calledBy.unprompted,
+            !this.members.hasAny(),
           );
     await this.#configureSession(session, this.#agentChoice(agent), agentInstructions(agent, this.#nameOf(entry.ownerUid)), allowed);
   }
@@ -4331,8 +4333,8 @@ export class ChatAgent extends DurableObject<Env> {
    * only its start (actedOf), so a later step that reads it stops, saying why.
    */
   #tellRunsDecided(skip: ReadonlySet<string>): void {
-    // Cheap on a wake with no run waiting.
-    if (!this.runs.anyWaiting()) return;
+    // Cheap on a wake with no item waiting.
+    if (!this.runs.anyItemWaiting()) return;
     // Only an action that ended can have been missed: its origin read for those alone.
     const ended = this.actions.list().filter((view) => view.status !== "pending" && view.status !== "running" && !skip.has(view.id));
     const actions = ended.map((view) => ({ view, run: this.actions.origin(view.id)?.run }));

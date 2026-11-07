@@ -212,15 +212,19 @@ export function valueAt(value: unknown, path: string): unknown {
 
 /**
  * An argument's values: each element of a list, else the value itself; none when the call does not set it. A path
- * through a list of objects (`items.amount`) reads that field of each of them.
+ * through a list of objects (`items.amount`) reads that field of each of them. A plain value (text, a number, yes or
+ * no) where the path goes on into an object (a string|object union, a server that does not check) is itself the value:
+ * a rule on `to.email` checks `to: "a@b.example"` too.
  */
 export function argValues(input: StepInput, path: string): unknown[] {
+  const plain = (value: unknown) => typeof value === "string" || typeof value === "number" || typeof value === "boolean";
   let found: unknown[] = [input];
   for (const part of path.split(".")) {
     found = found.flatMap((value): unknown[] => {
+      if (plain(value)) return [value];
       if (Array.isArray(value)) {
         if (/^\d+$/.test(part)) return value.length > Number(part) ? [value[Number(part)]] : [];
-        return value.flatMap((item) => (isObject(item) && Object.hasOwn(item, part) ? [item[part]] : []));
+        return value.flatMap((item) => (plain(item) ? [item] : isObject(item) && Object.hasOwn(item, part) ? [item[part]] : []));
       }
       return isObject(value) && Object.hasOwn(value, part) ? [value[part]] : [];
     });
@@ -342,6 +346,8 @@ function normalAddresses(text: string): string {
   return text
     .replace(/\([^()]*\)/g, " ")
     .replace(/\s*@\s*/g, "@")
+    // A quoted local part that needs no quotes is the same address: "leak"@blocked.example is leak@blocked.example.
+    .replace(/"([a-z0-9!#$%&'*+/=?^_`{|}~.-]+)"@/g, "$1@")
     .replace(/^[^"<>@:,;]*:/, "")
     .replace(/;\s*$/, "")
     .trim();

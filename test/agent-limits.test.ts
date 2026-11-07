@@ -105,6 +105,12 @@ describe("guardrail rules", () => {
     expect(violation(to, call({ to: [{ email: "ok@fine.com" }, { email: "ceo@rival.example", name: "C" }] }))).toMatch(/"ceo@rival.example", which is never allowed/);
     expect(violation(to, call({ to: { primary: { email: "Sam <sam@rival.example>" } } }))).toMatch(/never allowed/);
     expect(violation(to, call({ to: [{ email: "ok@fine.com" }] }))).toBeNull();
+    // A plain value where the rule's path expects an object (a string|object union) is checked itself; min and max too.
+    const email = rule({ kind: "never", arg: "to.email", value: ["*@rival.example"] });
+    expect(violation(email, call({ to: "ceo@rival.example" }))).toMatch(/never allowed/);
+    expect(violation(email, call({ to: ["ok@fine.com", { email: "ceo@rival.example" }] }))).toMatch(/never allowed/);
+    expect(violation(email, call({ to: { email: "ok@fine.com" } }))).toBeNull();
+    expect(violation(rule({ kind: "max", arg: "items.amount", value: 100 }), call({ items: 500 }))).toMatch(/500/);
     // Recipients kept as an object's keys.
     expect(violation(to, call({ to: { "ok@fine.com": true, "ceo@rival.example": true } }))).toMatch(/"ceo@rival.example", which is never allowed/);
     let deep: unknown = "ceo@rival.example";
@@ -163,6 +169,10 @@ describe("guardrail rules", () => {
     expect(matchesValue("*@blocked.com", "Sam <leak (work) @ blocked.com>")).toBe(true);
     expect(matchesValue("leak@blocked.com", "(a, b) leak@blocked.com")).toBe(true);
     expect(matchesValue("leak@blocked.com", "team: boss@ok.com;")).toBe(false);
+    // A quoted local part that needs no quotes.
+    expect(matchesValue("leak@blocked.com", '"leak"@blocked.com')).toBe(true);
+    expect(matchesValue("leak@blocked.com", 'Sam <"Leak"@Blocked.com>')).toBe(true);
+    expect(matchesValue("leak@blocked.com", '"le ak"@blocked.com')).toBe(false);
   });
 
   it("never matches a recipient written as Name <address>, by its address or its name", () => {

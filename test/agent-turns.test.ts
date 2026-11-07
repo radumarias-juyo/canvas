@@ -490,6 +490,15 @@ describe("allowedTools", () => {
     expect(allowedTools(tools, mcp, { ...agent, sharedServers: [] }, true, signsIn)).toEqual(allowedTools(tools, mcp, agent, true, signsIn));
   });
 
+  it("lets a turn its owner did not give read its sign-in servers too when nobody but the owner is in the chat", () => {
+    // A routed turn in the owner's private chat: "how are my open deals?" reads mail (signs in each user) as a run does.
+    expect(allowedTools(tools, mcp, agent, false, signsIn, false, true)).toEqual([...reads, "crm__list_deals", "mail__search"]);
+    // With others in the chat, only the servers whose results everyone shares.
+    expect(allowedTools(tools, mcp, agent, false, signsIn)).toEqual([...reads, "crm__list_deals"]);
+    // Never a write, alone or not.
+    expect(allowedTools(tools, mcp, agent, false, signsIn, false, true)).not.toContain("crm__update_deal");
+  });
+
   it("gives a run only reading tools: the app's and those of all its own servers, sign-in ones too", () => {
     expect(runTools([...tools, "some_new_tool"], mcp, agent)).toEqual([...reads, "crm__list_deals", "mail__search"]);
     expect(runTools(tools, mcp, {})).toEqual([...reads, "crm__list_deals", "mail__search", "vault__read"]);

@@ -336,6 +336,36 @@ describe("scheduled runs", () => {
     expect(host.delivered).toHaveLength(1);
   });
 
+  it("goes with its workflow as it is now when that changed while it waited for a sign-in", async () => {
+    const { host, runner, definition } = home();
+    host.signIn.add("crm");
+    await runner.apply(definition.id, definition);
+    host.clock.now = SEVEN;
+    expect(await runner.fired({ agentId: definition.id, dueAt: SEVEN })).toMatchObject({ status: "needs_sign_in" });
+    // Its owner edits the work step's prompt meanwhile: the run had run nothing, so it goes with the new one.
+    const edited = { ...definition, workflow: [sales, { kind: "work", prompt: "Say it in one line." }, { kind: "tell", to: ["owner"], via: "chat" }] } as AgentDefinition;
+    host.definitions.set(definition.id, edited);
+    host.signIn.delete("crm");
+    expect(await runner.signedIn("crm")).toBe(1);
+    await host.settled();
+    expect(host.runs.list(definition.id)[0]).toMatchObject({ status: "sent" });
+    expect(host.works.map((work) => work.prompt).join("\n")).toContain("Say it in one line.");
+  });
+
+  it("goes again when its changed steps no longer use the server it waited for, with those steps", async () => {
+    const { host, runner, definition } = home();
+    host.signIn.add("crm");
+    await runner.apply(definition.id, definition);
+    host.clock.now = SEVEN;
+    expect(await runner.fired({ agentId: definition.id, dueAt: SEVEN })).toMatchObject({ status: "needs_sign_in" });
+    const edited = { ...definition, workflow: [{ kind: "work", prompt: "Say hello." }, { kind: "tell", to: ["owner"], via: "chat" }] } as AgentDefinition;
+    host.definitions.set(definition.id, edited);
+    await runner.apply(definition.id, edited);
+    await host.settled();
+    expect(host.runs.list(definition.id)[0]).toMatchObject({ status: "sent" });
+    expect(host.works.map((work) => work.prompt).join("\n")).toContain("Say hello.");
+  });
+
   it("waits for a sign-in to a server only its work step's tools can come from", async () => {
     // No step reads calendar, but the work step may use its tools: its sign-in is checked before the run.
     const { host, runner, definition } = home(agent({ servers: ["crm", "calendar"] }));
@@ -1133,6 +1163,10 @@ describe("scheduled runs", () => {
 
     it("finds the decisions a run missed when a restart came between an action's end and the run", async () => {
       const { host, runner, definition } = await held();
+      // Looked for while any item waits, its run waiting or still going (another item's pass), or waiting for a sign-in.
+      expect(host.runs.anyItemWaiting()).toBe(true);
+      host.runs.update(definition.id, T0, { status: "running" });
+      expect(host.runs.anyItemWaiting()).toBe(true);
       const view = { id: "act1", status: "declined" } as PendingActionView;
       const missed = missedDecisions(host.runs, [{ view, run: ref(definition) }, { view: { ...view, id: "act2", status: "pending" } as PendingActionView, run: ref(definition) }]);
       expect(missed).toEqual([{ ref: ref(definition), acted: { ok: false, end: "stopped", detail: "you declined it" } }]);
@@ -1141,7 +1175,39 @@ describe("scheduled runs", () => {
       expect(host.runs.list(definition.id)[0].status).toBe("not_today");
       // Told once: the step waits no more.
       expect(missedDecisions(host.runs, [{ view, run: ref(definition) }])).toEqual([]);
+      expect(host.runs.anyItemWaiting()).toBe(false);
     });
+
+    it("ends its waiting items with it when a run waiting for a sign-in is skipped", async () => {
+      const { host, definition } = await held();
+      host.runs.update(definition.id, T0, { status: "needs_sign_in" });
+      expect(host.runs.skipWaiting(definition.id, T0, "Skipped: a newer run went instead.")).toBe(true);
+      expect(host.runs.items(definition.id, T0).map((item) => item.status)).toEqual(["not_today"]);
+      expect(host.runs.anyItemWaiting()).toBe(false);
+    });
+  });
+
+  it("sends nothing when its agent is turned off while it goes on after a restart", async () => {
+    const { host, runner, definition } = home();
+    // The work step never answers in the first object: it stopped there.
+    host.answer = () => new Promise<WorkResult>(() => {});
+    void runner.now(definition.id, false);
+    for (let i = 0; i < 5; i++) await tick();
+    const restarted = new FakeHome();
+    Object.assign(restarted, { sql: host.sql });
+    const runs = new AgentRuns(host.sql, () => restarted.clock.now);
+    Object.defineProperty(restarted, "runs", { value: runs });
+    restarted.definitions.set(definition.id, { ...definition });
+    // Turned off while its item goes on, after the run's own check at its start.
+    restarted.answer = async () => {
+      restarted.definitions.set(definition.id, { ...definition, enabled: false });
+      return { status: "done", text: "Done.", cost: 0 };
+    };
+    new AgentRunner(restarted, host.sql).resume();
+    await restarted.settled();
+    expect(restarted.works).toHaveLength(1);
+    expect(restarted.delivered).toHaveLength(0);
+    expect(runs.list(definition.id)[0]).toMatchObject({ status: "not_today", summary: expect.stringMatching(/was turned off/) });
   });
 
   it("makes a do step's call once when the run goes on after a restart", async () => {

@@ -32,6 +32,7 @@ describe("rule lines", () => {
     expect(ruleWarning(rule, tools)).toBeNull();
     expect(ruleWarning(rule, null)).toBeNull();
     expect(ruleWarning({ ...rule, tool: "*" }, tools)).toBeNull();
+    expect(ruleWarning(rule, [{ ...tools[0], annotations: { readOnlyHint: true } }])?.text).toMatch(/read-only now/);
     expect(ruleWarning({ ...rule, tool: "change_deal" }, tools)).toEqual({
       on: "tool",
       text: "crm lists no tool change_deal now, so this rule checks no call. If it was renamed, pick its new name.",

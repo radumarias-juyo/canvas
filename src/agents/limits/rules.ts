@@ -13,7 +13,7 @@ import {
   type QuietRange,
   schemaHasPath,
 } from "../../../shared/limits.ts";
-import type { ToolInfo } from "../../../shared/protocol.ts";
+import { isReadOnly, type ToolInfo } from "../../../shared/protocol.ts";
 import { errorMessage, listSome, plural, randomHex } from "../../../shared/util.ts";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -67,7 +67,8 @@ export function ruleLine(rule: GuardrailRule): string {
 /**
  * What is wrong with a rule by its server's tools as listed now (null before they are read): the gate matches a rule
  * by its tool's name, so one on a tool the server no longer lists checks no call, and (as `hitsFor` reads it) one on an
- * argument its tool no longer has fires on every call to it. Null when nothing is.
+ * argument its tool no longer has fires on every call to it; a tool listed as read-only now is called without the
+ * gate, so no rule checks it. Null when nothing is.
  */
 export function ruleWarning(
   rule: Pick<GuardrailRule, "server" | "tool" | "arg">,
@@ -77,6 +78,8 @@ export function ruleWarning(
   const tool = tools.find((each) => each.name === rule.tool);
   if (!tool)
     return { on: "tool", text: `${rule.server} lists no tool ${rule.tool} now, so this rule checks no call. If it was renamed, pick its new name.` };
+  if (isReadOnly(tool))
+    return { on: "tool", text: `${rule.server} lists ${rule.tool} as read-only now, so its calls skip the rules and this one checks none.` };
   if (rule.arg && schemaHasPath(tool.inputSchema, rule.arg) === false)
     return { on: "arg", text: `${rule.tool} has no argument ${rule.arg} now, so this rule fires on every call to it.` };
   return null;

@@ -407,6 +407,14 @@ export class RunExecutor {
         await mapLimit(elements, RUN_CONCURRENCY, (element) => this.#item(current, run, element, when));
         outcomes = this.#outcomes(agent.id, dueAt, elements);
       } while (outcomes.some((item) => item.status === "running"));
+      // A run that went on (a decision, a restart, a second pass) checks the agent once more before it sends: turned
+      // off or changed meanwhile, it sends nothing.
+      if (!started || pass > 1) {
+        const now = await this.#host.definition(agent.id).catch(() => current);
+        const changed = this.#stopIfChanged(now ?? { ...current, enabled: false }, run);
+        if (changed) return { status: changed, started };
+        if (now) current = now;
+      }
       const held = outcomes.filter((item) => item.status === "waiting");
       if (held.length) {
         const which = held.length > 1 ? ` for ${plural(held.length, "item")}` : held[0].label ? ` for ${held[0].label}` : "";
@@ -418,7 +426,9 @@ export class RunExecutor {
       return { status, started };
     } catch (error) {
       if (error instanceof SignInNeeded) return (await this.#turnedOffNow(agent, run)) ?? this.#waitForSignIn(agent, run, [error.server]);
-      runs.update(agent.id, dueAt, { status: "failed", summary: `Failed: ${errorMessage(error)}` });
+      // A run going on has items open: they end with it, not left running or waiting for good.
+      const summary = `Failed: ${errorMessage(error)}`;
+      runs.stop(agent.id, dueAt, { item: summary, status: "failed", summary });
       return { status: "failed", started };
     } finally {
       this.#host.changed(agent.id);
@@ -434,10 +444,17 @@ export class RunExecutor {
   /**
    * A run going on whose agent (as `agent` is now) changed while it waited, or since a restart cut it off: going on
    * would run steps it never had and send through deliveries it never had, so it stops. Or one turned off since (a
-   * test's apart): a call its owner approved ran all the same; nothing after it does. Null when it goes on.
+   * test's apart): a call its owner approved ran all the same; nothing after it does. Null when it goes on. A run that
+   * has not gone into its items (it waited for a sign-in before them) has run nothing: it goes with the agent as it is
+   * now, which its row then keeps as its shape.
    */
   #stopIfChanged(agent: AgentDefinition, run: RunRecord): RunStatus | null {
-    if (run.detail.shape !== undefined && run.detail.shape !== shapeOf(agent)) {
+    const shape = shapeOf(agent);
+    if (run.detail.shape !== undefined && run.detail.shape !== shape && !this.#wentIn(run)) {
+      this.#host.runs.update(run.agentId, run.dueAt, { detail: { shape } });
+      run.detail.shape = shape;
+    }
+    if (run.detail.shape !== undefined && run.detail.shape !== shape) {
       const why = `@${agent.name}'s workflow changed while this run waited, so it did nothing more and sent nothing`;
       return this.#stop(agent, run, "Its workflow changed while it waited: it stopped there.", why, "failed");
     }
@@ -446,6 +463,11 @@ export class RunExecutor {
       return this.#stop(agent, run, `@${agent.name} was turned off: it stopped there.`, why, "not_today");
     }
     return null;
+  }
+
+  /** Whether a run went into its items: it listed its scope, or has an item's row. */
+  #wentIn(run: RunRecord): boolean {
+    return run.detail.listed === true || this.#host.runs.items(run.agentId, run.dueAt).length > 0;
   }
 
   /**
@@ -500,7 +522,9 @@ export class RunExecutor {
     if (run.test) return null;
     const now = await this.#host.definition(agent.id).catch(() => agent);
     if (now?.enabled) return null;
-    this.#host.runs.update(run.agentId, run.dueAt, { status: "not_today", summary: now ? turnedOff(agent) : `Skipped: @${agent.name} was deleted.` });
+    const summary = now ? turnedOff(agent) : `Skipped: @${agent.name} was deleted.`;
+    // Its items that did not end (one waiting at a held call, when it goes on) end with it.
+    this.#host.runs.stop(run.agentId, run.dueAt, { item: summary, status: "not_today", summary });
     return { status: "not_today", started: true };
   }
 
@@ -545,6 +569,18 @@ export class RunExecutor {
     const runs = this.#host.runs;
     const { view, started } = await runs.beginItem(agent.id, run.dueAt, element.key, element.label, () => this.#host.newSession());
     if (!started && view.status !== "running") return;
+    if (!started && !run.test) {
+      // Going on (reopened by a decision, or cut off by a restart), maybe after the pass began: with the agent as it is
+      // now. Turned off, deleted or changed since, it stops here.
+      const now = await this.#host.definition(agent.id).catch(() => agent);
+      const changed = now && run.detail.shape !== undefined && shapeOf(now) !== run.detail.shape;
+      if (!now?.enabled || changed) {
+        const reason = changed ? "Its workflow changed while it waited: it stopped there." : `@${agent.name} was turned off: it stopped there.`;
+        runs.endItem(agent.id, run.dueAt, element.key, { status: changed ? "failed" : "not_today", steps: view.steps, reason, cost: 0 });
+        this.#host.changed(agent.id);
+        return;
+      }
+    }
     if (element.missing) {
       // Its element was too large to keep: going on (after a decision, or a restart), it cannot read it, so it stops
       // (as at a do result too large).

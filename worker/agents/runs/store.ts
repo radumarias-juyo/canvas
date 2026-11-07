@@ -319,6 +319,8 @@ export class AgentRuns {
         agentId,
         dueAt,
       ).rowsWritten > 0;
+    // Its items that did not end (one waiting at a held call) end with it: nothing goes through them again.
+    if (changed) this.stopItems(agentId, dueAt, summary);
     const run = changed ? this.get(agentId, dueAt) : null;
     if (run && !run.test) this.#onEnded?.({ ...run, status: "not_today" });
     return changed;
@@ -569,9 +571,12 @@ export class AgentRuns {
     return runs.map((run) => this.view(run, counts.get(run.dueAt) ?? NO_ITEMS));
   }
 
-  /** Whether any run waits for its owner to decide a held call. */
-  anyWaiting(): boolean {
-    return this.#sql.exec("SELECT 1 FROM agent_runs WHERE item = '' AND status = 'waiting' LIMIT 1").toArray().length > 0;
+  /**
+   * Whether any item waits for its owner to decide a held call: its run waiting, or still going (another item in its
+   * pass), or waiting for a sign-in.
+   */
+  anyItemWaiting(): boolean {
+    return this.#sql.exec("SELECT 1 FROM agent_runs WHERE item != '' AND status = 'waiting' LIMIT 1").toArray().length > 0;
   }
 
   /** The runs that did not end: cut off by a restart, or waiting for a sign-in. */

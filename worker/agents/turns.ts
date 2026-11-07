@@ -169,12 +169,20 @@ export class CatchUp {
   result(): { text: string; through: number } {
     if (!this.#lines.length) return { text: "", through: this.#through };
     const skipped = this.#full ? "(Earlier messages are left out.)\n\n" : "";
-    return { text: `What was said in the chat since your last turn:\n\n${skipped}${[...this.#lines].reverse().join("\n\n")}`, through: this.#through };
+    return {
+      text: `What was said in the chat since your last turn:\n\n${skipped}${[...this.#lines].reverse().join("\n\n")}`,
+      through: this.#through,
+    };
   }
 }
 
 /** CatchUp over `entries`, oldest first. */
-export function mirrorText(entries: readonly EntryRecord[], self: string, ownerUid: string, skip?: ReadonlySet<string>): { text: string; through: number } {
+export function mirrorText(
+  entries: readonly EntryRecord[],
+  self: string,
+  ownerUid: string,
+  skip?: ReadonlySet<string>,
+): { text: string; through: number } {
   const catchUp = new CatchUp(self, ownerUid, skip);
   catchUp.add([...entries].reverse());
   return catchUp.result();
@@ -272,7 +280,15 @@ const NEVER_FOR_AGENTS = ["react"];
  * memory notes the session reads anyway, and loading a deferred tool it may use. Every other tool of the app writes, runs code, reads the owner's private files,
  * or lists the owner's servers and sign-ins, and a tool added later is left out until it is named here.
  */
-const READ_TOOLS = ["artifact_read", "artifact_history", "artifact_diff", "activate_skill", "read_skill_resource", MEMORY_RECALL_TOOL, TOOL_SEARCH_TOOL_NAME];
+const READ_TOOLS = [
+  "artifact_read",
+  "artifact_history",
+  "artifact_diff",
+  "activate_skill",
+  "read_skill_resource",
+  MEMORY_RECALL_TOOL,
+  TOOL_SEARCH_TOOL_NAME,
+];
 /** The tools that only show something in the chat (a plan as a checklist card: no data): for a turn, not a run, which nobody watches. */
 const DISPLAY_TOOLS = [CHECKLIST_TOOL];
 
@@ -282,7 +298,8 @@ const DISPLAY_TOOLS = [CHECKLIST_TOOL];
  * use. A turn its owner did not ask for (a member's, another agent's hand-off, a schedule's) gets only the app's read
  * tools (READ_TOOLS), the display ones (DISPLAY_TOOLS) and the read-only MCP tools of its servers for shared chats. Its
  * owner then approves any write in their own view. A turn nobody asked for (`unprompted`) gets no display tools either:
- * it may still answer PASS, and then nothing of it shows.
+ * it may still answer PASS, and then nothing of it shows. In a chat with nobody but its owner (`alone`), where only
+ * they see what it reads, such a turn reads as a run does: every read-only MCP tool of its servers (runTools).
  *
  * `servers`: the agent's own list (every server when absent); `sharedServers`: the one for shared chats (when absent,
  * those of its servers that do not sign in each user, `signsIn`).
@@ -294,9 +311,10 @@ export function allowedTools(
   byOwner: boolean,
   signsIn: (server: string) => boolean,
   unprompted = false,
+  alone = false,
 ): string[] {
   const own = (server: string) => mayUseServer(agent, server);
-  const shared = (server: string) => own(server) && (agent.sharedServers ? agent.sharedServers.includes(server) : !signsIn(server));
+  const shared = (server: string) => own(server) && (alone || (agent.sharedServers ? agent.sharedServers.includes(server) : !signsIn(server)));
   return tools.filter((name) => {
     if (NEVER_FOR_AGENTS.includes(name)) return false;
     const info = mcp.get(name);
