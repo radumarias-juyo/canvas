@@ -203,7 +203,7 @@ export class AgentTurns {
         // entry on: what is there already (the report, replies posted before) stays the chat's.
         const from = await this.#host.newest(turn.session);
         if (!live()) return;
-        roster.setApart(turn.session, agent.reviewBeforePosting === true, from);
+        roster.setApart(turn.session, agent.reviewBeforePosting === true, from, turn.id);
       }
       if (turn.forked) await Promise.all([this.#tellApart(entry, turn), this.#host.configure(entry, agent, turn)]);
       else await Promise.all([turn.session ? undefined : this.#catchUp(entry, turn.id), this.#host.configure(entry, agent, turn)]);
@@ -338,7 +338,8 @@ export class AgentTurns {
       const held = review === true && sources.length > 0;
       // What a turn apart from the chat (a fork, a run's reply session) made stays withheld unless its reply is posted
       // (ChatRoster.release): a failed or empty one released at once names none of it.
-      const shows = !(forked || now.session !== undefined) || held || (done && !!text);
+      const kept = now.session !== undefined && roster.fork(now.session)?.kept === true;
+      const shows = !(forked || now.session !== undefined) || held || (done && !!text && !kept);
       const current = roster.get(entry.agentId) ?? entry;
       const reply: ChatAgentReplyData = {
         agentId: entry.agentId,

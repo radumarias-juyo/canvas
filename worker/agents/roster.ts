@@ -120,11 +120,13 @@ type RosterRow = {
  */
 /**
  * A session apart from the chat: `from`, where what is apart starts (a fork's own entries; a reused session's, what came
- * after its newest entry when its turn apart began); `reused`: later turns run in it again (setApart).
+ * after its newest entry when its turn apart began); `reused`: later turns run in it again (setApart); `kept`: an
+ * earlier turn of a reused session ended without its reply posted, so what it made stays withheld for good, and with it
+ * everything the session makes from then on (posting a later reply makes none of it the chat's).
  */
-export type Fork = { posted: boolean; ended: boolean; from?: number; review: boolean; reused: boolean };
-type ForkRow = { session: string; posted: number; from_entry: number | null; review: number; reused: number; open: number };
-const FORKS = `SELECT f.session, f.posted, f.from_entry, f.review, f.reused,
+export type Fork = { posted: boolean; ended: boolean; from?: number; review: boolean; reused: boolean; kept: boolean };
+type ForkRow = { session: string; posted: number; from_entry: number | null; review: number; reused: number; kept: number; open: number };
+const FORKS = `SELECT f.session, f.posted, f.from_entry, f.review, f.reused, f.kept,
   EXISTS (SELECT 1 FROM chat_agent_turns t WHERE t.session = f.session AND t.status IN ('queued', 'running')) AS open
   FROM chat_agent_forks f`;
 const forkOf = (row: ForkRow): Fork => ({
@@ -133,6 +135,7 @@ const forkOf = (row: ForkRow): Fork => ({
   ...(row.from_entry !== null && { from: row.from_entry }),
   review: row.review === 1,
   reused: row.reused === 1,
+  kept: row.kept === 1,
 });
 
 type TurnRow = {
@@ -248,7 +251,14 @@ export class ChatRoster {
     `);
     // From where a fork's own entries start (what it inherited is its parent's), whether its owner reviews its reply,
     // and whether later turns run in it again (a run's reply session, setApart): such a session never ends for good.
-    addColumns(sql, "chat_agent_forks", { from_entry: "INTEGER", review: "INTEGER NOT NULL DEFAULT 0", reused: "INTEGER NOT NULL DEFAULT 0" });
+    // For a reused one, the turn apart in it now, and whether an earlier one's outputs stay withheld for good (Fork.kept).
+    addColumns(sql, "chat_agent_forks", {
+      from_entry: "INTEGER",
+      review: "INTEGER NOT NULL DEFAULT 0",
+      reused: "INTEGER NOT NULL DEFAULT 0",
+      apart_turn: "INTEGER",
+      kept: "INTEGER NOT NULL DEFAULT 0",
+    });
     // Columns added later: a roster or turn table made before them lacks them.
     addColumns(sql, "chat_agents", {
       shared: "INTEGER NOT NULL DEFAULT 0",
@@ -481,14 +491,18 @@ export class ChatRoster {
    * made before stays as it was: the traces read keep what they read as the chat's, and its pages' versions are kept
    * by turn (recordPage).
    */
-  setApart(session: string, review: boolean, from?: number): void {
-    // Apart from `from` (its newest entry now) on; one still apart (a turn of it not posted) keeps where it was apart from.
+  setApart(session: string, review: boolean, from: number | undefined, turn: number): void {
+    // Apart from `from` (its newest entry now) on; one still apart keeps where it was apart from. Still apart for another
+    // turn (one discarded, failed or stopped, its reply never posted): what that made stays withheld for good (kept).
     this.#sql.exec(
-      `INSERT INTO chat_agent_forks (session, review, reused, from_entry) VALUES (?, ?, 1, ?) ON CONFLICT (session) DO UPDATE SET
-       from_entry = CASE WHEN posted = 1 THEN excluded.from_entry ELSE from_entry END, posted = 0, review = excluded.review`,
+      `INSERT INTO chat_agent_forks (session, review, reused, from_entry, apart_turn) VALUES (?, ?, 1, ?, ?) ON CONFLICT (session) DO UPDATE SET
+       kept = CASE WHEN posted = 0 AND apart_turn IS NOT excluded.apart_turn THEN 1 ELSE kept END,
+       from_entry = CASE WHEN posted = 1 THEN excluded.from_entry ELSE from_entry END,
+       posted = 0, review = excluded.review, apart_turn = excluded.apart_turn`,
       session,
       review ? 1 : 0,
       from ?? null,
+      turn,
     );
   }
 
@@ -682,10 +696,10 @@ export class ChatRoster {
         id,
       )
       .toArray()[0] as Pick<TurnRow, "session" | "forked"> | undefined;
-    // Its fork's pages and files are the chat's now, as its reply is.
+    // Its fork's pages and files are the chat's now, as its reply is; never those of a session that keeps them (Fork.kept).
     if (!reply.failed && reply.text && row?.session) {
-      this.#sql.exec("UPDATE chat_agent_forks SET posted = 1 WHERE session = ?", row.session);
-      this.#sql.exec("UPDATE chat_agent_fork_pages SET posted = 1 WHERE session = ?", row.session);
+      const posted = this.#sql.exec("UPDATE chat_agent_forks SET posted = 1 WHERE session = ? AND kept = 0", row.session).rowsWritten > 0;
+      if (posted) this.#sql.exec("UPDATE chat_agent_fork_pages SET posted = 1 WHERE session = ?", row.session);
     }
   }
 
