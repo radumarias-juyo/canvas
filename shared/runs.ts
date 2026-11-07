@@ -124,8 +124,8 @@ export interface AgentRunDetail extends AgentRunView {
   when: string;
   itemsList: RunItemView[];
   deliveries: RunDelivery[];
-  /** What it used: the skills its work steps named, the servers it read, the models it ran on. */
-  used: { skills: string[]; servers: string[]; models: string[] };
+  /** What it used: the skills its work steps named, the servers it read, the models it ran on, how many memory notes it read. */
+  used: { skills: string[]; servers: string[]; models: string[]; notes: number };
 }
 
 /** What a run's post in a chat carries (ChatAgentReplyData.run): which run, so a reply can continue it. */

@@ -55,7 +55,8 @@ export interface RunDetail {
    */
   released?: string[];
   when?: string;
-  used?: { skills: string[]; servers: string[]; models: string[] };
+  /** What it used; `notes`: the ids of the memory notes its sessions read. */
+  used?: { skills: string[]; servers: string[]; models: string[]; notes?: string[] };
   /** The watch result that started it, for its steps to read as `watch`, and the one before it (`previous`). */
   watch?: unknown;
   previous?: unknown;

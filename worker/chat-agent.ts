@@ -145,7 +145,7 @@ import {
   type Catalog,
 } from "./models.ts";
 import { withFailuresReported } from "./model-health.ts";
-import { scriptModel, scriptOn, SCRIPT_MODEL } from "./dev-model.ts";
+import { scriptEmbedder, scriptModel, scriptOn, scriptPauseMs, SCRIPT_MODEL } from "./dev-model.ts";
 import { chatAgentName, parseChatAgentName } from "./chat-name.ts";
 import { inboxIds, queuedIdsOf, queuedMessages } from "./queue.ts";
 import { readSystemPrompt, saveSystemPrompt, SYSTEM_PROMPT_KEY, type Tag } from "./users.ts";
@@ -193,6 +193,7 @@ import type { Value } from "../shared/conditions.ts";
 import { runRef, type AgentRunDetail, type AgentRunList, type RunDelivery, type RunRef } from "../shared/runs.ts";
 import type { RoomLink, RoomRef, SeatBatch, SeatLink, SeatResult, SeatTurn } from "./agents/seats/link.ts";
 import { memberAgentName, seatChatId } from "./agents/seats/names.ts";
+import { postedVersion, readableVersion } from "./agent/page-authors.ts";
 import { SeatActions } from "./agents/seats/actions.ts";
 import { NOT_YOUR_AGENT, ownWindowEntry, roomWindowSessions } from "./agents/window.ts";
 import { MAX_WINDOW_TEXT, WINDOW_ENTRIES, windowText, type AgentWindowView, type SteerResult } from "../shared/agent-window.ts";
@@ -261,6 +262,8 @@ import { CHAT_CHECKLIST_KIND, checklistEntry, type ChecklistAuthor, type Checkli
 
 /** Artifacts from the owner's other chats one chat remembers as named with "@" (see ChatAgent.#broughtIn). */
 const MAX_BROUGHT_IN = 200;
+/** How many pages of 100 log entries a read of another person's page looks back through for the replies that posted it. */
+const MAX_POSTED_PAGES = 20;
 /** How many bytes of skill files a chat object keeps in memory: a design library or two. */
 const SKILL_FILE_CACHE_BYTES = 4_000_000;
 
@@ -530,13 +533,16 @@ export class ChatAgent extends DurableObject<Env> {
     definition: async (entry) => this.#inThisChat(await this.#index(entry.ownerUid).getAgent(entry.agentId)),
     budgetLeft: () => this.spend.refusal() === undefined,
     spendLeft: async (ownerUid) => (await this.#runsCapped(ownerUid)) === undefined,
-    embedder: embedder(this.env.AI as unknown as ModelRunner, this.env.INTEREST_MODEL ?? ""),
+    // On the scripted model, a stand-in that compares words (worker/dev-model.ts).
+    embedder: scriptOn(this.env) ? scriptEmbedder : embedder(this.env.AI as unknown as ModelRunner, this.env.INTEREST_MODEL ?? ""),
     give: (agentId, request) => {
       this.turns.call([agentId], request);
     },
     observe: (event: FunnelEvent) => this.metrics.funnel({ ...event, stage: event.refusal ? `${event.stage}:${event.refusal}` : event.stage }),
     now: () => Date.now(),
   });
+  /** How long the chat stays quiet before an agent may speak up: PAUSE_MS, or on the scripted model what DEV_PAUSE_MS says. */
+  readonly #pauseMs = scriptPauseMs(this.env) ?? PAUSE_MS;
   /** The spend not yet sent to each payer's directory, by uid (#spent). */
   readonly #ownerSpend = new Map<string, { calls: number; tokens: number; cost: number }>();
   /** What each session's model calls came to since its turn started, for the turn's metrics: tokens, dollars, tool calls. */
@@ -711,6 +717,7 @@ export class ChatAgent extends DurableObject<Env> {
       onDrafted: (session, id) => this.roster.recordDraft(session, id),
       broughtIn: (id) => this.#broughtIn().includes(id),
       heldIn: (chatId, artifactId) => this.#heldIn(chatId, artifactId),
+      chatPage: (meta, session) => this.#chatPage(meta, session),
       proposeSkill: (skill) => this.#directory.saveSkill(skill, "agent", false),
       proposeAgent: (input) => this.#directory.saveAgent(input, "agent", false),
       checkPage: (input, signal) =>
@@ -3326,7 +3333,7 @@ export class ChatAgent extends DurableObject<Env> {
     if (!this.speakUp.possible()) return;
     const kept = this.ctx.storage.kv.get<PauseState>(PAUSE_KEY);
     this.ctx.storage.kv.put(PAUSE_KEY, { after: Math.max(sentAt, kept?.after ?? 0), tries: 0, armed: kept?.armed ?? false } satisfies PauseState);
-    if (!kept?.armed) this.ctx.waitUntil(this.#armPause(sentAt + PAUSE_MS));
+    if (!kept?.armed) this.ctx.waitUntil(this.#armPause(sentAt + this.#pauseMs));
   }
 
   async #armPause(at: number): Promise<void> {
@@ -3352,11 +3359,11 @@ export class ChatAgent extends DurableObject<Env> {
   async #afterPause(): Promise<void> {
     const kept = this.ctx.storage.kv.get<PauseState>(PAUSE_KEY);
     if (!kept) return;
-    const quietAt = kept.after + PAUSE_MS;
+    const quietAt = kept.after + this.#pauseMs;
     const busy = this.#status() === "running" || this.roster.allRunning().length > 0;
     if (this.speakUp.possible() && (Date.now() < quietAt || (busy && kept.tries < MAX_PAUSE_TRIES))) {
       this.ctx.storage.kv.put(PAUSE_KEY, { ...kept, armed: false, tries: kept.tries + (Date.now() < quietAt ? 0 : 1) } satisfies PauseState);
-      await this.#armPause(Math.max(quietAt, Date.now() + (busy ? PAUSE_MS : 0)));
+      await this.#armPause(Math.max(quietAt, Date.now() + (busy ? this.#pauseMs : 0)));
       return;
     }
     this.ctx.storage.kv.delete(PAUSE_KEY);
@@ -3845,6 +3852,37 @@ export class ChatAgent extends DurableObject<Env> {
     return this.turns.seatEnded(agentId, turn, result);
   }
 
+  /**
+   * (RPC, from a seat) The newest version of a page a member's agent may read in this chat (ChatScope.chatPage): one of
+   * this chat's as that member sees it, or another person's as their agent's replies posted it here; 0 for none.
+   */
+  async seatPage(uid: string, agentId: string, artifactId: string): Promise<number> {
+    if (!this.#seated(uid, agentId)) return 0;
+    const meta = await this.storage.artifacts.readMeta(artifactId);
+    if (!meta) return 0;
+    return readableVersion(meta, this.#room, {
+      shown: async () => shownOf(meta, await this.withheldFrom(artifactId, uid))?.latest ?? 0,
+      posted: () => this.#postedVersion(meta),
+    });
+  }
+
+  /**
+   * The newest version of another person's page conversation `session` may read as posted in its chat: in a seat's
+   * session, as its room shows it to this seat's owner (seatPage); else as a member's agent's replies posted it here.
+   */
+  async #chatPage(meta: Pick<ArtifactMeta, "id" | "ownerUid">, session: string): Promise<number> {
+    const seated = this.seats.turnIn(session);
+    if (seated) return exports.ChatAgent.getByName(chatAgentName(seated.room.ownerUid, seated.room.chatId)).seatPage(this.uid, seated.agentId, meta.id);
+    return meta.ownerUid === this.uid ? 0 : this.#postedVersion(meta);
+  }
+
+  /** The newest version of `meta` the replies of its owner's agents posted in this chat's log (postedVersion), within MAX_POSTED_PAGES. */
+  async #postedVersion(meta: Pick<ArtifactMeta, "id" | "ownerUid">): Promise<number> {
+    let newest = 0;
+    for await (const page of this.#log({ order: "descending" }, 100, MAX_POSTED_PAGES)) newest = Math.max(newest, postedVersion(page, meta));
+    return newest;
+  }
+
   /** This object as the host of its user's agents' seats in other people's chats (worker/agents/seats/). */
   #seatHost(): SeatHost {
     const room = (ref: RoomRef, agentId: string): RoomLink => {
@@ -4313,7 +4351,7 @@ export class ChatAgent extends DurableObject<Env> {
       when: run.detail.when ?? "",
       itemsList: this.runs.items(agentId, dueAt),
       deliveries: run.detail.deliveries,
-      used: run.detail.used ?? { skills: [], servers: [], models: [] },
+      used: { skills: [], servers: [], models: [], ...run.detail.used, notes: run.detail.used?.notes?.length ?? 0 },
     };
   }
 
@@ -4485,6 +4523,7 @@ export class ChatAgent extends DurableObject<Env> {
       },
       newSession: async () => (await this.harness.sessions.create()).id,
       configure: (session, agent, model, dueAt) => this.#configureRun(session, agent, model, undefined, dueAt),
+      notesRead: (session) => this.memory.notesIn(session),
       write: (session, text, requestId) => this.#writeTo(session, text, requestId),
       work: async (session, prompt, operationId) => {
         const { result, entries } = await this.#runStep(session, prompt, operationId);
