@@ -58,6 +58,11 @@ export interface SeatLink {
   give(batch: SeatBatch | null, turn: Omit<SeatTurn, "ownerName" | "kind">): Promise<number>;
   /** Stop a turn the seat runs. */
   abort(turn: number): Promise<void>;
+  /**
+   * Steer a turn the seat runs with its owner's words (`line`, steerLine): only one of their own, in its fork there.
+   * Whether it was steered (false: not such a turn, or no longer running).
+   */
+  steer(turn: number, line: string): Promise<boolean>;
   /** Have the seat send again the results of the turns it ended that the room has not taken (after a restart of either). */
   wake(): Promise<void>;
   /** The room's kind changed: what its turns there read as (memory notes) from now on. */
