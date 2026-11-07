@@ -4004,11 +4004,12 @@ class ChatSockets extends LifecycleCapability implements DurableObjectCapability
    * follows it. `letGo` when the stream ends by itself.
    */
   async #streamTurn(ws: WebSocket, run: { agentId: string; session: string; turn: number }, current: () => boolean, letGo: () => void) {
+    const member = this.#person(ws)?.uid !== this.#chat.ownerUid;
     const message = (events: readonly AgentEvent[]) => ({
       type: "agentEvents" as const,
       agent: run.agentId,
       turn: run.turn,
-      events: events.map((event) => shownEvent(event, this.#person(ws)?.uid !== this.#chat.ownerUid)),
+      events: events.map((event) => shownEvent(event, member)),
     });
     const events = await this.#chat.agentEvents(run.session);
     const now = Date.now();

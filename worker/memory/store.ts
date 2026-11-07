@@ -141,6 +141,17 @@ export class MemoryStore {
     );
   }
 
+  /** Why there is no room for one more note (see add), if there is none: `waits` unconfirmed, saved by the owner or not, in `chatId`. */
+  #full(byOwner: boolean, waits: boolean, chatId: string | undefined): string | undefined {
+    if ((byOwner ? this.#ownersCount() : this.#count()) >= MAX_NOTES)
+      return `There are ${MAX_NOTES} memory notes, the most there can be; the owner deletes some first.`;
+    if (waits && this.#count(`WHERE ${WAITING} AND chat_id IS ?`, chatId ?? null) >= MAX_UNCONFIRMED)
+      return `${MAX_UNCONFIRMED} notes from this chat already wait for the owner to confirm them; ask them to look at Memory first.`;
+    if (waits && byOwner && this.#count(`WHERE ${WAITING} AND by_owner = 1`) >= MAX_UNCONFIRMED_ALL)
+      return `${MAX_UNCONFIRMED_ALL} notes already wait for the owner to confirm them; ask them to look at Memory first.`;
+    return undefined;
+  }
+
   /**
    * Keep a note. One with the same text for the same reader (scope, agent, chat) that is in use is not kept twice:
    * it is returned (`existed`), confirmed when the new save confirms it (confirmsKept). Waiting at once, MAX_UNCONFIRMED
@@ -154,14 +165,8 @@ export class MemoryStore {
       if (confirmsKept(fields, same)) this.#sql.exec("UPDATE memory SET confirmed = 1, updated_at = ? WHERE id = ?", this.#at(same), same.id);
       return { note: this.get(same.id)!, existed: true };
     }
-    if ((byOwner ? this.#ownersCount() : this.#count()) >= MAX_NOTES)
-      return { error: `There are ${MAX_NOTES} memory notes, the most there can be; the owner deletes some first.` };
-    if (!fields.confirmed) {
-      if (this.#count(`WHERE ${WAITING} AND chat_id IS ?`, fields.chatId ?? null) >= MAX_UNCONFIRMED)
-        return { error: `${MAX_UNCONFIRMED} notes from this chat already wait for the owner to confirm them; ask them to look at Memory first.` };
-      if (byOwner && this.#count(`WHERE ${WAITING} AND by_owner = 1`) >= MAX_UNCONFIRMED_ALL)
-        return { error: `${MAX_UNCONFIRMED_ALL} notes already wait for the owner to confirm them; ask them to look at Memory first.` };
-    }
+    const full = this.#full(byOwner, !fields.confirmed, fields.chatId);
+    if (full) return { error: full };
     const now = this.#now();
     const id = randomHex(6);
     this.#insert({ ...fields, id, uses: 0, pinned: fields.pinned === true, createdAt: now, updatedAt: now });
@@ -268,9 +273,10 @@ export class MemoryStore {
     const same = note.forgottenAt === undefined ? this.#same(note) : undefined;
     if (same) return { id: same.id, skipped: true };
     // One still waiting may have been saved in a turn the owner did not ask for: kept as such (add), so it takes
-    // nobody's room but its own, within all of them.
+    // nobody's room but its chat's, within all of them.
     const waits = !note.confirmed && note.forgottenAt === undefined;
-    if ((waits ? this.#count() : this.#ownersCount()) >= MAX_NOTES) return { error: `There are ${MAX_NOTES} memory notes already.` };
+    const full = this.#full(!waits, waits, note.chatId);
+    if (full) return { error: full };
     const id = NOTE_ID_PATTERN.test(note.id) && !this.get(note.id) ? note.id : randomHex(6);
     // Its times as exported (recency ranks the notes), never later than now.
     const now = this.#now();

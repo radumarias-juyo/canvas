@@ -25,36 +25,74 @@ const LEFT_OUT: Readonly<Record<string, string>> = {
   [MEMORY_FORGET_TOOL]: "(What this call said is left out: more people read this chat now.)",
 };
 
-/** `entry` with a memory_recall or memory_forget result in it put in place of one that says it is left out. */
-export function withoutNoteResult(entry: EntryRecord): EntryRecord {
-  const [result, ...rest] = entry.model ?? [];
-  const leftOut = result?.role === "toolResult" ? LEFT_OUT[result.toolName] : undefined;
-  if (result?.role !== "toolResult" || !leftOut) return entry;
-  return { ...entry, model: [{ ...result, content: [{ type: "text", text: leftOut }], details: undefined }, ...rest] };
+/** `message` with what it says put in place of one that says it is left out, if it is a memory_recall or memory_forget result. */
+function leftOutResult(message: Message | undefined): ToolResultMessage | undefined {
+  const leftOut = message?.role === "toolResult" ? LEFT_OUT[message.toolName] : undefined;
+  return message?.role === "toolResult" && leftOut ? { ...message, content: [{ type: "text", text: leftOut }], details: undefined } : undefined;
+}
+
+/** `entry` with a memory_recall or memory_forget result in it left out (the same entry when it holds none). */
+function withoutNoteResult(entry: EntryRecord): EntryRecord {
+  const [first, ...rest] = entry.model ?? [];
+  const result = leftOutResult(first);
+  return result ? { ...entry, model: [result, ...rest] } : entry;
+}
+
+const holdsNoteResult = (entry: EntryRecord) => withoutNoteResult(entry) !== entry;
+
+/** A memory tool's call with its output and details left out; any other call as it is. */
+function blankCall<Call extends { output?: unknown; details?: unknown }>(call: Call, toolName: string): Call {
+  return LEFT_OUT[toolName] ? { ...call, output: undefined, details: undefined } : call;
 }
 
 /**
  * What a socket of someone other than the owner gets of `event`: what memory_recall found and what memory_forget said
- * left out, in the transcript's entries and in a call's running output. They may hold the owner's own notes, read in
- * this chat before others were in it (from any of the owner's chats).
+ * left out, in the transcript's entries, in a result's message as it starts and in a call's running output. They may
+ * hold the owner's own notes, read in this chat before others were in it (from any of the owner's chats). Every event
+ * type is named, so a new one fails the typecheck until it is placed here (as in withoutSystemPrompt).
  */
 export function withoutNoteResults(event: AgentEvent): AgentEvent {
   switch (event.type) {
-    case "snapshot":
-      return {
-        ...event,
-        entries: event.entries.map(withoutNoteResult),
-        tools: event.tools.map((slot) => (LEFT_OUT[slot.name] ? { ...slot, output: undefined, details: undefined } : slot)),
-      };
+    case "snapshot": {
+      const entries = event.entries.some(holdsNoteResult) ? event.entries.map(withoutNoteResult) : event.entries;
+      const tools = event.tools.some((slot) => LEFT_OUT[slot.name]) ? event.tools.map((slot) => blankCall(slot, slot.name)) : event.tools;
+      return entries === event.entries && tools === event.tools ? event : { ...event, entries, tools };
+    }
+    case "message_start": {
+      const message = leftOutResult(event.message);
+      return message ? { ...event, message } : event;
+    }
     case "message_end":
     case "entry_appended":
-      return { ...event, entry: withoutNoteResult(event.entry) };
+      return holdsNoteResult(event.entry) ? { ...event, entry: withoutNoteResult(event.entry) } : event;
     case "tool_execution_end":
-      return event.entry ? { ...event, entry: withoutNoteResult(event.entry) } : event;
+      if (!LEFT_OUT[event.toolName]) return event;
+      return {
+        ...event,
+        ...(event.entry && { entry: withoutNoteResult(event.entry) }),
+        ...(event.result && { result: { ...event.result, structuredOutput: undefined, details: undefined } }),
+      };
     case "tool_execution_update":
-      return LEFT_OUT[event.toolName] ? { ...event, output: undefined, details: undefined } : event;
-    default:
+      return blankCall(event, event.toolName);
+    case "agent_changed":
+    case "run_start":
+    case "run_end":
+    case "turn_start":
+    case "turn_end":
+    case "message_update":
+    case "tool_execution_start":
+    case "inbox_update":
+    case "submission":
+    case "auto_retry_start":
+    case "auto_retry_end":
+    case "deferred_poll":
+    case "usage_changed":
+    case "task_failed":
+    case "compaction_start":
+    case "compaction_end":
       return event;
+    default:
+      return event satisfies never;
   }
 }
 
@@ -86,15 +124,13 @@ function leaveOutNotes(entries: readonly EntryRecord[]): ContextEdit[] {
     if (SystemEntry.is(entry)) return [{ target: entry.id, action: "omit" }];
     if (CompactionEntry.is(entry) && entry.model?.length)
       return [{ target: entry.id, action: "replace", messages: [{ role: "user", content: SUMMARY_LEFT_OUT, timestamp: Date.now() }] }];
-    const result = ToolResultEntry.is(entry) ? (entry.model?.[0] as ToolResultMessage | undefined) : undefined;
-    const leftOut = result?.role === "toolResult" ? LEFT_OUT[result.toolName] : undefined;
-    if (!result || !leftOut) return [];
-    return [{ target: entry.id, action: "replace", messages: [{ ...result, content: [{ type: "text", text: leftOut }] }] }];
+    const result = ToolResultEntry.is(entry) ? leftOutResult(entry.model?.[0]) : undefined;
+    return result ? [{ target: entry.id, action: "replace", messages: [result] }] : [];
   });
 }
 
 /** The harness calls freshPrompt stops a compaction with. */
-export type Compactions = Pick<Harness, "inspect" | "abortTask" | "abortSubmission" | "waitForTask">;
+type Compactions = Pick<Harness, "inspect" | "abortTask" | "abortSubmission" | "waitForTask">;
 
 /** How many times freshPrompt looks again for a compaction that read the notes before it gives up (the next turn tries again). */
 const MAX_LOOKS = 5;

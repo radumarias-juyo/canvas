@@ -7,6 +7,9 @@ import { MEMORY_FORGET_TOOL, MEMORY_RECALL_TOOL } from "../shared/memory.ts";
 import { text } from "../worker/agent/output.ts";
 import { freshPrompt, withoutSummaries } from "../worker/memory/fresh.ts";
 
+/** Start a conversation's prompt afresh, and whether it ended sure no compaction read the notes (freshPrompt's `done`). */
+const freshDone = async (...args: Parameters<typeof freshPrompt>) => (await freshPrompt(...args)).done;
+
 /**
  * pi over a faux model with one `memory` section whose text the test sets, a memory_recall that finds the owner's
  * note and a memory_forget that quotes one, the messages each request carried, and the replies to give (`replies`,
@@ -84,7 +87,7 @@ describe("a prompt that held the owner's own notes", () => {
       expect(JSON.stringify(requests[0])).toContain("salary");
       // Shared: the section no longer holds the note, but the first prompt entry stays in the transcript.
       notes.text = "No notes yet.";
-      expect(await (await freshPrompt(root, pi)).done).toBe(true);
+      expect(await freshDone(root, pi)).toBe(true);
       await ask("and now?");
       const next = JSON.stringify(requests[1]);
       expect(next).not.toContain("salary");
@@ -103,7 +106,7 @@ describe("a prompt that held the owner's own notes", () => {
       notes.text = "No notes yet.";
       await ask("what do you know?");
       expect(JSON.stringify(requests.at(-1))).toContain("bonus");
-      expect(await (await freshPrompt(root, pi)).done).toBe(true);
+      expect(await freshDone(root, pi)).toBe(true);
       await ask("and now?");
       const next = JSON.stringify(requests.at(-1));
       expect(next).not.toContain("bonus");
@@ -123,7 +126,7 @@ describe("a prompt that held the owner's own notes", () => {
       await pi.waitForTask(await root.compact(undefined, BACKGROUND_CONTEXT), BACKGROUND_CONTEXT);
       await ask("third");
       expect(JSON.stringify(requests.at(-1))).toContain("bonus");
-      expect(await (await freshPrompt(root, pi)).done).toBe(true);
+      expect(await freshDone(root, pi)).toBe(true);
       await ask("and now?");
       expect(JSON.stringify(requests.at(-1))).not.toContain("bonus");
     } finally {
@@ -139,7 +142,7 @@ describe("a prompt that held the owner's own notes", () => {
       notes.text = "No notes yet.";
       await ask("forget that note");
       expect(JSON.stringify(requests.at(-1))).toContain("bonus");
-      expect(await (await freshPrompt(root, pi)).done).toBe(true);
+      expect(await freshDone(root, pi)).toBe(true);
       await ask("and now?");
       expect(JSON.stringify(requests.at(-1))).not.toContain("bonus");
     } finally {
@@ -177,7 +180,7 @@ describe("a prompt that held the owner's own notes", () => {
   it("stops a compaction summarizing the context as it was, so its summary never comes in", async () => {
     const { pi, root, ask, requests, compaction, release } = await compacting(true);
     try {
-      expect(await (await freshPrompt(root, pi)).done).toBe(true);
+      expect(await freshDone(root, pi)).toBe(true);
       expect((await pi.waitForTask(compaction!, BACKGROUND_CONTEXT)).state.outcome.status).toBe("aborted");
       await ask("and now?");
       expect(JSON.stringify(requests.at(-1))).not.toContain("salary");

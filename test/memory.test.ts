@@ -47,6 +47,12 @@ function clock(start = T0) {
   return () => at++;
 }
 
+/** The `i`th of the group chats groupChats makes, MAX_UNCONFIRMED notes in each so none is full. */
+const groupChat = (i: number) => `g${Math.floor(i / MAX_UNCONFIRMED)}`;
+/** Room in group chats for `notes` waiting notes (groupChat). */
+const groupChats = (notes: number): Record<string, ChatKind> =>
+  Object.fromEntries(Array.from({ length: Math.ceil(notes / MAX_UNCONFIRMED) }, (_, i) => [groupChat(i * MAX_UNCONFIRMED), "group"]));
+
 /** The owner's directory as memory sees it: their chats by kind, and their agents. */
 function directory(kinds: Record<string, ChatKind> = { [PRIVATE]: "private", [GROUP]: "group", [PAGE]: "page", [OFF]: "off_record" }, start = T0) {
   let changes = 0;
@@ -380,9 +386,9 @@ describe("UserMemory", () => {
   });
 
   it("imports only a note's own fields, within MAX_NOTES in all", () => {
-    const { memory } = directory();
+    const { memory } = directory(groupChats(MAX_NOTES + 10));
     const waiting = Array.from({ length: MAX_NOTES + 10 }, (_, i) => ({
-      ...note({ id: i.toString(16).padStart(12, "0"), text: `Said ${i}.`, source: "learned", confirmed: false, scope: "chat", chatId: GROUP }),
+      ...note({ id: i.toString(16).padStart(12, "0"), text: `Said ${i}.`, source: "learned", confirmed: false, scope: "chat", chatId: groupChat(i) }),
       // Not a field of a note's: an export never sets it.
       byOwner: false,
     }));
@@ -392,14 +398,31 @@ describe("UserMemory", () => {
   });
 
   it("keeps imported waiting notes out of the owner's own room", () => {
-    const { memory } = directory();
+    const { memory } = directory({ [PRIVATE]: "private", ...groupChats(MAX_UNCONFIRMED_ALL) });
+    // As many as the owner's own may wait, in chats of their own (within each chat's room).
     const waiting = Array.from({ length: MAX_UNCONFIRMED_ALL }, (_, i) =>
-      note({ id: i.toString(16).padStart(12, "0"), text: `Said ${i}.`, source: "learned", confirmed: false, scope: "chat", chatId: GROUP }),
+      note({
+        id: i.toString(16).padStart(12, "0"),
+        text: `Said ${i}.`,
+        source: "learned",
+        confirmed: false,
+        scope: "chat",
+        chatId: groupChat(i),
+      }),
     );
     expect(memory.import(waiting).every((result) => !("error" in result))).toBe(true);
     // They waited for the owner's confirm as members' saves: the owner's own still wait too.
     const fact = saved(memory.learn(writer(PRIVATE, "private", true, true), { text: "The target is 40.", scope: "user", kind: "fact" }));
     expect(fact.note.confirmed).toBe(false);
+  });
+
+  it("imports no more waiting notes into one chat than may wait there", () => {
+    const { memory } = directory();
+    const waiting = Array.from({ length: MAX_UNCONFIRMED + 1 }, (_, i) =>
+      note({ id: i.toString(16).padStart(12, "0"), text: `Said ${i}.`, source: "learned", confirmed: false, scope: "chat", chatId: GROUP }),
+    );
+    const results = memory.import(waiting);
+    expect(results.filter((result) => "error" in result)).toEqual([{ error: expect.stringContaining(`${MAX_UNCONFIRMED} notes from this chat`) }]);
   });
 
   it("imports a forgotten note once, and never brings back one forgotten here", () => {
@@ -797,5 +820,22 @@ describe("what someone other than the owner sees of a chat's events", () => {
     expect(JSON.stringify(appended)).not.toContain("salary");
     const update = { type: "tool_execution_update", toolCallId: "c5", toolName: MEMORY_RECALL_TOOL, output: { set: "My salary" } } as AgentEvent;
     expect(JSON.stringify(withoutNoteResults(update))).not.toContain("salary");
+  });
+
+  it("leaves them out of a result's message as it starts, and of a nested call's result", () => {
+    const message = result(MEMORY_RECALL_TOOL, "My salary is private.").model![0]!;
+    const started = withoutNoteResults({ type: "message_start", message });
+    expect(JSON.stringify(started)).not.toContain("salary");
+    expect(JSON.stringify(started)).toContain('"toolCallId":"c1"');
+    const nested = {
+      type: "tool_execution_end",
+      toolCallId: "c6",
+      toolName: MEMORY_RECALL_TOOL,
+      result: { taskId: "t1", structuredOutput: "My salary", isError: false, diagnostics: [] },
+    } as unknown as AgentEvent;
+    expect(JSON.stringify(withoutNoteResults(nested))).not.toContain("salary");
+    // Anything else, as it is.
+    const other = { type: "message_start", message: result("files_read", "salary.csv").model![0]! } as AgentEvent;
+    expect(withoutNoteResults(other)).toBe(other);
   });
 });

@@ -98,8 +98,6 @@ const PI = "pi";
 const SHOWN_KEY = "memory.shown:";
 /** The conversations (PI, or a session) whose prompt held the owner's own notes since it last started afresh. */
 const OWN_KEY = "memory.own";
-/** The conversations whose requests leave out a summary of theirs (see #forgetOwn). */
-const SUMMARIES_KEY = "memory.summaries";
 /** How many note ids a conversation keeps as shown; past it, the oldest go (a use may then count again). */
 const MAX_SHOWN = 1_000;
 
@@ -163,52 +161,40 @@ export class ChatMemory {
     return this.#deps.directory(agent?.ownerUid ?? this.#deps.ownerUid);
   }
 
-  /** The conversations kept under `list` in the chat's kv (OWN_KEY, SUMMARIES_KEY). */
-  #marked(list: string): string[] {
-    return this.#deps.kv.get<string[]>(list) ?? [];
-  }
-
-  #mark(list: string, key: string): void {
-    const marked = this.#marked(list);
-    if (!marked.includes(key)) this.#deps.kv.put(list, [...marked, key]);
-  }
-
-  #unmark(list: string, key: string): void {
-    this.#deps.kv.put(
-      list,
-      this.#marked(list).filter((each) => each !== key),
-    );
-  }
-
+  /** The conversations kept under OWN_KEY in the chat's kv. */
   #own(): string[] {
-    return this.#marked(OWN_KEY);
+    return this.#deps.kv.get<string[]>(OWN_KEY) ?? [];
   }
 
   #markOwn(key: string): void {
-    this.#mark(OWN_KEY, key);
+    const own = this.#own();
+    if (!own.includes(key)) this.#deps.kv.put(OWN_KEY, [...own, key]);
+  }
+
+  #unmarkOwn(key: string): void {
+    this.#deps.kv.put(
+      OWN_KEY,
+      this.#own().filter((each) => each !== key),
+    );
   }
 
   /**
    * Start afresh the prompt of conversation `key` when it held the owner's own notes, which `reader` does not read.
-   * Resolves once the edits are written; until freshPrompt is done (no compaction left that read them), each request
-   * leaves summaries out (leavesOutSummaries), and `key` stays marked under both lists, so if this object goes away
-   * first, the next turn starts it again. One at a time for each conversation: a refresh and audienceChanged at once
+   * Resolves once the edits are written; until freshPrompt is done (no compaction left that read them), `key` stays
+   * marked, so each request leaves summaries out (leavesOutSummaries), and if this object goes away first, the next turn
+   * starts it again. One at a time for each conversation: a refresh and audienceChanged at once
    * write one fresh start, not two.
    */
   #forgetOwn(key: string, reader: MemoryReader): Promise<void> {
     if (readsOwnNotes(reader) || !this.#own().includes(key)) return Promise.resolve();
     const going = this.#freshening.get(key);
     if (going) return going;
-    this.#mark(SUMMARIES_KEY, key);
     const started = this.#deps.freshPrompt(key === PI ? undefined : key);
     const written = started.then(() => undefined);
     this.#freshening.set(key, written);
     void started
-      .then(({ done }) => done)
-      .then((clean) => {
-        if (!clean) return;
-        this.#unmark(OWN_KEY, key);
-        this.#unmark(SUMMARIES_KEY, key);
+      .then(async ({ done }) => {
+        if (await done) this.#unmarkOwn(key);
       })
       .catch((error: unknown) => console.error("memory prompt:", errorMessage(error)))
       .finally(() => this.#freshening.delete(key));
@@ -284,7 +270,8 @@ export class ChatMemory {
       section: async (conversation) => (await this.#section(this.#who(conversation))).text,
       leavesOutSummaries: (conversation) => {
         const { key, agent } = this.#who(conversation);
-        return this.#marked(SUMMARIES_KEY).includes(key) && !readsOwnNotes(this.#reader(agent));
+        // Marked from the first prompt that held the owner's own notes until freshPrompt is done (#forgetOwn).
+        return this.#own().includes(key) && !readsOwnNotes(this.#reader(agent));
       },
       note: async (conversation, note) => {
         const { agent } = this.#who(conversation);
