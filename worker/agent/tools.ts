@@ -233,7 +233,10 @@ async function runInSandbox(
   ]);
   const room = MAX_SANDBOX_BYTES - [...skills, ...results].reduce((sum, file) => sum + file.bytes.byteLength, 0);
   if (room < 0) throw new Error(tooMuch(MAX_SANDBOX_BYTES - room, MAX_SANDBOX_BYTES));
-  const inputs = [...results, ...(await sandboxInputs(files, refs.filter((ref) => !ref.startsWith(TOOL_RESULTS)), folder, room))];
+  const own = await sandboxInputs(files, refs.filter((ref) => !ref.startsWith(TOOL_RESULTS)), folder, room);
+  const clash = own.find((file) => results.some((result) => result.name === file.name));
+  if (clash) throw new FileRefError(`A file of yours and a saved tool result would both be ./files/${clash.name}; pass them in separate runs.`);
+  const inputs = [...results, ...own];
   const result = await run(exports.Sandbox.getByName(sandboxName(scope.uid, scope.chatId)), inputs, skills);
   const { toSave, skipped } = outputPaths(folder, result.outputs);
   const saved = await Promise.all([...toSave].map(([path, bytes]) => files.put(path, bytes)));

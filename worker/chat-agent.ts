@@ -336,6 +336,8 @@ type RecentEntries = () => Promise<readonly EntryRecord[] | undefined>;
 interface SkillsFor {
   text: string;
   recent: RecentEntries;
+  /** False: no classifier call (nothing paid for), only the skills the chat was shown, as the message would start it. */
+  pick?: boolean;
 }
 
 /** Which entries of a conversation to read, as Conversation.entries takes it. */
@@ -1008,9 +1010,10 @@ export class ChatAgent extends DurableObject<Env> {
         const answered = saved === undefined && (!message || ((await message.recent())?.some(({ kind }) => kind === "pi.assistant") ?? true));
         shown = new Set(answered ? listed.filter(isActive).map(({ name }) => name) : (saved ?? []));
         const waiting = listed.filter((skill) => isActive(skill) && !shown!.has(skill.name));
-        if (message && waiting.length) for (const name of await this.#pickSkills(classifier, message.text, message.recent, waiting)) shown.add(name);
+        const picking = message !== undefined && message.pick !== false && waiting.length > 0;
+        if (picking) for (const name of await this.#pickSkills(classifier, message.text, message.recent, waiting)) shown.add(name);
         // Not into a chat deleted meanwhile.
-        if ((saved === undefined || (message && waiting.length)) && !this.#gone) this.ctx.storage.kv.put(SHOWN_SKILLS_KEY, [...shown]);
+        if ((saved === undefined || picking) && !this.#gone) this.ctx.storage.kv.put(SHOWN_SKILLS_KEY, [...shown]);
       }
       const source = skillSource(listed, version, shown, {
         read: (skill, path) => this.#readSkillFile(skill, path),
@@ -1482,8 +1485,8 @@ export class ChatAgent extends DurableObject<Env> {
     const picks = Promise.resolve(agentPicking ?? []).then((picked) => piPicks({ calling, underBudget, handedOn: picked.length > 0 }));
     // A new chat is put on Auto as it opens (startingSetting), which its first message may come before: wait for that.
     const onAuto = calling && underBudget && (this.#auto() || ((await this.harness.pi()) && this.#auto()));
-    const others = attachments.length + own.length - images;
-    const routing = onAuto ? picks.then((picking) => (picking ? this.#route(text, images, others, recentOnce) : undefined)) : undefined;
+    const otherFiles = attachments.length + own.length - images;
+    const routing = onAuto ? picks.then((picking) => (picking ? this.#route(text, images, otherFiles, recentOnce) : undefined)) : undefined;
     this.#announce({
       uid: author.uid,
       name: author.name,
@@ -1522,8 +1525,9 @@ export class ChatAgent extends DurableObject<Env> {
       ),
       // A message to the people in the chat starts no run: the agent needs its tools only when it is called.
       tooling,
-      // Without a pick (handed to agents, or past the budget), the skills as they are: no classifier call.
-      calling && picks.then((picking) => (picking ? this.refreshSkills({ text: skillText, recent: recentOnce }) : this.refreshSkills())),
+      // Without a pick (handed to agents, or past the budget), the skills as they are: no classifier call. Still with the
+      // message, so a chat pi has not answered yet is not taken for one shown every skill.
+      calling && picks.then((pick) => this.refreshSkills({ text: skillText, recent: recentOnce, pick })),
       calling && this.refreshFiles(),
       calling && this.refreshUserPrompt(),
     ]);
