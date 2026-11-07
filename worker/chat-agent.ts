@@ -49,13 +49,14 @@ import {
   everyone,
 } from "../shared/protocol.ts";
 import { baseName, type AttachmentInput } from "../shared/attachments.ts";
-import { keptMentions, parseMentions, summonsAgent, taggedPeople, type Mention, type MentionInput } from "../shared/mentions.ts";
+import { AGENT_NAME, keptMentions, parseMentions, summonsAgent, taggedPeople, type Mention, type MentionInput } from "../shared/mentions.ts";
 import { freePath, MAX_LISTED, uploadTargets } from "../shared/uploads.ts";
 import {
   AUTO_LEDGER_PREFIX,
   AUTO_MODEL,
   COMPACTION,
   compactionOverrides,
+  AGENT_ROUTER_LEDGER_PREFIX,
   HINT_LEDGER_PREFIX,
   isAuto,
   modelKey,
@@ -143,7 +144,7 @@ import {
   type ChatTurnData,
   type SharedAgentView,
 } from "../shared/agents.ts";
-import { AgentTurns, sessionOf, type TurnHost } from "./agents/controller.ts";
+import { AgentTurns, sessionOf, type TurnHost, type TurnOutcome } from "./agents/controller.ts";
 import { isTurnEntry, TurnFilter } from "./agents/live.ts";
 import { ChatRoster, type AgentTurn, type RosterEntry } from "./agents/roster.ts";
 import { reportOf, SignInNeeded, whenOf, type DeliveryRequest } from "./agents/runs/executor.ts";
@@ -174,6 +175,14 @@ import {
 import { branchKind, ChatKindState, KIND_KV, MAX_BRANCHES, planKindChange } from "./chat-kind.ts";
 import { branchContext, branchCopies, summaryFor } from "./branch.ts";
 import { newId } from "./storage/index.ts";
+import { agentRouterOn, AgentSettingsError, budgetDay, chatAllowsServer, checkAgentSettings, type ChatAgentSettings, type ChatAgentSettingsView } from "../shared/agent-settings.ts";
+import { agentRouteHistory, agentRouterId, agentRouterModel, AGENT_ROUTE_MS, routeAgents } from "./agents/router.ts";
+import { answered, embedder, FOLLOW_UP_AFTER_MS, looksLikeAsk, PAUSE_MS } from "./agents/funnel.ts";
+import { SpeakUp, type FunnelEvent } from "./agents/speak-up.ts";
+import { ChatSpend, meterExtension, type Spent } from "./agents/spend.ts";
+import { Metrics } from "./metrics.ts";
+import { checklistExtension } from "./agent/checklist.ts";
+import { CHAT_CHECKLIST_KIND, checklistEntry, type ChecklistAuthor, type ChecklistInput } from "../shared/checklist.ts";
 
 /** Artifacts from the owner's other chats one chat remembers as named with "@" (see ChatAgent.#broughtIn). */
 const MAX_BROUGHT_IN = 200;
@@ -250,7 +259,28 @@ const SHOWN_SKILLS_KEY = "skillsShown";
 /** The artifacts of the owner's other chats this one brought in (see #broughtIn). */
 const BROUGHT_IN_KEY = "broughtIn";
 /** The settings of a chat its export carries, beside its tables (worker/chat-dump.ts), its own system prompt among them. */
-const EXPORTED_KV = [AUTO_KEY, SHOWN_SKILLS_KEY, BROUGHT_IN_KEY, SYSTEM_PROMPT_KEY, ...KIND_KV];
+/** The chat's agent settings (shared/agent-settings.ts), and the agents muted in it. */
+const AGENT_SETTINGS_KEY = "agentSettings";
+const MUTED_KEY = "mutedAgents";
+/** The newest person's message a pause check waits behind (its sentAt), and that check's schedule. */
+const PAUSE_KEY = "speakUpPause";
+/** The day the owner was last told their runs stopped at the spend cap, and the day the chat's budget ran out. */
+const CAP_TOLD_KEY = "spendCapTold";
+const BUDGET_TOLD_KEY = "budgetTold";
+const EXPORTED_KV = [AUTO_KEY, SHOWN_SKILLS_KEY, BROUGHT_IN_KEY, SYSTEM_PROMPT_KEY, AGENT_SETTINGS_KEY, ...KIND_KV];
+
+/** What a pause check carries: the sentAt of the message it waits behind. */
+type PauseAlarm = { after: number; tries?: number };
+/** What a follow-up check carries: the question, by who asked it and when. */
+type FollowUpAlarm = { uid: string; sentAt: number };
+/** A pause check waits again while pi or an agent works, this many times at most. */
+const MAX_PAUSE_TRIES = 5;
+/** Which session posted a checklist (by its id): only that session may update it. */
+const CHECKLIST_KEY = "checklist:";
+/** The sessions whose model calls one turn's metrics add up, at most. */
+const MAX_TURN_SPEND = 200;
+/** Where a tool result too long for a turn is kept, in the owner's own files: not a chat file, so members never see it. */
+const SPILL_FOLDER = "tool-results";
 /** Set once the sidebars of everyone in a chat shared before they remembered people have met (#meetOnce). */
 const PEOPLE_TOLD_KEY = "peopleTold";
 /** How much of a long chat a branch reads to copy, in pages of 200 entries, newest first. */
@@ -333,6 +363,16 @@ interface ArtifactCall {
 export class ChatAgent extends DurableObject<Env> {
   readonly hub = new McpHub(mcpServers(this.env), (server) => this.#connect(server));
   readonly storage = new Storage(this.env);
+  /** The agents' metrics (worker/metrics.ts): a no-op without the METRICS binding. */
+  readonly metrics = new Metrics(this.env.METRICS, { uid: this.uid, chatId: this.chatId });
+  /** What the chat's model calls cost today, its daily budget, and AI Gateway's tags (worker/agents/spend.ts). */
+  readonly spend = new ChatSpend({
+    kv: this.ctx.storage.kv,
+    uid: this.uid,
+    chatId: this.chatId,
+    budget: () => this.#agentSettings().dailyTokens,
+    spent: (spent) => this.#spent(spent),
+  });
   /** Gemini's thought signatures, read off its answers by the AI binding below and put back on its next requests. */
   readonly gemini = new GeminiCompat();
   /** Keeps the chat's Claude prompt cache from expiring between its calls (cache-warmer.ts). */
@@ -377,6 +417,25 @@ export class ChatAgent extends DurableObject<Env> {
   /** The chat's agents besides pi, each in a session of its own, and their turns (worker/agents/). */
   readonly roster = new ChatRoster(this.ctx.storage.sql);
   readonly turns = new AgentTurns(this.#turnHost());
+  /** The router that picks agents for a message naming nobody (AGENT_ROUTER_MODEL); undefined: none picks. */
+  readonly #agentRouter = agentRouterModel(this.env.AGENT_ROUTER_MODEL);
+  /** Agents that speak up (worker/agents/speak-up.ts). */
+  readonly speakUp = new SpeakUp({
+    roster: this.roster,
+    settings: () => this.#agentSettings(),
+    muted: (agentId) => this.#mutedAgents().includes(agentId),
+    definition: (entry) => this.#index(entry.ownerUid).getAgent(entry.agentId),
+    budgetLeft: () => !this.spend.usedUp(),
+    spendLeft: async (ownerUid) => (await this.#runsCapped(ownerUid)) === undefined,
+    embedder: embedder(this.env.AI as unknown as ModelRunner, this.env.INTEREST_MODEL ?? ""),
+    give: (agentId, request) => {
+      this.turns.call([agentId], request);
+    },
+    observe: (event: FunnelEvent) => this.metrics.funnel({ ...event, stage: event.refusal ? `${event.stage}:${event.refusal}` : event.stage }),
+    now: () => Date.now(),
+  });
+  /** What each session's model calls came to since its turn started, for the turn's metrics: tokens, dollars, tool calls. */
+  readonly #turnSpend = new Map<string, { tokens: number; costUsd: number; toolCalls: number }>();
   readonly reactions = new ChatReactions(this.ctx.storage.sql);
   readonly sockets = new ChatSockets({
     events: () => this.harness.session().events(),
@@ -389,6 +448,7 @@ export class ChatAgent extends DurableObject<Env> {
     prompt: (text, author, attachments, mentions, replyTo) => this.prompt(text, author, attachments, mentions, replyTo),
     abort: (by, agent) => this.abort(by, agent),
     agents: () => this.agentViews(),
+    agentSettings: () => this.#settingsView(),
     runningAgents: () => this.roster.runningSessions(),
     agentEvents: (session) => this.harness.session(session).events(),
     turnInputId: (session, turn) => this.#turnInputId(session, turn),
@@ -405,6 +465,9 @@ export class ChatAgent extends DurableObject<Env> {
     callbacks: {
       run: (payload: RunAlarm) => this.#onAlarm(() => this.runner.fired(payload)),
       watch: (payload: WatchAlarm) => this.#onAlarm(() => this.runner.watchTick(payload)),
+      // Agents that speak up (worker/agents/speak-up.ts): after a pause in the chat, and once a question waited long.
+      pause: (payload: PauseAlarm) => this.#onAlarm(() => this.#afterPause(payload)),
+      followUp: (payload: FollowUpAlarm) => this.#onAlarm(() => this.#followUp(payload)),
     },
   });
   readonly lifecycle = Lifecycle.install(this).use(this.harness).use(this.sockets).use(this.scheduler);
@@ -520,6 +583,12 @@ export class ChatAgent extends DurableObject<Env> {
     this.registry.install(agentsExtension(scope));
     if (env.SANDBOX_ENABLED === "true") this.registry.install(sandboxExtension(scope));
     this.registry.install(systemPromptExtension(() => this.#systemPrompts()));
+    // Which session each model request is for, for its tags and its count (worker/agents/spend.ts).
+    this.registry.install(meterExtension(this.spend));
+    // A big ask's plan, as one card that edits in place (worker/agent/checklist.ts).
+    this.registry.install(checklistExtension({ postChecklist: (conversation, checklist, requestId) => this.#postChecklist(conversation, checklist, requestId) }));
+    // The read cache's hits and evictions, per agent.
+    this.hub.observe(this.metrics);
   }
 
   /** The uid is this object's name, which the Worker sets from a verified identity. */
@@ -813,7 +882,8 @@ export class ChatAgent extends DurableObject<Env> {
   /** pi-ai's models as the chat calls them: a model that cannot be called is marked for every chat (markFailing), so Auto leaves it out. */
   #models(): Models {
     const source = catalogSource(this.env, this.storage.models);
-    return withFailuresReported(piModels(this.ai.provider, this.gemini), (id, error) => this.ctx.waitUntil(markFailing(source, id, error)));
+    // Metered: each call counted for the chat's day and its owner's, tagged for AI Gateway, refused past the budget.
+    return this.spend.models(withFailuresReported(piModels(this.ai.provider, this.gemini), (id, error) => this.ctx.waitUntil(markFailing(source, id, error))));
   }
 
   /** The chat's one conversation. PiHarness has made it by the time pi() resolves. */
@@ -1170,7 +1240,10 @@ export class ChatAgent extends DurableObject<Env> {
     // Everything the extension is built from: a server's new tool list, or a new reason it is unavailable, reinstalls it.
     const installed = JSON.stringify([deferred, [...catalog], [...unavailable]]);
     if (installed !== this.#mcp.key) {
-      const { extension, listing, toolInfo } = mcpExtension(this.hub, catalog, unavailable, () => this.discoverMcp(), { deferred });
+      const { extension, listing, toolInfo } = mcpExtension(this.hub, catalog, unavailable, () => this.discoverMcp(), {
+        deferred,
+        spill: (tool, text) => this.#spill(tool, text),
+      });
       this.registry.install(extension);
       this.#mcpTools = toolInfo;
       if (deferred) this.registry.install(this.#toolSearch);
@@ -1362,8 +1435,22 @@ export class ChatAgent extends DurableObject<Env> {
     ]).then(([given, copied]) => [...given, ...copied]);
     // On Auto, the router picks the model while the rest gets ready. Its pick is used only if the message is a prompt.
     const images = attachments.filter((attachment) => attachment.image).length;
-    // What the router, the skill classifier and the tool picker read of the conversation: read once for all, and only if one asks.
-    const recent = calling ? memoAsync(() => this.#recentEntries()) : undefined;
+    // What the routers, the skill classifier and the tool picker read of the conversation: read once for all, and only if one asks.
+    const recentOnce = memoAsync(() => this.#recentEntries());
+    const recent = calling ? recentOnce : undefined;
+    // A message that names nobody, in a chat whose router is on: the router may pick agents of the roster for it, while
+    // the rest gets ready. Its pick is used only if the mentions name nobody either.
+    const agentRouter = this.#agentRouter;
+    const routesAgents =
+      agentRouter !== undefined &&
+      agentRouterOn(this.#agentSettings(), this.kinds.kind()) &&
+      !callsAgents &&
+      repliesTo === undefined &&
+      !repliesToAgent &&
+      home === undefined &&
+      !summonsAgent(text) &&
+      this.roster.list().some((entry) => !entry.off);
+    const agentPicking = routesAgents ? this.#pickAgents(agentRouter, text, everyMessage, recentOnce) : undefined;
     // A new chat is put on Auto as it opens (startingSetting), which its first message may come before: wait for that.
     const onAuto = recent && (this.#auto() || ((await this.harness.pi()) && this.#auto()));
     const routing = onAuto ? this.#route(text, images, attachments.length + own.length - images, recent) : undefined;
@@ -1414,7 +1501,10 @@ export class ChatAgent extends DurableObject<Env> {
     ]);
     // The files they named of their own are named too: "@pi notes.md" is not a call.
     const named = [...mentions, ...own];
-    const speakers = speakersOf(named);
+    let speakers = speakersOf(named);
+    // Picked by the router: nobody named an agent, pi or a person.
+    const routed = !speakers.length && agentPicking !== undefined && !summonsAgent(text, named) && !named.some((mention) => mention.kind === "person");
+    if (routed) speakers = await agentPicking;
     const summoned = (everyMessage && !speakers.length) || repliesToAgent || summonsAgent(text, named);
     // Again after the refreshes, which can take seconds: the author may have been removed meanwhile.
     this.#requireInChat(author);
@@ -1464,7 +1554,7 @@ export class ChatAgent extends DurableObject<Env> {
       const continued =
         byOwner && repliesTo && speakers.includes(repliesTo) ? await this.#continuedRun(replied).catch(() => undefined) : undefined;
       const caller = {
-        calledBy: { name: author.name, uid: author.uid },
+        calledBy: { name: author.name, uid: author.uid, ...(routed && { routed: true as const }) },
         // The catch-up leaves the message out (askKey), so the input carries all of it a hand-off would.
         ask: `${askOf({ name: author.name, kind: "person", owner: byOwner }, written, MAX_ASK_CHARS)}${files}`,
         askKey: messageAskKey({ uid: author.uid, sentAt }),
@@ -1479,6 +1569,9 @@ export class ChatAgent extends DurableObject<Env> {
     // Only a tag whose "@name" is in the text: one sent without it would notify someone of nothing they can see.
     const tags = taggedPeople(keptMentions(text, mentions));
     void this.#touchIndexes(title, author, tags, text).catch((error) => console.error("chat index:", errorMessage(error)));
+    // Agents that speak up: after a pause in the conversation, and for a question nobody was asked to answer.
+    this.#notePause(sentAt);
+    if (!summoned && !speakers.length) this.#noteAsk(author.uid, sentAt, text);
     return true;
   }
 
@@ -2443,7 +2536,8 @@ export class ChatAgent extends DurableObject<Env> {
 
   /** What everyone's app shows of the chat's agents besides pi. */
   agentViews(): ChatAgentView[] {
-    return this.roster.views((uid) => this.#nameOf(uid));
+    const muted = new Set(this.#mutedAgents());
+    return this.roster.views((uid) => this.#nameOf(uid)).map((view) => (muted.has(view.id) ? { ...view, muted: true as const } : view));
   }
 
   /** The name to show for someone in the chat, owner or member; their uid when they are neither. */
@@ -2554,6 +2648,287 @@ export class ChatAgent extends DurableObject<Env> {
     return { agents, turns: Object.fromEntries(agents.map((agent) => [agent.id, this.roster.recentTurns(agent.id).map(turnView)])) };
   }
 
+  /** The chat's agent settings as its owner set them (shared/agent-settings.ts). */
+  #agentSettings(): ChatAgentSettings {
+    return this.ctx.storage.kv.get<ChatAgentSettings>(AGENT_SETTINGS_KEY) ?? {};
+  }
+
+  /** The agents muted in this chat, by id. */
+  #mutedAgents(): string[] {
+    return this.ctx.storage.kv.get<string[]>(MUTED_KEY) ?? [];
+  }
+
+  /** The chat's agent settings as everyone in it sees them, with what the deployment can do and today's use. */
+  #settingsView(): ChatAgentSettingsView {
+    const settings = this.#agentSettings();
+    return {
+      settings,
+      router: agentRouterOn(settings, this.kinds.kind()),
+      available: { router: this.#agentRouter !== undefined, speakUp: this.speakUp.available() },
+      today: this.spend.today(),
+      muted: this.#mutedAgents(),
+      servers: this.hub.servers().map((server) => server.name),
+    };
+  }
+
+  /** Tell everyone's app the agent settings. */
+  #broadcastSettings(): void {
+    this.sockets.broadcast({ type: "agentSettings", settings: this.#settingsView() });
+  }
+
+  /** The chat's agent settings, for someone in it. */
+  agentSettingsFor(uid: string): ChatAgentSettingsView | ChatRefusal {
+    if (!this.isInChat(uid)) return refuse(403, "You are not in this chat.");
+    return this.#settingsView();
+  }
+
+  /** (owner) Change the chat's agent settings: each field given replaces the stored one, null clears it. */
+  setAgentSettings(by: Person, input: unknown): ChatAgentSettingsView | ChatRefusal {
+    if (by.uid !== this.uid) return refuse(403, "Only the chat's owner can change its agent settings.");
+    if (this.#gone) return refuse(404, DELETED);
+    let next: ChatAgentSettings;
+    try {
+      next = checkAgentSettings(input, this.#agentSettings());
+    } catch (error) {
+      if (error instanceof AgentSettingsError) return refuse(400, error.message);
+      throw error;
+    }
+    this.ctx.storage.kv.put(AGENT_SETTINGS_KEY, next);
+    if (!next.speakUp) this.#cancelPause();
+    this.#broadcastSettings();
+    return this.#settingsView();
+  }
+
+  /**
+   * Mute an agent of the roster in this chat, or unmute it: muted, it posts nothing unprompted here. Anyone in the chat
+   * may mute an agent that spoke up unasked; only the chat's owner, or the agent's, may unmute it.
+   */
+  setAgentMuted(by: Person, agentId: string, muted: unknown): ChatAgentView[] | ChatRefusal {
+    if (!this.isInChat(by.uid)) return refuse(403, "You are not in this chat.");
+    if (typeof muted !== "boolean") return refuse(400, "Expected {muted: true | false}.");
+    const entry = this.roster.get(agentId);
+    if (!entry) return refuse(404, "No such agent in this chat.");
+    if (!muted && by.uid !== this.uid && by.uid !== entry.ownerUid) return refuse(403, `Only the chat's owner or @${entry.name}'s can unmute it.`);
+    const list = this.#mutedAgents().filter((id) => id !== agentId && this.roster.get(id));
+    this.ctx.storage.kv.put(MUTED_KEY, muted ? [...list, agentId] : list);
+    this.#broadcastAgents();
+    this.#broadcastSettings();
+    return this.agentViews();
+  }
+
+  /** The tools `allowed` keeps, less the MCP tools of servers the chat's settings leave out. */
+  #chatServers(allowed: readonly string[]): string[] {
+    const settings = this.#agentSettings();
+    if (!settings.servers) return [...allowed];
+    return allowed.filter((name) => {
+      const info = this.#mcpTools.get(name);
+      return !info || chatAllowsServer(settings, info.server);
+    });
+  }
+
+  /**
+   * The agents the router picks for a message that names nobody (worker/agents/router.ts), best first: at most two of
+   * the roster's agents that are on. None when it fails or is unsure, which the metrics count.
+   */
+  async #pickAgents(model: NonNullable<ReturnType<typeof agentRouterModel>>, text: string, piAnswers: boolean, recent: RecentEntries): Promise<string[]> {
+    const agents = this.roster
+      .list()
+      .filter((entry) => !entry.off)
+      .map(({ agentId, name, job }) => ({ id: agentId, name, job }));
+    const started = Date.now();
+    try {
+      const entries = (await recent()) ?? [];
+      const signal = AbortSignal.timeout(AGENT_ROUTE_MS);
+      const { agents: picked, usage } = await routeAgents(this.env.AI as unknown as ModelRunner, model, { message: text, history: agentRouteHistory(entries), agents, piAnswers }, signal);
+      this.metrics.router({ picked, candidates: agents.length, ms: Date.now() - started });
+      // Paid for whatever it said. Only a record: a failure is logged.
+      void this.#root()
+        .then((root) => root.commit((tx) => recordSpend(tx, root.id, `${AGENT_ROUTER_LEDGER_PREFIX}${agentRouterId(model)}`, usage), BACKGROUND_CONTEXT))
+        .catch((error: unknown) => console.error("agent router spend:", errorMessage(error)));
+      return picked;
+    } catch (error) {
+      const failed = errorMessage(error);
+      console.error("agent router:", failed);
+      this.metrics.router({ picked: [], candidates: agents.length, ms: Date.now() - started, failed });
+      return [];
+    }
+  }
+
+  /**
+   * A person said something: after PAUSE_MS of quiet, an agent may speak up about it (#afterPause). Each message moves
+   * the check back; only the newest one's is kept.
+   */
+  #notePause(sentAt: number): void {
+    if (!this.speakUp.possible()) return;
+    this.ctx.waitUntil(this.#schedulePause({ after: sentAt }).catch((error: unknown) => console.error("speak up:", errorMessage(error))));
+  }
+
+  async #schedulePause(payload: PauseAlarm): Promise<void> {
+    const kept = this.ctx.storage.kv.get<PauseAlarm & { id: string }>(PAUSE_KEY);
+    if (kept && kept.after > payload.after) return;
+    if (kept && kept.after !== payload.after) await this.scheduler.cancel(kept.id).catch(() => {});
+    const { id } = await this.scheduler.set(new Date(Date.now() + PAUSE_MS), "pause", payload);
+    this.ctx.storage.kv.put(PAUSE_KEY, { ...payload, id });
+  }
+
+  /** No pause check waits any more (agents may no longer speak up here). */
+  #cancelPause(): void {
+    const kept = this.ctx.storage.kv.get<PauseAlarm & { id: string }>(PAUSE_KEY);
+    if (!kept) return;
+    this.ctx.storage.kv.delete(PAUSE_KEY);
+    this.ctx.waitUntil(this.scheduler.cancel(kept.id).catch(() => {}));
+  }
+
+  /**
+   * The chat was quiet for PAUSE_MS after a person's message: the agents past the gates whose job is close to the
+   * conversation may speak up (worker/agents/speak-up.ts). While pi or an agent works, the check waits again.
+   */
+  async #afterPause(payload: PauseAlarm): Promise<void> {
+    const kept = this.ctx.storage.kv.get<PauseAlarm & { id: string }>(PAUSE_KEY);
+    if (!kept || kept.after !== payload.after || !this.speakUp.possible()) return;
+    if (this.#status() === "running" || this.roster.allRunning().length) {
+      const tries = (payload.tries ?? 0) + 1;
+      if (tries <= MAX_PAUSE_TRIES) await this.#schedulePause({ after: payload.after, tries });
+      else this.ctx.storage.kv.delete(PAUSE_KEY);
+      return;
+    }
+    this.ctx.storage.kv.delete(PAUSE_KEY);
+    const recent = await this.#recentEntries();
+    if (!recent) return;
+    const last = recent.find((entry) => entry.kind === CHAT_MESSAGE_KIND);
+    const data = last?.data as Partial<ChatMessageData> | undefined;
+    if (!data?.text || data.uid === undefined || data.sentAt === undefined) return;
+    const line = askOf({ name: data.name ?? "someone", kind: "person" }, data.text, MAX_ASK_CHARS);
+    await this.speakUp.afterPause(recent, { line, askKey: messageAskKey({ uid: data.uid, sentAt: data.sentAt }) });
+  }
+
+  /** Someone asked something nobody was called for: if nobody answers within FOLLOW_UP_AFTER_MS, an agent may offer to. */
+  #noteAsk(uid: string, sentAt: number, text: string): void {
+    if (!this.speakUp.possible() || !looksLikeAsk(text)) return;
+    const payload: FollowUpAlarm = { uid, sentAt };
+    this.ctx.waitUntil(
+      this.scheduler.set(new Date(sentAt + FOLLOW_UP_AFTER_MS), "followUp", payload).catch((error: unknown) => console.error("follow-up:", errorMessage(error))),
+    );
+  }
+
+  /** A question's wait is over: when nobody answered it and its asker is still here, an agent may offer to pick it up. */
+  async #followUp({ uid, sentAt }: FollowUpAlarm): Promise<void> {
+    if (!this.speakUp.possible() || !this.isInChat(uid)) return;
+    // The question, and what came after it, from the newest entries back.
+    const after: EntryRecord[] = [];
+    let ask: Partial<ChatMessageData> | undefined;
+    search: for await (const page of this.#log({ order: "descending" }, 100, 5)) {
+      for (const entry of page) {
+        const data = entry.kind === CHAT_MESSAGE_KIND ? (entry.data as Partial<ChatMessageData> | undefined) : undefined;
+        if (data?.uid === uid && data.sentAt === sentAt) {
+          ask = data;
+          break search;
+        }
+        after.push(entry);
+      }
+    }
+    if (!ask?.text || answered(after, uid)) return;
+    await this.speakUp.followUp({ text: ask.text, name: ask.name ?? this.#nameOf(uid), uid, sentAt, askKey: messageAskKey({ uid, sentAt }) });
+  }
+
+  /**
+   * One model answer was counted (worker/agents/spend.ts): it adds to its turn's metrics and to the owner's day, and
+   * the chat is told once a day when its budget runs out.
+   */
+  #spent(spent: Spent): void {
+    if (spent.conversation) {
+      const kept = this.#turnSpend.get(spent.conversation) ?? { tokens: 0, costUsd: 0, toolCalls: 0 };
+      this.#turnSpend.delete(spent.conversation);
+      this.#turnSpend.set(spent.conversation, { tokens: kept.tokens + spent.tokens, costUsd: kept.costUsd + spent.costUsd, toolCalls: kept.toolCalls + spent.toolCalls });
+      if (this.#turnSpend.size > MAX_TURN_SPEND) this.#turnSpend.delete(this.#turnSpend.keys().next().value!);
+    }
+    // The owner's daily meter, which their runs stop at (RUNS_DAILY_USD). Only a meter: a failure is logged.
+    this.ctx.waitUntil(
+      Promise.resolve(this.#directory.recordModelSpend({ calls: 1, tokens: spent.tokens, cost: spent.costUsd })).catch((error: unknown) =>
+        console.error("owner spend:", errorMessage(error)),
+      ),
+    );
+    const refusal = this.spend.refusal();
+    const day = budgetDay(Date.now());
+    if (refusal && this.ctx.storage.kv.get<string>(BUDGET_TOLD_KEY) !== day) {
+      this.ctx.storage.kv.put(BUDGET_TOLD_KEY, day);
+      this.metrics.budget({ scope: "chat", usedTokens: this.spend.today().tokens, capped: true });
+      this.#notice({ kind: CHAT_EVENT_KIND, data: { event: "budget", scope: "chat", text: refusal } satisfies ChatEventData });
+      this.#broadcastSettings();
+    }
+  }
+
+  /** A roster agent's turn ended: its metrics. */
+  #turnEnded(turn: AgentTurn, outcome: TurnOutcome): void {
+    const entry = this.roster.get(turn.agentId);
+    const session = entry ? sessionOf(entry, turn) : undefined;
+    const used = (session && this.#turnSpend.get(session)) || { tokens: 0, costUsd: 0, toolCalls: 0 };
+    if (session) this.#turnSpend.delete(session);
+    this.metrics.turn({
+      agent: turn.agentId,
+      status: outcome.status,
+      wallMs: Math.max(0, outcome.endedAt - outcome.startedAt),
+      ...used,
+      byOwner: turn.byOwner,
+      unprompted: turn.calledBy.unprompted !== undefined,
+      cacheBytes: this.hub.cacheStats().get(turn.agentId)?.bytes ?? 0,
+    });
+  }
+
+  /** What `ownerUid`'s model calls cost today, when it is past the daily cap for runs (RUNS_DAILY_USD); undefined while not. */
+  async #runsCapped(ownerUid: string): Promise<{ spent: number; cap: number } | undefined> {
+    const cap = Number(this.env.RUNS_DAILY_USD);
+    if (!Number.isFinite(cap) || cap <= 0) return undefined;
+    const { costUsd } = await this.#index(ownerUid).modelSpentToday();
+    return costUsd >= cap ? { spent: costUsd, cap } : undefined;
+  }
+
+  /** Why the owner's runs may not spend today (RunHost.spendCap), the chat told once a day; undefined when they may. */
+  async #runSpendCap(): Promise<string | undefined> {
+    const capped = await this.#runsCapped(this.uid);
+    if (!capped) return undefined;
+    const text = `Skipped: today's model calls cost $${capped.spent.toFixed(2)}, past the daily cap of $${capped.cap.toFixed(2)} for agents' runs. Runs start again tomorrow (UTC).`;
+    const day = budgetDay(Date.now());
+    if (this.ctx.storage.kv.get<string>(CAP_TOLD_KEY) !== day) {
+      this.ctx.storage.kv.put(CAP_TOLD_KEY, day);
+      this.metrics.budget({ scope: "user", usedUsd: capped.spent, capped: true });
+      this.#notice({ kind: CHAT_EVENT_KIND, data: { event: "budget", scope: "runs", text } satisfies ChatEventData });
+    }
+    return text;
+  }
+
+  /** Keep a tool result too long for a turn whole, in the owner's own files (not a chat file): its path. */
+  async #spill(tool: string, text: string): Promise<string> {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const name = tool.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 60);
+    return (await this.scope.files()).put(`${SPILL_FOLDER}/${this.chatId}/${stamp}-${name}.txt`, text, "text/plain; charset=utf-8");
+  }
+
+  /**
+   * Post or update a checklist card (worker/agent/checklist.ts) for the session `conversation`: pi's, or a roster
+   * agent's. Its id comes from the call's request id, so a call run again after a restart names the same card, and
+   * only the session that posted a card may update it.
+   */
+  async #postChecklist(conversation: string, checklist: ChecklistInput, requestId: string): Promise<{ id: string } | { error: string }> {
+    const by = await this.#checklistAuthor(conversation);
+    if (!by) return { error: "only pi and the agents of this chat post checklists here." };
+    const id = checklist.id ?? (await sha256Hex(requestId)).slice(0, 12);
+    const owner = this.ctx.storage.kv.get<string>(`${CHECKLIST_KEY}${id}`);
+    if (checklist.id && owner !== conversation) return { error: `there is no checklist ${checklist.id} of yours in this chat; leave id out to post a new one.` };
+    if (!owner) this.ctx.storage.kv.put(`${CHECKLIST_KEY}${id}`, conversation);
+    const data = checklistEntry(id, checklist, by, Date.now());
+    await (await this.#root()).submit({ type: "write", requestId, entry: { kind: CHAT_CHECKLIST_KIND, data: data as unknown as JsonObject } }, BACKGROUND_CONTEXT);
+    return { id };
+  }
+
+  /** Who a session posts as: pi for the chat's own, the agent for a roster agent's (or its turn's fork); none for another. */
+  async #checklistAuthor(conversation: string): Promise<ChecklistAuthor | undefined> {
+    if (String(ROOT_CONVERSATION_ID) === conversation) return { name: AGENT_NAME };
+    const running = this.roster.runningSessions().find((turn) => turn.session === conversation);
+    const entry = this.roster.list().find((agent) => agent.session === conversation) ?? (running && this.roster.get(running.agentId));
+    return entry ? { name: entry.name, agentId: entry.agentId, avatar: entry.avatar, color: entry.color } : undefined;
+  }
+
   /** Read pi's new answers for the agents they name (#piScan), off the caller's path. Nothing while the chat has no agents. */
   #scanPi(): void {
     if (this.#gone || !this.roster.hasAny()) return;
@@ -2654,6 +3029,8 @@ export class ChatAgent extends DurableObject<Env> {
       },
       changed: () => this.#broadcastAgents(),
       waitUntil: (promise) => this.ctx.waitUntil(promise),
+      refusal: () => this.spend.refusal(),
+      ended: (turn, outcome) => this.#turnEnded(turn, outcome),
     };
   }
 
@@ -2699,9 +3076,12 @@ export class ChatAgent extends DurableObject<Env> {
    */
   async #configureAgent(entry: RosterEntry, agent: AgentDefinition, turn: AgentTurn): Promise<void> {
     await this.#refreshForTurn(turn.ask);
+    const session = sessionOf(entry, turn);
+    this.spend.tag(session, { agent: entry.agentId });
+    this.#turnSpend.delete(session);
     const allowed = (installed: readonly string[]) =>
-      allowedTools(installed, this.#mcpTools, agent, turn.byOwner, (server) => this.hub.server(server)?.auth === "oauth");
-    await this.#configureSession(sessionOf(entry, turn), this.#agentChoice(agent), agentInstructions(agent, this.#nameOf(entry.ownerUid)), allowed);
+      this.#chatServers(allowedTools(installed, this.#mcpTools, agent, turn.byOwner, (server) => this.hub.server(server)?.auth === "oauth"));
+    await this.#configureSession(session, this.#agentChoice(agent), agentInstructions(agent, this.#nameOf(entry.ownerUid)), allowed);
   }
 
   /**
@@ -2992,14 +3372,15 @@ export class ChatAgent extends DurableObject<Env> {
     const signInOr = (error: unknown) => (error instanceof McpFailure && error.error.code === "auth_required" ? new SignInNeeded(error.error.server ?? "") : error);
     return {
       runs: this.runs,
-      read: async (server, tool, input) => {
+      read: async (server, tool, input, agentId) => {
         const info = await this.hub.tool(server, tool).catch((error: unknown) => {
           throw signInOr(error);
         });
         if (!info) throw new Error(`${server} has no tool "${tool}".`);
         if (!isReadOnly(info)) throw new Error(`${server}.${tool} changes data: a look step only reads.`);
         try {
-          const { result } = await this.hub.read(server, tool, input, { staleMs: RUN_STALE_MS, viewer: this.uid });
+          // Kept in the agent's share of the read cache, so one busy agent does not push out the others' reads.
+          const { result } = await this.hub.read(server, tool, input, { staleMs: RUN_STALE_MS, viewer: this.uid, ...(agentId && { owner: agentId }) });
           return (result.payload ?? null) as Value;
         } catch (error) {
           throw signInOr(error);
@@ -3016,13 +3397,14 @@ export class ChatAgent extends DurableObject<Env> {
         this.ctx.waitUntil(Promise.allSettled(asking));
       },
       newSession: async () => (await this.harness.sessions.create()).id,
-      configure: (session, agent, model) => this.#configureRun(session, agent, model),
+      configure: (session, agent, model, dueAt) => this.#configureRun(session, agent, model, undefined, dueAt),
       write: async (session, text, requestId) => this.#writeAside(await this.#conversation(session), text, requestId),
       work: async (session, prompt, operationId) => {
         const { result, entries } = await this.#runStep(session, prompt, operationId);
         return { status: result.status, ...(result.text !== undefined && { text: result.text }), ...(result.reason && { reason: result.reason }), ...workSpend(entries) };
       },
       deliver: (request) => this.#deliverRun(request),
+      spendCap: () => this.#runSpendCap(),
       changed: (agentId) => this.sockets.broadcast({ type: "runs", agentId }),
       alarmAt: async (at, payload) => (await this.scheduler.set(new Date(at), "run", payload)).id,
       alarmEvery: async (seconds, payload) => (await this.scheduler.every(seconds, "watch", payload)).id,
@@ -3059,10 +3441,11 @@ export class ChatAgent extends DurableObject<Env> {
    * tools (runTools). `pageTools`: a page rebuild's, which has the report as its data and gets these artifact tools in
    * place of the servers' (so nothing a server returns can steer what it writes).
    */
-  async #configureRun(session: string, agent: AgentDefinition, model: string | undefined, pageTools?: readonly string[]): Promise<void> {
+  async #configureRun(session: string, agent: AgentDefinition, model: string | undefined, pageTools?: readonly string[], dueAt?: number): Promise<void> {
     await this.#runRefresh(agent);
+    this.spend.tag(session, { agent: agent.id, ...(dueAt !== undefined && { run: `${agent.id}:${dueAt}` }) });
     const allowed = (installed: readonly string[]) =>
-      pageTools ? [...runTools(installed, new Map(), agent), ...pageTools] : runTools(installed, this.#mcpTools, agent);
+      pageTools ? [...runTools(installed, new Map(), agent), ...pageTools] : this.#chatServers(runTools(installed, this.#mcpTools, agent));
     await this.#configureSession(session, this.#agentChoice(agent, model), runInstructions(agent, this.#nameOf(this.uid)), allowed);
   }
 
@@ -3223,7 +3606,7 @@ export class ChatAgent extends DurableObject<Env> {
     this.#bringIn([meta.id]);
     const seed = await writeDraft(scope, { artifact: meta, edits: [] });
     const session = request.session ?? (await this.harness.sessions.create()).id;
-    await this.#configureRun(session, agent, undefined, ["artifact_read", WRITE_TOOL, CHECK_TOOL]);
+    await this.#configureRun(session, agent, undefined, ["artifact_read", WRITE_TOOL, CHECK_TOOL], run.dueAt);
     const operationId = `run:${agent.id}:${run.dueAt}:page:${request.key}`;
     const prompt = [
       `Rebuild the page "${meta.title}" (artifact ${meta.id}) as a snapshot of this run: today's data written into the page, so it makes no live calls.`,
@@ -3418,6 +3801,8 @@ interface ChatSession {
   abort(by: Person, agent?: string): Promise<void>;
   /** The chat's agents besides pi, as everyone sees them. */
   agents(): ChatAgentView[];
+  /** The chat's agent settings, as everyone in it sees them. */
+  agentSettings(): ChatAgentSettingsView;
   /** The agents' turns running now, each with its session: what the sockets follow live. */
   runningAgents(): { agentId: string; session: string; turn: number }[];
   /** An agent's session's events: a snapshot, then one batch per commit. */
@@ -3641,6 +4026,7 @@ class ChatSockets extends LifecycleCapability implements DurableObjectCapability
       send(ws, { type: "auto", on: this.#chat.auto() });
       send(ws, { type: "incoming", incoming: this.#chat.incoming() });
       send(ws, { type: "agents", agents: this.#chat.agents() });
+      send(ws, { type: "agentSettings", settings: this.#chat.agentSettings() });
       this.#followAgents(ws);
       // Timed only once it is to be sent: a wake attaches every socket again, and most find their snapshot already sent.
       const snapshot = await this.#events([events.snapshot], false);

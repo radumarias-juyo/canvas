@@ -210,6 +210,7 @@ export function ChatEventNotice({ data, uid, onOpenChat }: { data: ChatEventData
       </div>
     );
   }
+  if (data.event === "budget") return <div className="chat-notice budget-notice">{data.text}</div>;
   return (
     <div className="chat-notice branch-line">
       Above: the conversation this chat carries from {link(data.from.chatId, data.from.title)}, where {data.by.uid === uid ? "you" : data.by.name} branched it off

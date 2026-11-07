@@ -105,6 +105,8 @@ export const HINT_LEDGER_PREFIX = "hint:";
 export const TOOL_PICK_LEDGER_PREFIX = "tool-pick:";
 /** The same for the code review of pages before they are published (worker/artifacts/review.ts): `review:` and the model's id. */
 export const REVIEW_LEDGER_PREFIX = "review:";
+/** The same for the agent router, which picks the chat's agents for a message that names none (worker/agents/router.ts). */
+export const AGENT_ROUTER_LEDGER_PREFIX = "agent-router:";
 
 /** A model Auto may pick (the deployment's AUTO_MODELS): the picker's id, and what it is best at, which the router reads. */
 export interface AutoCandidate {

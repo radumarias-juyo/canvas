@@ -72,16 +72,22 @@ export type DeliveryRequest = {
 /** What the executor needs from the chat object it runs in. Tests pass fakes. */
 export interface RunHost {
   readonly runs: AgentRuns;
-  /** A read-only call through the hub, as the agent's owner: the result's payload. Throws SignInNeeded for a sign-in. */
-  read(server: string, tool: string, input: StepInput): Promise<Value>;
+  /**
+   * A read-only call through the hub, as the agent's owner: the result's payload. Throws SignInNeeded for a sign-in.
+   * `agentId`: whose share of the hub's read cache it is kept in.
+   */
+  read(server: string, tool: string, input: StepInput, agentId?: string): Promise<Value>;
   /** Which of these servers need their owner to sign in again before a run can read them. */
   needsSignIn(servers: readonly string[]): Promise<string[]>;
   /** Ask the owner to sign in to these servers again, for `agent`'s run: they are told, and this chat when they do. */
   signInNeeded(agent: AgentDefinition, servers: readonly string[]): void;
   /** A fresh pi session for one item. */
   newSession(): Promise<string>;
-  /** Set an item's session up for its work steps: the agent's model (or `model`), instructions and read tools. */
-  configure(session: string, agent: AgentDefinition, model?: string): Promise<void>;
+  /**
+   * Set an item's session up for its work steps: the agent's model (or `model`), instructions and read tools. `dueAt`
+   * names the run, which the session's model calls are tagged with.
+   */
+  configure(session: string, agent: AgentDefinition, model?: string, dueAt?: number): Promise<void>;
   /** A passive write into a session: context, no model call. Placed once per `requestId`. */
   write(session: string, text: string, requestId: string): Promise<void>;
   /** A work step's prompt into its session, waited for. Placed once per `operationId`. */
@@ -187,7 +193,7 @@ export function itemKey(element: Value, index: number): { key: string; label: st
  */
 export async function readFor(host: Pick<RunHost, "read">, agent: AgentDefinition, step: Pick<LookStep, "server" | "tool">, input: StepInput): Promise<Value> {
   if (!mayUseServer(agent, step.server)) throw new Error(`${step.server} is not one of the servers @${agent.name} may use.`);
-  return host.read(step.server, step.tool, input);
+  return host.read(step.server, step.tool, input, agent.id);
 }
 
 /** What a work step's prompt says around the step's own words. */
@@ -420,7 +426,7 @@ export class RunExecutor {
         case "work": {
           const model = step.model ?? state.agent.model;
           if (state.configured !== (model ?? "")) {
-            await this.#host.configure(state.session, state.agent, step.model);
+            await this.#host.configure(state.session, state.agent, step.model, state.run.dueAt);
             state.configured = model ?? "";
           }
           const result = await this.#host.work(state.session, workPrompt(step, state.when, state.element), `${opId(state)}:work:${key}`);

@@ -80,6 +80,11 @@ export class SpeakUp {
     this.#host = host;
   }
 
+  /** Whether the deployment can tell an agent's interest (INTEREST_MODEL): without it, no agent speaks up anywhere. */
+  available(): boolean {
+    return this.#host.embedder !== undefined;
+  }
+
   /** Whether any agent could speak up here at all: the chat allows it, the deployment can tell interest, and the roster has agents. */
   possible(): boolean {
     return !!this.#host.settings().speakUp && this.#host.embedder !== undefined && this.#host.roster.hasAny();

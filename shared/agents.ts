@@ -437,6 +437,8 @@ export interface ChatAgentView {
   ended?: { turn: number; status: Exclude<AgentTurnStatus, "queued" | "running"> };
   /** Its owner shares it with the people of this chat: they can open it read-only, and copy it (SharedAgentView). */
   shared?: true;
+  /** Someone in the chat muted it here: it posts nothing unprompted in this chat (its owner's agent settings can undo it). */
+  muted?: true;
 }
 
 /** An MCP server of the deployment, as the agent editor lists it: whether it signs in each user, and this one now. */

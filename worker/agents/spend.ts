@@ -29,6 +29,8 @@ export interface Spent {
   tokens: number;
   costUsd: number;
   tags: SpendTags;
+  /** The tool calls the answer made. */
+  toolCalls: number;
   /** The pi session it was for, when the meter knows it. */
   conversation?: string;
 }
@@ -105,8 +107,8 @@ export class ChatSpend {
     if (this.#sessions.size > MAX_TAGGED) this.#sessions.delete(this.#sessions.keys().next().value!);
   }
 
-  /** Count one answer's usage, for the session it was for when known. */
-  record(usage: Usage, conversation?: string): void {
+  /** Count one answer's usage (and its tool calls), for the session it was for when known. */
+  record(usage: Usage, conversation?: string, toolCalls = 0): void {
     const tokens = usage.totalTokens || usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
     const costUsd = usage.cost.total;
     if (!tokens && !costUsd) return;
@@ -116,7 +118,7 @@ export class ChatSpend {
     if (!before) this.#prune(day);
     this.#kv.put(key, { tokens: (before?.tokens ?? 0) + tokens, costUsd: (before?.costUsd ?? 0) + costUsd } satisfies DaySpend);
     try {
-      this.#spent({ tokens, costUsd, tags: this.#tagsOf(conversation), ...(conversation && { conversation }) });
+      this.#spent({ tokens, costUsd, toolCalls, tags: this.#tagsOf(conversation), ...(conversation && { conversation }) });
     } catch (error) {
       console.error("spend:", error);
     }
@@ -158,7 +160,7 @@ export class ChatSpend {
       const count = (message: AssistantMessage) => {
         if (counted) return;
         counted = true;
-        this.record(message.usage, conversation);
+        this.record(message.usage, conversation, message.content.filter((block) => block?.type === "toolCall").length);
       };
       return tapStream(
         stream,
