@@ -173,6 +173,7 @@ describe("guardrail rules", () => {
     expect(matchesValue("leak@blocked.com", '"leak"@blocked.com')).toBe(true);
     expect(matchesValue("leak@blocked.com", 'Sam <"Leak"@Blocked.com>')).toBe(true);
     expect(matchesValue("leak@blocked.com", '"le ak"@blocked.com')).toBe(false);
+    expect(matchesValue("leak@blocked.com", '"l\\eak"@blocked.com')).toBe(true);
   });
 
   it("never matches a recipient written as Name <address>, by its address or its name", () => {

@@ -210,6 +210,11 @@ export function valueAt(value: unknown, path: string): unknown {
   return found;
 }
 
+/** A text, a number or a yes or no: a value with no fields. */
+function isPlain(value: unknown): value is string | number | boolean {
+  return typeof value === "string" || typeof value === "number" || typeof value === "boolean";
+}
+
 /**
  * An argument's values: each element of a list, else the value itself; none when the call does not set it. A path
  * through a list of objects (`items.amount`) reads that field of each of them. A plain value (text, a number, yes or
@@ -217,14 +222,13 @@ export function valueAt(value: unknown, path: string): unknown {
  * a rule on `to.email` checks `to: "a@b.example"` too.
  */
 export function argValues(input: StepInput, path: string): unknown[] {
-  const plain = (value: unknown) => typeof value === "string" || typeof value === "number" || typeof value === "boolean";
   let found: unknown[] = [input];
   for (const part of path.split(".")) {
     found = found.flatMap((value): unknown[] => {
-      if (plain(value)) return [value];
+      if (isPlain(value)) return [value];
       if (Array.isArray(value)) {
         if (/^\d+$/.test(part)) return value.length > Number(part) ? [value[Number(part)]] : [];
-        return value.flatMap((item) => (plain(item) ? [item] : isObject(item) && Object.hasOwn(item, part) ? [item[part]] : []));
+        return value.flatMap((item) => (isPlain(item) ? [item] : isObject(item) && Object.hasOwn(item, part) ? [item[part]] : []));
       }
       return isObject(value) && Object.hasOwn(value, part) ? [value[part]] : [];
     });
@@ -328,7 +332,7 @@ function textTest(pattern: string): (name: string) => boolean {
  * mail libraries read it (normalAddresses), by namesOf. Null for a value that is not text, a number or a boolean.
  */
 function namesIn(value: unknown): string[] | null {
-  if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") return null;
+  if (!isPlain(value)) return null;
   const text = String(value).trim().toLowerCase();
   if (typeof value !== "string") return [text];
   const entries = [text, normalAddresses(text)].flatMap((one) => one.split(LIST_SPLIT)).flatMap((entry) => [entry, normalAddresses(entry)]);
@@ -346,8 +350,9 @@ function normalAddresses(text: string): string {
   return text
     .replace(/\([^()]*\)/g, " ")
     .replace(/\s*@\s*/g, "@")
-    // A quoted local part that needs no quotes is the same address: "leak"@blocked.example is leak@blocked.example.
-    .replace(/"([a-z0-9!#$%&'*+/=?^_`{|}~.-]+)"@/g, "$1@")
+    // A quoted local part that needs no quotes is the same address: "leak"@blocked.example is leak@blocked.example,
+    // and so is "l\eak"@blocked.example (a quoted pair is the character it quotes).
+    .replace(/"((?:\\?[a-z0-9!#$%&'*+/=?^_`{|}~.-])+)"@/g, (_, local: string) => `${local.replace(/\\/g, "")}@`)
     .replace(/^[^"<>@:,;]*:/, "")
     .replace(/;\s*$/, "")
     .trim();

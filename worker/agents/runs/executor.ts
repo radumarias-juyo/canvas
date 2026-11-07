@@ -467,8 +467,11 @@ export class RunExecutor {
   #stopIfChanged(agent: AgentDefinition, run: RunRecord): RunStatus | null {
     const shape = shapeOf(agent);
     if (run.detail.shape !== undefined && run.detail.shape !== shape && !this.#wentIn(run)) {
-      this.#host.runs.update(run.agentId, run.dueAt, { detail: { shape } });
+      // What it uses goes with the steps it now has (the models it ran on stay: none yet).
+      const used = { skills: skillsNamed(workflowOf(agent)), servers: serversNamed(agent, { reads: true }), models: run.detail.used?.models ?? [] };
+      this.#host.runs.update(run.agentId, run.dueAt, { detail: { shape, used } });
       run.detail.shape = shape;
+      run.detail.used = used;
     }
     const stop = whyStop(agent, agent.name, run);
     return stop && this.#stop(agent, run, stop);
@@ -521,7 +524,8 @@ export class RunExecutor {
         const agent = await this.#host.definition(agentId);
         if (!agent || (!test && !agent.enabled)) {
           const summary = agent ? turnedOff(agent) : "Failed: the agent was deleted.";
-          runs.update(agentId, deferred.dueAt, { status: agent ? "not_today" : "failed", summary });
+          // Its items that did not end (one waiting at a held call) end with it.
+          runs.stop(agentId, deferred.dueAt, { status: agent ? "not_today" : "failed", summary });
           return;
         }
         await this.start(startOf(agent, { ...deferred, status: "running" }));
@@ -584,7 +588,7 @@ export class RunExecutor {
     const runs = this.#host.runs;
     const { view, started } = await runs.beginItem(agent.id, run.dueAt, element.key, element.label, () => this.#host.newSession());
     if (!started && view.status !== "running") return;
-    if (!started && !run.test) {
+    if (!started) {
       // Going on (reopened by a decision, or cut off by a restart), maybe after the pass began: with the agent as it is
       // now. Turned off, deleted or changed since, it stops here.
       const stop = whyStop(await this.#host.definition(agent.id).catch(() => agent), agent.name, run);

@@ -578,10 +578,19 @@ export class AgentRuns {
 
   /**
    * Whether any item waits for its owner to decide a held call: its run waiting, or still going (another item in its
-   * pass), or waiting for a sign-in.
+   * pass), or waiting for a sign-in. One left waiting under a run that ended counts not: nothing reopens it.
    */
   anyItemWaiting(): boolean {
-    return this.#sql.exec("SELECT 1 FROM agent_runs WHERE item != '' AND status = 'waiting' LIMIT 1").toArray().length > 0;
+    return (
+      this.#sql
+        .exec(
+          `SELECT 1 FROM agent_runs AS each WHERE each.item != '' AND each.status = 'waiting' AND EXISTS (
+             SELECT 1 FROM agent_runs AS run WHERE run.agent_id = each.agent_id AND run.due_at = each.due_at AND run.item = ''
+               AND run.status IN ('waiting', 'running', 'needs_sign_in')
+           ) LIMIT 1`,
+        )
+        .toArray().length > 0
+    );
   }
 
   /** The runs that did not end: cut off by a restart, or waiting for a sign-in. */

@@ -435,7 +435,8 @@ export class AgentRunner {
   async #goOn(run: RunRecord, start: (start: RunStart) => Promise<RunEnd> = (one) => this.executor.start(one)): Promise<RunEnd | null> {
     const agent = await this.#host.definition(run.agentId);
     if (!agent) {
-      this.#host.runs.update(run.agentId, run.dueAt, { status: "failed", summary: "Failed: the agent was deleted." });
+      // Its items that did not end (one waiting at a held call) end with it.
+      this.#host.runs.stop(run.agentId, run.dueAt, { status: "failed", summary: "Failed: the agent was deleted." });
       return null;
     }
     return start(startOf(agent, run));
