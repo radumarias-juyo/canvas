@@ -30,7 +30,6 @@ export type Outputs = Required<Pick<ChatAgentReplyData, "published" | "items" | 
   Pick<ChatAgentReplyData, "saved"> & { forked?: boolean; review?: boolean };
 export const NO_OUTPUTS: Outputs = { published: [], items: [], sources: [] };
 
-
 /** How one operation in an agent's session ended, as PiHarness.wait says. */
 export interface TurnResult {
   status: "done" | "unanswered";

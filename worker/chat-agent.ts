@@ -68,7 +68,7 @@ import {
   type ModelChoice,
   type ModelSetting,
 } from "../shared/models.ts";
-import { deadline, errorMessage, formatBytes, listSome, mapLimit, memoAsync, serial, sha256Hex, singleFlight } from "../shared/util.ts";
+import { abortable, deadline, errorMessage, formatBytes, listSome, mapLimit, memoAsync, serial, sha256Hex, singleFlight } from "../shared/util.ts";
 import type { ChatSystemPrompt } from "../shared/system-prompt.ts";
 import type { SkillFileInfo } from "../shared/skill-files.ts";
 import { attachmentContent, parseAttachments, withoutImageData, type ToMarkdown } from "./agent/attachments.ts";
@@ -2563,6 +2563,8 @@ export class ChatAgent extends DurableObject<Env> {
       [...newest].map(async ([artifactId, version]) => {
         const meta = await this.storage.artifacts.readMeta(artifactId);
         if (!meta || !isOwnedBy(meta, this.uid, this.chatId)) return;
+        // A newer version that is the chat's is out already: they heard of that one. One still held is not.
+        if (newestShown(meta.latest, this.roster.withheldVersions(artifactId)) > version) return;
         const summary = {
           id: meta.id,
           title: meta.title,
@@ -3230,7 +3232,10 @@ export class ChatAgent extends DurableObject<Env> {
     piAnswers: boolean,
     recent: RecentEntries,
   ): Promise<string[]> {
-    const speaksUp = async (entry: RosterEntry) => (await this.#index(entry.ownerUid).getAgent(entry.agentId))?.speaksUp === true;
+    // Pi's picks wait for this one: the members' definitions are read within the router's time, not on top of it (one
+    // not read by then is left out).
+    const cap = AbortSignal.timeout(AGENT_ROUTE_MS);
+    const speaksUp = async (entry: RosterEntry) => (await abortable(this.#index(entry.ownerUid).getAgent(entry.agentId), cap))?.speaksUp === true;
     // The conversation is read while the members' definitions are (memoised: the other pickers share it).
     void recent().catch(() => {});
     const may = await routableAgents(roster, this.uid, this.#account(author), speaksUp);
@@ -3239,7 +3244,7 @@ export class ChatAgent extends DurableObject<Env> {
     const started = Date.now();
     try {
       const request = { message: text, history: routeHistory((await recent()) ?? []), agents, piAnswers };
-      const { agents: picked, usage } = await routeAgents(this.env.AI as unknown as ModelRunner, model, request, AbortSignal.timeout(AGENT_ROUTE_MS));
+      const { agents: picked, usage } = await routeAgents(this.env.AI as unknown as ModelRunner, model, request, cap);
       this.metrics.router({ picked, candidates: agents.length, ms: Date.now() - started });
       this.#sideSpend(`${AGENT_ROUTER_LEDGER_PREFIX}${agentRouterId(model)}`, usage, "agent router");
       return picked;
@@ -4780,11 +4785,11 @@ interface ChatNow {
   agent: Agent;
 }
 
-/** What #route found: a router's pick and the model choice it names, or why the chat keeps its model, and how long that took. */
 /** What of a page is not the chat's yet (ChatAgent.held): the page itself, or these versions. */
 type HeldPage = { page: boolean; versions: number[] };
 const NOTHING_HELD: HeldPage = { page: false, versions: [] };
 
+/** What #route found: a router's pick and the model choice it names, or why the chat keeps its model, and how long that took. */
 type Routing = { pick: AutoPick; choice: ModelChoice } | { kept: Pick<AutoPick, "running" | "missed" | "ms"> & { failed: string } };
 
 /** What the chat's sockets need from the chat. */

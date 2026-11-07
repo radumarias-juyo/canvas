@@ -942,11 +942,11 @@ export class UserDirectory extends DurableObject<Env> {
 
   /**
    * A version a turn apart from the chat published (recordArtifact's `held`) is the chat's now: it reaches the page's
-   * followers, unless a newer version is out already (which they heard of).
+   * followers. Whether a newer one they heard of is out already is the chat's to say (it knows which are still held):
+   * this list's newest can be one that is.
    */
   announceArtifact(artifact: ArtifactSummary, chatKind?: ChatKind): void {
-    const newest = this.#latestOf(artifact.id);
-    if (newest === undefined || artifact.latest < newest) return;
+    if (this.#latestOf(artifact.id) === undefined) return;
     this.#announce(artifact, chatKind);
   }
 

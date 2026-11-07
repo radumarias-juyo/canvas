@@ -87,8 +87,8 @@ export class AgentSeats {
   readonly #host: SeatHost;
   /** The turns this object waits on, so a wake does not wait on one twice. */
   readonly #waiting = new Set<string>();
-  /** The turns a give here is setting up (until their input is in): a resume leaves them to it. */
-  readonly #starting = new Set<string>();
+  /** The turns a give here is setting up (until their input is in), settling when it ends: a resume leaves them to it, a later give waits. */
+  readonly #starting = new Map<string, Promise<void>>();
   /** Whether a wake for the results no room took is set already (#report): one alarm wakes them all. */
   #later = false;
 
@@ -236,6 +236,8 @@ export class AgentSeats {
     // being set up sees it ended before its input goes in).
     for (const row of stale)
       if (row.submitted !== 1) this.#end(ref, row.turn, { status: "unanswered", reason: "the room gave a later turn", ...NO_OUTPUTS });
+    // Such a set-up ends first (its input stays out, or the run it started stops): it never stops this turn's run.
+    await Promise.all(stale.map((row) => this.#starting.get(turnKey(ref, row.turn))));
     const delivered = batch ? await this.deliver(ref, agentId, batch) : seat.delivered;
     const byOwner = turn.byOwner && !turn.unattended && turn.hop === 0 && turn.calledBy.uid === this.#host.uid && !turn.calledBy.agentId;
     const checked: SeatTurn = { ...turn, byOwner };
@@ -270,11 +272,13 @@ export class AgentSeats {
   async #claimed(row: SeatTurnRow, work: () => Promise<void>): Promise<void> {
     const key = turnKey(refOf(row), row.turn);
     if (this.#starting.has(key)) return;
-    this.#starting.add(key);
+    let settled!: () => void;
+    this.#starting.set(key, new Promise<void>((resolve) => (settled = resolve)));
     try {
       await work();
     } finally {
       this.#starting.delete(key);
+      settled();
     }
   }
 

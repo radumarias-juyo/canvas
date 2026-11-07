@@ -251,6 +251,11 @@ describe("publishing from a conversation apart from the chat", () => {
     // The same page saved from the chat's conversation too is the chat's: both had it.
     await writeDraft(scope, { html: "<p>salaries</p>", session: "1" });
     expect(roster.withheldDrafts("1")).toEqual(new Set([edited.id]));
+    // And one the chat had first stays the chat's when a conversation apart saves the same page later.
+    const month = await writeDraft(scope, { html: "<p>month</p>", session: "1" });
+    await writeDraft(scope, { html: "<p>month</p>", session: "fork" });
+    expect(roster.withheldDrafts("1")).toEqual(new Set([edited.id]));
+    await checkDraft(scope, month.id, {}, undefined, "1");
   });
 });
 

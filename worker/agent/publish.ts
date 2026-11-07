@@ -281,7 +281,7 @@ export interface WriteInput {
 }
 
 /** What conversation `session` may see (PublishScope.rulesFor); undefined, not a model's turn, or a chat with no rules: everything. */
-function rulesOf(scope: PublishScope, session: string | undefined): Promise<SessionRules> | undefined {
+export function rulesOf(scope: PublishScope, session: string | undefined): Promise<SessionRules> | undefined {
   return session === undefined ? undefined : scope.rulesFor?.(session);
 }
 

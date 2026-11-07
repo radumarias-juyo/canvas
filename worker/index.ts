@@ -166,7 +166,10 @@ async function route(request: Request, env: Env): Promise<Response> {
       const latest = newestShown(visible.latest, hidden);
       if (!latest) return json({ error: "No such artifact" }, 404);
       const versions = visible.versions.filter((version) => !hidden.has(version.version));
-      return json({ ...visible, latest, versions, isOwner, ...(inChat && { chatId }) } satisfies ArtifactView);
+      // Nor when a withheld one came out.
+      const updatedAt =
+        latest === visible.latest ? visible.updatedAt : (versions.find((version) => version.version === latest)?.publishedAt ?? visible.updatedAt);
+      return json({ ...visible, latest, updatedAt, versions, isOwner, ...(inChat && { chatId }) } satisfies ArtifactView);
     }
     // A read-only Git token for the artifact's repo, for `git clone`. Only the owner gets one:
     // the repo also holds the version history and the metadata.

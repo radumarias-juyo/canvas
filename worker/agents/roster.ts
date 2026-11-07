@@ -138,6 +138,11 @@ export type ApartWindow = { turn: number; from: number; through?: number; posted
 /** The sessions apart from the chat with a turn's reply not posted (ChatRoster.withheld). */
 const WITHHELD = "SELECT session FROM chat_agent_forks WHERE posted = 0 UNION SELECT session FROM chat_agent_apart_windows WHERE posted = 0";
 
+/** The session of a draft a conversation the chat sees saved (ChatRoster.recordDraft): no session is named so. */
+const CHAT_DRAFT = "";
+/** How many of those it keeps: well over the drafts a chat keeps (worker/storage/drafts.ts). */
+const MAX_CHAT_DRAFTS = 200;
+
 const FORKS = `SELECT f.session, f.posted, f.from_entry, f.review, f.reused,
   EXISTS (SELECT 1 FROM chat_agent_turns t WHERE t.session = f.session AND t.status IN ('queued', 'running')) AS open
   FROM chat_agent_forks f`;
@@ -314,6 +319,19 @@ export class ChatRoster {
     });
     // A fork's view (FORKS) asks whether a turn still runs in its session, for every session every trace read.
     sql.exec("CREATE INDEX IF NOT EXISTS chat_agent_turns_by_session ON chat_agent_turns (session)");
+    // Rows from before turns apart were kept per turn: a fork's are its one turn's (posted with its reply), and what a
+    // reused session holds apart from where it was apart from is a window no turn posts: withheld for good, never the chat's.
+    sql.exec(`
+      UPDATE chat_agent_forks SET apart_turn = (SELECT MAX(t.id) FROM chat_agent_turns t WHERE t.session = chat_agent_forks.session)
+        WHERE apart_turn IS NULL AND reused = 0 AND EXISTS (SELECT 1 FROM chat_agent_turns t WHERE t.session = chat_agent_forks.session);
+      UPDATE chat_agent_fork_pages SET turn = (SELECT f.apart_turn FROM chat_agent_forks f WHERE f.session = chat_agent_fork_pages.session)
+        WHERE turn IS NULL AND session IN (SELECT session FROM chat_agent_forks WHERE reused = 0 AND apart_turn IS NOT NULL);
+      UPDATE chat_agent_fork_files SET turn = (SELECT f.apart_turn FROM chat_agent_forks f WHERE f.session = chat_agent_fork_files.session)
+        WHERE turn IS NULL AND session IN (SELECT session FROM chat_agent_forks WHERE reused = 0 AND apart_turn IS NOT NULL);
+      INSERT INTO chat_agent_apart_windows (session, turn, from_entry)
+        SELECT session, -1, COALESCE(from_entry, -1) FROM chat_agent_forks f WHERE reused = 1 AND posted = 0
+        AND NOT EXISTS (SELECT 1 FROM chat_agent_apart_windows w WHERE w.session = f.session);
+    `);
   }
 
   /** The roster's clock: what its turns' times are taken from. */
@@ -607,17 +625,30 @@ export class ChatRoster {
   /**
    * A draft `session` saved (worker/storage/drafts.ts, by its id, a hash of the page): one a session apart from the chat
    * saved with its reply not posted is that turn's, which no other conversation lists or uses until it is posted
-   * (withheldDrafts). Saved from a conversation the chat sees, the page is the chat's, whoever else saved it too.
+   * (withheldDrafts). Saved from a conversation the chat sees, the page is the chat's, whoever else saved it too, before
+   * or after: a row of no session (CHAT_DRAFT) says so, for the newest MAX_CHAT_DRAFTS such drafts.
    */
   recordDraft(session: string, draftId: string): void {
     const apart = this.#sql.exec(
       `INSERT INTO chat_agent_fork_drafts (session, draft_id, turn)
        SELECT session, ?, apart_turn FROM chat_agent_forks WHERE session = ? AND posted = 0
+       AND NOT EXISTS (SELECT 1 FROM chat_agent_fork_drafts WHERE session = ? AND draft_id = ?)
        ON CONFLICT DO UPDATE SET turn = excluded.turn, posted = 0`,
       draftId,
       session,
+      CHAT_DRAFT,
+      draftId,
     ).rowsWritten;
-    if (!apart) this.#sql.exec("DELETE FROM chat_agent_fork_drafts WHERE draft_id = ?", draftId);
+    if (apart) return;
+    this.#sql.exec("DELETE FROM chat_agent_fork_drafts WHERE draft_id = ?", draftId);
+    this.#sql.exec("INSERT INTO chat_agent_fork_drafts (session, draft_id, posted) VALUES (?, ?, 1)", CHAT_DRAFT, draftId);
+    this.#sql.exec(
+      `DELETE FROM chat_agent_fork_drafts WHERE session = ? AND rowid NOT IN
+       (SELECT rowid FROM chat_agent_fork_drafts WHERE session = ? ORDER BY rowid DESC LIMIT ?)`,
+      CHAT_DRAFT,
+      CHAT_DRAFT,
+      MAX_CHAT_DRAFTS,
+    );
   }
 
   /** The drafts sessions apart from the chat other than `except` saved, with their replies not posted, and `except` did not save too. */

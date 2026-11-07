@@ -26,7 +26,19 @@ import type { PageReview } from "../artifacts/review.ts";
 import { chatOutFolder, FILES_WRITE_TOOL, RUN_BASH_TOOL, RUN_PYTHON_TOOL, savedReport, wroteReport } from "../chat-traces.ts";
 import { MAX_RUN_STDERR, MAX_RUN_STDOUT, type SandboxFile, type SandboxRun } from "../sandbox.ts";
 import { isToolResult, literalPath, MAX_DRAFTS, normalisePath, TOOL_RESULTS, type FileEntry, type ToolResults, type UserFiles } from "../storage/index.ts";
-import { checkDraft, draftLine, draftNamed, FailedChecks, publishDraft, readPageSource, reviewedRefusal, writeDraft, type PublishScope, type SessionRules } from "./publish.ts";
+import {
+  checkDraft,
+  draftLine,
+  draftNamed,
+  FailedChecks,
+  publishDraft,
+  readPageSource,
+  reviewedRefusal,
+  rulesOf as sessionRules,
+  writeDraft,
+  type PublishScope,
+  type SessionRules,
+} from "./publish.ts";
 import { checkFolders, FileRefError, MAX_SANDBOX_BYTES, outputPaths, resolveFile, resolveRef, sandboxLayout, saveFiles } from "./file-refs.ts";
 import { clip, MAX_TOOL_TEXT, text } from "./output.ts";
 import { pagePart } from "./page-part.ts";
@@ -340,7 +352,7 @@ async function chatArtifact(scope: ChatScope, id: string, rules?: SessionRules):
 
 /** What the conversation a tool runs in may see and change (PublishScope.rulesFor); undefined: nothing is withheld. */
 async function rulesOf(scope: ChatScope, api: { conversationId: unknown }): Promise<SessionRules | undefined> {
-  return scope.rulesFor?.(String(api.conversationId));
+  return sessionRules(scope, String(api.conversationId));
 }
 
 /**
