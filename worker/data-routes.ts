@@ -196,17 +196,14 @@ async function importChat(request: Request, uid: string, directory: Directory, s
   if (step === "begin") {
     const start = body as Partial<ChatImportStart> | null;
     if (typeof start?.from !== "string" || !isObject(start.artifacts)) return json({ error: "Expected {from, artifacts}." }, 400);
-    const artifacts = Object.fromEntries(
-      Object.entries(start.artifacts).filter(
-        (pair): pair is [string, string] => ID_PATTERN.test(pair[0]) && typeof pair[1] === "string" && ID_PATTERN.test(pair[1]),
-      ),
-    );
-    const agents = Object.fromEntries(
-      Object.entries(isObject(start.agents) ? start.agents : {}).filter(
-        (pair): pair is [string, string] => AGENT_ID_PATTERN.test(pair[0]) && typeof pair[1] === "string" && AGENT_ID_PATTERN.test(pair[1]),
-      ),
-    );
-    return answer(await chat.importBegin({ from: start.from, artifacts, agents }));
+    // Only ids on both sides: they are put in place of one another in the chat's rows.
+    const idMap = (pairs: unknown, pattern: RegExp) =>
+      Object.fromEntries(
+        Object.entries(isObject(pairs) ? pairs : {}).filter(
+          (pair): pair is [string, string] => pattern.test(pair[0]) && typeof pair[1] === "string" && pattern.test(pair[1]),
+        ),
+      );
+    return answer(await chat.importBegin({ from: start.from, artifacts: idMap(start.artifacts, ID_PATTERN), agents: idMap(start.agents, AGENT_ID_PATTERN) }));
   }
   if (step === "rows") {
     if (!isObject(body) || !Array.isArray(body.tables)) return json({ error: "Expected a part of a chat's export." }, 400);

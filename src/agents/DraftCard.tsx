@@ -9,8 +9,8 @@ import { glanceRows, instructionSteps, runsLabel, stateLabel } from "./glance.ts
 import { agentPath, goTo } from "./nav.ts";
 import { putAgent, reloadAgents, useAgents } from "./store.ts";
 
-/** Whether this deployment runs Test it: unknown until the first press, false once the route answered 404. */
-let testable: boolean | undefined;
+/** This deployment runs no Test it: its route answered 404 (the note that says so re-renders the card). */
+let untestable = false;
 
 /**
  * Where the model drafted an agent (agent_propose), in place of a plain step: its badge, name and job, whether it is
@@ -44,7 +44,6 @@ export function DraftCard({ details, chatId, mine }: { details: AgentProposedDet
 function Card({ agent, chatId }: { agent: AgentDefinition; chatId: string }) {
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<{ text: string; error?: boolean } | null>(null);
-  const [canTest, setCanTest] = useState(testable !== false);
   const state = stateLabel(agent);
   const steps = instructionSteps(agent.instructions);
   const rows = glanceRows(agent);
@@ -86,12 +85,10 @@ function Card({ agent, chatId }: { agent: AgentDefinition; chatId: string }) {
     setNote(null);
     try {
       await api.testAgent(agent.id);
-      testable = true;
       setNote({ text: "Testing it on today's data: nothing is sent or changed. Its result shows under its runs." });
     } catch (e) {
       if ((e as { status?: number }).status === 404) {
-        testable = false;
-        setCanTest(false);
+        untestable = true;
         setNote({ text: "Testing an agent is not available here yet." });
       } else setNote({ text: errorMessage(e), error: true });
     } finally {
@@ -111,7 +108,7 @@ function Card({ agent, chatId }: { agent: AgentDefinition; chatId: string }) {
         </div>
         <span className={`pill agent-state ${state.tone}`}>{state.text}</span>
         <div className="agent-card-actions">
-          {canTest && (
+          {!untestable && (
             <button type="button" disabled={busy} onClick={() => void test()}>
               Test it
             </button>

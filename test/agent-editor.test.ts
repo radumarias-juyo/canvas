@@ -4,6 +4,7 @@ import {
   copyInput,
   copyName,
   proposedBy,
+  type AgentChanges,
   type AgentDefinition,
   type AgentInput,
   type AgentResult,
@@ -44,7 +45,6 @@ describe("AgentStore: the chats an agent is in", () => {
       { chatId: "chat-a", shared: true },
       { chatId: "chat-b", shared: false },
     ]);
-    expect(store.chatCounts()).toEqual(new Map([[agent.id, 2]]));
     store.noteChat(agent.id, "chat-a", false);
     expect(store.chatsOf(agent.id)).toEqual([{ chatId: "chat-b", shared: false }]);
   });
@@ -61,7 +61,7 @@ describe("AgentStore: the chats an agent is in", () => {
     expect(store.chatsOf(a.id)).toEqual([{ chatId: "two", shared: false }]);
     expect(store.delete(a.id)).toBeNull();
     expect(store.chatsOf(a.id)).toEqual([]);
-    expect(store.chatCounts()).toEqual(new Map([[b.id, 1]]));
+    expect(store.chatsOf(b.id)).toEqual([{ chatId: "two", shared: false }]);
     store.noteChat(a.id, "three", true);
     expect(store.chatsOf(a.id)).toEqual([]);
   });
@@ -92,7 +92,7 @@ describe("copies of a shared agent", () => {
       assumed: ["servers"],
       copiedFrom: { owner: "x", id: "y", version: 1 },
     };
-    expect(copyInput(original, { job: "Mine now.", model: null, origin: "agent", enabled: true })).toEqual({
+    expect(copyInput(original, { job: "Mine now.", model: null, origin: "agent", enabled: true } as AgentChanges)).toEqual({
       ...research,
       job: "Mine now.",
       model: null,
@@ -180,21 +180,6 @@ describe("ChatRoster: sharing an agent with the chat", () => {
     roster.setShared("id-a", false);
     expect(roster.views(() => "Ann")[0]).not.toHaveProperty("shared");
     expect(roster.setShared("id-nobody", true)).toBe(false);
-  });
-
-  it("adds the column to a roster made before it", () => {
-    const sql = memorySql();
-    sql.db.exec(`CREATE TABLE chat_agents (
-      agent_id TEXT PRIMARY KEY, owner_uid TEXT NOT NULL, name TEXT NOT NULL UNIQUE, session TEXT NOT NULL, added_at INTEGER NOT NULL,
-      avatar TEXT NOT NULL, color TEXT NOT NULL, job TEXT NOT NULL, mirrored INTEGER NOT NULL DEFAULT -1, off INTEGER NOT NULL DEFAULT 0
-    )`);
-    sql.db.exec(
-      "INSERT INTO chat_agents (agent_id, owner_uid, name, session, added_at, avatar, color, job) VALUES ('id-old', 'ann', 'old', 's', 1, 'O', 'blue', 'Old.')",
-    );
-    const roster = new ChatRoster(sql, () => T0);
-    expect(roster.get("id-old")?.shared).toBe(false);
-    roster.setShared("id-old", true);
-    expect(new ChatRoster(sql, () => T0).get("id-old")?.shared).toBe(true);
   });
 });
 
@@ -365,9 +350,9 @@ describe("the draft card's words", () => {
 
   it("goes to an agent's page and back from its URL", () => {
     const id = "b".repeat(16);
-    const path = agentPath({ id, field: "servers", chat: "c0ffee" });
-    expect(path).toBe(`/agents/${id}?field=servers&chat=c0ffee`);
-    expect(agentPlace(new URL(path, "https://app.test"))).toEqual({ id, tab: undefined, field: "servers", chat: "c0ffee" });
+    const path = agentPath({ id, field: "servers", chat: "c0ffee00" });
+    expect(path).toBe(`/agents/${id}?field=servers&chat=c0ffee00`);
+    expect(agentPlace(new URL(path, "https://app.test"))).toEqual({ id, tab: undefined, field: "servers", chat: "c0ffee00" });
     expect(agentPlace(new URL("/agents/new", "https://app.test"))).toMatchObject({ id: "new" });
     expect(agentPlace(new URL(`/agents/${id}?chat=../x`, "https://app.test"))?.chat).toBeUndefined();
     expect(agentPlace(new URL("/agents/nothex", "https://app.test"))).toBeNull();

@@ -148,7 +148,7 @@ export const ModelPicker = memo(function ModelPicker({ model, thinkingLevel, aut
     setOpen(false);
     trigger.current?.focus();
   }, []);
-  const menuAuto = useMemo(() => autoLabel && { ...AUTO_OPTION, ...autoLabel }, [autoLabel]);
+  const autoOption = useMemo(() => (autoLabel ? { ...AUTO_OPTION, ...autoLabel } : DEFAULT_AUTO), [autoLabel]);
   // A trigger turned off (the chat lost its socket) closes the menu: its picks would go nowhere.
   useEffect(() => {
     if (disabled) setOpen(false);
@@ -175,8 +175,6 @@ export const ModelPicker = memo(function ModelPicker({ model, thinkingLevel, aut
   const full = current ? `${current.name} (${providerLabel(current.provider)})` : model;
   // On Auto: the model, and effort, its last message was answered with; none where Auto is not the router.
   const last = choiceLabel(current, model, effort);
-  const autoName = autoLabel?.name ?? AUTO_OPTION.name;
-  const autoHint = autoLabel?.hint ?? AUTO_HINT;
   const lastPick = !autoLabel || model !== AUTO_MODEL;
   return (
     <div className="model-picker">
@@ -187,12 +185,12 @@ export const ModelPicker = memo(function ModelPicker({ model, thinkingLevel, aut
         disabled={disabled}
         aria-haspopup="dialog"
         aria-expanded={open}
-        aria-label={auto ? `Model: ${autoName}${lastPick ? `, last ${last}` : ""}` : effort ? `Model: ${name}, ${effortLabel(effort).toLowerCase()}` : `Model: ${name}`}
-        title={auto ? `${autoName}: ${autoHint.toLowerCase()}${lastPick ? `. Last: ${last}` : ""}` : effort ? `${full} · ${effortLabel(effort)}` : full}
+        aria-label={auto ? `Model: ${autoOption.name}${lastPick ? `, last ${last}` : ""}` : effort ? `Model: ${name}, ${effortLabel(effort).toLowerCase()}` : `Model: ${name}`}
+        title={auto ? `${autoOption.name}: ${autoOption.hint.toLowerCase()}${lastPick ? `. Last: ${last}` : ""}` : effort ? `${full} · ${effortLabel(effort)}` : full}
         onClick={() => setOpen(!open)}
       >
         {/* A deployment's default can be a model the picker does not list. */}
-        <span className="model-trigger-name">{auto ? autoName : name}</span>
+        <span className="model-trigger-name">{auto ? autoOption.name : name}</span>
         {auto ? (
           lastPick && <span className="model-trigger-effort model-trigger-pick">{name}</span>
         ) : (
@@ -209,7 +207,7 @@ export const ModelPicker = memo(function ModelPicker({ model, thinkingLevel, aut
           onEffort={(level) => level !== thinkingLevel && onChange(model, level)}
           onClose={close}
           trigger={trigger}
-          autoOption={menuAuto}
+          autoOption={autoOption}
         />
       )}
       {!auto && current && !current.images && attachingImages && (
@@ -260,7 +258,7 @@ function ModelMenu({
   onEffort,
   onClose,
   trigger,
-  autoOption = DEFAULT_AUTO,
+  autoOption,
 }: {
   catalog: ModelCatalog;
   current: string;
@@ -270,7 +268,7 @@ function ModelMenu({
   onEffort: (level: ModelThinkingLevel) => void;
   onClose: () => void;
   trigger: RefObject<HTMLButtonElement | null>;
-  autoOption?: AutoOption & { hint: string };
+  autoOption: AutoOption & { hint: string };
 }) {
   const id = useId();
   const [query, setQuery] = useState("");

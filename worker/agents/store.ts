@@ -7,6 +7,7 @@ import {
   defaultColor,
   MAX_AGENT_PROPOSALS,
   MAX_AGENTS,
+  type AgentChanges,
   type AgentDefinition,
   type AgentInput,
   type AgentOrigin,
@@ -188,7 +189,7 @@ export class AgentStore {
    * Save someone's own copy of an agent another person shared (`copiedFrom`), turned off, as their draft: under its
    * name, or the first free "name-2"… when they have an agent of that name.
    */
-  saveCopy(input: AgentInput, copiedFrom: NonNullable<AgentDefinition["copiedFrom"]>): AgentResult {
+  saveCopy(input: AgentChanges, copiedFrom: NonNullable<AgentDefinition["copiedFrom"]>): AgentResult {
     const name = copyName(String(input.name ?? "").toLowerCase(), (candidate) => this.byName(candidate) !== null);
     if (!name) return { error: `You have many agents named like "${input.name}"; rename one first.` };
     return this.save({ ...input, name }, "user", false, { copiedFrom });
@@ -239,12 +240,6 @@ export class AgentStore {
       .exec("SELECT chat_id, shared FROM agent_chats WHERE agent_id = ? ORDER BY chat_id", agentId)
       .toArray()
       .map((row) => ({ chatId: row.chat_id as string, shared: row.shared === 1 }));
-  }
-
-  /** How many chats each agent is in, by its id. */
-  chatCounts(): Map<string, number> {
-    const rows = this.#sql.exec("SELECT agent_id, COUNT(*) AS n FROM agent_chats GROUP BY agent_id").toArray();
-    return new Map(rows.map((row) => [row.agent_id as string, row.n as number]));
   }
 
   /** A deleted chat holds no agent any more. */

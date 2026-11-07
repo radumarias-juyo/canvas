@@ -1,4 +1,4 @@
-import type { AgentChatUse, AgentDefinition, AgentInput, AgentServerInfo, ChatAgents, ChatAgentView, SharedAgentView } from "../shared/agents.ts";
+import type { AgentChanges, AgentChatUse, AgentDefinition, AgentInput, AgentServerInfo, ChatAgents, ChatAgentView, SharedAgentView } from "../shared/agents.ts";
 import type {
   ArtifactVersionImport,
   ChatDumpCursor,
@@ -202,7 +202,6 @@ export const api = {
   /** (owner) Bring one of their agents into the chat. */
   addChatAgent: (chatId: string, agentId: string) => request<ChatAgentView[]>(chatPath(chatId, "/agents"), post({ agentId })),
   removeChatAgent: (chatId: string, agentId: string) => request<ChatAgentView[]>(chatPath(chatId, `/agents/${agentId}`), { method: "DELETE" }),
-  agent: (id: string) => request<AgentDefinition>(`/api/agents/${id}`),
   /** The MCP servers an agent may use, and which this user signed in to. */
   agentServers: () => request<AgentServerInfo[]>("/api/agents/servers"),
   /** The chats one of the user's agents is in, with whether it is shared in each. */
@@ -212,7 +211,7 @@ export const api = {
   /** (owner) Share one of the chat's agents with its people, or stop. */
   shareChatAgent: (chatId: string, agentId: string, shared: boolean) => request<ChatAgentView[]>(chatPath(chatId, `/agents/${agentId}`), send("PATCH", { shared })),
   /** The user's own copy of an agent shared in a chat, with their changes: saved off, with where it came from. */
-  copyAgent: (chatId: string, agentId: string, changes: Partial<AgentInput>) => request<AgentDefinition>(chatPath(chatId, `/agents/${agentId}/copy`), post(changes)),
+  copyAgent: (chatId: string, agentId: string, changes: AgentChanges) => request<AgentDefinition>(chatPath(chatId, `/agents/${agentId}/copy`), post(changes)),
   /** A dry run of an agent on today's data, nothing sent or changed. Throws with status 404 where testing is not there yet. */
   testAgent: (id: string) => request<unknown>(`/api/agents/${id}/test`, post({})),
   skills: () => request<SkillInfo[]>("/api/skills"),

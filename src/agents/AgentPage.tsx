@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useRef, useState, type ComponentType } from "react";
-import type { AgentChatUse, AgentDefinition, AgentInput, SharedAgentView } from "../../shared/agents.ts";
+import {
+  COPIED_FIELDS,
+  type AgentChatUse,
+  type AgentChanges,
+  type AgentDefinition,
+  type AgentInput,
+  type SharedAgentView,
+} from "../../shared/agents.ts";
 import type { ChatSummary } from "../../shared/protocol.ts";
-import { errorMessage, plural } from "../../shared/util.ts";
+import { errorMessage } from "../../shared/util.ts";
 import { api } from "../api.ts";
 import { AgentAvatar } from "../chat/people.tsx";
 import { MenuButton, opensElsewhere } from "../layout.tsx";
@@ -33,14 +40,15 @@ export interface AgentTabProps {
   notice: (notice: PageNotice | null) => void;
 }
 
-/** A line under the page's header. */
+/** A line under the page's header, about one agent: the page of another says nothing of it. */
 export interface PageNotice {
+  agentId: string;
   text: string;
   error?: boolean;
 }
 
-/** The optional fields the form can clear, as a copy's request says so: null is none (checkAgent). */
-const CLEARED = { avatar: null, color: null, model: null, effort: null, servers: null, sharedServers: null } as unknown as Partial<AgentInput>;
+/** What a tab saves without editing: the rest of the definition (its trigger, scope, workflow, autonomy) stays as it is. */
+const KEPT = [...COPIED_FIELDS, "autonomy"] as const satisfies readonly (keyof AgentInput)[];
 
 /** A tab of the agent page. Later tabs (workflow and runs, limits, what it knows) add themselves here. */
 export interface AgentTab {
@@ -48,8 +56,6 @@ export interface AgentTab {
   label: string;
   /** The fields it edits: a Change for one of them opens this tab. */
   fields: readonly string[];
-  /** Whether it shows for this agent: some tabs are only for an agent that is saved, or the user's own. */
-  shows?: (subject: AgentSubject) => boolean;
   Component: ComponentType<AgentTabProps>;
 }
 
@@ -85,12 +91,6 @@ export function AgentPage({
 }) {
   const { agents, error: listError } = useAgents();
   const [notice, setNotice] = useState<PageNotice | null>(null);
-  // Another agent's page says nothing of this one's, unless a save here made it (a new agent, a copy): its notice stays.
-  const madeHere = useRef<string | null>(null);
-  useEffect(() => {
-    if (madeHere.current === place.id) madeHere.current = null;
-    else setNotice(null);
-  }, [place.id]);
   const own = agents?.find((agent) => agent.id === place.id);
   // Someone else's agent, as the chat it was opened from shares it.
   const [shared, setShared] = useState<SharedAgentView | null>(null);
@@ -119,23 +119,27 @@ export function AgentPage({
           ? { kind: "shared", agent: shared, chatId: place.chat, chatTitle }
           : null;
 
+  const tab = tabFor(TABS, place);
   const save = useCallback(
     async (fields: AgentInput): Promise<AgentDefinition> => {
       if (!subject) throw new Error("This agent is not loaded yet.");
       let saved: AgentDefinition;
-      if (subject.kind === "own") saved = await api.saveAgent(subject.agent.id, { ...fields, version: subject.agent.version });
-      else if (subject.kind === "new") saved = await api.createAgent(fields);
-      // A copy takes what the form leaves out from the original: what the form cleared is said as cleared.
-      else saved = await api.copyAgent(subject.chatId, subject.agent.id, { ...CLEARED, ...fields });
-      putAgent(saved);
-      void reloadAgents();
-      if (subject.kind !== "own") {
-        madeHere.current = saved.id;
-        navigate(agentPath({ id: saved.id }));
+      if (subject.kind === "own") {
+        const { agent } = subject;
+        const kept = Object.fromEntries(KEPT.filter((key) => !tab.fields.includes(key)).map((key) => [key, agent[key]]));
+        saved = await api.saveAgent(agent.id, { ...kept, ...fields, version: agent.version });
+      } else if (subject.kind === "new") saved = await api.createAgent(fields);
+      else {
+        // A copy takes what the tab leaves out from the original, so what the tab cleared is said as cleared (null).
+        const cleared: AgentChanges = Object.fromEntries(tab.fields.map((key) => [key, null]));
+        saved = await api.copyAgent(subject.chatId, subject.agent.id, { ...cleared, ...fields });
       }
+      // The user directory tells the sidebar's socket too, which reads the list again.
+      putAgent(saved);
+      if (subject.kind !== "own") navigate(agentPath({ id: saved.id }));
       return saved;
     },
-    [subject, navigate],
+    [subject, tab, navigate],
   );
 
   const back = place.chat && (
@@ -166,20 +170,18 @@ export function AgentPage({
     );
   }
 
-  const tabs = TABS.filter((tab) => !tab.shows || tab.shows(subject));
-  const tab = tabFor(tabs, place);
   return (
     <div className="agent-page">
       {back}
       <AgentHeader subject={subject} navigate={navigate} onMenu={onMenu} />
-      {notice && (
+      {notice?.agentId === place.id && (
         <p className={notice.error ? "form-error agent-notice" : "skills-note agent-notice"} role="status">
           {notice.text}
         </p>
       )}
-      {tabs.length > 1 && (
+      {TABS.length > 1 && (
         <nav className="agent-tabs" role="tablist" aria-label="Agent">
-          {tabs.map((each) => (
+          {TABS.map((each) => (
             <button
               key={each.id}
               type="button"
@@ -224,12 +226,11 @@ function AgentHeader({ subject, navigate, onMenu }: { subject: AgentSubject; nav
     );
   }
   const { agent } = subject;
-  const turn = async (on: boolean) => {
-    if (subject.kind !== "own") return;
+  const turn = async (mine: AgentDefinition, on: boolean) => {
     setBusy(true);
     setError(null);
     try {
-      putAgent(await api.setAgentEnabled(subject.agent, on));
+      putAgent(await api.setAgentEnabled(mine, on));
     } catch (e) {
       setError(errorMessage(e));
       void reloadAgents();
@@ -245,20 +246,7 @@ function AgentHeader({ subject, navigate, onMenu }: { subject: AgentSubject; nav
       setError(errorMessage(e));
     }
   };
-  const remove = async () => {
-    setBusy(true);
-    try {
-      await api.deleteAgent(agent.id);
-      dropAgent(agent.id);
-      void reloadAgents();
-      navigate("/");
-    } catch (e) {
-      setError(errorMessage(e));
-      setBusy(false);
-    }
-  };
-  const mine = subject.kind === "own" ? subject.agent : null;
-  const state = mine && stateLabel(mine);
+  const state = subject.kind === "own" && stateLabel(subject.agent);
   return (
     <header className="agent-head">
       {onMenu && <MenuButton onClick={onMenu} />}
@@ -268,11 +256,16 @@ function AgentHeader({ subject, navigate, onMenu }: { subject: AgentSubject; nav
         <p>{agent.job}</p>
       </div>
       <div className="agent-head-actions">
-        {mine && state ? (
+        {subject.kind === "own" && state ? (
           <>
             <span className={`pill agent-state ${state.tone}`}>{state.text}</span>
-            <button type="button" className={mine.enabled ? undefined : "primary"} disabled={busy} onClick={() => void turn(!mine.enabled)}>
-              {mine.enabled ? "Turn off" : "Turn on"}
+            <button
+              type="button"
+              className={subject.agent.enabled ? undefined : "primary"}
+              disabled={busy}
+              onClick={() => void turn(subject.agent, !subject.agent.enabled)}
+            >
+              {subject.agent.enabled ? "Turn off" : "Turn on"}
             </button>
             <button type="button" disabled={busy} onClick={() => void askDelete()}>
               Delete
@@ -283,25 +276,64 @@ function AgentHeader({ subject, navigate, onMenu }: { subject: AgentSubject; nav
         )}
       </div>
       {error && <p className="form-error agent-head-note">{error}</p>}
-      {deleting && (
-        <div className="agent-confirm" role="alertdialog" aria-label={`Delete @${agent.name}?`}>
-          <p>
-            <strong>Delete @{agent.name}?</strong>{" "}
-            {deleting.length
-              ? `It leaves ${plural(deleting.length, "chat")} it is in: ${deleting.map((use) => `“${use.title}”`).join(", ")}. Its past replies stay in them.`
-              : "It is in no chat."}{" "}
-            This cannot be undone.
-          </p>
-          <div className="skill-form-actions">
-            <button type="button" className="danger" disabled={busy} onClick={() => void remove()}>
-              Delete
-            </button>
-            <button type="button" disabled={busy} onClick={() => setDeleting(null)}>
-              Cancel
-            </button>
-          </div>
-        </div>
-      )}
+      {deleting && <DeleteAgent agent={agent} chats={deleting} onClose={() => setDeleting(null)} onDeleted={() => navigate("/")} />}
     </header>
+  );
+}
+
+/** Asks before deleting an agent, naming the chats it leaves; Escape and Cancel close it, not while it is being deleted. */
+function DeleteAgent({
+  agent,
+  chats,
+  onClose,
+  onDeleted,
+}: {
+  agent: Pick<AgentDefinition, "id" | "name">;
+  chats: readonly AgentChatUse[];
+  onClose: () => void;
+  onDeleted: () => void;
+}) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => dialog.current?.showModal(), []);
+  const remove = async () => {
+    setDeleting(true);
+    setError(null);
+    try {
+      await api.deleteAgent(agent.id);
+      dropAgent(agent.id);
+      onDeleted();
+    } catch (e) {
+      setError(errorMessage(e));
+      setDeleting(false);
+    }
+  };
+  return (
+    <dialog ref={dialog} className="confirm-dialog" onClose={onClose} onCancel={(e) => deleting && e.preventDefault()}>
+      <h2>Delete @{agent.name}?</h2>
+      {chats.length ? (
+        <>
+          <p>It leaves {chats.length === 1 ? "the chat" : `the ${chats.length} chats`} it is in; its past replies stay in them:</p>
+          <ul className="confirm-list">
+            {chats.map((use) => (
+              <li key={use.chatId}>{use.title}</li>
+            ))}
+          </ul>
+        </>
+      ) : (
+        <p>It is in no chat.</p>
+      )}
+      <p>This cannot be undone.</p>
+      {error && <p className="form-error">{error}</p>}
+      <div className="confirm-actions">
+        <button type="button" disabled={deleting} onClick={() => dialog.current?.close()}>
+          Cancel
+        </button>
+        <button type="button" className="danger" disabled={deleting} onClick={() => void remove()}>
+          {deleting ? "Deleting…" : "Delete"}
+        </button>
+      </div>
+    </dialog>
   );
 }

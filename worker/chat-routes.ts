@@ -1,5 +1,5 @@
 import { exports } from "cloudflare:workers";
-import { copyInput, type AgentInput, type SharedAgentView } from "../shared/agents.ts";
+import { copyInput, type AgentChanges, type SharedAgentView } from "../shared/agents.ts";
 import type { MentionOptions } from "../shared/mentions.ts";
 import {
   ID_PATTERN,
@@ -179,7 +179,8 @@ export async function chatRoute(
   }
   if (what === "agents" && sub === "copy") {
     if (method !== "POST" || !item) return null;
-    return copyAgent(request, directory, await chat.sharedAgent(person.uid, item));
+    const shared = await chat.sharedAgent(person.uid, item);
+    return "status" in shared ? answer(shared) : copyAgent(request, directory, shared);
   }
   if (what === "agents") {
     const result =
@@ -207,10 +208,9 @@ export async function chatRoute(
  * changed (the body), saved off in their own directory: the original stays as it is and keeps running as its owner.
  * Its owner copies their own agent the same way. The copy says where it came from, from the chat's word, not the body's.
  */
-async function copyAgent(request: Request, directory: DurableObjectStub<UserDirectory>, shared: SharedAgentView | ChatRefusal): Promise<Response> {
-  if ("status" in shared) return json({ error: shared.error }, shared.status);
-  const body = await readJson<Record<string, unknown>>(request);
+async function copyAgent(request: Request, directory: DurableObjectStub<UserDirectory>, shared: SharedAgentView): Promise<Response> {
+  const body = await readJson<AgentChanges>(request);
   if (!body || typeof body !== "object") return json({ error: "Expected the copy's fields as JSON (content-type: application/json)." }, 400);
-  const saved = await directory.copyAgent(copyInput(shared, body) as unknown as AgentInput, { owner: shared.ownerUid, id: shared.id, version: shared.version });
+  const saved = await directory.copyAgent(copyInput(shared, body), { owner: shared.ownerUid, id: shared.id, version: shared.version });
   return "error" in saved ? json(saved, 400) : json(saved, 201);
 }

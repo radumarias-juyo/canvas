@@ -379,10 +379,7 @@ export interface AgentChatUse {
  * An agent its owner shares with a chat, as the people in that chat may open it: what it does and how, never who it
  * is signed in as. It keeps running as its owner; a change someone else makes is saved as their own copy.
  */
-export type SharedAgentView = Pick<
-  AgentDefinition,
-  "id" | "name" | "avatar" | "color" | "job" | "instructions" | "model" | "effort" | "servers" | "sharedServers" | "version" | "trigger" | "scope" | "workflow"
-> & {
+export type SharedAgentView = Pick<AgentDefinition, CopiedField | "id" | "version"> & {
   ownerUid: string;
   ownerName: string;
   /** Its latest turns in this chat, newest first. */
@@ -404,16 +401,27 @@ export const COPIED_FIELDS = [
   "scope",
   "workflow",
 ] as const satisfies readonly (keyof AgentInput)[];
+export type CopiedField = (typeof COPIED_FIELDS)[number];
+
+/** Changes to a definition's fields, as a request carries them: null clears an optional one (checkAgent reads it as none). */
+export type AgentChanges = { [K in keyof AgentInput]?: AgentInput[K] | null };
+
+/** The fields a copy takes of `agent`, those it has. */
+export function copiedFields(agent: Pick<AgentInput, CopiedField>): Pick<AgentInput, CopiedField> {
+  const fields: AgentChanges = {};
+  for (const field of COPIED_FIELDS) if (agent[field] !== undefined) Object.assign(fields, { [field]: agent[field] });
+  return fields as Pick<AgentInput, CopiedField>;
+}
 
 /**
  * The fields of someone's copy of `original`: what they changed (`changes`, a request's body, checked by checkAgent when
  * saved), else the original's. Only the fields a copy takes: never its state, its guesses or where it came from.
  */
-export function copyInput(original: Partial<Record<(typeof COPIED_FIELDS)[number], unknown>>, changes: Record<string, unknown>): Record<string, unknown> {
-  const fields: Record<string, unknown> = {};
+export function copyInput(original: Pick<AgentInput, CopiedField>, changes: AgentChanges): AgentChanges {
+  const fields: AgentChanges = {};
   for (const field of COPIED_FIELDS) {
     const value = Object.hasOwn(changes, field) ? changes[field] : original[field];
-    if (value !== undefined) fields[field] = value;
+    if (value !== undefined) Object.assign(fields, { [field]: value });
   }
   return fields;
 }

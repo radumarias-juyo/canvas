@@ -1,5 +1,6 @@
 import type { MouseEvent } from "react";
 import { isDraftAgent, type AgentDefinition } from "../../shared/agents.ts";
+import { plural } from "../../shared/util.ts";
 import { UnreadDot } from "../chat/ChatList.tsx";
 import { AgentAvatar } from "../chat/people.tsx";
 import { isBoolean, opensElsewhere, SectionHead, useStoredState } from "../layout.tsx";
@@ -24,7 +25,7 @@ export function AgentsNav({ openId, navigate }: { openId: string | undefined; na
   return (
     <>
       <SectionHead name="Agents" count={list.length} open={open} onToggle={setOpen}>
-        {!open && drafts > 0 && <UnreadDot label={`${drafts} proposed ${drafts === 1 ? "agent" : "agents"} to review`} />}
+        {!open && drafts > 0 && <UnreadDot label={`${plural(drafts, "proposed agent")} to review`} />}
       </SectionHead>
       {open && (
         <nav className="agent-list" aria-label="Your agents">

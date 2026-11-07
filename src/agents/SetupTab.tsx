@@ -13,7 +13,7 @@ import {
   type AgentTurnView,
 } from "../../shared/agents.ts";
 import { AUTO_MODEL } from "../../shared/models.ts";
-import { errorMessage, plural } from "../../shared/util.ts";
+import { errorMessage, memoAsync, plural } from "../../shared/util.ts";
 import { api } from "../api.ts";
 import { ModelPicker, useCatalog } from "../chat/ModelPicker.tsx";
 import { AgentAvatar } from "../chat/people.tsx";
@@ -52,8 +52,10 @@ const SETUP_ASSUMED: Record<string, readonly string[]> = {
 };
 
 /** The deployment's MCP servers, read once for every form on the page. */
-let serversRead: Promise<AgentServerInfo[]> | undefined;
-const readServers = () => (serversRead ??= api.agentServers().catch((error: unknown) => ((serversRead = undefined), Promise.reject(error))));
+const readServers = memoAsync(api.agentServers);
+
+/** Fields shown together with another one: a Change for them opens that one. */
+const SHOWN_WITH: Record<string, string> = { effort: "model", sharedServers: "servers" };
 
 function formOf(subject: AgentSubject): Form {
   if (subject.kind === "new")
@@ -139,13 +141,12 @@ export function SetupTab({ subject, field, save, notice }: AgentTabProps) {
   // which say how it runs.
   useEffect(() => {
     if (!field) return;
-    const known = field in SETUP_ASSUMED || field === "sharedServers" || field === "effort" || field === "color";
-    const target = box.current?.querySelector<HTMLElement>(`[data-field="${known ? field : "instructions"}"]`);
+    const at = (name: string) => box.current?.querySelector<HTMLElement>(`[data-field="${CSS.escape(name)}"]`);
+    const target = at(SHOWN_WITH[field] ?? field) ?? at("instructions");
     target?.scrollIntoView({ block: "center" });
     (target?.querySelector<HTMLElement>("input, textarea") ?? target?.querySelector<HTMLElement>(".model-trigger"))?.focus({ preventScroll: true });
   }, [field]);
 
-  const readOnly = subject.kind === "shared";
   const dirty = changed(form, initial);
   const set = <K extends keyof Form>(key: K, value: Form[K], confirms = key) =>
     setForm((current) => ({ ...current, [key]: value, assumed: confirmed(current.assumed, confirms) }));
@@ -172,6 +173,7 @@ export function SetupTab({ subject, field, save, notice }: AgentTabProps) {
     try {
       const saved = await save(inputOf(form, servers));
       notice({
+        agentId: saved.id,
         text:
           subject.kind === "shared"
             ? `Saved your own copy, @${saved.name}, turned off. It runs with your sign-ins; the original stays as it is.`
@@ -181,9 +183,13 @@ export function SetupTab({ subject, field, save, notice }: AgentTabProps) {
       });
     } catch (e) {
       const message = errorMessage(e);
-      if (/changed since you read it/.test(message)) {
+      if (subject.kind === "own" && /changed since you read it/.test(message)) {
         // The newer version shows in place of this one: the user makes their change again on it.
-        notice({ text: "Someone changed this agent since you opened it, so it was reloaded with their changes. Make yours again.", error: true });
+        notice({
+          agentId: subject.agent.id,
+          text: "Someone changed this agent since you opened it, so it was reloaded with their changes. Make yours again.",
+          error: true,
+        });
         await reloadAgents();
       } else setError(message);
     } finally {
@@ -331,7 +337,7 @@ export function SetupTab({ subject, field, save, notice }: AgentTabProps) {
       {error && <p className="form-error">{error}</p>}
       <div className="agent-form-actions">
         <button type="submit" className="primary" disabled={saving || !servers || (subject.kind !== "new" && !dirty)}>
-          {saving ? "Saving…" : subject.kind === "new" ? "Make the agent" : readOnly ? "Save as my copy" : "Save"}
+          {saving ? "Saving…" : subject.kind === "new" ? "Make the agent" : subject.kind === "shared" ? "Save as my copy" : "Save"}
         </button>
         {dirty && subject.kind !== "new" && (
           <button type="button" disabled={saving} onClick={() => setForm(initial)}>

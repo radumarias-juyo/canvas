@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import type { AgentDefinition } from "../../shared/agents.ts";
+import { errorMessage } from "../../shared/util.ts";
 import { api } from "../api.ts";
 
 /** The user's agents as the app last read them: null until the first read answers. */
@@ -29,7 +30,7 @@ const agentsStore = (() => {
     }
     reading = api.agents().then(
       (agents) => set({ agents, error: null }),
-      (error: unknown) => set({ ...state, error: (error as Error).message ?? String(error) }),
+      (error: unknown) => set({ ...state, error: errorMessage(error) }),
     );
     return reading.finally(() => {
       reading = undefined;

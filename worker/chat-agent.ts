@@ -124,6 +124,7 @@ import {
   AGENT_ID_PATTERN,
   CHAT_AGENT_KIND,
   CHAT_TURN_KIND,
+  copiedFields,
   type AgentDefinition,
   type AgentTurnView,
   type ChatAgentReplyData,
@@ -147,6 +148,9 @@ export interface ChatRefusal {
   error: string;
   status: 400 | 403 | 404 | 409;
 }
+
+/** A turn as the people in the chat see it: never the message that asked for it. */
+const turnView = ({ root: _root, ask: _ask, submitted: _submitted, ...turn }: AgentTurn): AgentTurnView => turn;
 
 function refuse(status: ChatRefusal["status"], error: string): ChatRefusal {
   return { error, status };
@@ -1911,7 +1915,7 @@ export class ChatAgent extends DurableObject<Env> {
     if (agents.length) kv.put(PI_SCAN_KEY, { through } satisfies PiScan);
     kv.delete(IMPORTING_KEY);
     kv.put(IMPORTED_KEY, true);
-    for (const agentId of agents) await this.#noteAgentChat(agentId, true);
+    await Promise.all(agents.map((agentId) => this.#noteAgentChat(agentId, true)));
     return null;
   }
 
@@ -2098,20 +2102,15 @@ export class ChatAgent extends DurableObject<Env> {
     if (uid !== entry.ownerUid && !entry.shared) return refuse(403, `@${entry.name}'s owner does not share it in this chat.`);
     const agent = await this.#index(entry.ownerUid).getAgent(agentId);
     if (!agent) return refuse(404, "This agent was deleted.");
-    const { id, name, avatar, color, job, instructions, model, effort, servers, sharedServers, version, trigger, scope, workflow } = agent;
-    const turns = this.roster.recentTurns(agentId).map(({ root: _root, ask: _ask, submitted: _submitted, ...turn }): AgentTurnView => turn);
     return {
-      ...{ id, name, avatar, color, job, instructions, version },
-      ...(model && { model }),
-      ...(effort && { effort }),
-      ...(servers && { servers }),
-      ...(sharedServers && { sharedServers }),
-      ...(trigger && { trigger }),
-      ...(scope && { scope }),
-      ...(workflow && { workflow }),
+      ...copiedFields(agent),
+      id: agent.id,
+      avatar: agent.avatar,
+      color: agent.color,
+      version: agent.version,
       ownerUid: entry.ownerUid,
       ownerName: this.#nameOf(entry.ownerUid),
-      turns,
+      turns: this.roster.recentTurns(agentId).map(turnView),
     };
   }
 
@@ -2119,8 +2118,7 @@ export class ChatAgent extends DurableObject<Env> {
   agentsFor(uid: string): ChatAgents | ChatRefusal {
     if (!this.isInChat(uid)) return refuse(403, "You are not in this chat.");
     const agents = this.agentViews();
-    const view = ({ root: _root, ask: _ask, submitted: _submitted, ...turn }: AgentTurn): AgentTurnView => turn;
-    return { agents, turns: Object.fromEntries(agents.map((agent) => [agent.id, this.roster.recentTurns(agent.id).map(view)])) };
+    return { agents, turns: Object.fromEntries(agents.map((agent) => [agent.id, this.roster.recentTurns(agent.id).map(turnView)])) };
   }
 
   /** Read pi's new answers for the agents they name (#piScan), off the caller's path. Nothing while the chat has no agents. */

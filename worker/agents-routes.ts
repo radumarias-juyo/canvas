@@ -20,8 +20,8 @@ import type { UserDirectory } from "./users.ts";
 export async function agentsRoute(
   request: Request,
   directory: DurableObjectStub<UserDirectory>,
-  dropFromChat: (chatId: string, agentId: string) => Promise<void> = async () => {},
-  servers: readonly Pick<McpServerConfig, "name" | "auth">[] = [],
+  dropFromChat: (chatId: string, agentId: string) => Promise<void>,
+  servers: readonly Pick<McpServerConfig, "name" | "auth">[],
 ): Promise<Response | null> {
   const path = new URL(request.url).pathname;
   const method = request.method;

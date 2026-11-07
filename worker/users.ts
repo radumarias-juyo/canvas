@@ -10,7 +10,7 @@ import { titleFromMessage, UNNAMED_CHAT } from "./agent/title.ts";
 import { applyAuthChange, type McpAuthChange, type McpAuthRecord, type McpAuthStore } from "./mcp/oauth.ts";
 import { mcpServers } from "./mcp/servers.ts";
 import { AgentStore, type AgentSave } from "./agents/store.ts";
-import type { AgentChatUse, AgentDefinition, AgentInput, AgentOrigin, AgentResult } from "../shared/agents.ts";
+import type { AgentChanges, AgentChatUse, AgentDefinition, AgentInput, AgentOrigin, AgentResult } from "../shared/agents.ts";
 
 /** One user's OAuth state for one MCP server. `uid` must come from a verified identity. */
 export function mcpAuthStore(uid: string, server: string): McpAuthStore {
@@ -543,7 +543,7 @@ export class UserDirectory extends DurableObject<Env> {
   }
 
   /** The user's own copy of an agent someone shared with them, saved off (AgentStore.saveCopy). */
-  copyAgent(input: AgentInput, copiedFrom: NonNullable<AgentDefinition["copiedFrom"]>): AgentResult {
+  copyAgent(input: AgentChanges, copiedFrom: NonNullable<AgentDefinition["copiedFrom"]>): AgentResult {
     const saved = this.#agents.saveCopy(input, copiedFrom);
     if (!("error" in saved)) this.#changed("agents");
     return saved;
@@ -558,8 +558,8 @@ export class UserDirectory extends DurableObject<Env> {
 
   /** One of the user's chats added an agent of theirs, took it out, or changed whether it shares it (AgentStore.noteChat). */
   noteAgentChat(agentId: string, chatId: string, inChat: boolean, shared = false): void {
+    // Only the index: the agents list the sidebars read is the same.
     this.#agents.noteChat(agentId, chatId, inChat, shared);
-    this.#changed("agents");
   }
 
   /** The chats of the user's an agent is in, by title, with whether it is shared there. */
@@ -568,11 +568,6 @@ export class UserDirectory extends DurableObject<Env> {
       const title = this.chatTitle(chatId);
       return title === null ? [] : [{ chatId, title, shared }];
     });
-  }
-
-  /** How many chats each of the user's agents is in, by its id. */
-  agentChatCounts(): Record<string, number> {
-    return Object.fromEntries(this.#agents.chatCounts());
   }
 
   /** Delete one of the user's skills. Built-in ones can only be turned off. */

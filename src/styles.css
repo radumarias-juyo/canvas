@@ -1059,9 +1059,7 @@ a.mention-chip:hover { text-decoration: underline; }
 .agent-head-text h2 { margin: 0; font-size: 28px; line-height: 1.1; overflow-wrap: anywhere; }
 .agent-head-text p { margin: 4px 0 0; color: var(--muted); }
 .agent-head-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.agent-head-note, .agent-confirm { flex-basis: 100%; margin: 0; }
-.agent-confirm { padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--error) 40%, var(--border)); border-radius: var(--radius); background: var(--surface); }
-.agent-confirm p { margin: 0 0 10px; }
+.agent-head-note { flex-basis: 100%; margin: 0; }
 .pill.agent-state.on { border-color: transparent; background: color-mix(in srgb, var(--live) 14%, var(--surface)); color: var(--live); }
 .pill.agent-state.draft { border-color: transparent; background: var(--working-soft); color: var(--working); }
 .pill.assumed { padding: 0 7px; border: 1px dashed var(--working); background: none; color: var(--working); font-size: 11px; }
