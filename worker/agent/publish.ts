@@ -18,7 +18,8 @@ export interface PublishedHost {
   /** This chat's kind, read where it lives (the owner's row of it can lag). */
   kind(): ChatKind;
   directory: {
-    recordArtifact(artifact: ArtifactSummary, seen: boolean, chatKind: ChatKind): unknown;
+    recordArtifact(artifact: ArtifactSummary, seen: boolean, chatKind: ChatKind, held: boolean): unknown;
+    announceArtifact(artifact: ArtifactSummary, chatKind: ChatKind): unknown;
     pageChat(artifactId: string): string | null | Promise<string | null>;
   };
   /** Another chat of the owner's, by id. */
@@ -27,19 +28,37 @@ export interface PublishedHost {
   later(work: Promise<void>): void;
 }
 
+/** The kind of the chat a version belongs to: a version of an off-the-record chat reaches no follower. One that cannot be asked counts as off the record. */
+const kindOf = (host: PublishedHost, chatId: string): ChatKind | Promise<ChatKind> =>
+  chatId === host.chatId
+    ? host.kind()
+    : host
+        .chat(chatId)
+        .chatKind()
+        .catch((): ChatKind => "off_record");
+
 /**
  * What every publish does once a version is out, whoever published it (pi, an agent, a run's page step, which
  * publishes as the page's own chat): record it as `chatId`'s, and, off the publish's path, tell the chat that discusses
  * the page of its new version. ChatAgent's PublishScope.onPublished; a scope sets only its chatId, never its own.
+ * `held`: a turn apart from the chat published it, so its followers and the page's chat hear of it only once its reply
+ * is posted (announcePublished).
  */
-export async function afterPublish(host: PublishedHost, artifact: Omit<ArtifactSummary, "chatId">, chatId: string): Promise<void> {
-  // The chat it belongs to says its kind: a version of an off-the-record chat reaches no follower. One that cannot be
-  // asked counts as off the record.
-  const kind = chatId === host.chatId ? host.kind() : await host.chat(chatId).chatKind().catch((): ChatKind => "off_record");
-  await host.directory.recordArtifact({ ...artifact, chatId }, false, kind);
+export async function afterPublish(host: PublishedHost, artifact: Omit<ArtifactSummary, "chatId">, chatId: string, held = false): Promise<void> {
+  await host.directory.recordArtifact({ ...artifact, chatId }, false, await kindOf(host, chatId), held);
+  if (!held) tellPageChat(host, artifact);
+}
+
+/** A version afterPublish held is the chat's now (its reply was posted): its followers and the page's chat hear of it. */
+export async function announcePublished(host: PublishedHost, artifact: Omit<ArtifactSummary, "chatId">, chatId: string): Promise<void> {
+  await host.directory.announceArtifact({ ...artifact, chatId }, await kindOf(host, chatId));
+  tellPageChat(host, artifact);
+}
+
+/** Off the publish's path: a notice to the chat that discusses the page, if there is one other than the publishing chat. */
+function tellPageChat(host: PublishedHost, artifact: Pick<ArtifactSummary, "id" | "title" | "latest">): void {
   host.later(
     (async () => {
-      // Only a notice, to the chat that discusses the page, if there is one other than the publishing chat.
       const pageChat = await host.directory.pageChat(artifact.id);
       if (!pageChat || pageChat === host.chatId) return;
       await host.chat(pageChat).pageVersion({ id: artifact.id, title: artifact.title, version: artifact.latest });

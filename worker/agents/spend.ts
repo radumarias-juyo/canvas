@@ -88,6 +88,22 @@ export class ChatSpend {
     return budget !== undefined && this.today().tokens >= budget ? budgetNotice(budget) : undefined;
   }
 
+  /**
+   * Count what a turn another object ran for the chat came to (a member's agent's, in its seat): in the chat's day, which
+   * its budget stops at, but not as an answer of this object's (its owner's object pays for it and counts it there).
+   */
+  count(spent: DaySpend): void {
+    if (!(spent.tokens > 0 || spent.costUsd > 0)) return;
+    const day = budgetDay(this.#now());
+    const key = `${SPEND_KEY}${day}`;
+    const before = this.#kv.get<DaySpend>(key);
+    if (!before) this.#prune(day);
+    this.#kv.put(key, {
+      tokens: (before?.tokens ?? 0) + Math.max(0, spent.tokens),
+      costUsd: (before?.costUsd ?? 0) + Math.max(0, spent.costUsd),
+    } satisfies DaySpend);
+  }
+
   /** Tag the requests of a pi session (an agent's, a run item's); pi's own are "pi". */
   tag(conversation: string, tags: SpendTags): void {
     this.#tags.delete(conversation);

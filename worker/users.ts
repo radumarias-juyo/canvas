@@ -921,9 +921,10 @@ export class UserDirectory extends DurableObject<Env> {
 
   /**
    * A version was published. `seen`: the user has it already (an import brought it), so it is not unread. `chatKind`:
-   * the kind of the chat it was published from, as that chat has it now (this user's row of it can lag).
+   * the kind of the chat it was published from, as that chat has it now (this user's row of it can lag). `held`: a turn
+   * apart from the chat published it, so it reaches the page's followers only once its reply is posted (announceArtifact).
    */
-  recordArtifact(artifact: ArtifactSummary, seen = false, chatKind?: ChatKind): void {
+  recordArtifact(artifact: ArtifactSummary, seen = false, chatKind?: ChatKind, held = false): void {
     const before = this.ctx.storage.sql.exec<{ latest: number }>("SELECT latest FROM artifacts WHERE id = ?", artifact.id).toArray()[0]?.latest ?? 0;
     this.ctx.storage.sql.exec(
       `INSERT INTO artifacts (id, title, chat_id, latest, updated_at, seen) VALUES (?, ?, ?, ?, ?, ?)
@@ -936,10 +937,23 @@ export class UserDirectory extends DurableObject<Env> {
       seen ? artifact.latest : 0,
     );
     this.#changed("artifacts");
-    // A new version reaches the page's followers, unless the chat it was published from is off the record: as it says
-    // (when it told), and as this user's row of it says.
+    if (!seen && !held && artifact.latest > before) this.#announce(artifact, chatKind);
+  }
+
+  /**
+   * A version a turn apart from the chat published (recordArtifact's `held`) is the chat's now: it reaches the page's
+   * followers, unless a newer version is out already (which they heard of).
+   */
+  announceArtifact(artifact: ArtifactSummary, chatKind?: ChatKind): void {
+    const newest = this.ctx.storage.sql.exec<{ latest: number }>("SELECT latest FROM artifacts WHERE id = ?", artifact.id).toArray()[0]?.latest;
+    if (newest === undefined || artifact.latest < newest) return;
+    this.#announce(artifact, chatKind);
+  }
+
+  /** A new version reaches the page's followers, unless the chat it was published from is off the record: as it says (when it told), and as this user's row of it says. */
+  #announce(artifact: ArtifactSummary, chatKind?: ChatKind): void {
     const kinds = [this.#rows.kindOf(artifact.chatId), ...(chatKind ? [chatKind] : [])];
-    if (seen || artifact.latest <= before || !mayLeave({ what: "feed" }, ...kinds)) return;
+    if (!mayLeave({ what: "feed" }, ...kinds)) return;
     this.#fanOut(
       "page",
       artifact.id,

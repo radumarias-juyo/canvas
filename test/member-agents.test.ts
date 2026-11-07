@@ -4,8 +4,8 @@ import { CHAT_AGENT_KIND, checkAgent, type AgentDefinition, type ChatAgentReplyD
 import { CHAT_MESSAGE_KIND, PUBLISH_TOOL } from "../shared/protocol.ts";
 import { FILES_WRITE_TOOL } from "../worker/chat-traces.ts";
 import type { McpToolInfo } from "../worker/agent/mcp.ts";
-import { AgentTurns, operationId, type Caller, type TurnHost, type TurnResult } from "../worker/agents/controller.ts";
-import { ChatRoster, type RosterEntry, type RunningTurn } from "../worker/agents/roster.ts";
+import { AgentTurns, operationId, type Caller, type TurnHost, type TurnOutcome, type TurnResult } from "../worker/agents/controller.ts";
+import { ChatRoster, newestShown, type AgentTurn, type PostedPage, type RosterEntry, type RunningTurn } from "../worker/agents/roster.ts";
 import type { RoomLink, RoomRef, SeatBatch, SeatLink, SeatResult, SeatTurn } from "../worker/agents/seats/link.ts";
 import { memberAgentName, seatChatId } from "../worker/agents/seats/names.ts";
 import { addRefusal, mayRemove, mayShare, seatedEntry, type ChatRules } from "../worker/agents/seats/rules.ts";
@@ -359,6 +359,16 @@ class Room implements TurnHost {
   drafted(uid: string) {
     this.told.push(uid);
   }
+  /** How each turn ended, as the chat object's metrics and budget hear it. */
+  readonly outcomes: { turn: number; outcome: TurnOutcome }[] = [];
+  ended(turn: AgentTurn, outcome: TurnOutcome) {
+    this.outcomes.push({ turn: turn.id, outcome });
+  }
+  /** The versions posted replies made the chat's, as the chat object would announce them. */
+  readonly announced: PostedPage[] = [];
+  posted(pages: readonly PostedPage[]) {
+    this.announced.push(...pages);
+  }
 
   // What the chat object answers a seat's call with (ChatAgent.seatLog, seatEnded).
   async seatLog(uid: string, agentId: string, after: number, turn: number): Promise<SeatBatch> {
@@ -504,6 +514,19 @@ describe("Member agents: a seat in the member's own object", () => {
     ana.sessions.finish(byAna.id, "Yours too.");
     await settle();
     expect(chat.posts.map((post) => post.turn)).toEqual([byRadu.id, byAna.id]);
+  });
+
+  it("tells the room what a seat's turn spent in the member's object, for the chat's budget", async () => {
+    const chat = room();
+    const planner = chat.add(ANA, "planner", { servers: ["db"] });
+    const [turn] = chat.turns.call([planner.agentId], chat.say(RADU, "@planner what do we know?"));
+    await settle();
+    const ana = chat.member(ANA.uid);
+    ana.sessions
+      .run(ana.sessions.sessionOf(turn.id), operationId(turn.id))
+      .resolve({ status: "done", text: "Q3.", spent: { tokens: 1200, costUsd: 0.01 } });
+    await settle();
+    expect(chat.outcomes).toEqual([{ turn: turn.id, outcome: expect.objectContaining({ status: "done", spent: { tokens: 1200, costUsd: 0.01 } }) }]);
   });
 
   it("checks who asked again in the seat: a turn said to be its owner's from someone else only reads", async () => {
@@ -1123,19 +1146,66 @@ describe("Member agents: what the review of private turns found", () => {
     expect(chat.roster.fork("run-reply")).toMatchObject({ posted: false, ended: false });
     expect(await chat.turns.post(RADU.uid, planner.agentId, first.id)).toBeNull();
     expect(chat.roster.withheldVersion("r1", 2)).toBe(false);
-    // The next reply in the same session is apart again, from the newest entry then: what the first posted stays the chat's.
+    expect(chat.announced).toEqual([{ artifactId: "r1", version: 2 }]);
+    // The next reply in the same session is apart again, in a window of its own from the newest entry then: what the
+    // first posted stays the chat's.
     chat.newestEntries.set("run-reply", 12);
     const [second] = reply("@planner and after that?");
     await settle();
-    expect(chat.roster.fork("run-reply")).toMatchObject({ posted: false, from: 12 });
-    // Given again while still apart (its reply not posted): it keeps where it went apart.
+    expect(chat.roster.fork("run-reply")).toMatchObject({ posted: false, from: 7 });
+    expect(chat.roster.windows("run-reply")).toEqual([
+      { turn: first.id, from: 7, through: 12, posted: true },
+      { turn: second.id, from: 12, posted: false },
+    ]);
+    // Given again while still apart (its reply not posted): it keeps its window.
     chat.roster.setApart("run-reply", true, 15, second.id);
-    expect(chat.roster.fork("run-reply")).toMatchObject({ posted: false, from: 12, kept: false });
+    expect(chat.roster.windows("run-reply").at(-1)).toEqual({ turn: second.id, from: 12, posted: false });
     chat.roster.recordPage("run-reply", "r1", 3);
     expect([chat.roster.withheldVersion("r1", 2), chat.roster.withheldVersion("r1", 3)]).toEqual([false, true]);
   });
 
-  it("keeps what a discarded reply to a run's report made withheld for good, also once a later reply in its session is posted", async () => {
+  it("shows someone else the newest version no turn apart is still holding", () => {
+    expect(newestShown(4, new Set([4]))).toBe(3);
+    expect(newestShown(4, new Set([2, 4, 3]))).toBe(1);
+    expect(newestShown(4, new Set([2]))).toBe(4);
+    expect(newestShown(1, new Set([1]))).toBe(0);
+  });
+
+  it("posts a held reply to a run's report as its own once a later turn runs in its session, and leaves the later one apart", async () => {
+    const chat = room();
+    const planner = chat.add(RADU, "planner", { servers: ["db", "calendar"], reviewBeforePosting: true });
+    const reply = (text: string) => chat.turns.call([planner.agentId], { ...chat.say(RADU, text), session: "run-reply" });
+    const calendar = [result("calendar_events", [{ id: "e1", title: "x" }])];
+    chat.newestEntries.set("run-reply", 3);
+    const [first] = reply("@planner and the week after?");
+    await settle();
+    chat.roster.recordPage("run-reply", "r1", 1);
+    chat.sessions.finish(first.id, "Week 42.", [...calendar, tool(PUBLISH_TOOL, { artifactId: "r1", version: 1, title: "Week" })]);
+    await settle();
+    // Held for review while the next reply in the session starts.
+    chat.newestEntries.set("run-reply", 9);
+    const [second] = reply("@planner and week 43?");
+    await settle();
+    chat.roster.recordPage("run-reply", "r2", 1);
+    expect(await chat.turns.post(RADU.uid, planner.agentId, first.id)).toBeNull();
+    // The first reply's page is the chat's and its chip shows; the second turn's stays apart.
+    expect(chat.posts.at(-1)).toMatchObject({ turn: first.id, published: [{ artifactId: "r1", version: 1, title: "Week" }] });
+    expect([chat.roster.withheldVersion("r1", 1), chat.roster.withheldVersion("r2", 1)]).toEqual([false, true]);
+    expect(chat.roster.windows("run-reply").map((window) => window.posted)).toEqual([true, false]);
+    expect(chat.roster.fork("run-reply")).toMatchObject({ posted: false });
+    expect(chat.roster.withheld()).toEqual(new Set(["run-reply"]));
+    chat.sessions.finish(second.id, "Week 43.", calendar);
+    await settle();
+    expect(await chat.turns.post(RADU.uid, planner.agentId, second.id)).toBeNull();
+    expect(chat.roster.withheldVersion("r2", 1)).toBe(false);
+    expect(chat.roster.anyWithheld()).toBe(false);
+    expect(chat.announced).toEqual([
+      { artifactId: "r1", version: 1 },
+      { artifactId: "r2", version: 1 },
+    ]);
+  });
+
+  it("keeps what a discarded reply to a run's report made withheld for good, and posts a later reply's own", async () => {
     const chat = room();
     const planner = chat.add(RADU, "planner", { servers: ["db", "calendar"], reviewBeforePosting: true });
     const reply = (text: string) => chat.turns.call([planner.agentId], { ...chat.say(RADU, text), session: "run-reply" });
@@ -1146,22 +1216,26 @@ describe("Member agents: what the review of private turns found", () => {
     chat.sessions.finish(first.id, "Week 42 too.", calendar);
     await settle();
     expect(chat.turns.discard(RADU.uid, planner.agentId, first.id)).toBeNull();
-    // The next reply runs in the same session: what the discarded one made is kept, and so is all the session makes now.
+    // The next reply runs in the same session, in a window of its own: what the discarded one made stays withheld.
     const [second] = reply("@planner then just next week?");
     await settle();
-    expect(chat.roster.fork("run-reply")).toMatchObject({ posted: false, kept: true });
-    chat.sessions.entries.set(`run-reply|${second.id}`, [...calendar, tool(PUBLISH_TOOL, { artifactId: "r2", version: 1, title: "Next" })]);
+    expect(chat.roster.windows("run-reply").map((window) => [window.turn, window.posted])).toEqual([
+      [first.id, false],
+      [second.id, false],
+    ]);
     chat.roster.recordPage("run-reply", "r2", 1);
-    chat.sessions.finish(second.id, "Week 41.", calendar);
+    chat.sessions.finish(second.id, "Week 41.", [...calendar, tool(PUBLISH_TOOL, { artifactId: "r2", version: 1, title: "Next" })]);
     await settle();
     expect(await chat.turns.post(RADU.uid, planner.agentId, second.id)).toBeNull();
-    expect(chat.posts.at(-1)).toMatchObject({ turn: second.id, text: "Week 41." });
-    expect(chat.posts.at(-1)).not.toHaveProperty("published");
+    expect(chat.posts.at(-1)).toMatchObject({ turn: second.id, text: "Week 41.", published: [{ artifactId: "r2", version: 1, title: "Next" }] });
     expect([chat.roster.withheldVersion("r1", 2), chat.roster.withheldVersion("r2", 1), chat.roster.fork("run-reply")?.posted]).toEqual([
       true,
-      true,
       false,
+      true,
     ]);
+    // The discarded window stays withheld for good, so the session's drafts stay out of other conversations' sight.
+    expect([chat.roster.anyWithheld(), chat.roster.withheld()]).toEqual([true, new Set(["run-reply"])]);
+    expect(chat.announced).toEqual([{ artifactId: "r2", version: 1 }]);
   });
 
   it("names nothing a failed reply to a run's report published: it stays withheld, as a fork's does", async () => {

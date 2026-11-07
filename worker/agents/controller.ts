@@ -2,7 +2,7 @@ import type { EntryRecord } from "@earendil-works/pi-durable";
 import { MAX_HOPS, type AgentDefinition, type AgentDraftView, type ChatAgentReplyData, type ChatTurnData } from "../../shared/agents.ts";
 import { AGENT_NAME } from "../../shared/mentions.ts";
 import { errorMessage, isObject, serial } from "../../shared/util.ts";
-import { sessionOf, type AgentTurn, type ChatRoster, type RosterEntry, type TurnRequest } from "./roster.ts";
+import { sessionOf, type AgentTurn, type ChatRoster, type PostedPage, type RosterEntry, type TurnRequest } from "./roster.ts";
 import { isPass } from "./funnel.ts";
 import type { SeatBatch, SeatLink, SeatResult } from "./seats/link.ts";
 import { chatTraces } from "../chat-traces.ts";
@@ -29,12 +29,20 @@ export type Outputs = Required<Pick<ChatAgentReplyData, "published" | "items" | 
   Pick<ChatAgentReplyData, "saved"> & { forked?: boolean; review?: boolean };
 export const NO_OUTPUTS: Outputs = { published: [], items: [], sources: [] };
 
+/** A turn's spend in another object, for its outcome (TurnOutcome.spent): none when it has none. */
+const spentOf = (result: TurnResult): { spent?: TurnSpent } => (result.spent ? { spent: result.spent } : {});
+
 /** How one operation in an agent's session ended, as PiHarness.wait says. */
 export interface TurnResult {
   status: "done" | "unanswered";
   text?: string;
   reason?: string;
+  /** What its model calls came to, when another object ran it (a seat): the chat's budget counts it too. */
+  spent?: TurnSpent;
 }
+
+/** What a turn's model calls came to. */
+export type TurnSpent = { tokens: number; costUsd: number };
 
 /** What the turn controller needs from the chat object it runs in: pi's sessions, the log, and the owner's directory. */
 export interface TurnHost {
@@ -87,6 +95,8 @@ export interface TurnHost {
   waitUntil(promise: Promise<unknown>): void;
   /** Why no turn may start now (the chat's daily budget is used up), as the turn's reply says it; undefined when one may. */
   refusal?(): string | undefined;
+  /** A reply was posted that made versions a turn apart published the chat's (ChatRoster.release): announce them now. */
+  posted?(pages: readonly PostedPage[]): void;
   /** A turn ended: how, and whether a reply was posted for it (an unprompted turn that passed posts none). For the metrics. */
   ended?(turn: AgentTurn, outcome: TurnOutcome): void;
 }
@@ -96,6 +106,8 @@ export interface TurnOutcome {
   status: "done" | "failed" | "passed";
   startedAt: number;
   endedAt: number;
+  /** What it spent in another object (a seat's turn: TurnResult.spent). */
+  spent?: TurnSpent;
 }
 
 /**
@@ -352,7 +364,12 @@ export class AgentTurns {
       // for it), and it hands nothing on.
       if (turn.calledBy.unprompted && (!done || !text || isPass(text))) {
         if (roster.end(turn.id, done ? "done" : "failed")) {
-          this.#host.ended?.(turn, { status: done ? "passed" : "failed", startedAt: now.startedAt ?? now.createdAt, endedAt: roster.now() });
+          this.#host.ended?.(turn, {
+            status: done ? "passed" : "failed",
+            startedAt: now.startedAt ?? now.createdAt,
+            endedAt: roster.now(),
+            ...spentOf(result),
+          });
         }
         this.#host.changed();
         this.pump(entry.agentId);
@@ -364,9 +381,8 @@ export class AgentTurns {
       // Its owner sees a reply built on a private server first, when they review those (`held`).
       const held = review === true && sources.length > 0;
       // What a turn apart from the chat (a fork, a run's reply session) made stays withheld unless its reply is posted
-      // (ChatRoster.release): a failed or empty one released at once names none of it.
-      const kept = now.session !== undefined && roster.fork(now.session)?.kept === true;
-      const shows = !(forked || now.session !== undefined) || held || (done && !!text && !kept);
+      // (ChatRoster.release, which posts a done reply with text): a failed or empty one released at once names none of it.
+      const shows = !(forked || now.session !== undefined) || held || (done && !!text);
       const current = roster.get(entry.agentId) ?? entry;
       const reply: ChatAgentReplyData = {
         agentId: entry.agentId,
@@ -392,11 +408,11 @@ export class AgentTurns {
         // Its owner sees it first: nothing of it reaches the chat, pi or other agents until they post it. A failed or
         // empty one too: what its fork published or saved stays withheld until they post or discard it.
         if (roster.end(turn.id, done ? "done" : "failed", { reply, toPi: false, held: true })) {
-          this.#host.ended?.(turn, { status: done ? "done" : "failed", startedAt: reply.startedAt, endedAt: reply.endedAt });
+          this.#host.ended?.(turn, { status: done ? "done" : "failed", startedAt: reply.startedAt, endedAt: reply.endedAt, ...spentOf(result) });
           this.#host.drafted(current.ownerUid);
         }
       } else if (roster.end(turn.id, done ? "done" : "failed", { reply, toPi: false })) {
-        this.#host.ended?.(turn, { status: done ? "done" : "failed", startedAt: reply.startedAt, endedAt: reply.endedAt });
+        this.#host.ended?.(turn, { status: done ? "done" : "failed", startedAt: reply.startedAt, endedAt: reply.endedAt, ...spentOf(result) });
         delivering = this.#release(turn.id, reply, done);
       }
     }
@@ -418,7 +434,8 @@ export class AgentTurns {
     // A turn nobody asked for hands nothing on.
     const next = done && left > 0 && !turn.calledBy.unprompted ? handOffs(reply.text, reply.agentId, turn.hop, roster.list()).slice(0, left) : [];
     // A chain no person started never hands pi a turn: pi has the owner's full tools. It reads the reply instead.
-    roster.release(id, reply, !turn.unattended && next.includes(AGENT_NAME));
+    const posted = roster.release(id, reply, !turn.unattended && next.includes(AGENT_NAME));
+    if (posted.length) this.#host.posted?.(posted);
     const agents = next.filter((agentId) => agentId !== AGENT_NAME);
     // A hand-off can only read, whoever started the chain: agents cannot give each other permission.
     const ask = askOf({ name: reply.name, kind: "agent" }, reply.text, MAX_ASK_CHARS);

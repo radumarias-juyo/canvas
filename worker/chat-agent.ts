@@ -98,6 +98,7 @@ import { clearImported, DumpError, dumpChat, hasConversation, importedRoster, re
 import { idRemapper, type ChatDumpCursor, type ChatDumpPage, type ChatDumpPart, type ChatImportStart } from "../shared/data-export.ts";
 import {
   afterPublish,
+  announcePublished,
   checkDraft,
   FailedChecks,
   publishDraft,
@@ -162,7 +163,7 @@ import {
 } from "../shared/agents.ts";
 import { AgentTurns, type Caller, type Outputs, type PiChain, type TurnHost, type TurnOutcome } from "./agents/controller.ts";
 import { isTurnEntry, TurnFilter } from "./agents/live.ts";
-import { ChatRoster, sessionOf, type AgentTurn, type RosterEntry, type RunningTurn } from "./agents/roster.ts";
+import { ChatRoster, newestShown, sessionOf, type AgentTurn, type PostedPage, type RosterEntry, type RunningTurn } from "./agents/roster.ts";
 import { reportOf, SignInNeeded, whenOf, type DeliveryRequest } from "./agents/runs/executor.ts";
 import { AgentRunner, type RunAlarm, type RunnerHost, type WatchAlarm } from "./agents/runs/runner.ts";
 import { AgentRuns, type RunRecord } from "./agents/runs/store.ts";
@@ -228,7 +229,7 @@ import {
   type ChatAgentSettings,
   type ChatAgentSettingsView,
 } from "../shared/agent-settings.ts";
-import { agentRouterId, agentRouterModel, AGENT_ROUTE_MS, piPicks, routeAgents, routesAgents } from "./agents/router.ts";
+import { agentRouterId, agentRouterModel, AGENT_ROUTE_MS, piPicks, routableAgents, routeAgents, routesAgents } from "./agents/router.ts";
 import { answered, embedder, FOLLOW_UP_AFTER_MS, looksLikeAsk, PAUSE_MS } from "./agents/funnel.ts";
 import { SpeakUp, type FunnelEvent } from "./agents/speak-up.ts";
 import { ChatSpend, meterExtension, type Spent } from "./agents/spend.ts";
@@ -667,9 +668,9 @@ export class ChatAgent extends DurableObject<Env> {
       files: memoAsync(() => this.storage.userFiles(this.uid)),
       onPublished: (artifact, chatId, session) => {
         // A version a conversation apart from the chat published (an agent's private turn): kept by version, before
-        // anything else, so members never reach it before its reply is posted.
-        if (session !== undefined && chatId === this.chatId) this.roster.recordPage(session, artifact.id, artifact.latest);
-        return afterPublish(this.#published, artifact, chatId);
+        // anything else, so members never reach it before its reply is posted, nor hear of it (ChatRoster.release).
+        const held = session !== undefined && chatId === this.chatId && this.roster.recordPage(session, artifact.id, artifact.latest);
+        return afterPublish(this.#published, artifact, chatId, held);
       },
       rulesFor: (session) => this.#rulesFor(session),
       onSaving: (session, paths) => this.roster.recordFiles(session, paths),
@@ -1674,7 +1675,7 @@ export class ChatAgent extends DurableObject<Env> {
         anyOn: roster.some((entry) => !entry.off),
         underBudget,
       });
-    const agentPicking = routes ? this.#pickAgents(agentRouter, roster, text, everyMessage, recentOnce) : undefined;
+    const agentPicking = routes ? this.#pickAgents(agentRouter, roster, author.uid, text, everyMessage, recentOnce) : undefined;
     // Pi's paid picks wait for that pick (capped at AGENT_ROUTE_MS): a message it hands to agents is not pi's (piPicks).
     // The free work goes ahead meanwhile.
     const picks = Promise.resolve(agentPicking ?? []).then((picked) => piPicks({ calling, underBudget, handedOn: picked.length > 0 }));
@@ -2006,8 +2007,12 @@ export class ChatAgent extends DurableObject<Env> {
     const [{ files, traces }, artifacts] = await Promise.all([this.#chatFiles(owner), this.#directory.listChatArtifacts(this.chatId)]);
     if (owner) return { files: newestFirst(files), artifacts };
     const hidden = this.#hiddenArtifacts(traces.hidden.artifacts);
-    const visible = artifacts.filter((artifact) => !hidden.has(artifact.id));
-    return { files: newestFirst(files), artifacts: visible.map(({ unread: _, ...artifact }) => artifact) };
+    // A page's newest version they may see: not one a turn apart from the chat published with its reply not posted.
+    const visible = artifacts.flatMap(({ unread: _, ...artifact }) => {
+      const latest = hidden.has(artifact.id) ? 0 : newestShown(artifact.latest, this.roster.withheldVersions(artifact.id));
+      return latest ? [{ ...artifact, latest }] : [];
+    });
+    return { files: newestFirst(files), artifacts: visible };
   }
 
   /** Paths someone other than the owner uploaded through this chat (noteUploads): the owner's files they may attach. */
@@ -2543,6 +2548,23 @@ export class ChatAgent extends DurableObject<Env> {
     this.sockets.broadcastPeople();
   }
 
+  /** Versions a turn apart published are the chat's now (its reply was posted): what afterPublish held is announced. */
+  async #announceVersions(pages: readonly PostedPage[]): Promise<void> {
+    await Promise.all(
+      pages.map(async ({ artifactId, version }) => {
+        const meta = await this.storage.artifacts.readMeta(artifactId);
+        if (!meta || !isOwnedBy(meta, this.uid, this.chatId)) return;
+        const summary = {
+          id: meta.id,
+          title: meta.title,
+          latest: version,
+          updatedAt: meta.versions.find((v) => v.version === version)?.publishedAt ?? meta.updatedAt,
+        };
+        await announcePublished(this.#published, summary, this.chatId);
+      }),
+    ).catch((error: unknown) => console.error("announce:", errorMessage(error)));
+  }
+
   /** Where `afterPublish` records a version and finds the chat that discusses its page. */
   get #published(): PublishedHost {
     return {
@@ -2858,20 +2880,29 @@ export class ChatAgent extends DurableObject<Env> {
       const seen = apart ? this.#seenWithheld : this.#seen;
       // A fork whose turn ended takes no more entries: read to its end once, it is not read again.
       if (seen.settled.has(id)) return;
-      const read = async (into: SeenTraces, after: number, through?: number) => {
-        const from = Math.max(into.through.get(id) ?? -1, after) + 1;
+      // Entries after `after` and through `through` (to the end without), on from where `key` was read to.
+      const read = async (into: SeenTraces, after: number, through?: number, key = id) => {
+        const from = Math.max(into.through.get(key) ?? -1, after) + 1;
         if (through !== undefined && from > through) return;
         const query = { order: "ascending", minEntryId: from as EntryId, ...(through !== undefined && { maxEntryId: through as EntryId }) } as const;
         for await (const page of entryPages(await this.harness.conversation(id), query, 500)) {
           chatTraces(page, into.traces);
           const last = page.at(-1);
-          if (last) into.through.set(id, last.id as number);
+          if (last) into.through.set(key, last.id as number);
         }
       };
-      // A fork is read from its own first entry: what it inherited is its parent's, read there. A session later turns
-      // run in again (a run's reply session) is its own from the start, and the chat's up to where its turn apart began.
-      if (fork?.reused && apart && fork.from !== undefined) await read(this.#seen, -1, fork.from);
-      await read(seen, (fork?.reused && !apart ? undefined : fork?.from) ?? -1);
+      // A session later turns run in again (a run's reply session) is the chat's up to its first turn apart, then each
+      // turn's window is the chat's once that turn's reply is posted (ChatRoster.windows). A window posted later is read
+      // again into the chat's, by a cursor of its own.
+      if (fork?.reused) {
+        const windows = this.roster.windows(id);
+        await read(this.#seen, -1, windows[0]?.from);
+        for (const window of windows)
+          await read(window.posted ? this.#seen : this.#seenWithheld, window.from, window.through, `${id}#${window.turn}`);
+        return;
+      }
+      // A fork is read from its own first entry: what it inherited is its parent's, read there.
+      await read(seen, fork?.from ?? -1);
       if (fork?.ended) seen.settled.add(id);
     });
     const [shared, held] = [this.#seen.traces, this.#seenWithheld.traces];
@@ -3178,17 +3209,22 @@ export class ChatAgent extends DurableObject<Env> {
   }
 
   /**
-   * The agents the router picks for a message that names nobody (worker/agents/router.ts), best first: at most two of
-   * the roster's agents that are on. None when it fails or is unsure, which the metrics count.
+   * The agents the router picks for `author`'s message that names nobody (worker/agents/router.ts), best first: at most
+   * two of the roster's agents it may pick (routableAgents: a member's only when they let it speak unasked). None when
+   * it fails or is unsure, which the metrics count.
    */
   async #pickAgents(
     model: NonNullable<ReturnType<typeof agentRouterModel>>,
     roster: readonly RosterEntry[],
+    author: string,
     text: string,
     piAnswers: boolean,
     recent: RecentEntries,
   ): Promise<string[]> {
-    const agents = roster.filter((entry) => !entry.off).map(({ agentId, name, job }) => ({ id: agentId, name, job }));
+    const speaksUp = async (entry: RosterEntry) => (await this.#index(entry.ownerUid).getAgent(entry.agentId))?.speaksUp === true;
+    const may = await routableAgents(roster, this.uid, this.#account(author), speaksUp);
+    if (!may.length) return [];
+    const agents = may.map(({ agentId, name, job }) => ({ id: agentId, name, job }));
     const started = Date.now();
     try {
       const request = { message: text, history: routeHistory((await recent()) ?? []), agents, piAnswers };
@@ -3386,7 +3422,9 @@ export class ChatAgent extends DurableObject<Env> {
     void this.#restorePiTools();
     const entry = this.roster.get(turn.agentId);
     const session = entry ? sessionOf(entry, turn) : undefined;
-    const used = (session && this.#turnSpend.get(session)) || { tokens: 0, costUsd: 0, toolCalls: 0 };
+    // A seat's turn (a member's agent) ran in its owner's object, which paid for it: the chat's budget counts it here.
+    if (outcome.spent) this.spend.count(outcome.spent);
+    const used = (session && this.#turnSpend.get(session)) || { tokens: 0, costUsd: 0, toolCalls: 0, ...outcome.spent };
     if (session) this.#turnSpend.delete(session);
     this.metrics.turn({
       agent: turn.agentId,
@@ -3656,6 +3694,7 @@ export class ChatAgent extends DurableObject<Env> {
       },
       drafted: (uid) => this.#tellDrafts(uid),
       refusal: () => this.spend.refusal(),
+      posted: (pages) => this.ctx.waitUntil(this.#announceVersions(pages)),
       ended: (turn, outcome) => this.#turnEnded(turn, outcome),
     };
   }
@@ -3731,7 +3770,12 @@ export class ChatAgent extends DurableObject<Env> {
       write: (session, text, requestId) => this.#writeTo(session, text, requestId),
       configure: (session, agent, turn) => this.#configureAgent(session, agent, { ask: turn.input, byOwner: turn.byOwner, calledBy: turn.calledBy }, turn.ownerName),
       submit: (session, input, operationId, data) => this.#submitTo(session, input, operationId, data),
-      wait: (session, operationId) => this.harness.wait(operationId, { session }),
+      // With what the turn's model calls came to here: its room's budget counts them too (this object pays for them).
+      wait: async (session, operationId) => {
+        const result = await this.harness.wait(operationId, { session });
+        const spent = this.#turnSpend.get(session);
+        return spent ? { ...result, spent: { tokens: spent.tokens, costUsd: spent.costUsd } } : result;
+      },
       abort: (session) => this.#abortSession(session),
       turnEntries: (session, turn) => this.#turnEntries(session, turn),
       sources: (agent, entries) => this.#sources(agent, entries),
@@ -4476,8 +4520,17 @@ export class ChatAgent extends DurableObject<Env> {
     // A run that goes on after a restart publishes once: a version with its mark is the one it sent.
     const already = publishedAlready(meta, mark);
     if (already) return already;
-    if (step.edit === "rebuild") return this.#rebuildPage(request, meta, scope, mark);
-    return publishFindings(scope, meta, request.text, `Findings, ${whenOf(request.agent)}`, mark);
+    // Built on the newest version that is the chat's: not one a turn apart from it published with its reply not posted,
+    // which the new version would carry to everyone.
+    const held =
+      meta.chatId === this.chatId
+        ? this.heldVersions(meta.id)
+        : await exports.ChatAgent.getByName(chatAgentName(this.uid, meta.chatId)).heldVersions(meta.id);
+    const latest = newestShown(meta.latest, new Set(held));
+    if (!latest) return { kind: "page", to, status: "failed", detail: "page not updated: it is not the chat's yet" };
+    const base = { ...meta, latest };
+    if (step.edit === "rebuild") return this.#rebuildPage(request, base, scope, mark);
+    return publishFindings(scope, base, request.text, `Findings, ${whenOf(request.agent)}`, mark);
   }
 
   /**
@@ -4675,6 +4728,22 @@ export class ChatAgent extends DurableObject<Env> {
     const meta = await this.storage.artifacts.readMeta(artifactId);
     if (!meta || !isOwnedBy(meta, this.uid, this.chatId)) return false;
     return meta.versions.every((version) => (version.manifest.mcp?.servers ?? []).every((entry) => this.#mayLoad(entry.server, viewer)));
+  }
+
+  /**
+   * What of a page `viewer` may not see yet: all of it (one only a turn apart from the chat made: #withheldPage), or the
+   * versions such turns published with their replies not posted. Nothing for the owner. What the artifact's view and its
+   * pages leave out (worker/index.ts).
+   */
+  async withheldFrom(artifactId: string, viewer: string): Promise<{ page: boolean; versions: number[] }> {
+    if (viewer === this.uid || !this.roster.anyWithheld()) return { page: false, versions: [] };
+    if (await this.#withheldPage(artifactId)) return { page: true, versions: [] };
+    return { page: false, versions: this.heldVersions(artifactId) };
+  }
+
+  /** The versions of a page turns apart from the chat published with their replies not posted (ChatRoster.withheldVersions). */
+  heldVersions(artifactId: string): number[] {
+    return [...this.roster.withheldVersions(artifactId)];
   }
 
   /** Versions never change once published, so their manifests cache for the object's lifetime. */
