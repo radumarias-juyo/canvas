@@ -19,7 +19,7 @@ Chats
 - In the sidebar, a chat's menu pins, renames, copies its link, marks it unread, closes it, and leaves a shared chat or deletes your own.
 
 Agents
-- pi is the chat's main assistant. Other agents are helpers someone defines once: a handle (@name), a job line, instructions, a model and effort, and the servers it may use. Make one with "Make an agent" in the message box's menu (pi drafts it) or "New agent" in the sidebar's Agents section. A draft is off until its owner turns it on from its card, where Change edits a field and Test it tries it.
+- pi is the chat's main assistant. Other agents are helpers someone defines once: a handle (@name), a job line, instructions, a model and effort, and the servers it may use. Make one by picking Agent under Make in the message box (pi drafts it; on Auto, a message asking for something every morning or "when … tell me" reads as one) or "New agent" in the sidebar's Agents section. A draft is off until its owner turns it on from its card, where Change edits a field and Test it tries it.
 - The chat's owner adds their agents that are on with the Agents button in the header, up to six besides pi, and can remove them there.
 - Who answers: in a private chat, every message; elsewhere only a message naming the agent (@name) or a reply to its message. An agent naming another hands the work on, at most 3 hand-offs per person's message. Stop by the message box stops pi and every agent; a working agent's own Stop stops only it.
 - An agent always acts as its owner: their sign-ins, files and skills. Only its owner's own asks may use all its servers and write tools; anyone else's ask gets read-only use of the servers its owner allows in shared chats. Only its owner's messages are instructions to it.

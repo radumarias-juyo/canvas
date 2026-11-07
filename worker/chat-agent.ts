@@ -190,6 +190,7 @@ import { answeredIn, reportContext, runInstructions, RUN_STEP_KIND, workSpend, t
 import { publishedAlready, publishFindings, publishRebuilt, readOnlyDeclaration, runMark } from "./agents/runs/page.ts";
 import { compileWorkflow } from "./agents/runs/compile.ts";
 import { sourceName } from "./agents/runs/source.ts";
+import { makeNote, parseMake, type MakeKind } from "../shared/make.ts";
 import type { Value } from "../shared/conditions.ts";
 import { runRef, type AgentRunDetail, type AgentRunList, type RunDelivery, type RunRef } from "../shared/runs.ts";
 import type { RoomLink, RoomRef, SeatBatch, SeatLink, SeatResult, SeatTurn } from "./agents/seats/link.ts";
@@ -594,7 +595,7 @@ export class ChatAgent extends DurableObject<Env> {
     peopleFor: (uid) => this.peopleFor(uid),
     queued: (ids) => this.queued(ids),
     incoming: () => this.incoming(),
-    prompt: (text, author, attachments, mentions, replyTo) => this.prompt(text, author, attachments, mentions, replyTo),
+    prompt: (text, author, attachments, mentions, replyTo, make) => this.prompt(text, author, attachments, mentions, replyTo, false, make),
     takeOffer: (author, entry) => this.takeOffer(author, entry),
     abort: (by, agent) => this.abort(by, agent),
     agents: () => this.agentViews(),
@@ -1589,13 +1590,14 @@ export class ChatAgent extends DurableObject<Env> {
     mentionInputs: readonly MentionInput[] = [],
     replyTo?: number,
     drafts = false,
+    make?: MakeKind,
   ): Promise<void> {
     // When it came in: the refreshes and copies below can take seconds. Never the same as another's, which would make
     // two messages of one person, sent in the same millisecond, one incoming message (incomingKey).
     const sentAt = (this.#lastSentAt = Math.max(Date.now(), this.#lastSentAt + 1));
     let placed = false;
     try {
-      placed = await this.#prompt(text, author, attachments, mentionInputs, replyTo, sentAt, drafts);
+      placed = await this.#prompt(text, author, attachments, mentionInputs, replyTo, sentAt, drafts, make);
     } finally {
       const key = incomingKey({ uid: author.uid, sentAt });
       if (this.#incoming.delete(key)) this.sockets.broadcast({ type: "incoming", incoming: this.incoming(), ...(placed && { placed: key }) });
@@ -1695,6 +1697,7 @@ export class ChatAgent extends DurableObject<Env> {
     replyTo: number | undefined,
     sentAt: number,
     drafts: boolean,
+    make?: MakeKind,
   ): Promise<boolean> {
     this.#requireInChat(author);
     const shared = this.members.hasAny();
@@ -1819,7 +1822,10 @@ export class ChatAgent extends DurableObject<Env> {
     if (!text && !attached) return false;
     this.#bringIn(broughtIn);
     const written = [quote && replyLine(quote), text, note].filter(Boolean).join("\n\n");
-    const said = shared ? `${author.name}: ${written}` : written;
+    // What they chose to make (or what Auto read the message as), for pi only, when its run answers this message: a line
+    // after what they wrote, never part of it (shared/make.ts). Not for a Yes, which only drafts.
+    const chose = summoned && !drafts ? makeNote(make, text) : "";
+    const said = [shared ? `${author.name}: ${written}` : written, chose].filter(Boolean).join("\n\n");
     const content = attached ? [...attached.content, ...(written ? [{ type: "text" as const, text: said }] : [])] : said;
     const dataWith = (auto?: AutoPick, tools?: ToolPickNote) =>
       ({
@@ -5435,7 +5441,14 @@ interface ChatSession {
   peopleFor(uid: string): ChatPeopleView;
   queued(ids: readonly number[]): Promise<QueuedMessage[]>;
   incoming(): IncomingMessage[];
-  prompt(text: string, author: Person, attachments: readonly AttachmentInput[], mentions: readonly MentionInput[], replyTo?: number): Promise<void>;
+  prompt(
+    text: string,
+    author: Person,
+    attachments: readonly AttachmentInput[],
+    mentions: readonly MentionInput[],
+    replyTo?: number,
+    make?: MakeKind,
+  ): Promise<void>;
   /** The owner's Yes to the next step a reply offers. */
   takeOffer(author: Person, entry: unknown): Promise<void>;
   abort(by: Person, agent?: string): Promise<void>;
@@ -5617,7 +5630,7 @@ class ChatSockets extends LifecycleCapability implements DurableObjectCapability
         const mentions = parseMentions(message.mentions);
         const text = String(message.text ?? "").trim().slice(0, 20_000);
         const replyTo = typeof message.replyTo === "number" ? message.replyTo : undefined;
-        if (text || attachments.length) await this.#chat.prompt(text, person, attachments, mentions, replyTo);
+        if (text || attachments.length) await this.#chat.prompt(text, person, attachments, mentions, replyTo, parseMake(message.make));
       } else if (message.type === "offer_yes") await this.#chat.takeOffer(person, message.entry);
       else if (message.type === "abort") await this.#chat.abort(person, typeof message.agent === "string" ? message.agent : undefined);
       else if (message.type === "model") await this.#chat.setModel(message, person);

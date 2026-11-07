@@ -941,6 +941,14 @@ a.mention-chip:hover { text-decoration: underline; }
 .composer-more-menu .composer-history-item { align-items: baseline; }
 .composer-history-text { flex: 1; min-width: 0; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
 .composer-history-item small { flex: none; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.make-button { display: inline-flex; align-items: center; gap: 5px; height: 26px; margin-left: 2px; padding: 0 8px; border: 1px solid transparent; border-radius: 999px; background: none; color: var(--muted); font-size: 13px; }
+.make-button:hover, .make-button[aria-expanded="true"] { background: var(--surface-2); color: var(--text); }
+.make-button.chosen { border-color: color-mix(in srgb, var(--accent) 35%, transparent); background: var(--accent-soft); color: var(--accent); }
+.make-menu { min-width: 260px; }
+.make-menu button[aria-checked="true"] { background: var(--accent-soft); }
+.make-menu button[aria-checked="true"] .composer-more-glyph { color: var(--accent); }
+.make-choice { display: flex; flex-direction: column; gap: 1px; }
+.make-choice small { color: var(--muted); font-size: 12px; }
 .composer-model { margin-left: auto; }
 .composer-model .spinner { flex: none; width: 14px; height: 14px; margin-right: 6px; border-top-color: var(--text); }
 .dictation-error, .dictation-status { min-width: 0; padding: 0 6px; font-size: 13px; color: var(--error); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
