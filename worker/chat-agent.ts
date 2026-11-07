@@ -90,7 +90,8 @@ import type { ModelRunner } from "./agent/workers-ai.ts";
 import { asksUser, RunTracker } from "./chat-status.ts";
 import { mcpExtension, type McpToolInfo, type ServerCatalog } from "./agent/mcp.ts";
 import { deferredTools, MIN_TOOLS_TO_PICK, pickerId, pickFailure, pickTools, TOOL_PICK_MS, toolPicker, toolsToOffer, type PickableTool } from "./agent/tool-pick.ts";
-import { artifactExtension, filesExtension, filesIndexExtension, reactionsExtension, sandboxExtension, sandboxName, skillsExtension, type ChatScope } from "./agent/tools.ts";
+import { artifactExtension, filesExtension, filesIndexExtension, reactionsExtension, sandboxExtension, skillsExtension, type ChatScope } from "./agent/tools.ts";
+import { agentSandboxName, sandboxFor, sandboxName } from "./agent/sandbox-names.ts";
 import type { SandboxFile } from "./sandbox.ts";
 import { formatSkillFile } from "./skills/index.ts";
 import { ChatReactions } from "./reactions.ts";
@@ -342,6 +343,8 @@ const RUNNING_WHEN_PICKED = "a reply started while the router picked, so the mes
 const PROGRESS = { partialIntervalMs: STREAM_STEP_MS, outputIntervalMs: STREAM_STEP_MS };
 /** The chat's status as the sidebars last heard it, in this object's storage: after a restart, whether a run may be going. */
 const STATUS_KEY = "status";
+/** The sandbox objects this chat's sessions ran code in (ChatAgent.#sandboxOf): what deleting the chat destroys. */
+const SANDBOXES_KEY = "sandboxes";
 /** Set while pi's tools are only those of a Yes to an offer (draftTools), until its run is over (#piTools). */
 const DRAFTING_KEY = "drafting";
 /** Why a Yes to pi's offer is refused while pi works: its tools change for the whole run (#piTools). */
@@ -725,6 +728,7 @@ export class ChatAgent extends DurableObject<Env> {
       artifacts: this.storage.artifacts,
       // Deriving the user's key is not free, so derive it once per object.
       files: memoAsync(() => this.storage.userFiles(this.uid)),
+      sandboxOf: (session) => this.#sandboxOf(session),
       onPublished: (artifact, chatId, session) => {
         // A version a conversation apart from the chat published (an agent's private turn): kept by version, before
         // anything else, so members never reach it before its reply is posted, nor hear of it (ChatRoster.release).
@@ -812,6 +816,27 @@ export class ChatAgent extends DurableObject<Env> {
     // seat with the same id (agent ids are unique per user only): its sessions run in its owner's object, not here.
     const entry = entries.find((each) => each.agentId === agentId && each.seat === undefined);
     return { agentId, ownerUid: entry?.ownerUid ?? this.uid, name: entry?.name ?? "agent", byOwner: turn?.byOwner === true, ...(ran && { run: true }) };
+  }
+
+  /**
+   * The sandbox object a session runs code in (worker/agent/sandbox-names.ts): the chat's for pi's, one of its own for
+   * each agent's (its own session, its turns' forks, its runs', a seat's); null for one nobody is known of. Remembered,
+   * so deleting the chat stops and forgets every one of them.
+   */
+  #sandboxOf(session: string): string | null {
+    const name = sandboxFor(this.#memoryAgent(session), this.uid, this.chatId);
+    if (name !== null) {
+      const used = this.#sandboxesUsed();
+      if (!used.includes(name)) this.ctx.storage.kv.put(SANDBOXES_KEY, [...used, name]);
+    }
+    return name;
+  }
+
+  /** The sandboxes this chat's sessions ran code in: pi's always, with the agents' that did (#sandboxOf). */
+  #sandboxesUsed(): string[] {
+    const pi = sandboxName(this.uid, this.chatId);
+    const used = this.ctx.storage.kv.get<string[]>(SANDBOXES_KEY) ?? [];
+    return used.includes(pi) ? used : [pi, ...used];
   }
 
   /** The uid is this object's name, which the Worker sets from a verified identity. */
@@ -2846,7 +2871,7 @@ export class ChatAgent extends DurableObject<Env> {
         // The tool results kept whole for this chat's turns (#spill).
         this.scope.toolResults().then((results) => results.deleteAll()),
         this.scope.drafts().then((drafts) => drafts.deleteAll()),
-        this.env.SANDBOX_ENABLED === "true" && exports.Sandbox.getByName(sandboxName(this.uid, this.chatId)).destroy(),
+        ...(this.env.SANDBOX_ENABLED === "true" ? this.#sandboxesUsed().map((name) => exports.Sandbox.getByName(name).destroy()) : []),
       ]);
       await this.runner.clearAll();
       // A branch's place among its conversation's MAX_BRANCHES is free again (an imported one took none).
@@ -3144,7 +3169,20 @@ export class ChatAgent extends DurableObject<Env> {
           .drop()
           .catch((error: unknown) => console.error("agent seat:", errorMessage(error))),
       index && this.#noteAgentChat(entry, false),
+      entry.seat === undefined && this.#dropSandbox(agentSandboxName(this.uid, this.chatId, entry.agentId)),
     ]);
+  }
+
+  /** An agent of this chat's object left it: its sandbox here stops and forgets what it held (one it never used, nothing). */
+  async #dropSandbox(name: string): Promise<void> {
+    const used = this.#sandboxesUsed();
+    if (!used.includes(name)) return;
+    if (this.env.SANDBOX_ENABLED === "true") {
+      await exports.Sandbox.getByName(name)
+        .destroy()
+        .catch((error: unknown) => console.error("agent sandbox:", errorMessage(error)));
+    }
+    this.ctx.storage.kv.put(SANDBOXES_KEY, used.filter((each) => each !== name));
   }
 
   /**
