@@ -1,5 +1,6 @@
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { MAX_HOPS, type AgentDefinition, type AgentDraftView, type ChatAgentReplyData, type ChatTurnData } from "../../shared/agents.ts";
+import { messageBudgetNotice } from "../../shared/agent-settings.ts";
 import { AGENT_NAME } from "../../shared/mentions.ts";
 import { errorMessage, isObject, serial } from "../../shared/util.ts";
 import { steerLine, type SteerResult } from "../../shared/agent-window.ts";
@@ -86,6 +87,12 @@ export interface TurnHost {
   newest(session: string): Promise<number | undefined>;
   /** Whether nobody but the chat's owner is in the chat now (no members): a turn then reads every server of its agent's. */
   alone(): boolean;
+  /** What a turn's model calls in this object came to so far, in tokens (a seat's come with its result). */
+  turnTokens?(entry: RosterEntry, turn: AgentTurn): number;
+  /** How many tokens one person's message's chain of turns may use (ChatAgentSettings.messageTokens); no cap when absent. */
+  messageBudget?(): number | undefined;
+  /** A chain stopped at its budget: the chat's line saying so (`text`), placed once per chain however often it is told. */
+  chainStopped?(root: number, text: string): Promise<void>;
   /**
    * What a forked turn's reply shows of its sources (turnSources), from its session's entries: only the shared servers'
    * records, the private servers it called, and whether its owner reviews it first.
@@ -211,6 +218,16 @@ export class AgentTurns {
       const refused = this.#host.refusal?.();
       if (refused) {
         await this.#ended(entry, turn, { status: "unanswered", reason: refused });
+        return;
+      }
+      // Its chain used up the budget per person's message before it came up: it and the rest of the chain stop.
+      const over = this.#overBudget(turn.root);
+      if (over) {
+        const notice = roster.end(turn.id, "stopped") ? this.#stopChain(turn.root, over, [entry.name]) : null;
+        this.#host.changed();
+        // Its next turn, of another chain, may go.
+        this.#pumpAfter(agentId);
+        if (notice) await this.#host.chainStopped?.(turn.root, notice);
         return;
       }
       if (!live()) return;
@@ -373,6 +390,8 @@ export class AgentTurns {
     if (now?.status === "running" || now?.status === "queued") {
       const done = result.status === "done";
       const text = (result.text ?? "").trim();
+      // What its model calls came to, here or in a seat's object: its chain's budget counts it.
+      const tokens = result.spent?.tokens ?? this.#host.turnTokens?.(entry, now) ?? 0;
       // How it ended, for the metrics and the chat's budget (with what it spent in another object, a seat's).
       const outcome = (status: TurnOutcome["status"], startedAt: number, endedAt: number): TurnOutcome => ({
         status,
@@ -383,7 +402,7 @@ export class AgentTurns {
       // A turn nobody asked for posts only an answer worth posting: none when it passed, or failed (nobody is waiting
       // for it), and it hands nothing on.
       if (turn.calledBy.unprompted && (!done || !text || isPass(text))) {
-        if (roster.end(turn.id, done ? "done" : "failed")) {
+        if (roster.end(turn.id, done ? "done" : "failed", undefined, tokens)) {
           this.#host.ended?.(turn, outcome(done ? "passed" : "failed", now.startedAt ?? now.createdAt, roster.now()));
         }
         this.#host.changed();
@@ -426,11 +445,12 @@ export class AgentTurns {
       if (held) {
         // Its owner sees it first: nothing of it reaches the chat, pi or other agents until they post it. A failed or
         // empty one too: what its fork published or saved stays withheld until they post or discard it.
-        if (roster.end(turn.id, done ? "done" : "failed", { reply, toPi: false, held: true, ...(joined && { heldWhy: JOINED_WHILE_APART }) })) {
+        const outbox = { reply, toPi: false, held: true, ...(joined && { heldWhy: JOINED_WHILE_APART }) };
+        if (roster.end(turn.id, done ? "done" : "failed", outbox, tokens)) {
           this.#host.ended?.(turn, ended);
           this.#host.drafted(current.ownerUid);
         }
-      } else if (roster.end(turn.id, done ? "done" : "failed", { reply, toPi: false })) {
+      } else if (roster.end(turn.id, done ? "done" : "failed", { reply, toPi: false }, tokens)) {
         this.#host.ended?.(turn, ended);
         delivering = this.#release(turn.id, reply, done);
       }
@@ -451,7 +471,11 @@ export class AgentTurns {
     const turn = roster.turn(id)!;
     const left = MAX_HOPS - roster.handOffsFrom(turn.root);
     // A turn nobody asked for hands nothing on.
-    const next = done && left > 0 && !turn.calledBy.unprompted ? handOffs(reply.text, reply.agentId, turn.hop, roster.list()).slice(0, left) : [];
+    let next = done && left > 0 && !turn.calledBy.unprompted ? handOffs(reply.text, reply.agentId, turn.hop, roster.list()).slice(0, left) : [];
+    // Its chain used up the budget per person's message: it hands nothing on, and what waits of the chain stops.
+    const over = this.#overBudget(turn.root);
+    const notice = over && this.#stopChain(turn.root, over, next.map((agentId) => roster.get(agentId)?.name ?? AGENT_NAME));
+    if (over) next = [];
     // A chain no person started never hands pi a turn: pi has the owner's full tools. It reads the reply instead.
     const posted = roster.release(id, reply, !turn.unattended && next.includes(AGENT_NAME));
     if (posted.length) this.#host.posted?.(posted);
@@ -470,7 +494,34 @@ export class AgentTurns {
       ...(turn.by !== undefined && { by: turn.by }),
     };
     if (agents.length) this.call(agents, hop);
-    return this.#deliver(id);
+    // The chain's last line, after its reply.
+    return notice ? this.#deliver(id).then(() => this.#host.chainStopped?.(turn.root, notice)) : this.#deliver(id);
+  }
+
+  /**
+   * What the chain that `root` started used, with the chat's budget per person's message, once it used that up (past
+   * it, or at it); null while it may go on, or when the chat has no budget.
+   */
+  #overBudget(root: number): { budget: number; spent: number } | null {
+    const budget = this.#host.messageBudget?.();
+    if (budget === undefined) return null;
+    const spent = this.#host.roster.chainTokens(root);
+    return spent >= budget ? { budget, spent } : null;
+  }
+
+  /**
+   * A chain used up its budget: what waits of it stops, and what the chat is told (the agents given no turn: `given`,
+   * those it would have handed on to, and those stopped), or null when no agent was left out.
+   */
+  #stopChain(root: number, over: { budget: number; spent: number }, given: readonly string[]): string | null {
+    const roster = this.#host.roster;
+    const stopped = roster.stopQueued(root).map((turn) => roster.get(turn.agentId)?.name ?? turn.agentId);
+    const left = [...new Set([...given, ...stopped])];
+    if (stopped.length) {
+      this.#host.changed();
+      this.#pumpAfter();
+    }
+    return left.length ? messageBudgetNotice(over.budget, over.spent, left) : null;
   }
 
   /** A reply of `uid`'s agent `agentId` held for their review, as turn `id`; refused for anyone else's, or one no longer held. */

@@ -129,6 +129,7 @@
     "src/chat/dictation-engine.ts",
     "src/agents/glance.ts",
     "src/agents/AgentTabs.tsx",
+    "src/agents/ServersTable.tsx",
     "src/agents/tab-fields.ts",
     "src/agents/nav.ts",
     "src/agents/runs.ts",

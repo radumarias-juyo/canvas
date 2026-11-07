@@ -353,6 +353,8 @@ export class ChatRoster {
       by_uid: "TEXT",
       alone: "INTEGER NOT NULL DEFAULT 0",
       held_why: "TEXT",
+      // What its model calls came to, a seat's in its owner's object too: its chain's budget counts it (chainTokens).
+      tokens: "INTEGER NOT NULL DEFAULT 0",
     });
     // A fork's view (FORKS) asks whether a turn still runs in its session, for every session every trace read.
     sql.exec("CREATE INDEX IF NOT EXISTS chat_agent_turns_by_session ON chat_agent_turns (session)");
@@ -548,6 +550,24 @@ export class ChatRoster {
   handOffsFrom(root: number): number {
     return this.#sql.exec("SELECT COALESCE(SUM((hop > 0) + to_pi), 0) AS n FROM chat_agent_turns WHERE root = ? OR id = ?", root, root).toArray()[0]
       .n as number;
+  }
+
+  /** How many tokens the turns of the chain that `root` started used, as each ended (`end`). */
+  chainTokens(root: number): number {
+    return this.#sql.exec("SELECT COALESCE(SUM(tokens), 0) AS n FROM chat_agent_turns WHERE root = ? OR id = ?", root, root).toArray()[0].n as number;
+  }
+
+  /** Stop the turns of the chain that `root` started that wait: those stopped, oldest first. */
+  stopQueued(root: number): AgentTurn[] {
+    const rows = this.#sql
+      .exec(
+        "UPDATE chat_agent_turns SET status = 'stopped', ended_at = ? WHERE status = 'queued' AND (root = ? OR id = ?) RETURNING *",
+        this.#now(),
+        root,
+        root,
+      )
+      .toArray() as TurnRow[];
+    return rows.map(turnOf).sort((one, other) => one.id - other.id);
   }
 
   /**
@@ -846,18 +866,21 @@ export class ChatRoster {
 
   /**
    * End a turn not ended yet, with what it still has to deliver. Only once: a turn that ended already (a second wait on
-   * it, a stop meanwhile) stays as it ended, and null says so, so its reply is delivered once.
+   * it, a stop meanwhile) stays as it ended, and null says so, so its reply is delivered once. `tokens`: what its model
+   * calls came to (chainTokens).
    */
-  end(id: number, status: Exclude<AgentTurnStatus, "queued" | "running">, outbox?: Outbox): AgentTurn | null {
+  end(id: number, status: Exclude<AgentTurnStatus, "queued" | "running">, outbox?: Outbox, tokens = 0): AgentTurn | null {
     const row = this.#sql
       .exec(
-        `UPDATE chat_agent_turns SET status = ?, ended_at = ?, reply = ?, to_pi = ?, held = ?, held_why = ? WHERE id = ? AND ${OPEN} RETURNING *`,
+        `UPDATE chat_agent_turns SET status = ?, ended_at = ?, reply = ?, to_pi = ?, held = ?, held_why = ?, tokens = ?
+         WHERE id = ? AND ${OPEN} RETURNING *`,
         status,
         this.#now(),
         outbox ? JSON.stringify(outbox.reply) : null,
         outbox?.toPi ? 1 : 0,
         outbox?.held ? 1 : 0,
         (outbox?.held && outbox.heldWhy) || null,
+        Math.max(0, Math.round(tokens)),
         id,
       )
       .toArray()[0] as TurnRow | undefined;

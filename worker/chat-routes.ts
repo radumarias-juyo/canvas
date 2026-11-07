@@ -62,7 +62,7 @@ import type { UserDirectory } from "./users.ts";
  *   GET    /api/chats/:id/agents/:agentId/window?session=  (the agent's owner) its window (AgentWindowView): its sessions here
  *                                             and one's transcript; a member's from their own object, where its seat is
  *   POST   /api/chats/:id/agents/:agentId/steer  (the agent's owner) {text}: steer its turn of theirs, or start one (SteerResult)
- *   PUT    /api/chats/:id/agent-settings    (owner) {router?, speakUp?, servers?, dailyTokens?}: each given replaces, null clears;
+ *   PUT    /api/chats/:id/agent-settings    (owner) {router?, speakUp?, servers?, dailyTokens?, messageTokens?}: each given replaces, null clears;
  *                                             everyone in the chat gets the settings (ChatAgentSettingsView) over its socket
  *                                             they read (a newer one refuses), with their changes,
  *                                             saved off in their directory with copiedFrom; it runs with their sign-ins
