@@ -75,8 +75,11 @@ export type DeliveryRequest = {
 /** What the executor needs from the chat object it runs in. Tests pass fakes. */
 export interface RunHost {
   readonly runs: AgentRuns;
-  /** A read-only call through the hub, as the agent's owner: the result's payload. Throws SignInNeeded for a sign-in. */
-  read(server: string, tool: string, input: StepInput): Promise<Value>;
+  /**
+   * A read-only call through the hub, as the agent's owner: the result's payload. Throws SignInNeeded for a sign-in.
+   * `agentId`: whose share of the hub's read cache it is kept in.
+   */
+  read(server: string, tool: string, input: StepInput, agentId?: string): Promise<Value>;
   /**
    * The servers that sign in each user (`auth: "oauth"`) its owner has a sign-in record for (signed in now, or lapsed):
    * a work step's tools may come from them, so a run checks them too. One they never signed in to (or Disconnected) is
@@ -96,8 +99,11 @@ export interface RunHost {
   waitUntil(promise: Promise<unknown>): void;
   /** A fresh pi session for one item. */
   newSession(): Promise<string>;
-  /** Set an item's session up for its work steps: the agent's model (or `model`), instructions and read tools. */
-  configure(session: string, agent: AgentDefinition, model?: string): Promise<void>;
+  /**
+   * Set an item's session up for its work steps: the agent's model (or `model`), instructions and read tools. `dueAt`
+   * names the run, which the session's model calls are tagged with.
+   */
+  configure(session: string, agent: AgentDefinition, model?: string, dueAt?: number): Promise<void>;
   /** A passive write into a session: context, no model call. Placed once per `requestId`. */
   write(session: string, text: string, requestId: string): Promise<void>;
   /** A work step's prompt into its session, waited for. Placed once per `operationId`. */
@@ -106,6 +112,13 @@ export interface RunHost {
   deliver(request: DeliveryRequest): Promise<RunDelivery>;
   /** The run's list changed, or a run started or ended: tell the people looking. */
   changed(agentId: string): void;
+  /**
+   * Why a run may not spend today (its owner's daily spend cap is reached), its owner told once a day; undefined when it
+   * may. Not asked for a test, which its owner started by hand.
+   */
+  spendCap?(): Promise<string | undefined>;
+  /** A run went through its items and ended (not one stopped before, by the cap or a sign-in): for the metrics. */
+  ended?(run: { agentId: string; dueAt: number; status: RunStatus; items: number; wallMs: number }): void;
 }
 
 /** A run to start. */
@@ -195,7 +208,7 @@ export function itemKey(element: Value, index: number): { key: string; label: st
  */
 export async function readFor(host: Pick<RunHost, "read">, agent: AgentDefinition, step: Pick<LookStep, "server" | "tool">, input: StepInput): Promise<Value> {
   if (!mayUseServer(agent, step.server)) throw new Error(`${step.server} is not one of the servers @${agent.name} may use.`);
-  return host.read(step.server, step.tool, input);
+  return host.read(step.server, step.tool, input, agent.id);
 }
 
 /** What a work step's prompt says around the step's own words. */
@@ -293,9 +306,17 @@ export class RunExecutor {
     // Ended, or waiting for a sign-in that has not come: an alarm that fires twice sends once.
     if (!started && run.status !== "running") return { status: run.status, started: false };
     this.#host.changed(agent.id);
+    const startedAt = Date.now();
     try {
-      const servers = runServers(agent, await this.#host.signInServers());
-      let missing = await this.#host.needsSignIn(servers);
+      const [capped, needed] = await Promise.all([
+        run.test ? undefined : this.#host.spendCap?.(),
+        this.#host.signInServers().then((signedIn) => this.#host.needsSignIn(runServers(agent, signedIn))),
+      ]);
+      if (capped) {
+        runs.update(agent.id, dueAt, { status: "failed", summary: capped });
+        return { status: "failed", started };
+      }
+      let missing = needed;
       // Read before the check for a late sign-in below, so no await comes between that and the wait.
       const off = missing.length ? await this.#turnedOffNow(agent, run) : null;
       if (off) return off;
@@ -313,6 +334,7 @@ export class RunExecutor {
       const elements = await this.#elements(agent);
       const outcomes = await mapLimit(elements, RUN_CONCURRENCY, (element) => this.#item(agent, run, element, when));
       const status = await this.#finish(agent, runs.get(agent.id, dueAt)!, outcomes);
+      this.#host.ended?.({ agentId: agent.id, dueAt, status, items: outcomes.length, wallMs: Date.now() - startedAt });
       return { status, started };
     } catch (error) {
       if (error instanceof SignInNeeded) return (await this.#turnedOffNow(agent, run)) ?? this.#waitForSignIn(agent, run, [error.server]);
@@ -500,7 +522,7 @@ export class RunExecutor {
         case "work": {
           const model = step.model ?? state.agent.model;
           if (state.configured !== (model ?? "")) {
-            await this.#host.configure(state.session, state.agent, step.model);
+            await this.#host.configure(state.session, state.agent, step.model, state.run.dueAt);
             state.configured = model ?? "";
           }
           const result = await this.#host.work(state.session, workPrompt(step, state.when, state.element), `${opId(state)}:work:${key}`);

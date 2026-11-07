@@ -2,6 +2,7 @@ import type { ToolCall, ToolResultMessage } from "@earendil-works/pi-ai";
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { createContext, use, useMemo, useState, type ReactNode } from "react";
 import { AGENT_PROPOSE_TOOL } from "../../shared/agents.ts";
+import { CHECKLIST_TOOL } from "../../shared/checklist.ts";
 import {
   CHECK_TOOL,
   DRAFTS_TOOL,
@@ -116,6 +117,7 @@ const LABELS: Record<string, string> = {
   skill_propose: "Propose skill",
   [AGENT_PROPOSE_TOOL]: "Draft agent",
   [MCP_DISCOVER_TOOL]: "List MCP servers",
+  [CHECKLIST_TOOL]: "Plan",
 };
 
 /** What a call's long text arguments are, where the key alone says less. */
@@ -164,6 +166,8 @@ const SAID: Record<string, (n: number) => string> = {
   skill_propose: some("proposed", "a skill", "skill"),
   [AGENT_PROPOSE_TOOL]: some("drafted", "an agent", "agent"),
   [MCP_DISCOVER_TOOL]: again("looked up MCP servers"),
+  // The first call posts the plan, the others update it.
+  [CHECKLIST_TOOL]: (n) => (n === 1 ? "posted the plan" : `updated the plan${times(n - 1)}`),
   tool_search: again("searched for tools"),
   react: again("reacted"),
 };

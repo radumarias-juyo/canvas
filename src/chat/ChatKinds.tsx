@@ -210,6 +210,8 @@ export function ChatEventNotice({ data, uid, onOpenChat }: { data: ChatEventData
       </div>
     );
   }
+  // Only a branch's own line: an event this app does not know yet (a newer server's) draws nothing.
+  if (data.event !== "branched") return null;
   return (
     <div className="chat-notice branch-line">
       Above: the conversation this chat carries from {link(data.from.chatId, data.from.title)}, where {data.by.uid === uid ? "you" : data.by.name} branched it off

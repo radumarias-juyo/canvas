@@ -165,6 +165,12 @@ export function sandboxLayout(paths: readonly string[]): Map<string, string> {
     if (other !== undefined) throw new FileRefError(`"${other}" and "${path}" would both be ./files/${name}; pass them in separate runs.`);
     layout.set(name, path);
   }
+  checkFolders(layout);
+  return layout;
+}
+
+/** Refuse a layout (names under ./files/, to what each comes from) with a file where another needs a folder. */
+export function checkFolders(layout: ReadonlyMap<string, string>): void {
   for (const name of layout.keys()) {
     const segments = name.split("/");
     for (let end = 1; end < segments.length; end++) {
@@ -172,7 +178,6 @@ export function sandboxLayout(paths: readonly string[]): Map<string, string> {
       if (layout.has(folder)) throw new FileRefError(`"${layout.get(folder)}" is a file where "${layout.get(name)}" needs a folder; pass them in separate runs.`);
     }
   }
-  return layout;
 }
 
 /**

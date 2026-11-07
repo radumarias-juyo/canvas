@@ -536,6 +536,17 @@ a.item-chip:hover { border-color: var(--accent); color: var(--accent); }
 .call-hint-no { width: 22px; height: 22px; padding: 0; border: 0; border-radius: 50%; background: none; color: var(--muted); font: inherit; font-size: 16px; line-height: 1; cursor: pointer; }
 .call-hint-ask:hover { filter: brightness(1.1); }
 .call-hint-no:hover { background: color-mix(in srgb, var(--text) 8%, transparent); color: var(--text); }
+/* Under a reply: the next step it offers. On the chat's latest offer, for its owner, Yes and No thanks beside it. */
+.offer { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; align-self: flex-start; max-width: 100%; color: var(--muted); font-size: 13px; line-height: 20px; }
+.offer.live { padding: 4px 4px 4px 10px; border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border)); border-radius: var(--radius); background: var(--accent-soft); color: var(--text); }
+.offer-icon { flex: none; display: inline-flex; color: var(--accent); }
+.offer-text { flex: 1 1 12em; min-width: 0; overflow-wrap: anywhere; }
+.offer-actions { display: inline-flex; flex: none; gap: 6px; margin-left: auto; }
+.offer-actions button { padding: 0 12px; border-radius: 999px; font: inherit; line-height: 22px; cursor: pointer; }
+.offer-actions .offer-yes { border: 1px solid var(--accent); background: var(--accent); color: var(--accent-text); font-weight: 600; }
+.offer-actions .offer-no { border: 1px solid var(--border); background: var(--surface); color: var(--text); }
+.offer-yes:hover { filter: brightness(1.1); }
+.offer-no:hover { border-color: var(--muted); }
 /* Reactions under a message: each emoji, how many, the viewer's own marked; a click adds or takes back theirs. */
 .reactions { display: flex; flex-wrap: wrap; gap: 4px; }
 .reaction { display: inline-flex; align-items: center; gap: 4px; padding: 0 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--text); font-size: 13px; line-height: 22px; }
@@ -594,6 +605,23 @@ button.reaction:hover { border-color: var(--muted); }
 .agent-menu-state, .agent-menu-empty { color: var(--muted); font-size: 13px; }
 .agent-menu .section-head { padding: 4px 0 0; }
 .agent-menu .danger { align-self: flex-start; }
+.agent-menu > button:not(.danger):not(.icon-button) { align-self: flex-start; }
+/* The chat's agent settings, under the owner's list of agents to add. */
+.agent-settings { display: flex; flex-direction: column; gap: 10px; padding-top: 6px; border-top: 1px solid var(--border); }
+.agent-settings .section-head { margin: 0; padding: 0; }
+.agent-settings .skill-toggle { align-items: flex-start; }
+.agent-settings .skill-toggle > span, .agent-budget label, .agent-servers-here legend { display: flex; flex-direction: column; gap: 2px; }
+.agent-settings small { color: var(--muted); font-size: 12px; }
+.agent-budget { display: flex; flex-direction: column; gap: 6px; margin: 0; }
+.agent-budget-row { display: flex; gap: 6px; }
+.agent-budget-row input { flex: 1; min-width: 0; }
+.agent-budget-row input[aria-invalid="true"] { border-color: var(--error); }
+.agent-servers-here { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; border: 0; }
+.agent-servers-here legend { padding: 0 0 4px; }
+/* Under an agent's reply nobody asked for: the mark, and Mute. */
+.mute-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
+.pill.unprompted { border-color: transparent; background: var(--working-soft); color: var(--working); }
+.budget-notice { color: var(--working); }
 .agent-runs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .agent-run { display: flex; align-items: baseline; gap: 8px; font-size: 13px; }
 .agent-run .sent-time { margin-left: auto; flex: none; opacity: 1; }
@@ -765,6 +793,34 @@ button.reaction:hover { border-color: var(--muted); }
 .artifact-card:hover { border-color: var(--accent); }
 .artifact-card-icon { flex: none; display: grid; place-items: center; width: 40px; height: 40px; border-radius: 9px; background: var(--accent-soft); color: var(--accent); font-size: 22px; }
 .artifact-card small { display: block; color: var(--muted); font-size: 12.5px; }
+
+/*
+ * An agent's plan for a big ask (ChecklistCard): a card indented as the agent's other parts are, its author's badge and
+ * the title over the steps, each with its mark: an empty circle to do, a pulsing dot in progress, a check done, a dash
+ * skipped (its text struck through). It edits in place as the agent updates it.
+ */
+.checklist-card { margin: 4px 0 4px var(--gutter); padding: 12px 16px 12px 14px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-card); }
+.checklist-head { display: flex; align-items: center; gap: 10px; }
+.checklist-head > .avatar { --size: 26px; }
+.checklist-title { min-width: 0; display: flex; flex-direction: column; line-height: 1.3; }
+.checklist-title strong { overflow-wrap: anywhere; }
+.checklist-title small { color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.checklist-card.final .checklist-title small { color: var(--live); }
+.checklist-steps { margin: 10px 0 0; padding: 0; list-style: none; font-size: 14px; }
+.checklist-step { display: flex; gap: 10px; align-items: flex-start; padding: 3px 0; }
+.checklist-mark { position: relative; flex: none; display: grid; place-items: center; width: 16px; height: 16px; margin-top: 2px; border: 1.5px solid var(--border); border-radius: 50%; }
+.checklist-mark::after { content: ""; }
+.checklist-step.doing .checklist-mark { border-color: var(--working); }
+.checklist-step.doing .checklist-mark::after { width: 6px; height: 6px; border-radius: 50%; background: var(--working); animation: notify-pulse 1.6s ease-in-out infinite; }
+.checklist-step.done .checklist-mark { border-color: var(--live); background: var(--live); }
+.checklist-step.done .checklist-mark::after { content: "✓"; color: var(--surface); font: 700 10px / 1 var(--font-body); }
+.checklist-step.skipped .checklist-mark { border-style: dashed; }
+.checklist-step.skipped .checklist-mark::after { width: 7px; height: 1.5px; background: var(--muted); }
+.checklist-text { min-width: 0; display: flex; flex-direction: column; overflow-wrap: anywhere; }
+.checklist-step.doing .checklist-step-text { font-weight: 500; }
+.checklist-step.skipped .checklist-step-text { color: var(--muted); text-decoration: line-through; }
+.checklist-text small { color: var(--muted); font-size: 12.5px; }
+@media (prefers-reduced-motion: reduce) { .checklist-step.doing .checklist-mark::after { animation: none; } }
 
 /* As wide as the conversation's column (its badges' gutter included), centred under it. */
 .composer { position: relative; display: flex; flex-direction: column; gap: 6px; width: 100%; max-width: calc(var(--column) + 40px); margin: 0 auto; padding: 10px 20px max(14px, env(safe-area-inset-bottom)); }

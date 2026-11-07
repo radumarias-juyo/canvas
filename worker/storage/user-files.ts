@@ -1,6 +1,6 @@
 import { MAX_LISTED, UPLOADS } from "../../shared/uploads.ts";
 import { normalisePath } from "./paths.ts";
-import { deletePrefix } from "./r2.ts";
+import { deleteKeys, deletePrefix } from "./r2.ts";
 
 /** A part of a file, as R2 reads it: from an offset (for a length), or its last `suffix` bytes. */
 export type ByteRange = { offset: number; length?: number } | { suffix: number };
@@ -74,9 +74,7 @@ export class UserFiles {
 
   /** Delete files by their paths; a path with no file is skipped. */
   async delete(paths: readonly string[]): Promise<void> {
-    const keys = paths.map((path) => this.#objectKey(path));
-    // R2 deletes at most 1,000 keys a call.
-    for (let i = 0; i < keys.length; i += 1000) await this.#bucket.delete(keys.slice(i, i + 1000));
+    await deleteKeys(this.#bucket, paths.map((path) => this.#objectKey(path)));
   }
 
   /** Delete `folder` (never all the files: #objectKey refuses an empty path) and everything under it, however many files. */

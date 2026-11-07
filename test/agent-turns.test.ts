@@ -1,8 +1,9 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import type { EntryRecord } from "@earendil-works/pi-durable";
+import { ROOT_CONVERSATION_ID, type EntryRecord } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
 import { CHAT_AGENT_KIND, CHAT_TURN_KIND, MAX_HOPS, speakerLabel, type ChatAgentReplyData } from "../shared/agents.ts";
 import { AGENT_NAME } from "../shared/mentions.ts";
+import { OFFER_RULE } from "../shared/offers.ts";
 import { CHAT_ASIDE_KIND, CHAT_MESSAGE_KIND, CHAT_PEOPLE_KIND, PUBLISH_TOOL, type ChatMessageData } from "../shared/protocol.ts";
 import {
   agentInstructions,
@@ -11,6 +12,8 @@ import {
   askOf,
   assistantText,
   allowedTools,
+  draftTools,
+  piBusy,
   runTools,
   CatchUp,
   handOffs,
@@ -439,6 +442,18 @@ describe("askOf", () => {
   });
 });
 
+describe("piBusy", () => {
+  it("counts only pi's own conversation: an agent's turn or a run step working leaves pi free", () => {
+    const of = (conversationId: unknown) => ({ conversationId }) as never;
+    expect(piBusy([])).toBe(false);
+    // @atlas works in its session, a run step in another: pi is idle, so a Yes is taken and its tools come back.
+    expect(piBusy([of("session-atlas"), of("run-7")])).toBe(false);
+    expect(piBusy([of("session-atlas"), of(ROOT_CONVERSATION_ID)])).toBe(true);
+    // A session named by its string is pi's too.
+    expect(piBusy([of(String(ROOT_CONVERSATION_ID))])).toBe(true);
+  });
+});
+
 describe("allowedTools", () => {
   const mcp = new Map<string, McpToolInfo>([
     ["crm__list_deals", { server: "crm", readOnly: true }],
@@ -478,6 +493,20 @@ describe("allowedTools", () => {
   it("gives a run only reading tools: the app's and those of all its own servers, sign-in ones too", () => {
     expect(runTools([...tools, "some_new_tool"], mcp, agent)).toEqual([...reads, "crm__list_deals", "mail__search"]);
     expect(runTools(tools, mcp, {})).toEqual([...reads, "crm__list_deals", "mail__search", "vault__read"]);
+  });
+
+  it("lets a turn someone asked for post its plan as a checklist card, but not one nobody asked for, nor a run", () => {
+    expect(allowedTools([...tools, "checklist"], mcp, agent, false, signsIn)).toContain("checklist");
+    expect(allowedTools([...tools, "checklist"], mcp, agent, true, signsIn)).toContain("checklist");
+    // Speaking up, it may still PASS: then nothing of it may show.
+    expect(allowedTools([...tools, "checklist"], mcp, agent, false, signsIn, true)).toEqual(allowedTools(tools, mcp, agent, false, signsIn));
+    expect(runTools([...tools, "checklist"], mcp, agent)).not.toContain("checklist");
+  });
+
+  it("gives the turn a Yes to an offer starts only reading tools and the one that drafts a routine", () => {
+    const all = [...tools, "checklist", "files_write"];
+    expect(draftTools(all, mcp, agent)).toEqual(["agent_propose", ...reads, "crm__list_deals", "mail__search"]);
+    expect(draftTools(all, mcp, {})).toEqual(["agent_propose", ...reads, "crm__list_deals", "mail__search", "vault__read"]);
   });
 
   it("gives anyone else's turn only the app's read tools and read tools of servers that do not sign in each user", () => {
@@ -526,6 +555,14 @@ describe("agentInstructions", () => {
     expect(prompt).toContain('"Your turn: …"');
     expect(turnInput({ calledBy: { name: "Ana" }, hop: 0, ask: "" }).startsWith("Your turn: ")).toBe(true);
     expect(prompt).toContain(`@${AGENT_NAME}`);
+  });
+
+  it("tells it how a turn nobody asked for reads, to answer PASS when it has nothing, and how to offer one next step", () => {
+    const prompt = agentInstructions(research, "Radu");
+    expect(turnInput({ calledBy: { name: "the conversation", unprompted: "speak-up" }, hop: 0, ask: "[Ana · person]: hm" }).startsWith("Nobody called you")).toBe(true);
+    expect(prompt).toContain('"Nobody called you…"');
+    expect(prompt).toContain("answer exactly PASS");
+    expect(prompt).toContain(OFFER_RULE);
   });
 
   it("changes only with the definition and the owner's name", () => {

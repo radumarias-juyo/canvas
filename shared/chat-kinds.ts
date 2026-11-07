@@ -150,6 +150,13 @@ export type ChatEventData =
   | { event: "branched"; from: BranchedFrom; by: Who };
 
 /**
+ * A daily cap was reached: the chat's token budget (no more model calls in it today), or the owner's spend on runs. Its
+ * own entry kind, not a chat.event: an app from before it skips a kind it does not know.
+ */
+export const CHAT_BUDGET_KIND = "chat.budget";
+export type ChatBudgetData = { scope: "chat" | "runs"; text: string };
+
+/**
  * A message copied into a branch from the chat it branched off: pi's reply as its text, or an artifact card. People's
  * messages and other agents' replies are copied as the entries they were (chat.message, chat.agent).
  */

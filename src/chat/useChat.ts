@@ -2,6 +2,7 @@ import type { AssistantMessage, ModelThinkingLevel } from "@earendil-works/pi-ai
 import type { AgentEvent, AgentState, EntryRecord, JsonObject, UsageState } from "@earendil-works/pi-durable";
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { CHAT_AGENT_KIND, type ChatAgentReplyData, type ChatAgentView } from "../../shared/agents.ts";
+import type { ChatAgentSettingsView } from "../../shared/agent-settings.ts";
 import type { AttachmentInput } from "../../shared/attachments.ts";
 import type { MentionInput } from "../../shared/mentions.ts";
 import { modelKey } from "../../shared/models.ts";
@@ -386,6 +387,8 @@ export function useChat(chatId: string) {
   const [hints, setHints] = useState<ReadonlySet<number>>(NO_HINTS);
   // The agents the owner brought into the chat besides pi, and whether each is working.
   const [agents, setAgents] = useState<ChatAgentView[]>(NO_AGENTS);
+  // How the chat's agents behave here, as its owner set it (router, speaking up, servers, daily budget).
+  const [agentSettings, setAgentSettings] = useState<ChatAgentSettingsView | null>(null);
   // What the agents working now do, each in its own session.
   const [live, dispatchAgents] = useReducer(reduceAgents, NO_LIVE);
   const ended = Object.values(live).reduce((first, agent) => Math.min(first, agent.endedAt ?? Infinity), Infinity);
@@ -411,6 +414,7 @@ export function useChat(chatId: string) {
     setAuto(false);
     setHints(NO_HINTS);
     setAgents(NO_AGENTS);
+    setAgentSettings(null);
     dispatchAgents({ type: "reset" });
     let closed = false;
     let attempt = 0;
@@ -447,7 +451,8 @@ export function useChat(chatId: string) {
         else if (message.type === "agents") {
           setAgents(message.agents);
           dispatchAgents({ type: "agents", agents: message.agents, at: Date.now() });
-        } else if (message.type === "agentEvents") dispatchAgents({ ...message, events: message.events as AgentEvent[], at: Date.now() });
+        } else if (message.type === "agentSettings") setAgentSettings(message.settings);
+        else if (message.type === "agentEvents") dispatchAgents({ ...message, events: message.events as AgentEvent[], at: Date.now() });
         else if (message.type === "removed" || message.type === "deleted") {
           stop(STOPPED[message.type]);
           ws.close();
@@ -492,6 +497,7 @@ export function useChat(chatId: string) {
   // Stable, so the memoized model picker skips the re-render on every streamed token.
   const setModel = useCallback((model: string, thinkingLevel?: ModelThinkingLevel) => send({ type: "model", model, thinkingLevel }), [send]);
   const react = useCallback((entry: number, emoji: Reaction, on: boolean) => send({ type: "react", entry, emoji, on }), [send]);
+  const takeOffer = useCallback((entry: number) => send({ type: "offer_yes", entry }), [send]);
   const dropHint = useCallback(
     (entry: number) =>
       setHints((known) => {
@@ -510,10 +516,13 @@ export function useChat(chatId: string) {
     /** Who has the chat open right now, and in how many windows. */
     online,
     prompt,
+    takeOffer,
     /** Stop pi and every agent's turn, or with `agent` only that agent's. */
     abort: (agent?: string) => send(agent ? { type: "abort", agent } : { type: "abort" }),
     /** The chat's agents besides pi (its roster), as the chat last said. */
     agents,
+    /** The chat's agent settings, as the chat last said; null until it has. */
+    agentSettings,
     /** The agents' turns followed live, by agent id (see shownLive). */
     live,
     setModel,
