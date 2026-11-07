@@ -625,9 +625,13 @@ describe("ChatMemory", () => {
     // Asides are not inputs; the conversation's first run goes back to the start of the log; no input is no one's.
     expect(await asked(reply("toolUse"), message("ana", true), message("owner"))).toBe(true);
     expect(await asked(reply("toolUse"))).toBe(false);
-    // A failed request retried in the run does not end it; a run that ended in one is read over more inputs.
+    // A failed or cut off request retried or resumed in the run does not end it: the run's inputs are before it.
     expect(await asked(reply("toolUse"), reply("error"), message("owner"), reply("stop"))).toBe(true);
     expect(await asked(reply("toolUse"), reply("error"), message("owner"), entry(CHAT_TURN_KIND), reply("stop"))).toBe(false);
+    expect(await asked(reply("toolUse"), reply("aborted"), message("ana"), reply("stop"))).toBe(false);
+    // The owner's message after a run that failed, or was cut off by a restart, starts a run of its own.
+    expect(await asked(reply("toolUse"), message("owner"), reply("error"), entry(CHAT_TURN_KIND))).toBe(true);
+    expect(await asked(reply("toolUse"), message("owner"), reply("aborted"), message("ana"))).toBe(true);
     // A run longer than it reads is not judged the owner's.
     const long = (async function* () {
       for (let page = 0; page <= MAX_RUN_PAGES; page++) yield [reply("toolUse")];
@@ -752,7 +756,11 @@ describe("what someone other than the owner sees of a chat's events", () => {
   it("leaves out what memory_recall found and memory_forget said, in the history and as calls run", () => {
     const snapshot = {
       type: "snapshot",
-      entries: [result(MEMORY_RECALL_TOOL, "- [a1] (about the owner) My salary is private."), result(MEMORY_FORGET_TOOL, "Forgot [a2]: “My bonus.”", 2), result("files_read", "salary.csv", 3)],
+      entries: [
+        result(MEMORY_RECALL_TOOL, "- [a1] (about the owner) My salary is private."),
+        result(MEMORY_FORGET_TOOL, "Forgot [a2]: “My bonus.”", 2),
+        result("files_read", "salary.csv", 3),
+      ],
       tools: [{ callId: "c4", name: MEMORY_RECALL_TOOL, status: "running", output: "My salary" }],
     } as unknown as AgentEvent;
     const shown = JSON.stringify(withoutNoteResults(snapshot));

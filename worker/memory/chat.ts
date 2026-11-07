@@ -80,9 +80,11 @@ export async function runAskedByOwner(pages: AsyncIterable<readonly EntryRecord[
       const seen = piLogEntry(entry);
       if (!seen) continue;
       if ("reply" in seen) {
-        // A failed request is retried in the same run (or compacted after an overflow): only another reply ends one.
-        // Read past one that did end it, the run is judged over more inputs, never fewer.
-        if (seen.reply.stopReason !== "toolUse" && seen.reply.stopReason !== "error") return asked;
+        const { stopReason } = seen.reply;
+        if (stopReason === "toolUse") continue;
+        // A failed or cut off request is retried, or resumed, in the same run, which places no input: one with inputs
+        // after it is a new run (the owner's message after a failed one). Any other reply ends a run.
+        if ((stopReason !== "error" && stopReason !== "aborted") || asked) return asked;
       } else if (seen.input !== "message" || seen.uid !== ownerUid) return false;
       else asked = true;
     }
