@@ -1,12 +1,12 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type KeyboardEvent, type RefObject } from "react";
+import type { ChatAgentView } from "../../shared/agents.ts";
 import { baseName } from "../../shared/attachments.ts";
 import {
   activeQuery,
   AGENT_NAME,
-  AGENT_TOKEN,
-  splitAgent,
+  splitCalls,
   keptMentions,
-  matchMentions,
+  matchPicks,
   mentionLabel,
   mentionToken,
   sameMention,
@@ -19,13 +19,18 @@ import {
 import { everyone, type ChatPeople, type Person } from "../../shared/protocol.ts";
 import { formatBytes } from "../../shared/util.ts";
 import { api } from "../api.ts";
-import { AgentAvatar, Avatar, tintOf, tintStyle, useSharedChat } from "./people.tsx";
+import { AgentAvatar, Avatar, tintOf, tintStyle, toneStyle, useChatAgents, useSharedChat } from "./people.tsx";
 
-/** The agent, as the picker offers it in a shared chat, where "@pi" is what calls it. */
-const AGENT_CHOICE = { agent: true, detail: "agent · asks it to answer" } as const;
+/**
+ * An agent as the picker offers it: pi, or another agent of the chat's roster (`view`), with its job line. Picking one
+ * calls it: the text itself does, so nothing is sent with the message.
+ */
+type AgentPick = { agent: true; name: string; job: string; handleOnly?: boolean; view?: ChatAgentView };
 /** For the owner, when nobody they know matches: tag the name anyway, and get an invite link to send them. */
 type InviteChoice = { invite: string; detail: string };
-type Choice = MentionChoice | typeof AGENT_CHOICE | InviteChoice;
+type Choice = MentionChoice | AgentPick | InviteChoice;
+
+const PI_CHOICE: AgentPick = { agent: true, name: AGENT_NAME, job: "the chat's assistant", handleOnly: true };
 
 /**
  * Who "@" knows besides the people in the chat: the people the user shares other chats with (`known`), whom tagging
@@ -43,8 +48,9 @@ export type Outsider = Person | { name: string; invite: true };
  * "@" in the composer: as the user types "@" (or presses the @ button), a list of the chat owner's files and
  * artifacts opens over the input, filtered by what follows the "@". Arrows move, Enter or Tab picks, Escape closes.
  * A pick puts `@<path>`, `@<title>` or `@<name>` in the text and is sent with the message while that text is still there.
- * In a `shared` chat (its `people`, and the viewer's `uid`) the agent comes first: "@pi" in a message is what calls it
- * there; then the others in the chat, who are told when a message tags them.
+ * The chat's agents come first (`agents`, its roster, with pi in a `shared` chat or one with agents): "@name" in a
+ * message is what calls one. Then, in a shared chat (its `people`, and the viewer's `uid`), the others in it, who are
+ * told when a message tags them.
  */
 export function useMentions(
   chatId: string,
@@ -53,11 +59,17 @@ export function useMentions(
   input: RefObject<HTMLTextAreaElement | null>,
   people: ChatPeople | null,
   uid: string,
+  agents: readonly ChatAgentView[] = [],
   outside?: Outside,
   /** All in the chat, the owner too, also in a chat nobody shares, where `people` is null: who is not an outsider. */
   inChat: readonly Person[] = [],
 ) {
   const shared = people !== null;
+  // pi is called by name in a shared chat, and in one with other agents (where a message that names only them is theirs).
+  const callable = useMemo<AgentPick[]>(
+    () => (shared || agents.length ? [PI_CHOICE, ...agents.map((view) => ({ agent: true as const, name: view.name, job: view.job, view }))] : []),
+    [shared, agents],
+  );
   // The last person tagged who is not in the chat, until the user answers the card about them.
   const [outsider, setOutsider] = useState<Outsider | null>(null);
   const [options, setOptions] = useState<MentionOptions | null>(null);
@@ -73,7 +85,7 @@ export function useMentions(
   // came from; edit the text, or type on past it, and the list reopens.
   const done =
     typed !== null &&
-    [...picked.map(mentionLabel), ...(shared ? [AGENT_NAME] : [])].some(
+    [...picked.map(mentionLabel), ...callable.map((choice) => choice.name)].some(
       (label) => draft.startsWith(`@${label}`, typed.start) && typed.query.trimEnd().length <= label.length,
     );
   const query = typed && !done && typed.start !== dismissedAt ? typed : null;
@@ -129,16 +141,17 @@ export function useMentions(
   );
   const choices = useMemo<Choice[]>(() => {
     if (!query) return [];
-    const callsAgent = shared && AGENT_NAME.startsWith(query.query.trim().toLowerCase());
-    const matched = matchMentions([...others, ...all], query.query);
-    // A name, typed in full, that is nobody the user knows: the owner may invite them by link.
+    const matched = matchPicks(callable, [...others, ...all], query.query);
+    // A name, typed in full, that is nobody the user knows and no agent: the owner may invite them by link.
     const name = query.query.trim();
     const invite =
-      outside?.canInvite && /^[\p{L}][\p{L}\p{N}._-]{1,31}$/u.test(name) && !matched.some((choice) => choice.mention.kind === "person") && !AGENT_NAME.startsWith(name.toLowerCase())
+      outside?.canInvite &&
+      /^[\p{L}][\p{L}\p{N}._-]{1,31}$/u.test(name) &&
+      !matched.some((choice) => "agent" in choice || choice.mention.kind === "person")
         ? [{ invite: name, detail: "not in this chat · invite by link" }]
         : [];
-    return [...(callsAgent ? [AGENT_CHOICE] : []), ...matched, ...invite];
-  }, [all, others, query?.query, shared, outside?.canInvite]);
+    return [...matched, ...invite];
+  }, [all, others, query?.query, callable, outside?.canInvite]);
   // An "@" in running text ("@ the team") matches nothing once a space follows: then it was not a mention.
   const open = query !== null && !(options && choices.length === 0 && /\s/.test(query.query));
 
@@ -156,8 +169,8 @@ export function useMentions(
 
   const pick = (choice: Choice) => {
     if (!query) return;
-    // The agent is called by the text itself: nothing to send with the message.
-    if ("agent" in choice) return replace(query.start, caret, `${AGENT_TOKEN} `);
+    // An agent is called by the text itself: nothing to send with the message.
+    if ("agent" in choice) return replace(query.start, caret, `@${choice.name} `);
     // Nobody to send either: the card offers an invite link.
     if ("invite" in choice) {
       setOutsider({ name: choice.invite, invite: true });
@@ -235,7 +248,7 @@ export function useMentions(
   };
 }
 
-export function MentionList({ mentions }: { mentions: ReturnType<typeof useMentions> }) {
+export function MentionList({ mentions, uid }: { mentions: ReturnType<typeof useMentions>; uid: string }) {
   const { open, loaded, choices, active, setActive, pick } = mentions;
   const people = useSharedChat();
   if (!open) return null;
@@ -268,7 +281,7 @@ export function MentionList({ mentions }: { mentions: ReturnType<typeof useMenti
               onMouseEnter={() => setActive(i)}
             >
               {"agent" in choice ? (
-                <AgentAvatar />
+                <AgentAvatar badge={choice.view} />
               ) : "invite" in choice ? (
                 <Avatar name={choice.invite} tint={0} />
               ) : choice.mention.kind === "person" ? (
@@ -276,8 +289,15 @@ export function MentionList({ mentions }: { mentions: ReturnType<typeof useMenti
               ) : (
                 <span className="mention-icon">{choice.mention.kind === "file" ? "▤" : "▦"}</span>
               )}
-              <span className="mention-label">{"agent" in choice ? AGENT_NAME : "invite" in choice ? choice.invite : mentionLabel(choice.mention)}</span>
-              <small>{choice.detail}</small>
+              <span className="mention-label">{"agent" in choice ? choice.name : "invite" in choice ? choice.invite : mentionLabel(choice.mention)}</span>
+              {"agent" in choice ? (
+                <>
+                  <small className="mention-job">{choice.job}</small>
+                  {choice.view && <span className="owner-pill">{ownerLabel(choice.view, uid)}</span>}
+                </>
+              ) : (
+                <small>{choice.detail}</small>
+              )}
             </button>
           </Fragment>
         ))
@@ -286,15 +306,20 @@ export function MentionList({ mentions }: { mentions: ReturnType<typeof useMenti
   );
 }
 
-/** The heading a choice is listed under: the agent, people, then files and artifacts. */
+/** Whose an agent is, as its pill in the picker and its menu say it: "yours", or its owner's name. */
+export function ownerLabel(agent: Pick<ChatAgentView, "ownerUid" | "ownerName">, uid: string): string {
+  return agent.ownerUid === uid ? "yours" : `${agent.ownerName}'s`;
+}
+
+/** The heading a choice is listed under: agents, people, then files and artifacts. */
 function choiceGroup(choice: Choice): string {
-  if ("agent" in choice) return "Agent";
+  if ("agent" in choice) return "Agents";
   if ("invite" in choice) return "People";
   return { person: "People", file: "Files", artifact: "Artifacts" }[choice.mention.kind];
 }
 
 function choiceKey(choice: Choice): string {
-  if ("agent" in choice) return "agent";
+  if ("agent" in choice) return `agent:${choice.name}`;
   if ("invite" in choice) return `i:${choice.invite}`;
   const { mention } = choice;
   if (mention.kind === "person") return `p:${mention.uid}`;
@@ -336,19 +361,26 @@ export function MentionText({ text, mentions, me }: { text: string; mentions?: M
   );
 }
 
-/** Plain text, with the agent as a chip where it is called. */
+/** Plain text, with pi and the chat's other agents as chips where they are called, each in its own colour. */
 function AgentRun({ text }: { text: string }) {
+  const agents = useChatAgents();
+  const names = useMemo(() => agents.map((agent) => agent.name), [agents]);
   return (
     <>
-      {splitAgent(text).map((part, i) =>
-        part.call ? (
-          <span key={i} className="mention-chip agent" title={`Asks ${AGENT_NAME} to answer`}>
+      {splitCalls(text, names).map((part, i) => {
+        if (!part.call) return part.text;
+        const agent = agents.find((view) => view.name === part.call);
+        return (
+          <span
+            key={i}
+            className={agent ? "mention-chip agent toned" : "mention-chip agent"}
+            style={agent && toneStyle(agent.color)}
+            title={`Asks ${part.call} to answer`}
+          >
             {part.text}
           </span>
-        ) : (
-          part.text
-        ),
-      )}
+        );
+      })}
     </>
   );
 }
