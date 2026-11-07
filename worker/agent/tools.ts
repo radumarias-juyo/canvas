@@ -210,11 +210,10 @@ async function runInSandbox(
   // A reviewed turn apart from the chat saves no file over one the chat has: those are left out, saying why.
   const rules = await rulesOf(scope, api);
   if (rules?.reviewed) {
-    const over = await Promise.all([...toSave.keys()].map(async (path) => ((await overwrites(files, rules, path)) ? path : undefined)));
-    for (const path of over) {
-      if (path === undefined) continue;
+    const over = await Promise.all([...toSave.keys()].map(async (path) => ((await overwrites(files, rules, path)) ? [path] : [])));
+    for (const path of over.flat()) {
       toSave.delete(path);
-      skipped.push(`${path} (a file the chat has: your reply is reviewed before it is posted, so save it under a new name)`);
+      skipped.push(`${path} (${reviewedRefusal("file")})`);
     }
   }
   const saved = await Promise.all([...toSave].map(([path, bytes]) => files.put(path, bytes)));
@@ -281,8 +280,8 @@ async function chatArtifact(scope: ChatScope, id: string, rules?: SessionRules):
 }
 
 /** What the conversation a tool runs in may see and change (PublishScope.rulesFor); undefined: nothing is withheld. */
-function rulesOf(scope: ChatScope, api: { conversationId: unknown }): Promise<SessionRules | undefined> {
-  return scope.rulesFor ? scope.rulesFor(String(api.conversationId)) : Promise.resolve(undefined);
+async function rulesOf(scope: ChatScope, api: { conversationId: unknown }): Promise<SessionRules | undefined> {
+  return scope.rulesFor?.(String(api.conversationId));
 }
 
 /**
@@ -401,9 +400,9 @@ export function artifactExtension(scope: ChatScope): Extension {
                 `rather than writing the whole page again (${DRAFTS_TOOL} with its draft_id shows the page). Only a page that is not that one goes as html.`,
             );
           }
-          // Opening the drafts (memoised) while the artifact is read, rather than after.
-          const rules = args.artifact_id === undefined ? undefined : await rulesOf(scope, api);
-          const [artifact] = await Promise.all([args.artifact_id === undefined ? undefined : chatArtifact(scope, args.artifact_id, rules), scope.drafts()]);
+          // Opening the drafts (memoised) while the artifact and the conversation's rules are read, rather than after.
+          const [rules] = await Promise.all([args.artifact_id === undefined ? undefined : rulesOf(scope, api), scope.drafts()]);
+          const artifact = args.artifact_id === undefined ? undefined : await chatArtifact(scope, args.artifact_id, rules);
           // Edits change the newest version this conversation sees: one a turn apart from the chat published is not the chat's yet.
           const version = artifact && args.html === undefined && args.draft_id === undefined ? versionToRead(artifact, args.version, rules) : args.version;
           const draft = await writeDraft(scope, { html: args.html, draftId: args.draft_id, edits: args.edits, mcp: args.mcp, artifact, version });
@@ -533,7 +532,8 @@ export function artifactExtension(scope: ChatScope): Extension {
           const html = await readPageSource(scope, meta.id, version);
           if (html === null) throw new Error(`Artifact ${meta.id} has no version ${version}.`);
           const declared = JSON.stringify(manifestOf(meta, version) ?? {});
-          return { output: text(`Version ${version} of ${meta.latest}, manifest ${declared}:\n\n${pagePart(html, args.part)}`) };
+          const newest = versionToRead(meta, undefined, rules);
+          return { output: text(`Version ${version} of ${newest}, manifest ${declared}:\n\n${pagePart(html, args.part)}`) };
         },
       }),
       defineTool({
@@ -546,7 +546,7 @@ export function artifactExtension(scope: ChatScope): Extension {
           const meta = await ownArtifact(scope, args.artifact_id, rules);
           const versions = meta.versions.filter((v) => !rules?.hiddenVersion(meta.id, v.version));
           const lines = versions.map((v) => `v${v.version}  ${new Date(v.publishedAt).toISOString()}  ${v.message ?? "(no message)"}`);
-          return { output: text(`"${meta.title}", ${meta.latest} versions, newest last:\n${lines.join("\n")}`) };
+          return { output: text(`"${meta.title}", ${lines.length} versions, newest last:\n${lines.join("\n")}`) };
         },
       }),
       defineTool({
@@ -560,7 +560,7 @@ export function artifactExtension(scope: ChatScope): Extension {
           const to = versionToRead(meta, args.to, rules);
           const from = versionToRead(meta, args.from ?? to - 1, rules);
           const [before, after] = await Promise.all([readPageSource(scope, meta.id, from), readPageSource(scope, meta.id, to)]);
-          if (before === null || after === null) throw new Error(`Artifact ${meta.id} has versions 1 to ${meta.latest}.`);
+          if (before === null || after === null) throw new Error(`Artifact ${meta.id} has versions 1 to ${versionToRead(meta, undefined, rules)}.`);
           const patch = createTwoFilesPatch(`v${from}/index.html`, `v${to}/index.html`, before, after, undefined, undefined, { context: 3 });
           return { output: text(clip(patch)) };
         },

@@ -26,7 +26,7 @@ import {
  */
 export type Outputs = Required<Pick<ChatAgentReplyData, "published" | "items" | "sources">> &
   Pick<ChatAgentReplyData, "saved"> & { forked?: boolean; review?: boolean };
-const NO_OUTPUTS: Outputs = { published: [], items: [], sources: [] };
+export const NO_OUTPUTS: Outputs = { published: [], items: [], sources: [] };
 
 /** How one operation in an agent's session ended, as PiHarness.wait says. */
 export interface TurnResult {
@@ -331,8 +331,9 @@ export class AgentTurns {
       const forked = out.forked === true || now.forked === true;
       // Its owner sees a reply built on a private server first, when they review those (`held`).
       const held = review === true && sources.length > 0;
-      // What a fork made stays withheld unless its reply is posted: a failed or empty one released at once names none of it.
-      const shows = !forked || held || (done && !!text);
+      // What a turn apart from the chat (a fork, a run's reply session) made stays withheld unless its reply is posted
+      // (ChatRoster.release): a failed or empty one released at once names none of it.
+      const shows = !(forked || now.session !== undefined) || held || (done && !!text);
       const current = roster.get(entry.agentId) ?? entry;
       const reply: ChatAgentReplyData = {
         agentId: entry.agentId,
@@ -379,7 +380,7 @@ export class AgentTurns {
     const left = MAX_HOPS - roster.handOffsFrom(turn.root);
     const next = done && left > 0 ? handOffs(reply.text, reply.agentId, turn.hop, roster.list()).slice(0, left) : [];
     // A chain no person started never hands pi a turn: pi has the owner's full tools. It reads the reply instead.
-    roster.release(id, reply, !turn.unattended && next.includes(AGENT_NAME), done && !!reply.text);
+    roster.release(id, reply, !turn.unattended && next.includes(AGENT_NAME));
     const agents = next.filter((agentId) => agentId !== AGENT_NAME);
     // A hand-off can only read, whoever started the chain: agents cannot give each other permission.
     const ask = askOf({ name: reply.name, kind: "agent" }, reply.text, MAX_ASK_CHARS);
@@ -422,8 +423,7 @@ export class AgentTurns {
     if (!text) return { error: "A reply needs some text; discard it instead." };
     const current = roster.get(held.agentId);
     // A failed one its owner posts is theirs now, as they wrote or kept it.
-    const { failed, ...kept } = held.reply;
-    void failed;
+    const { failed: _, ...kept } = held.reply;
     const reply: ChatAgentReplyData = {
       ...kept,
       ...(current && { name: current.name, avatar: current.avatar, color: current.color }),

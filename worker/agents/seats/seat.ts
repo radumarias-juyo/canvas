@@ -9,7 +9,7 @@ import { isChatKind } from "../../../shared/chat-kinds.ts";
 import { errorMessage } from "../../../shared/util.ts";
 import { addColumns, type Sql } from "../../members.ts";
 import type { MemoryAgent } from "../../memory/chat.ts";
-import { operationId, outputsOf, unreadOutputs, type Outputs, type TurnResult } from "../controller.ts";
+import { NO_OUTPUTS, operationId, outputsOf, unreadOutputs, type Outputs, type TurnResult } from "../controller.ts";
 import { askedApart } from "../turns.ts";
 import type { RoomLink, RoomRef, SeatBatch, SeatResult, SeatTurn } from "./link.ts";
 import { chatAgentName } from "../../chat-name.ts";
@@ -279,8 +279,7 @@ export class AgentSeats {
         row.turn,
       );
     } catch (error) {
-      this.#end(ref, row.turn, { status: "unanswered", reason: errorMessage(error), published: [], items: [], sources: [] });
-      this.#host.waitUntil(this.#report(ref, row.turn));
+      this.#host.waitUntil(this.#fail(ref, row.turn, error));
       return;
     } finally {
       this.#starting.delete(key);
@@ -297,9 +296,14 @@ export class AgentSeats {
       if (!seat || !row.given) throw new Error("This turn's seat is gone.");
       await this.#start(row, await this.#agent(row.agent_id), JSON.parse(row.given) as SeatTurn, seat.session);
     } catch (error) {
-      this.#end(ref, row.turn, { status: "unanswered", reason: errorMessage(error), published: [], items: [], sources: [] });
-      await this.#report(ref, row.turn);
+      await this.#fail(ref, row.turn, error);
     }
+  }
+
+  /** A turn that could not be set up ends with the error, reported to its room. */
+  #fail(ref: RoomRef, turn: number, error: unknown): Promise<void> {
+    this.#end(ref, turn, { status: "unanswered", reason: errorMessage(error), ...NO_OUTPUTS });
+    return this.#report(ref, turn);
   }
 
   /** Forget the turns the rooms took more than TAKEN_KEEP ago. */

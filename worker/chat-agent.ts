@@ -1734,7 +1734,8 @@ export class ChatAgent extends DurableObject<Env> {
    * such a page (#hiddenPages, which a change of the roster's turns lets go).
    */
   async #withheldPage(artifactId: string): Promise<boolean> {
-    if (this.roster.madeApart().has(artifactId)) return true;
+    if (!this.roster.anyWithheld()) return false;
+    if (this.roster.withheldVersion(artifactId, 1)) return true;
     const forking = () => this.roster.allRunning().some((turn) => turn.forked);
     let hidden = this.#hiddenPages;
     if (!hidden || forking()) {
@@ -1744,6 +1745,11 @@ export class ChatAgent extends DurableObject<Env> {
       if (changes === this.#rosterChanges && !forking()) this.#hiddenPages = hidden;
     }
     return hidden.has(artifactId);
+  }
+
+  /** The pages not the chat's yet, but for their makers: those only unposted forks named, and those turns apart made. */
+  #hiddenArtifacts(traces: SessionTraces): Set<string> {
+    return new Set([...traces.hidden.artifacts, ...this.roster.madeApart()]);
   }
 
   /** Whether `version` of a page is not the chat's yet: the page (#withheldPage), or that version (a fork's of a page the chat has). */
@@ -1756,12 +1762,17 @@ export class ChatAgent extends DurableObject<Env> {
    * pages and versions other such turns made, and, apart itself with its reply reviewed, nothing the chat already has.
    */
   async #rulesFor(session: string): Promise<SessionRules> {
+    // With no turn apart from the chat waiting to be posted, nothing is withheld (and nothing is reviewed).
+    if (!this.roster.anyWithheld()) return { hidden: new Set(), hiddenVersion: () => false, own: new Set(), reviewed: false, chatFile: () => true };
     const traces = await this.#readTraces();
     const own = this.roster.pagesOf(session);
     const fork = this.roster.fork(session);
+    const versions = new Map<string, Set<number>>();
+    const withheldOf = (artifactId: string) =>
+      versions.get(artifactId) ?? versions.set(artifactId, this.roster.withheldVersions(artifactId, session)).get(artifactId)!;
     return {
-      hidden: new Set([...traces.hidden.artifacts, ...this.roster.madeApart()].filter((id) => !own.has(id))),
-      hiddenVersion: (artifactId, version) => this.roster.withheldVersion(artifactId, version, session),
+      hidden: new Set([...this.#hiddenArtifacts(traces)].filter((id) => !own.has(id))),
+      hiddenVersion: (artifactId, version) => withheldOf(artifactId).has(version),
       own,
       reviewed: !!fork && !fork.posted && fork.review,
       chatFile: (path) => this.#inChat(path, traces),
@@ -1777,8 +1788,8 @@ export class ChatAgent extends DurableObject<Env> {
     const owner = uid === this.uid;
     const [{ files, traces }, artifacts] = await Promise.all([this.#chatFiles(owner), this.#directory.listChatArtifacts(this.chatId)]);
     if (owner) return { files: newestFirst(files), artifacts };
-    const madeApart = this.roster.madeApart();
-    const visible = artifacts.filter((artifact) => !traces.hidden.artifacts.has(artifact.id) && !madeApart.has(artifact.id));
+    const hidden = this.#hiddenArtifacts(traces);
+    const visible = artifacts.filter((artifact) => !hidden.has(artifact.id));
     return { files: newestFirst(files), artifacts: visible.map(({ unread: _, ...artifact }) => artifact) };
   }
 
@@ -4032,7 +4043,7 @@ export class ChatAgent extends DurableObject<Env> {
     if (viewer === this.uid) return true;
     // Not while the page, or a version of it, is not the chat's yet: what it saved may come from its author's sign-ins,
     // which its calls refuse members too (artifactCall).
-    if (this.isInChat(viewer)) return !(await this.#withheldPage(artifactId)) && !this.roster.hasWithheldVersion(artifactId);
+    if (this.isInChat(viewer)) return !this.roster.withheldVersion(artifactId) && !(await this.#withheldPage(artifactId));
     const meta = await this.storage.artifacts.readMeta(artifactId);
     if (!meta || !isOwnedBy(meta, this.uid, this.chatId)) return false;
     return meta.versions.every((version) => (version.manifest.mcp?.servers ?? []).every((entry) => this.#mayLoad(entry.server, viewer)));

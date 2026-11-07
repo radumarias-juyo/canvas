@@ -1050,7 +1050,7 @@ describe("Member agents: what the review of private turns found", () => {
     ]);
     // Not from the fork itself: it builds on what it made.
     expect(chat.roster.withheldVersion("w1", 3, fork)).toBe(false);
-    expect([chat.roster.pagesOf(fork), chat.roster.madeApart(), chat.roster.hasWithheldVersion("w1")]).toEqual([
+    expect([chat.roster.pagesOf(fork), chat.roster.madeApart(), chat.roster.withheldVersion("w1")]).toEqual([
       new Set(["w1", "p1"]),
       new Set(["p1"]),
       true,
@@ -1059,7 +1059,7 @@ describe("Member agents: what the review of private turns found", () => {
     await settle();
     expect(chat.roster.withheldVersion("w1", 3)).toBe(true);
     expect(await chat.turns.post(RADU.uid, planner.agentId, kept.id)).toBeNull();
-    expect([chat.roster.withheldVersion("w1", 3), chat.roster.madeApart(), chat.roster.hasWithheldVersion("w1")]).toEqual([false, new Set(), false]);
+    expect([chat.roster.withheldVersion("w1", 3), chat.roster.madeApart(), chat.roster.withheldVersion("w1")]).toEqual([false, new Set(), false]);
     // Recorded only while apart and not posted.
     chat.roster.recordPage(fork, "w1", 4);
     expect(chat.roster.withheldVersion("w1", 4)).toBe(false);
@@ -1096,6 +1096,20 @@ describe("Member agents: what the review of private turns found", () => {
     expect(chat.roster.fork("run-reply")).toMatchObject({ posted: false });
     chat.roster.recordPage("run-reply", "r1", 3);
     expect([chat.roster.withheldVersion("r1", 2), chat.roster.withheldVersion("r1", 3)]).toEqual([false, true]);
+  });
+
+  it("names nothing a failed reply to a run's report published: it stays withheld, as a fork's does", async () => {
+    const chat = room();
+    const helper = chat.add(RADU, "helper", { servers: ["db", "calendar"] });
+    const [turn] = chat.turns.call([helper.agentId], { ...chat.say(RADU, "@helper and next week?"), session: "run-reply" });
+    await settle();
+    chat.sessions.entries.set(`run-reply|${turn.id}`, [tool(PUBLISH_TOOL, { artifactId: "r1", version: 2, title: "Week" })]);
+    chat.roster.recordPage("run-reply", "r1", 2);
+    chat.sessions.run("run-reply", operationId(turn.id)).resolve({ status: "unanswered", reason: "model error" });
+    await settle();
+    expect(chat.posts.at(-1)).toMatchObject({ turn: turn.id, failed: "model error" });
+    expect(chat.posts.at(-1)).not.toHaveProperty("published");
+    expect(chat.roster.withheldVersion("r1", 2)).toBe(true);
   });
 
   it("gives a seat its turn again when the call was cut off, and stops it there when giving fails", async () => {

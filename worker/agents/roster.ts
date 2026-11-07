@@ -502,43 +502,50 @@ export class ChatRoster {
     );
   }
 
-  /** Whether a session apart from the chat (other than `except`) published this version of a page, with its reply not posted. */
-  withheldVersion(artifactId: string, version: number, except?: string): boolean {
+  /**
+   * Whether a session apart from the chat (other than `except`) published `version` of a page (any version, when
+   * unset), with its reply not posted. Version 1: the page is one such a session made.
+   */
+  withheldVersion(artifactId: string, version?: number, except?: string): boolean {
     return (
       this.#sql
         .exec(
-          "SELECT 1 FROM chat_agent_fork_pages WHERE artifact_id = ? AND version = ? AND posted = 0 AND session IS NOT ? LIMIT 1",
+          "SELECT 1 FROM chat_agent_fork_pages WHERE artifact_id = ? AND (? IS NULL OR version = ?) AND posted = 0 AND session IS NOT ? LIMIT 1",
           artifactId,
-          version,
+          version ?? null,
+          version ?? null,
           except ?? null,
         )
         .toArray().length > 0
     );
   }
 
-  /** Whether a session apart from the chat published any version of a page, with its reply not posted. */
-  hasWithheldVersion(artifactId: string): boolean {
-    return this.#sql.exec("SELECT 1 FROM chat_agent_fork_pages WHERE artifact_id = ? AND posted = 0 LIMIT 1", artifactId).toArray().length > 0;
+  /** The versions of a page sessions apart from the chat other than `except` published, with their replies not posted. */
+  withheldVersions(artifactId: string, except?: string): Set<number> {
+    const rows = this.#sql
+      .exec("SELECT version FROM chat_agent_fork_pages WHERE artifact_id = ? AND posted = 0 AND session IS NOT ?", artifactId, except ?? null)
+      .toArray();
+    return new Set(rows.map((row) => row.version as number));
+  }
+
+  /** Whether any session apart from the chat has its reply not posted: until one does, nothing is withheld. */
+  anyWithheld(): boolean {
+    return this.#sql.exec("SELECT 1 FROM chat_agent_forks WHERE posted = 0 LIMIT 1").toArray().length > 0;
   }
 
   /** The pages a session apart from the chat made (their first version), with its reply not posted: not the chat's yet. */
   madeApart(): Set<string> {
-    return new Set(
-      this.#sql
-        .exec("SELECT DISTINCT artifact_id FROM chat_agent_fork_pages WHERE version = 1 AND posted = 0")
-        .toArray()
-        .map((row) => row.artifact_id as string),
-    );
+    return this.#pageIds("version = 1 AND posted = 0");
   }
 
   /** The pages `session` published while apart from the chat (recordPage). */
   pagesOf(session: string): Set<string> {
-    return new Set(
-      this.#sql
-        .exec("SELECT DISTINCT artifact_id FROM chat_agent_fork_pages WHERE session = ?", session)
-        .toArray()
-        .map((row) => row.artifact_id as string),
-    );
+    return this.#pageIds("session = ?", session);
+  }
+
+  #pageIds(where: string, ...bindings: string[]): Set<string> {
+    const rows = this.#sql.exec(`SELECT DISTINCT artifact_id FROM chat_agent_fork_pages WHERE ${where}`, ...bindings).toArray();
+    return new Set(rows.map((row) => row.artifact_id as string));
   }
 
   /**
@@ -650,9 +657,10 @@ export class ChatRoster {
   /**
    * Let an ended turn's reply go to the chat as `reply` (a held one as its owner posts it, maybe edited), handing pi a
    * turn when it names pi: it is then delivered. Nothing when it has nothing to deliver (delivered or discarded already).
-   * `posts`: a done reply with text, or one its owner posts: only then are its fork's pages and files the chat's.
+   * Only a reply with text that did not fail (a done one, or one its owner posts) makes its fork's pages and files the
+   * chat's.
    */
-  release(id: number, reply: ChatAgentReplyData, toPi: boolean, posts: boolean): void {
+  release(id: number, reply: ChatAgentReplyData, toPi: boolean): void {
     const row = this.#sql
       .exec(
         `UPDATE chat_agent_turns SET held = 0, reply = ?, to_pi = ? WHERE id = ? AND ${PENDING} RETURNING session, forked`,
@@ -662,7 +670,7 @@ export class ChatRoster {
       )
       .toArray()[0] as Pick<TurnRow, "session" | "forked"> | undefined;
     // Its fork's pages and files are the chat's now, as its reply is.
-    if (posts && row?.session) {
+    if (!reply.failed && reply.text && row?.session) {
       this.#sql.exec("UPDATE chat_agent_forks SET posted = 1 WHERE session = ?", row.session);
       this.#sql.exec("UPDATE chat_agent_fork_pages SET posted = 1 WHERE session = ?", row.session);
     }
