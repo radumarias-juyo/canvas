@@ -20,8 +20,16 @@ function rowKey(item: string): string {
   return item || "*";
 }
 
-type Counts = { total: number; acted: number | null; not_today: number | null; failed: number | null; waiting: number | null; cost: number | null };
-const NO_ITEMS: Counts = { total: 0, acted: 0, not_today: 0, failed: 0, waiting: 0, cost: 0 };
+type Counts = {
+  total: number;
+  acted: number | null;
+  not_today: number | null;
+  blocked: number | null;
+  failed: number | null;
+  waiting: number | null;
+  cost: number | null;
+};
+const NO_ITEMS: Counts = { total: 0, acted: 0, not_today: 0, blocked: 0, failed: 0, waiting: 0, cost: 0 };
 
 type RunRow = {
   agent_id: string;
@@ -85,9 +93,10 @@ export interface ActedStep {
   value?: unknown;
   /**
    * Where the item ends at this step: `waiting` while it is held for its owner (until they decide, AgentRunner.decided),
-   * `stopped` once they declined it or it expired (as at a condition that did not hold).
+   * `stopped` once they declined it or it expired (as at a condition that did not hold), `blocked` when the write gate
+   * refused it (its level, or a rule that blocks).
    */
-  end?: "waiting" | "stopped";
+  end?: "waiting" | "stopped" | "blocked";
   /** It ran, but its result was too large to keep: an item going through again cannot read it (`done` is missing). */
   cut?: true;
 }
@@ -289,14 +298,14 @@ export class AgentRuns {
   }
 
   /**
-   * What became of the runs of the agent (a test, or a real one, as `test` says) after `dueAt`: `went` when one was sent
-   * or found nothing to do, `going` when one is still going (it may yet wait for a sign-in too), else null (none, or
-   * they failed or wait as well, which replaced nothing).
+   * What became of the runs of the agent (a test, or a real one, as `test` says) after `dueAt`: `went` when one was sent,
+   * found nothing to do or was blocked (it went through its steps), `going` when one is still going (it may yet wait
+   * for a sign-in too), else null (none, or they failed or wait as well, which replaced nothing).
    */
   newer(agentId: string, dueAt: number, test: boolean): "went" | "going" | null {
-    const where = "agent_id = ? AND due_at > ? AND item = '' AND test = ? AND status IN ('sent', 'not_today', 'running')";
+    const where = "agent_id = ? AND due_at > ? AND item = '' AND test = ? AND status IN ('sent', 'not_today', 'blocked', 'running')";
     const statuses = new Set(this.#rows(where, agentId, dueAt, test ? 1 : 0).map((row) => row.status));
-    return statuses.has("sent") || statuses.has("not_today") ? "went" : statuses.has("running") ? "going" : null;
+    return statuses.has("running") && statuses.size === 1 ? "going" : statuses.size ? "went" : null;
   }
 
   /** The agent's runs before `dueAt` still waiting for a sign-in: one at `dueAt` went, so they are skipped. */
@@ -541,8 +550,8 @@ export class AgentRuns {
     if (!dueAts.length) return new Map();
     const rows = this.#sql
       .exec(
-        `SELECT due_at, COUNT(*) AS total, SUM(status = 'acted') AS acted, SUM(status = 'not_today') AS not_today, SUM(status = 'failed') AS failed,
-           SUM(status = 'waiting') AS waiting, SUM(cost) AS cost
+        `SELECT due_at, COUNT(*) AS total, SUM(status = 'acted') AS acted, SUM(status = 'not_today') AS not_today, SUM(status = 'blocked') AS blocked,
+           SUM(status = 'failed') AS failed, SUM(status = 'waiting') AS waiting, SUM(cost) AS cost
          FROM agent_runs WHERE agent_id = ? AND due_at IN (${dueAts.map(() => "?").join(", ")}) AND item != '' GROUP BY due_at`,
         agentId,
         ...dueAts,
@@ -563,7 +572,14 @@ export class AgentRuns {
       startedAt: run.startedAt,
       ...(run.endedAt !== undefined && { endedAt: run.endedAt }),
       cost: counts.cost ?? 0,
-      items: { total: counts.total, acted: counts.acted ?? 0, notToday: counts.not_today ?? 0, failed: counts.failed ?? 0, waiting: counts.waiting ?? 0 },
+      items: {
+        total: counts.total,
+        acted: counts.acted ?? 0,
+        notToday: counts.not_today ?? 0,
+        blocked: counts.blocked ?? 0,
+        failed: counts.failed ?? 0,
+        waiting: counts.waiting ?? 0,
+      },
       ...(run.summary !== undefined && { summary: run.summary }),
       ...(run.detail.needsSignIn?.length && { needsSignIn: run.detail.needsSignIn }),
     };

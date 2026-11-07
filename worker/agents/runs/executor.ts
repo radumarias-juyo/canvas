@@ -268,7 +268,7 @@ function setMissing(scope: Record<string, Value>, name: string, why: string): vo
 }
 
 /** Where an item stopped before its last step, and why. */
-type ItemStop = { status: "not_today" | "waiting"; reason: string };
+type ItemStop = { status: "not_today" | "waiting" | "blocked"; reason: string };
 
 /** Why a run going on stops: its item's reason, the run's, and how it ends unless something went out. */
 type RunStop = { item: string; why: string; otherwise: "failed" | "not_today" };
@@ -740,9 +740,11 @@ export class RunExecutor {
           }
           record(label, acted.ok, acted.detail);
           // Held: the item stops here, its deliveries unsent, until the owner decides (then it goes through again,
-          // to this step's outcome). Declined or expired, it stops as at a condition that did not hold.
+          // to this step's outcome). Declined or expired, it stops as at a condition that did not hold. Refused by the
+          // gate (its level, a rule that blocks), it stops too: blocked, nothing after it runs or goes out.
           if (acted.end === "waiting") return { status: "waiting", reason: `Waits for you to approve ${step.server}.${step.tool}.` };
           if (acted.end === "stopped") return { status: "not_today", reason: `${step.server}.${step.tool} was not done: ${acted.detail}` };
+          if (acted.end === "blocked") return { status: "blocked", reason: `${step.server}.${step.tool} was refused: ${acted.detail}` };
           break;
         }
         case "tell":
@@ -792,7 +794,7 @@ export class RunExecutor {
         keep(keptOf(acted, json));
         return acted;
       }
-      acted = { ok: false, detail: result.message, ...(result.status === "held" && { end: "waiting" as const }) };
+      acted = { ok: false, detail: result.message, end: result.status === "held" ? "waiting" : "blocked" };
     } catch (error) {
       if (error instanceof SignInNeeded) {
         // Nothing reached the server: asked again once signed in.
@@ -913,14 +915,28 @@ export class RunExecutor {
     const delivered = deliveries.some((delivery) => delivery.status === "sent" || delivery.status === "recorded");
     // And one whose report went out to nobody (every send failed) failed, even with items acted: nobody heard.
     const undelivered = deliveries.find((delivery) => delivery.status === "failed" || delivery.status === "refused");
-    const status: RunStatus = delivered ? "sent" : undelivered ? "failed" : acted.length ? "sent" : failed.length ? "failed" : "not_today";
+    const blocked = items.filter((item) => item.status === "blocked");
+    // Never "sent" for a write that was refused: with nothing acted on or sent, a refused one says so (blocked).
+    const status: RunStatus = delivered
+      ? "sent"
+      : undelivered
+        ? "failed"
+        : acted.length
+          ? "sent"
+          : failed.length
+            ? "failed"
+            : blocked.length
+              ? "blocked"
+              : "not_today";
     const first = deliveries.find((delivery) => delivery.text)?.text ?? acted.find((item) => item.text)?.text;
     const summary =
       status === "sent"
         ? firstLine(first ?? `Acted on ${acted.length} of ${items.length}.`)
         : status === "failed"
           ? `Failed: ${(undelivered ? undelivered.detail : failed[0]?.reason) ?? "a step failed"}`
-          : `Not today: ${items[0]?.reason ?? "nothing to report"}`;
+          : status === "blocked"
+            ? `Blocked: ${blocked[0]?.reason ?? "a change was refused"}`
+            : `Not today: ${items[0]?.reason ?? "nothing to report"}`;
     runs.update(agent.id, run.dueAt, { status, summary });
     // It went: older runs still waiting for a sign-in would only post after it.
     if (status !== "failed") runs.skipReplaced(agent.id, run.dueAt, run.test);

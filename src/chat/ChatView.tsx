@@ -56,7 +56,7 @@ import { Dictation } from "./Dictation.tsx";
 import { ownMessages, useHistory } from "./history.ts";
 import { AgentDraft } from "./AgentDraft.tsx";
 import { AgentReply } from "./AgentReply.tsx";
-import { ActionCard, ChatActions } from "./ActionCard.tsx";
+import { ActionCard, ActionOutcome, ChatActions } from "./ActionCard.tsx";
 import { CHAT_ACTION_KIND, type ChatActionData } from "../../shared/limits.ts";
 import { ChecklistCard } from "./ChecklistCard.tsx";
 import { CHAT_CHECKLIST_KIND, checklistAt, foldChecklists, type ChatChecklistData } from "../../shared/checklist.ts";
@@ -69,7 +69,22 @@ import { OrphanResult, StepRun, StepsProvider, stepLabel } from "./Steps.tsx";
 import { endedEarly, stepRuns, streamingSteps, type MessageSteps, type StepRuns, type StreamingSteps } from "./stepRuns.ts";
 import { Thinking } from "./Thinking.tsx";
 import { useRevealedText } from "./reveal.ts";
-import { blocks, firstNew, inReply, isAgent, liveOffer, openHints, published, replyItems, sentAt, shown, showsAsCard, userText } from "./entries.ts";
+import {
+  blocks,
+  endedSeat,
+  firstNew,
+  inReply,
+  isAgent,
+  liveOffer,
+  openHints,
+  outcomesAfter,
+  published,
+  replyItems,
+  sentAt,
+  shown,
+  showsAsCard,
+  userText,
+} from "./entries.ts";
 import { OfferRow } from "./Offer.tsx";
 import {
   answersEveryMessage,
@@ -347,8 +362,11 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
   const waiting = useMemo(() => queueLines(agents), [agents]);
   // The held calls' cards: their live state, and whether the viewer decides them.
   const chatActions = useMemo(() => ({ actions, isOwner, ownerName: people?.owner.name }), [actions, isOwner, people]);
-  // What the viewer's own agents held in their seats here: their cards, which no one else gets, under the transcript.
+  // What the viewer's own agents held in their seats here, which no one else gets: the cards that wait, under the
+  // transcript; those that ended, as a line after the entry they were decided after.
   const seatActions = useMemo(() => [...actions.values()].filter((action) => action.seat).sort((a, b) => a.createdAt - b.createdAt), [actions]);
+  const seatOpen = useMemo(() => seatActions.filter((action) => !endedSeat(action)), [seatActions]);
+  const seatOutcomes = useMemo(() => outcomesAfter(state.entries, seatActions.filter(endedSeat)), [state.entries, seatActions]);
   return (
     <ChatActions.Provider value={chatActions}>
     <SharedChat.Provider value={group}>
@@ -417,6 +435,7 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
                             />
                           </EntryOf.Provider>
                           {spend && <PromptCost spend={spend} />}
+                          {seatOutcomes.get(entry.id as number)?.map((action) => <ActionOutcome key={action.id} action={action} />)}
                         </Fragment>
                       );
                     })}
@@ -440,7 +459,7 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
                     {drafts.map((draft) => (
                       <AgentDraft key={draft.turn} chatId={chatId} draft={draft} onDone={setDrafts} />
                     ))}
-                    {seatActions.map((action) => (
+                    {seatOpen.map((action) => (
                       <ActionCard key={action.id} action={action} />
                     ))}
                     <Queue queued={state.queued} incoming={state.incoming} uid={uid} />

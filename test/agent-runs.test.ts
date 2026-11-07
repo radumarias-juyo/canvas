@@ -705,6 +705,69 @@ describe("scheduled runs", () => {
     expect(host.reads).toHaveLength(0);
   });
 
+  describe("a do step the gate refuses", () => {
+    const BLOCKED: ActResult = { status: "refused", message: 'Not run: a rule blocks it: stage of crm.update is "lost", which is never allowed.' };
+
+    it("stops the item there, blocked with the gate's reason, and the run is blocked, not sent", async () => {
+      const workflow: AgentStep[] = [
+        { kind: "do", server: "crm", tool: "update", input: { stage: "lost" } },
+        { kind: "work", prompt: "Report what was done." },
+        { kind: "tell", to: ["owner"], via: "chat" },
+      ];
+      const { host, runner, definition } = home(agent({ workflow, autonomy: 4 }));
+      host.actAnswer = () => BLOCKED;
+      await runner.now(definition.id, false);
+      await host.settled();
+      const [item] = host.runs.items(definition.id, T0);
+      expect(item).toMatchObject({ status: "blocked", reason: `crm.update was refused: ${BLOCKED.message}` });
+      expect(item.steps.map((step) => step.kind)).toEqual(["do"]);
+      // Nothing after it runs or goes out.
+      expect(host.works).toHaveLength(0);
+      expect(host.delivered).toHaveLength(0);
+      const [run] = host.runs.list(definition.id);
+      expect(run).toMatchObject({ status: "blocked", items: { total: 1, acted: 0, blocked: 1 } });
+      expect(run.summary).toBe(`Blocked: crm.update was refused: ${BLOCKED.message}`);
+      expect(host.runs.get(definition.id, T0)?.detail.acted?.[":0"]).toMatchObject({ ok: false, end: "blocked" });
+    });
+
+    it("counts a refused item as not acted on when another one acted", async () => {
+      const scoped = agent({
+        workflow: [
+          { kind: "do", server: "crm", tool: "update", input: { region: "{{item.name}}" } },
+          { kind: "work", prompt: "Report on {{item.name}}." },
+        ],
+        scope: { list: { kind: "look", server: "crm", tool: "regions", input: {} }, each: true },
+        autonomy: 4,
+      });
+      const { host, runner, definition } = home(scoped);
+      host.values.set("crm.regions", [{ name: "north" }, { name: "south" }]);
+      host.actAnswer = (_call, input) => (input.region === "north" ? BLOCKED : { status: "ran", value: "ok" });
+      host.answer = () => ({ status: "done", text: "", cost: 0 });
+      await runner.now(definition.id, false);
+      await host.settled();
+      expect(host.runs.items(definition.id, T0).map((item) => [item.item, item.status])).toEqual([
+        ["north", "blocked"],
+        ["south", "acted"],
+      ]);
+      expect(host.works.map((work) => work.prompt).filter((prompt) => prompt.includes("north"))).toEqual([]);
+      const [run] = host.runs.list(definition.id);
+      expect(run).toMatchObject({ status: "sent", summary: "Acted on 1 of 2.", items: { total: 2, acted: 1, blocked: 1 } });
+    });
+
+    it("a run going on again does not make a refused call again", async () => {
+      const workflow: AgentStep[] = [{ kind: "do", server: "crm", tool: "update", input: {} }, { kind: "work", prompt: "Report." }];
+      const { host, runner, definition } = home(agent({ workflow, autonomy: 4 }));
+      host.actAnswer = () => BLOCKED;
+      await runner.now(definition.id, false);
+      await host.settled();
+      const again = new AgentRunner(host, host.sql);
+      again.resume();
+      await host.settled();
+      expect(host.acts).toHaveLength(1);
+      expect(host.runs.list(definition.id)[0].status).toBe("blocked");
+    });
+  });
+
   it("makes a do step's call through the gate with its input filled, and later steps read what it returned", async () => {
     const workflow: AgentStep[] = [
       { kind: "look", server: "crm", tool: "weekly_sales", input: {}, as: "sales" },

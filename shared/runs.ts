@@ -11,12 +11,16 @@ export type RunWhy = "schedule" | "watch" | "test" | "manual";
 
 /**
  * How a run ended: `sent` when it acted on at least one item, `not_today` when every item stopped at a condition (no
- * model call), `failed`, `needs_sign_in` when a server it reads needs its owner to sign in again (kept to retry), or
- * `waiting` while a do step of one of its items is held for its owner's approval (it goes on once they decide).
+ * model call), `blocked` when nothing was acted on or sent and a do step of an item was refused (its level or a rule),
+ * `failed`, `needs_sign_in` when a server it reads needs its owner to sign in again (kept to retry), or `waiting` while
+ * a do step of one of its items is held for its owner's approval (it goes on once they decide).
  */
-export type RunStatus = "running" | "sent" | "not_today" | "failed" | "needs_sign_in" | "waiting";
-/** `waiting`: stopped at a do step held for its owner; approved it goes on from there, declined or expired it stops. */
-export type RunItemStatus = "running" | "acted" | "not_today" | "failed" | "waiting";
+export type RunStatus = "running" | "sent" | "not_today" | "blocked" | "failed" | "needs_sign_in" | "waiting";
+/**
+ * `waiting`: stopped at a do step held for its owner; approved it goes on from there, declined or expired it stops.
+ * `blocked`: stopped at a do step the write gate refused (its level, or a rule that blocks): nothing of it was changed.
+ */
+export type RunItemStatus = "running" | "acted" | "not_today" | "blocked" | "failed" | "waiting";
 
 /** How a run ended: not running, and not waiting for a held call (it goes on once its owner decides). */
 export type EndedRunStatus = Exclude<RunStatus, "running" | "waiting">;
@@ -103,8 +107,8 @@ export interface AgentRunView {
   endedAt?: number;
   /** In dollars, every work step of every item. */
   cost: number;
-  /** How many items it had, acted on, stopped at a condition ("not today"), failed, or wait for a decision. */
-  items: { total: number; acted: number; notToday: number; failed: number; waiting: number };
+  /** How many items it had, acted on, stopped at a condition ("not today"), stopped at a refused write, failed, or wait for a decision. */
+  items: { total: number; acted: number; notToday: number; blocked: number; failed: number; waiting: number };
   /** The report's first line, or why it failed. */
   summary?: string;
   /** The servers whose sign-in it waits for (status needs_sign_in). */
