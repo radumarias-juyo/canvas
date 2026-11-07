@@ -214,9 +214,9 @@ async function importChat(request: Request, uid: string, directory: Directory, s
   // finish
   const info = body as Partial<ExportedChat> | null;
   if (typeof info?.title !== "string") return json({ error: "Expected {title, createdAt, updatedAt}." }, 400);
-  const refused = await chat.importFinish();
-  if (refused) return answer(refused);
-  await directory.importChat({ id: chatId, title: info.title, createdAt: Number(info.createdAt) || 0, updatedAt: Number(info.updatedAt) || 0 });
+  const finished = await chat.importFinish();
+  if ("error" in finished) return answer(finished);
+  await directory.importChat({ id: chatId, title: info.title, createdAt: Number(info.createdAt) || 0, updatedAt: Number(info.updatedAt) || 0 }, finished.kind);
   return json({});
 }
 

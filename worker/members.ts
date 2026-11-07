@@ -143,6 +143,11 @@ export class ChatMembers {
     return this.#sql.exec("DELETE FROM chat_invites WHERE id = ?", id).rowsWritten > 0;
   }
 
+  /** Revoke every open invite: a chat made private lets nobody in by a link sent before. */
+  revokeInvites(): void {
+    this.#sql.exec("DELETE FROM chat_invites");
+  }
+
   /** What accept would answer now, without using the invite up. */
   async check(secret: string, person: Person, now = Date.now()): Promise<{ error: string } | null> {
     const secretHash = await sha256Hex(secret);

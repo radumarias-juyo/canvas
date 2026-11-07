@@ -702,15 +702,16 @@ export class UserDirectory extends DurableObject<Env> {
   }
 
   /** Add a chat an import filled (ChatAgent.importFinish) to this user's list, read: the import is the commit point. */
-  importChat(chat: Pick<ExportedChat, "id" | "title" | "createdAt" | "updatedAt">): void {
+  importChat(chat: Pick<ExportedChat, "id" | "title" | "createdAt" | "updatedAt">, kind: ChatKind = "private"): void {
     const now = Date.now();
     this.ctx.storage.sql.exec(
-      "INSERT OR IGNORE INTO chats (id, title, created_at, updated_at, seen_at) VALUES (?, ?, ?, ?, ?)",
+      "INSERT OR IGNORE INTO chats (id, title, created_at, updated_at, seen_at, kind) VALUES (?, ?, ?, ?, ?, ?)",
       chat.id,
-      chat.title.slice(0, 200) || UNNAMED_CHAT,
+      chat.title.slice(0, MAX_CHAT_TITLE) || UNNAMED_CHAT,
       chat.createdAt || now,
       chat.updatedAt || now,
       now,
+      kind,
     );
     this.#changed("chats");
   }

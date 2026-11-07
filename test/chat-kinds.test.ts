@@ -148,6 +148,27 @@ describe("ChatKindState", () => {
     expect(state.branchedFrom()).toEqual({ chatId: "chat0001", title: "Plans", entry: 7 });
     expect(state.branchCount()).toBe(3);
   });
+
+  it("keeps out of a page's chat whom the owner removed, until they are let back in", () => {
+    const state = new ChatKindState(memoryKv(), () => true);
+    state.shutOut("maria");
+    state.shutOut("ion");
+    expect(state.isShutOut("maria")).toBe(true);
+    state.letBackIn("maria");
+    expect(state.isShutOut("maria")).toBe(false);
+    expect(state.isShutOut("ion")).toBe(true);
+  });
+
+  it("comes in by import as its owner's alone, off the record staying so", () => {
+    const group = new ChatKindState(memoryKv(), () => false);
+    group.setKind("page");
+    group.setPage({ id: "page0001", title: "Signups", version: 2 });
+    expect(group.imported()).toBe("private");
+    expect(group.page()).toBeUndefined();
+    const offRecord = new ChatKindState(memoryKv(), () => false);
+    offRecord.setKind("off_record");
+    expect(offRecord.imported()).toBe("off_record");
+  });
 });
 
 describe("ChatMembers: how each joined", () => {

@@ -21,9 +21,14 @@ const KIND_KEY = "kind";
 const PAGE_KEY = "page";
 const BRANCHED_FROM_KEY = "branchedFrom";
 const BRANCHES_KEY = "branches";
+/** Not exported: the people of a chat stay behind with it. */
+const SHUT_OUT_KEY = "shutOut";
 
 /** The chat storage keys an export carries (with the chat's other settings, worker/chat-dump.ts). */
 export const KIND_KV = [KIND_KEY, PAGE_KEY, BRANCHED_FROM_KEY, BRANCHES_KEY];
+
+/** The most people one chat remembers its owner removed. */
+export const MAX_SHUT_OUT = 500;
 
 /** The most branches one chat has. */
 export const MAX_BRANCHES = 100;
@@ -70,6 +75,38 @@ export class ChatKindState {
 
   setBranchedFrom(from: BranchedFrom): void {
     this.#kv.put(BRANCHED_FROM_KEY, from);
+  }
+
+  /**
+   * The chat came in by import, without its people: one that was open to others is its owner's alone again, and
+   * discusses no page (the link to it stayed behind); one off the record stays so. Its kind now.
+   */
+  imported(): ChatKind {
+    this.#kv.delete(PAGE_KEY);
+    const kind = this.stored() === "off_record" ? "off_record" : "private";
+    this.setKind(kind);
+    return kind;
+  }
+
+  /**
+   * The owner removed `uid`: opening the page the chat discusses does not let them back in (joinPage). Being added
+   * again, or joining by an invite, does (letBackIn). The newest MAX_SHUT_OUT are kept.
+   */
+  shutOut(uid: string): void {
+    this.#kv.put(SHUT_OUT_KEY, [...this.#shutOut().filter((other) => other !== uid), uid].slice(-MAX_SHUT_OUT));
+  }
+
+  isShutOut(uid: string): boolean {
+    return this.#shutOut().includes(uid);
+  }
+
+  letBackIn(uid: string): void {
+    const shut = this.#shutOut();
+    if (shut.includes(uid)) this.#kv.put(SHUT_OUT_KEY, shut.filter((other) => other !== uid));
+  }
+
+  #shutOut(): string[] {
+    return this.#kv.get<string[]>(SHUT_OUT_KEY) ?? [];
   }
 
   /** How many chats branched off from this one. */

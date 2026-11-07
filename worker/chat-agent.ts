@@ -402,6 +402,8 @@ export class ChatAgent extends DurableObject<Env> {
   #statusWrites: Promise<unknown> = Promise.resolve();
   /** The owner's sidebar hears whether the chat has members in order (#tellShared). */
   #sharedWrites: Promise<unknown> = Promise.resolve();
+  /** The sidebars hear the chat's kind in order (#tellKind): a later kind must not land before an earlier one. */
+  #kindWrites: Promise<unknown> = Promise.resolve();
   /** The last read of the queue, by the inbox ids it was for: every socket asks after the same commit. */
   #queuedRead: { key: string; read: Promise<QueuedMessage[]> } | undefined;
   /** What the transcript names, and how far each of pi's sessions was read for it (see #transcriptTraces). */
@@ -1800,6 +1802,7 @@ export class ChatAgent extends DurableObject<Env> {
    * them directly (addMember).
    */
   #joined(person: Person, by?: Person): void {
+    this.kinds.letBackIn(person.uid);
     // A chat that never stored its kind was a group before only if someone else was in it already.
     const stored = this.kinds.stored();
     const before = stored ?? legacyKind(this.members.list().some((member) => member.uid !== person.uid));
@@ -1817,7 +1820,8 @@ export class ChatAgent extends DurableObject<Env> {
   /** Tell every sidebar that lists the chat its kind, as the chat has it now. Only a view: a failure is logged. */
   #tellKind(): void {
     const kind = this.kinds.kind();
-    void settleLogged("chat kind", this.#everyonesIndexes().map((index) => index.setChatKind(this.chatId, this.uid, kind)));
+    const indexes = this.#everyonesIndexes();
+    this.#kindWrites = this.#kindWrites.then(() => settleLogged("chat kind", indexes.map((index) => index.setChatKind(this.chatId, this.uid, kind))));
   }
 
   /**
@@ -1863,6 +1867,7 @@ export class ChatAgent extends DurableObject<Env> {
   async removeMember(by: Person, uid: string): Promise<ChatRefusal | null> {
     if (by.uid !== this.uid && by.uid !== uid) return refuse(403, "Only the chat's owner can remove people.");
     if (!this.members.has(uid)) return refuse(404, "No such member.");
+    if (by.uid !== uid) this.kinds.shutOut(uid);
     await this.#drop([uid], by.uid === uid ? "left" : "removed");
     return null;
   }
@@ -1900,11 +1905,16 @@ export class ChatAgent extends DurableObject<Env> {
     const person = await this.#directory.knownPerson(uid);
     if (!person) return refuse(404, "You can add only people you share another chat with. Send anyone else an invite link.");
     const title = (await this.#directory.chatTitle(this.chatId)) ?? "";
+    // They may have come in by a link meanwhile: then nobody adds them, and nobody hears it twice.
+    let added = false;
     const failed = await this.#seat(uid, title, () => {
+      if (this.members.has(uid)) return null;
       const full = this.members.add(person, "added");
+      added = !full;
       return full && refuse(409, full.error);
     });
     if (failed) return failed;
+    if (!added) return this.peopleFor(by.uid);
     this.members.setOwnerName(by);
     this.#joined(person, by);
     const tag: Tag = { from: by.name, text: "added you to this chat", at: Date.now(), added: true };
@@ -1935,15 +1945,21 @@ export class ChatAgent extends DurableObject<Env> {
     const to = kind as ChatKind;
     if (to === from) return this.peopleFor(by.uid);
     this.kinds.setKind(to);
+    // "Only you": a link sent before must not let anyone in, which would make it a group again (#joined).
+    if (to === "private") this.members.revokeInvites();
     const removed = plan.removed.map(personOf);
-    await this.#drop(
-      removed.map((member) => member.uid),
-      "removed",
-      false,
-    );
-    this.#notice({ kind: CHAT_EVENT_KIND, data: { event: "kind", kind: to, from, by: { uid: by.uid, name: by.name }, ...(removed.length && { removed }) } satisfies ChatEventData });
-    this.#tellKind();
-    this.sockets.broadcastPeople();
+    try {
+      await this.#drop(
+        removed.map((member) => member.uid),
+        "removed",
+        false,
+      );
+    } finally {
+      // The kind changed whatever a removed member's sidebar answered: the transcript and every sidebar hear it.
+      this.#notice({ kind: CHAT_EVENT_KIND, data: { event: "kind", kind: to, from, by: personOf(by), ...(removed.length && { removed }) } satisfies ChatEventData });
+      this.#tellKind();
+      this.sockets.broadcastPeople();
+    }
     return this.peopleFor(by.uid);
   }
 
@@ -1974,14 +1990,18 @@ export class ChatAgent extends DurableObject<Env> {
       if (person.uid !== this.uid) await this.#index(person.uid).addSharedChat(this.#sharedRow(title));
       return null;
     }
+    if (this.kinds.isShutOut(person.uid)) return refuse(403, "The chat's owner removed you from it.");
+    let added = false;
     const failed = await this.#seat(person.uid, title, () => {
-      // The owner may have changed the kind meanwhile.
+      // The owner may have changed the kind meanwhile, or another window of theirs joined first.
       if (this.kinds.kind() !== "page") return refuse(403, PAGE_CLOSED);
+      if (this.members.has(person.uid)) return null;
       const full = this.members.add(person, "page");
+      added = !full;
       return full && refuse(409, full.error);
     });
     if (failed) return failed;
-    this.#joined(person);
+    if (added) this.#joined(person);
     return null;
   }
 
@@ -2007,10 +2027,13 @@ export class ChatAgent extends DurableObject<Env> {
    * links back here; this chat shows a line that the branch exists. The new chat is the owner's, as this one is.
    */
   async branchOff(by: Person, entry: unknown): Promise<{ chatId: string } | ChatRefusal> {
+    if (this.#gone) return refuse(404, DELETED);
     if (!this.isInChat(by.uid)) return refuse(403, "You are not in this chat.");
     if (this.kinds.branchCount() >= MAX_BRANCHES) return refuse(409, `This chat has ${MAX_BRANCHES} branches, the most there can be.`);
     const at = await this.#entryAt(entry);
     if (!at) return refuse(404, "No such message in this chat.");
+    // Counted before the awaits below, so branches started at once cannot pass the limit together.
+    this.kinds.countBranch();
     const pages: EntryRecord[][] = [];
     for await (const page of this.#log({ maxEntryId: at.id }, 200, MAX_BRANCH_PAGES)) pages.push([...page]);
     const entries = pages.flat().reverse();
@@ -2029,8 +2052,7 @@ export class ChatAgent extends DurableObject<Env> {
     for (let i = 0; i < copies.length; i += BRANCH_COPY_BATCH) await branch.copyIntoBranch(copies.slice(i, i + BRANCH_COPY_BATCH));
     const page = this.kinds.page();
     await branch.finishBranch({ by, owner, from, kind, title: branchTitle, members: this.members.listVia(), context: await context, ...(page && { page }) });
-    this.kinds.countBranch();
-    this.#notice({ kind: CHAT_EVENT_KIND, data: { event: "branch", chatId, title: branchTitle, entry: from.entry, by: { uid: by.uid, name: by.name } } satisfies ChatEventData });
+    this.#notice({ kind: CHAT_EVENT_KIND, data: { event: "branch", chatId, title: branchTitle, entry: from.entry, by: personOf(by) } satisfies ChatEventData });
     return { chatId };
   }
 
@@ -2062,10 +2084,12 @@ export class ChatAgent extends DurableObject<Env> {
       this.#bringIn([made.page.id]);
     }
     for (const member of made.members) this.members.add(member, member.via === "invite" ? "added" : member.via);
-    const rows = this.#listingMembers().map((member) => this.#index(member.uid).addSharedChat(this.#sharedRow(made.title)));
-    await Promise.allSettled(rows);
+    await settleLogged(
+      "branch rows",
+      this.#listingMembers().map((member) => this.#index(member.uid).addSharedChat(this.#sharedRow(made.title))),
+    );
     if (this.members.hasAny()) this.#tellShared();
-    this.#notice({ kind: CHAT_EVENT_KIND, data: { event: "branched", from: made.from, by: { uid: made.by.uid, name: made.by.name } } satisfies ChatEventData });
+    this.#notice({ kind: CHAT_EVENT_KIND, data: { event: "branched", from: made.from, by: personOf(made.by) } satisfies ChatEventData });
     await this.#contextWrite("branch", made.context);
   }
 
@@ -2199,15 +2223,16 @@ export class ChatAgent extends DurableObject<Env> {
   }
 
   /** The import has stored every part: the chat opens as it was, with nobody in it but its owner. */
-  importFinish(): ChatRefusal | null {
+  importFinish(): ChatRefusal | { kind: ChatKind } {
     const kv = this.ctx.storage.kv;
     if (kv.get(IMPORTING_KEY) === undefined) return refuse(409, "This chat's import has not begun.");
+    const kind = this.kinds.imported();
     // The chat's system prompt came as the zip had it: keep it only within what a saved one may be.
     const prompt = readSystemPrompt(kv);
     if (prompt && "error" in saveSystemPrompt(kv, prompt)) kv.delete(SYSTEM_PROMPT_KEY);
     kv.delete(IMPORTING_KEY);
     kv.put(IMPORTED_KEY, true);
-    return null;
+    return { kind };
   }
 
   /**
