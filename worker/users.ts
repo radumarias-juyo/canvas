@@ -267,6 +267,11 @@ export class UserDirectory extends DurableObject<Env> {
   addFeed(input: FeedInput, follow?: { kind: FollowKind; id: string; ownerUid: string; title?: string }): boolean {
     if (follow && !this.#follows.follows(follow.kind, follow.id, follow.ownerUid)) return false;
     if (follow?.title && this.#follows.retitle(follow.kind, follow.id, follow.ownerUid, follow.title)) this.#changed("follows");
+    // An agent opens for a follower only from the chat that shares it with them: the one they followed it from.
+    if (follow?.kind === "agent" && input.open.to === "agent" && !input.open.chatId) {
+      const chatId = this.#follows.get("agent", follow.id)?.chatId;
+      if (chatId) input = { ...input, open: { ...input.open, chatId } };
+    }
     const known = input.chat ? this.#rows.kindOf(input.chat.id) : null;
     // What it is about goes with it: a page or agent unfollowed or gone, or one of this user's agents deleted.
     const about = follow ? aboutOf(follow.kind, follow.id) : input.aboutAgent && aboutOf("agent", input.aboutAgent);
@@ -609,13 +614,14 @@ export class UserDirectory extends DurableObject<Env> {
         id,
       )
       .toArray()[0];
+    // What the feed told them of in it (tags, questions, a run's post) they have now seen, also when the chat's row was
+    // not unread (a member's row is bumped only now and then: ChatAgent's MEMBERS_TOUCH_MS).
+    if (this.#feed.markChatRead(id)) this.#changed("feed");
     if (!before) return null;
     const now = Date.now();
     this.ctx.storage.sql.exec(`UPDATE chats SET seen_at = ?, marked_unread = 0 ${unread}`, now, id);
     this.ctx.storage.sql.exec(`UPDATE shared_chats SET seen_at = ?, marked_unread = 0 ${unread}`, now, id);
     this.#changed("chats");
-    // What the feed told them of in it (tags, questions, a run's post) they have now seen.
-    if (this.#feed.markChatRead(id)) this.#changed("feed");
     return before.seen_at > 0 && before.activity_at > before.seen_at ? before.seen_at : null;
   }
 

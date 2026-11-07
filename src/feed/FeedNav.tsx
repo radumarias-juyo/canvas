@@ -42,7 +42,7 @@ export function FeedNav({ active, navigate }: { active: boolean; navigate: (path
  * chats or posts then reach the user's feed. "Following" stops it.
  */
 export function FollowButton({ kind, id, chatId }: { kind: FollowKind; id: string; chatId?: string }) {
-  const { known, following, toggle } = useFollow(kind, id, chatId);
+  const { known, following, toggle, error: loadError } = useFollow(kind, id, chatId);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const click = async () => {
@@ -56,6 +56,8 @@ export function FollowButton({ kind, id, chatId }: { kind: FollowKind; id: strin
       setBusy(false);
     }
   };
+  // A failed read of the follows leaves the button off: say why.
+  const shown = error ?? (known ? null : loadError);
   const what = kind === "page" ? "its new versions, and a chat about it when one starts" : "its posts";
   return (
     <>
@@ -69,7 +71,7 @@ export function FollowButton({ kind, id, chatId }: { kind: FollowKind; id: strin
       >
         {following ? "Following" : "Follow"}
       </button>
-      {error && <span className="form-error follow-error">{error}</span>}
+      {shown && <span className="form-error follow-error">{shown}</span>}
     </>
   );
 }

@@ -72,10 +72,10 @@ export function useFollows(): Loaded<FollowView[]> {
 
 /** Whether the user follows a page or agent, and a way to follow it or stop. */
 export function useFollow(kind: FollowKind, id: string, chatId?: string) {
-  const { value } = useFollows();
+  const { value, error } = useFollows();
   const following = Boolean(value?.some((follow) => follow.kind === kind && follow.id === id));
   const toggle = async () => follows.put(following ? await api.unfollow(kind, id) : await api.follow(kind, id, chatId));
-  return { known: value !== null, following, toggle };
+  return { known: value !== null, following, toggle, error };
 }
 
 /** Put the follows as a change answered with them. */

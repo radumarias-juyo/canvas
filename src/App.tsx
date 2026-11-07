@@ -512,7 +512,7 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, showFe
             <AgentPage place={agentPage} chats={chats} navigate={navigate} onMenu={narrow ? openMenu : undefined} />
           </ErrorBoundary>
         ) : showFeed ? (
-          <ErrorBoundary what="the feed">
+          <ErrorBoundary key="feed" what="the feed">
             <FeedView navigate={navigate} onMenu={narrow ? openMenu : undefined} />
           </ErrorBoundary>
         ) : showSkills ? (
