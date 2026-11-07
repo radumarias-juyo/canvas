@@ -5,6 +5,7 @@
 // autonomy level) are stored here too, for the scheduler.
 
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
+import type { ItemRef } from "./items.ts";
 import { AGENT_NAME } from "./mentions.ts";
 import { EFFORT_LABELS } from "./models.ts";
 import { isObject } from "./util.ts";
@@ -353,6 +354,10 @@ export interface ChatAgentView {
   queued?: number;
   /** Its owner turned it off since it was added: it does not answer until they turn it on again. */
   off?: true;
+  /** The turn it works on now (with `busy`): who gave it, how many hand-offs led to it, and how long it has run, as of this view. */
+  running?: { turn: number; calledBy: ChatAgentReplyData["calledBy"]; hop: number; elapsedMs: number };
+  /** The oldest turn waiting for it (with `queued`): who gave it, and how many hand-offs led to it. */
+  next?: { calledBy: ChatAgentReplyData["calledBy"]; hop: number };
 }
 
 /**
@@ -381,6 +386,8 @@ export type ChatAgentReplyData = {
   failed?: string;
   /** Artifacts it published in this turn, for the app to show their cards. */
   published?: { artifactId: string; title: string; version: number }[];
+  /** The records its tool results held (shared/items.ts), as chips under the reply: from the servers, never its text. */
+  items?: ItemRef[];
 };
 
 export type AgentTurnStatus = "queued" | "running" | "done" | "failed" | "stopped";

@@ -83,6 +83,15 @@ describe("withoutSystemPrompt", () => {
     expect(JSON.stringify(sent)).not.toMatch(/secret|files_read/);
   });
 
+  it("strips the system message as it starts, before its entry lands", () => {
+    const event = { type: "message_start", message: system.model![0] } as unknown as AgentEvent;
+    const sent = withoutSystemPrompt(event);
+    expect(sent).toEqual({ type: "message_start", message: { role: "system", content: "", timestamp: 5 } });
+    expect(JSON.stringify(sent)).not.toMatch(/secret|files_read/);
+    const assistant = { type: "message_start", message: { role: "assistant", content: [], timestamp: 7 } } as unknown as AgentEvent;
+    expect(withoutSystemPrompt(assistant)).toBe(assistant);
+  });
+
   it("returns an event with no system entry as it is", () => {
     for (const event of [snapshot([user]), { type: "entry_appended", entry: user } as AgentEvent, { type: "tool_execution_end" } as AgentEvent]) {
       expect(withoutSystemPrompt(event)).toBe(event);

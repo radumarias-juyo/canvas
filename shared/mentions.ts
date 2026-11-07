@@ -72,18 +72,63 @@ export function summonsAgent(text: string, mentions: readonly Mention[] = []): b
   return calledNames(text, [AGENT_NAME], mentions).length > 0;
 }
 
+/**
+ * The text split into plain runs and the calls in it: "@pi", and "@name" for each of `names` (the chat's other agents),
+ * as typed ("@PI" stays so), with the name each one calls, for the transcript to show them as chips.
+ */
+export function splitCalls(text: string, names: readonly string[] = []): { text: string; call?: string }[] {
+  const hits: { at: number; end: number; name: string }[] = [];
+  for (const name of [AGENT_NAME, ...names]) {
+    for (const match of text.matchAll(callPattern(name, "gi"))) {
+      const at = match.index + match[1].length;
+      hits.push({ at, end: at + name.length + 1, name });
+    }
+  }
+  hits.sort((a, b) => a.at - b.at);
+  const parts: { text: string; call?: string }[] = [];
+  let plain = 0;
+  for (const hit of hits) {
+    if (hit.at < plain) continue;
+    if (hit.at > plain) parts.push({ text: text.slice(plain, hit.at) });
+    parts.push({ text: text.slice(hit.at, hit.end), call: hit.name });
+    plain = hit.end;
+  }
+  if (plain < text.length) parts.push({ text: text.slice(plain) });
+  return parts;
+}
+
 /** The text split into plain runs and the "@pi"s in it (as typed: "@PI" stays so), for the transcript to show them as chips. */
 export function splitAgent(text: string): { text: string; call: boolean }[] {
-  const parts: { text: string; call: boolean }[] = [];
-  let plain = 0;
-  for (const match of text.matchAll(callPattern(AGENT_NAME, "gi"))) {
-    const at = match.index + match[1].length;
-    if (at > plain) parts.push({ text: text.slice(plain, at), call: false });
-    plain = at + AGENT_TOKEN.length;
-    parts.push({ text: text.slice(at, plain), call: true });
-  }
-  if (plain < text.length) parts.push({ text: text.slice(plain), call: false });
-  return parts;
+  return splitCalls(text).map((part) => ({ text: part.text, call: part.call !== undefined }));
+}
+
+/** An agent as the "@" picker offers it: its handle and job line, for matching. */
+export interface AgentChoice {
+  name: string;
+  job: string;
+}
+
+/**
+ * The agents the "@" picker offers for `query`, best first: handles that start with it, then handles or job lines with a
+ * word that does, then those that hold it anywhere; at most `limit`. An empty query offers them all, in the roster's
+ * order (pi first when it is among them). Case does not matter.
+ */
+export function matchAgents<T extends AgentChoice>(agents: readonly T[], query: string, limit = 6): T[] {
+  const q = query.trim().toLowerCase();
+  const scoreOf = ({ name, job }: AgentChoice): number => {
+    if (!q) return 1;
+    if (name.startsWith(q)) return 4;
+    const words = job.toLowerCase().split(/[^\p{L}\p{N}]+/u);
+    if (words.some((word) => word.startsWith(q))) return 3;
+    if (name.includes(q)) return 2;
+    return job.toLowerCase().includes(q) ? 1 : 0;
+  };
+  return agents
+    .map((agent, order) => ({ agent, order, score: scoreOf(agent) }))
+    .filter((hit) => hit.score > 0)
+    .sort((a, b) => b.score - a.score || a.order - b.order)
+    .slice(0, limit)
+    .map(({ agent }) => agent);
 }
 
 /** Mentions one message may carry. */

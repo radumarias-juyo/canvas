@@ -6,6 +6,7 @@ import type { EntryRecord } from "@earendil-works/pi-durable";
 import { TOOL_SEARCH_TOOL_NAME } from "@earendil-works/pi-durable/tool-search";
 import { CHAT_AGENT_KIND, MAX_HOPS, speakerLabel, type AgentDefinition, type ChatAgentReplyData } from "../../shared/agents.ts";
 import { textOf } from "../../shared/canonical.ts";
+import { mergeItems, resultItems, type ItemRef } from "../../shared/items.ts";
 import { AGENT_NAME, calledNames, type Mention } from "../../shared/mentions.ts";
 import { CHAT_MESSAGE_KIND, incomingKey, publishedBy, type ChatMessageData } from "../../shared/protocol.ts";
 import type { McpToolInfo } from "../agent/mcp.ts";
@@ -252,6 +253,16 @@ export function agentInstructions(agent: Pick<AgentDefinition, "name" | "job" | 
       `- To hand work to another agent of the chat, name it with @ and its name in your reply (for example @${AGENT_NAME}), only when you need its help, and never name yourself. Hand-offs are capped.\n` +
       "- A turn someone other than your owner gave you can only read: tools that change data, run code or read your owner's private files are not offered then. Say what you would do, and your owner can ask you.",
   ].join("\n\n");
+}
+
+/** The records a turn's MCP results held (shared/items.ts), each once, for the chips under its reply. */
+export function itemsIn(entries: readonly EntryRecord[]): ItemRef[] {
+  return mergeItems(
+    entries.flatMap((entry) => {
+      const message = entry.model?.[0];
+      return entry.kind === "pi.tool-result" && message?.role === "toolResult" && !message.isError ? [resultItems(message.details)] : [];
+    }),
+  );
 }
 
 /** The artifacts a turn published: the results of artifact_publish among `entries` (its session's, from the turn on). */

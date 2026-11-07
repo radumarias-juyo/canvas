@@ -142,7 +142,8 @@ function agentPeople({ owner, members }: ChatPeople, roster: readonly PromptAgen
  * An event for a browser: each `pi.system` entry in it keeps its place, but not the prompt's sections and tools. Nobody's
  * app shows them, and they are the owner's (their system prompt, the list of their files, their MCP tools): this keeps
  * them off the browsers of the people they share the chat with. Only hygiene, not a boundary: the agent acts as the
- * owner, and may tell anyone in the chat what it was told. Entries come only in these four events; copies only what changes.
+ * owner, and may tell anyone in the chat what it was told. Entries come only in these four events, and the system message
+ * once more as message_start; copies only what changes.
  */
 export function withoutSystemPrompt(event: AgentEvent): AgentEvent {
   switch (event.type) {
@@ -153,6 +154,9 @@ export function withoutSystemPrompt(event: AgentEvent): AgentEvent {
       return isSystem(event.entry) ? { ...event, entry: promptless(event.entry) } : event;
     case "tool_execution_end":
       return event.entry && isSystem(event.entry) ? { ...event, entry: promptless(event.entry) } : event;
+    // The system message starts as an event of its own before its entry lands, with all of it.
+    case "message_start":
+      return event.message.role === "system" ? { ...event, message: { role: "system", content: "", timestamp: event.message.timestamp } as Message } : event;
     default:
       return event;
   }

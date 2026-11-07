@@ -420,23 +420,42 @@ export class ChatRoster {
     return this.#turns("agent_id = ? ORDER BY id DESC LIMIT ?", agentId, limit);
   }
 
-  /** What everyone sees of the roster, with who is working and how many turns wait. `ownerName` names an owner. */
+  /**
+   * What everyone sees of the roster: who is working, on which turn and for how long, and how many turns wait, with the
+   * oldest of them. `ownerName` names an owner.
+   */
   views(ownerName: (uid: string) => string): ChatAgentView[] {
-    const counts = this.#sql.exec(`SELECT agent_id, status, COUNT(*) AS n FROM chat_agent_turns WHERE ${OPEN} GROUP BY agent_id, status`).toArray();
-    const count = (agentId: string, status: AgentTurnStatus) =>
-      (counts.find((row) => row.agent_id === agentId && row.status === status)?.n as number | undefined) ?? 0;
-    return this.list().map((entry) => ({
-      id: entry.agentId,
-      name: entry.name,
-      avatar: entry.avatar,
-      color: entry.color,
-      job: entry.job,
-      ownerUid: entry.ownerUid,
-      ownerName: ownerName(entry.ownerUid),
-      ...(count(entry.agentId, "running") && { busy: true as const }),
-      ...(count(entry.agentId, "queued") && { queued: count(entry.agentId, "queued") }),
-      ...(entry.off && { off: true as const }),
-    }));
+    // The turns not ended, oldest first: few, so one read serves every agent.
+    const open = this.#turns(`${OPEN} ORDER BY id`);
+    const now = this.#now();
+    return this.list().map((entry) => {
+      const mine = open.filter((turn) => turn.agentId === entry.agentId);
+      const running = mine.find((turn) => turn.status === "running");
+      const queued = mine.filter((turn) => turn.status === "queued");
+      return {
+        id: entry.agentId,
+        name: entry.name,
+        avatar: entry.avatar,
+        color: entry.color,
+        job: entry.job,
+        ownerUid: entry.ownerUid,
+        ownerName: ownerName(entry.ownerUid),
+        ...(running && {
+          busy: true as const,
+          running: { turn: running.id, calledBy: running.calledBy, hop: running.hop, elapsedMs: Math.max(0, now - (running.startedAt ?? now)) },
+        }),
+        ...(queued.length && { queued: queued.length, next: { calledBy: queued[0].calledBy, hop: queued[0].hop } }),
+        ...(entry.off && { off: true as const }),
+      };
+    });
+  }
+
+  /** The turns running now, each with its agent's session: what the chat's sockets follow live. */
+  runningSessions(): { agentId: string; session: string; turn: number }[] {
+    return this.allRunning().flatMap((turn) => {
+      const entry = this.get(turn.agentId);
+      return entry ? [{ agentId: turn.agentId, session: entry.session, turn: turn.id }] : [];
+    });
   }
 
   #prune(agentId: string): void {

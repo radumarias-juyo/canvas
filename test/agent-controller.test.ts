@@ -384,6 +384,23 @@ describe("AgentTurns: a turn", () => {
     expect(chat.runningOf(A)).toBeNull();
   });
 
+  it("carries the records its MCP results held as the reply's items, each once, from the results and never its text", async () => {
+    const chat = new FakeChat([A]);
+    const caller = chat.say(OWNER, "@atlas which tickets?");
+    const [turn] = chat.turns.call([idOf(A)], caller);
+    await chat.flush();
+    const ticket = { server: "desk", id: "T-1", title: "Login fails", url: "https://desk.example/T-1" };
+    chat.pages.set(turn.id, [
+      toolResult("desk__search", { items: [ticket, { server: "desk", id: "T-2", title: "Slow page" }] }),
+      toolResult("desk__get", { items: [ticket] }),
+      toolResult("desk__search", { items: [{ server: "desk", id: "T-9", title: "From a failed call" }] }, true),
+      toolResult("desk__bad", { items: [{ server: "desk", id: "T-3", title: "Bad link", url: "javascript:alert(1)" }] }),
+    ]);
+    chat.finish(turn.id, done("T-1 and T-2, see https://elsewhere.example/T-7."));
+    await chat.flush();
+    expect(chat.replies()[0].items).toEqual([ticket, { server: "desk", id: "T-2", title: "Slow page" }]);
+  });
+
   it("leaves what the turn did not have out of its reply", async () => {
     const { chat, turn } = await called([A]);
     chat.finish(turn.id, done(""));
@@ -391,6 +408,7 @@ describe("AgentTurns: a turn", () => {
     const [reply] = chat.replies();
     expect(reply.text).toBe("");
     expect(Object.keys(reply)).not.toContain("published");
+    expect(Object.keys(reply)).not.toContain("items");
     expect(Object.keys(reply)).not.toContain("failed");
   });
 

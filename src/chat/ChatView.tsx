@@ -1,7 +1,8 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode, type RefObject } from "react";
-import { CHAT_AGENT_KIND, type ChatAgentReplyData } from "../../shared/agents.ts";
+import { CHAT_AGENT_KIND, type ChatAgentReplyData, type ChatAgentView } from "../../shared/agents.ts";
+import type { ItemRef } from "../../shared/items.ts";
 import { baseName, imageBudget, MAX_ATTACHMENTS, type Attachment } from "../../shared/attachments.ts";
 import { MAX_FILE_BYTES } from "../../shared/uploads.ts";
 import { errorMessage, formatBytes } from "../../shared/util.ts";
@@ -35,7 +36,7 @@ import { Compact, useCompact, useSwipeReveal } from "./gestures.ts";
 import { calendarDay, DaySeparator, SentTime } from "./SentTime.tsx";
 import { ReactionChips, ReactionsContext, useMessageReactions, type MessageReactions } from "./Reactions.tsx";
 import { isReactable, type EntryReactions } from "../../shared/reactions.ts";
-import { AgentAvatar, AgentByline, Avatar, SharedChat, tintOf, tintStyle, useSharedChat } from "./people.tsx";
+import { AgentAvatar, AgentByline, Avatar, ChatAgents, SharedChat, tintOf, tintStyle, toneStyle, useChatAgents, useSharedChat } from "./people.tsx";
 import { MenuButton } from "../layout.tsx";
 import { AutoPicked, ToolsPicked } from "./AutoPick.tsx";
 import { ChatCost, PromptCost } from "./Cost.tsx";
@@ -43,7 +44,12 @@ import { ContextMeter } from "./Context.tsx";
 import { ChatPromptButton } from "../SystemPrompt.tsx";
 import { SharePanel } from "./SharePanel.tsx";
 import { promptSpend, totalTime } from "./spend.ts";
-import { useChat, waitingOnModel } from "./useChat.ts";
+import { shownLive, useChat, waitingOnModel, type AgentLive } from "./useChat.ts";
+import { PeopleBar } from "./AgentsBar.tsx";
+import { queueLines } from "./agentLines.ts";
+import { formatElapsed, useElapsed } from "./elapsed.ts";
+import { Fold, ItemChips } from "./Fold.tsx";
+import { workingPhrase } from "./phrase.ts";
 import { ComposerMore } from "./ComposerMore.tsx";
 import { Dictation } from "./Dictation.tsx";
 import { ownMessages, useHistory } from "./history.ts";
@@ -53,11 +59,11 @@ import { Markdown } from "./Markdown.tsx";
 import { MentionList, MentionText, useMentions } from "./Mentions.tsx";
 import { NotifyButton } from "./notify.tsx";
 import { ModelPicker } from "./ModelPicker.tsx";
-import { OrphanResult, StepRun, StepsProvider } from "./Steps.tsx";
+import { OrphanResult, StepRun, StepsProvider, stepLabel } from "./Steps.tsx";
 import { endedEarly, stepRuns, streamingSteps, type MessageSteps, type StepRuns, type StreamingSteps } from "./stepRuns.ts";
 import { Thinking } from "./Thinking.tsx";
 import { useRevealedText } from "./reveal.ts";
-import { blocks, firstNew, isAgent, openHints, published, sentAt, shown, userText } from "./entries.ts";
+import { blocks, firstNew, isAgent, openHints, published, replyItems, sentAt, shown, userText } from "./entries.ts";
 
 interface Props {
   chatId: string;
@@ -82,7 +88,7 @@ const GROWS_ITSELF = CSS.supports("field-sizing", "content");
 const atBottom = (el: HTMLElement) => el.scrollHeight - el.scrollTop - el.clientHeight < 80;
 
 export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity, onLeft, onMenu }: Props) {
-  const { state, connected, people, online, prompt, abort, setModel, auto, reactions, react, hints, dropHint, agents } = useChat(chatId);
+  const { state, connected, people, online, prompt, abort, setModel, auto, reactions, react, hints, dropHint, agents, live } = useChat(chatId);
   // pi, or an agent of the chat, is working or has turns waiting: Stop stops them all.
   const working = state.busy || agents.some((agent) => agent.busy || agent.queued);
   const chatReactions = useMemo(() => ({ uid, react }), [uid, react]);
@@ -98,7 +104,9 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
   const list = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const shared = people && people.members.length > 0 ? people : null;
-  const mentions = useMentions(chatId, draft, setDraft, input, shared, uid);
+  // A chat with other people or other agents: every message shows its author's badge, and the people bar lists them.
+  const group = shared ?? (people && agents.length > 0 ? people : null);
+  const mentions = useMentions(chatId, draft, setDraft, input, shared, uid, agents);
   // The viewer's own earlier messages, to bring back into the composer (Up, or the "more" menu). Who owns the chat must be
   // known first: a plain `pi.user` entry is the owner's.
   const isOwner = people?.owner.uid === uid;
@@ -135,7 +143,7 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
     const el = list.current;
     if (el && following.current) el.scrollTop = el.scrollHeight;
   }, []);
-  useEffect(follow, [follow, state.entries.length, state.partial, state.tools, state.queued.length, state.incoming.length]);
+  useEffect(follow, [follow, state.entries.length, state.partial, state.tools, state.queued.length, state.incoming.length, live]);
   // On a phone, dragging the conversation left shows when each message was sent.
   const compact = useCompact();
   const track = useRef<HTMLDivElement>(null);
@@ -261,8 +269,15 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
   // A hint comes in after its message: keep it in view for a reader at the bottom.
   useEffect(follow, [follow, hinted]);
   const thinking = state.runStartedAt !== undefined && waitingOnModel(state);
+  const phrase = thinking ? workingPhrase(state.entries, state.partial, stepLabel) : undefined;
+  // pi's replies' item chips: the records its tool results held, under the reply built on them.
+  const items = useMemo(() => replyItems(state.entries), [state.entries]);
+  // The agents working now, each with its live steps, its time and its own Stop; then who waits for a turn.
+  const liveTurns = useMemo(() => shownLive(live, agents, state.entries), [live, agents, state.entries]);
+  const waiting = useMemo(() => queueLines(agents), [agents]);
   return (
-    <SharedChat.Provider value={shared}>
+    <SharedChat.Provider value={group}>
+      <ChatAgents.Provider value={agents}>
       <ReactionsContext.Provider value={chatReactions}>
         <section className="chat">
           <header className="chat-header">
@@ -270,10 +285,9 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
             <h1 className="chat-title" title={title}>
               {title}
             </h1>
-            {shared ? (
-              <PeopleBar people={shared} online={online} uid={uid} working={state.busy} />
-            ) : (
-              <span className="chat-people">{mine > 1 && `Open in ${mine} of your windows`}</span>
+            {!group && <span className="chat-people">{mine > 1 && `Open in ${mine} of your windows`}</span>}
+            {people && (group || isOwner) && (
+              <PeopleBar chatId={chatId} people={people} online={online} uid={uid} piWorking={state.busy} agents={agents} bar={group !== null} />
             )}
             <ChatCost usage={state.usage} entries={state.entries} time={time} />
             {shared && <NotifyButton />}
@@ -315,6 +329,7 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
                           hinted={hinted.has(entry.id as number)}
                           onAskAgent={askAgent}
                           onNoHint={dropHint}
+                          items={items.get(entry.id as number)}
                         />
                         {spend && <PromptCost spend={spend} />}
                       </Fragment>
@@ -322,8 +337,16 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
                   })}
                   {!agentLast && (state.partial || thinking) && <AgentByline />}
                   {state.partial && <Assistant message={state.partial} steps={streamed?.steps} streaming onGrow={follow} />}
-                  {thinking && <Thinking since={state.runStartedAt!} />}
+                  {thinking && <Thinking since={state.runStartedAt!} phrase={phrase} />}
                   {state.error && <div className="chat-error">{state.error}</div>}
+                  {liveTurns.map((turn) => (
+                    <AgentTurnLive key={`${turn.agent.id}:${turn.turn}`} live={turn} onStop={connected ? () => abort(turn.agent.id) : undefined} />
+                  ))}
+                  {waiting.map((line) => (
+                    <div key={line.agentId} className="agent-queue-line">
+                      {line.text}
+                    </div>
+                  ))}
                   <Queue queued={state.queued} incoming={state.incoming} uid={uid} />
                 </div>
               </div>
@@ -331,7 +354,7 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
           </StepsProvider>
           <form className="composer" onSubmit={submit} onDragOver={onDragOver} onDrop={onDrop}>
             {attachments.error && <div className="chat-error">{attachments.error}</div>}
-            <MentionList mentions={mentions} />
+            <MentionList mentions={mentions} uid={uid} />
             {replying && (
               <div className="replying">
                 <ReplyQuoteView quote={replying} />
@@ -463,6 +486,7 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
           </form>
         </section>
       </ReactionsContext.Provider>
+      </ChatAgents.Provider>
     </SharedChat.Provider>
   );
 }
@@ -479,6 +503,7 @@ const Entry = memo(function Entry({
   hinted,
   onAskAgent,
   onNoHint,
+  items,
 }: {
   entry: EntryRecord;
   /** Where an agent message's steps show (stepRuns.ts). */
@@ -494,6 +519,8 @@ const Entry = memo(function Entry({
   hinted: boolean;
   onAskAgent: (entry: number) => void;
   onNoHint: (entry: number) => void;
+  /** For one of pi's replies: the records its tool results held, as chips under it. */
+  items?: ItemRef[];
 }) {
   const people = useSharedChat();
   const reactions = useMessageReactions(isReactable(entry) ? entry.id : undefined, byEmoji);
@@ -537,7 +564,7 @@ const Entry = memo(function Entry({
     return <AgentReply data={entry.data as unknown as ChatAgentReplyData} reactions={reactions} onReply={answer} onOpen={onOpen} />;
   }
   if (entry.kind === "pi.assistant" && message?.role === "assistant") {
-    return <Assistant message={message} steps={steps} reactions={reactions} onReply={answer} />;
+    return <Assistant message={message} steps={steps} reactions={reactions} onReply={answer} items={items} foldKey={String(entry.id)} />;
   }
   if (entry.kind === "pi.tool-result" && message?.role === "toolResult") {
     const artifact = published(entry);
@@ -606,43 +633,6 @@ function agentTurns(entries: readonly EntryRecord[]): Set<number> {
 function endsInAgentTurn(entries: readonly EntryRecord[]): boolean {
   const last = entries.findLast(shown);
   return last !== undefined && isAgent(last);
-}
-
-/**
- * Who is in a shared chat: everyone's badge in their colour, with a dot for those who have it open now, then the agent's,
- * marked while it works. Names show on hover (and to screen readers).
- */
-function PeopleBar({ people, online, uid, working }: { people: ChatPeople; online: Presence[]; uid: string; working: boolean }) {
-  // Each open window is a socket; someone no longer in the chat may still show for a moment, so only people in it count.
-  const windows = new Map(online.map((presence) => [presence.uid, presence.windows]));
-  const all = everyone(people);
-  const here = all.filter((person) => windows.has(person.uid)).length;
-  return (
-    <div className="people-bar" aria-label={`${all.length} people, ${here} here now`}>
-      {all.map((person) => {
-        const count = windows.get(person.uid) ?? 0;
-        const you = person.uid === uid;
-        const state = count === 0 ? "away" : count > 1 ? `here now, in ${count} windows` : "here now";
-        return (
-          <span key={person.uid} className={count ? "person online" : "person"} title={`${person.name}${you ? " (you)" : ""}: ${state}`}>
-            <Avatar name={person.name} tint={tintOf(people, person.uid)} online={count > 0} />
-            <span className="sr-only">
-              {you ? "You" : person.name}
-              {count > 1 && <small> ×{count}</small>}
-            </span>
-          </span>
-        );
-      })}
-      <span className="people-divider" aria-hidden="true" />
-      <span className="person agent" title={`${AGENT_NAME}, the agent: ${working ? "working" : "idle"}`}>
-        <AgentAvatar working={working} />
-        <span className="sr-only">
-          {AGENT_NAME}
-          {working && <small> working</small>}
-        </span>
-      </span>
-    </div>
-  );
 }
 
 /**
@@ -798,12 +788,23 @@ function Byline({ author }: { author: Person }) {
   );
 }
 
-/** The message a reply answers: who wrote it, in their colour, and the start of it. */
+/**
+ * The message a reply answers: who wrote it, in their colour (an agent of the chat's in its own, as "@name"), and the
+ * start of it.
+ */
 function ReplyQuoteView({ quote }: { quote: ReplyQuote }) {
   const people = useSharedChat();
-  const style = "agent" in quote || !people ? undefined : tintStyle(tintOf(people, quote.uid));
+  const agents = useChatAgents();
+  if ("agent" in quote) {
+    const agent = quote.agentId === undefined ? undefined : agents.find((view) => view.id === quote.agentId);
+    return (
+      <div className={quote.agentId ? "reply-quote agent toned" : "reply-quote agent"} style={agent && toneStyle(agent.color)}>
+        <strong>{quote.agentId ? `@${quote.name}` : quote.name}</strong> <span>{quote.text}</span>
+      </div>
+    );
+  }
   return (
-    <div className={"agent" in quote ? "reply-quote agent" : "reply-quote"} style={style}>
+    <div className="reply-quote" style={people ? tintStyle(tintOf(people, quote.uid)) : undefined}>
       <strong>{quote.name}</strong> <span>{quote.text}</span>
     </div>
   );
@@ -907,6 +908,9 @@ function Assistant({
   onGrow,
   reactions = null,
   onReply,
+  items,
+  foldKey,
+  bare = false,
 }: {
   message: AssistantMessage;
   steps?: MessageSteps;
@@ -914,6 +918,12 @@ function Assistant({
   onGrow?: () => void;
   reactions?: MessageReactions | null;
   onReply?: () => void;
+  /** The records its tool results held, as chips under it. */
+  items?: readonly ItemRef[];
+  /** Names it for its "Show more": a long text folds once it is in the transcript, never while it streams. */
+  foldKey?: string;
+  /** Without reactions, actions and its time: a live agent's message, whose reply the chat shows once it is posted. */
+  bare?: boolean;
 }) {
   const content = useRef<HTMLDivElement>(null);
   // What a copy pastes as plain text: its Markdown. Not while it streams, when it has no actions.
@@ -923,7 +933,15 @@ function Assistant({
     if (block.type === "text")
       return block.text ? (
         <div key={i} className="bubble markdown">
-          {streaming ? <RevealedMarkdown text={block.text} onGrow={onGrow} /> : <Markdown text={block.text} />}
+          {streaming ? (
+            <RevealedMarkdown text={block.text} onGrow={onGrow} />
+          ) : foldKey ? (
+            <Fold foldKey={`${foldKey}:${i}`}>
+              <Markdown text={block.text} />
+            </Fold>
+          ) : (
+            <Markdown text={block.text} />
+          )}
         </div>
       ) : null;
     // A step shows in its run, at the run's first step.
@@ -938,7 +956,8 @@ function Assistant({
       {parts}
       {message.stopReason === "error" && <div className="chat-error">The model failed: {message.errorMessage ?? "unknown error"}</div>}
       {message.stopReason === "aborted" && <div className="tool-call">Stopped.</div>}
-      {text && (
+      {items && <ItemChips items={items} />}
+      {text && !bare && (
         <>
           <ReactionChips reactions={reactions} />
           <div className="message-foot">
@@ -949,4 +968,60 @@ function Assistant({
       )}
     </div>
   );
+}
+
+/** No breaks: an agent's live turn draws no day or "New" line between its steps. */
+const NO_BREAKS: ReadonlySet<number> = new Set();
+
+/**
+ * An agent working on a turn, under the conversation, as pi's run shows: a working line with its badge, how long it has
+ * worked and its step's short phrase, and its own Stop (`onStop`, absent while not connected); then its steps and text
+ * as they come, from its own session. Once its reply is posted the reply shows instead (shownLive).
+ */
+function AgentTurnLive({ live, onStop }: { live: AgentLive & { agent: ChatAgentView }; onStop?: () => void }) {
+  const { agent, state, startedAt, endedAt } = live;
+  const running = endedAt === undefined;
+  const runs = useMemo(() => stepRuns(state.entries, NO_BREAKS), [state.entries]);
+  const streamed = useMemo(() => state.partial && streamingSteps(runs, state.partial), [runs, state.partial]);
+  const phrase = workingPhrase(state.entries, state.partial, stepLabel);
+  return (
+    <div className="agent-live" aria-live="off">
+      <div className="byline agent working-line">
+        <AgentAvatar badge={agent} working={running} />
+        <strong>@{agent.name}</strong>
+        <small className="working-what">
+          {running ? "working" : "posting its reply"}
+          {startedAt !== undefined && running && (
+            <>
+              {" · "}
+              <Since at={startedAt} />
+            </>
+          )}
+          {phrase && ` · ${phrase}`}
+        </small>
+        {running && onStop && (
+          <button type="button" className="working-stop" onClick={onStop} title={`Stop @${agent.name} only`}>
+            Stop
+          </button>
+        )}
+      </div>
+      <StepsProvider entries={state.entries} tools={state.tools} busy={running}>
+        {state.entries.map((entry) => {
+          const message = entry.model?.[0];
+          if (entry.kind === "pi.assistant" && message?.role === "assistant") {
+            const steps = streamed?.grown?.entry === entry.id ? streamed.grown.steps : runs.byEntry.get(entry.id as number);
+            return <Assistant key={entry.id} message={message} steps={steps} bare />;
+          }
+          if (entry.kind === "pi.tool-result" && message?.role === "toolResult" && !published(entry)) return <OrphanResult key={entry.id} message={message} />;
+          return null;
+        })}
+        {state.partial && <Assistant message={state.partial} steps={streamed?.steps} streaming bare />}
+      </StepsProvider>
+    </div>
+  );
+}
+
+/** How long since `at`, counting on each second. */
+function Since({ at }: { at: number }) {
+  return <>{formatElapsed(useElapsed(at))}</>;
 }
