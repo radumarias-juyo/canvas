@@ -15,6 +15,9 @@ import {
 import { CHAT_MESSAGE_KIND } from "../shared/protocol.ts";
 import { ChatActions, type NewAction } from "../worker/agents/limits/actions.ts";
 import { LimitsDirectory } from "../worker/agents/limits/directory.ts";
+import { approvalFeed, approvalRef } from "../worker/agents/limits/feed.ts";
+import { AgentRuns } from "../worker/agents/runs/store.ts";
+import { FeedStore } from "../worker/feed/store.ts";
 import { WriteGate, type Caller, type GateContext, type GateHost } from "../worker/agents/limits/gate.ts";
 import { inputLevel, lowestLevel, turnLevel } from "../worker/agents/limits/levels.ts";
 import { toolInput } from "../worker/agents/limits/tell.ts";
@@ -457,6 +460,73 @@ describe("pending actions", () => {
     const two = after.add(action());
     after.move(two.id, "pending", "running");
     expect(after.move(two.id, "running", "done", "x".repeat(5_000))?.result).toHaveLength(2_000);
+  });
+});
+
+describe("approvals in the feed", () => {
+  const chatActions = () =>
+    new ChatActions(
+      memorySql(),
+      () => "chat-1",
+      () => T0,
+    );
+  const held = (over: Partial<NewAction> = {}, actions = chatActions()) =>
+    actions.add({
+      kind: "approval",
+      actor: { name: "deals", agentId: "a".repeat(16), avatar: "de", color: "blue" },
+      server: "crm",
+      tool: "update_deal",
+      input: { discount: 5 },
+      why: "at Approve",
+      expiresAt: T0 + 3_600_000,
+      origin: { session: "3", level: 3 },
+      ...over,
+    });
+
+  it("waits in Needs you from its hold, naming who asks and the call, and opens its chat", () => {
+    const feed = new FeedStore(memorySql());
+    const view = held();
+    expect(feed.add(approvalFeed(view, "Deals", "group"))).toBe("added");
+    expect(feed.counts()).toEqual({ unread: 1, needsYou: 1 });
+    const [item] = feed.list({ needsYou: true }).items;
+    expect(item).toMatchObject({ kind: "approval", needsYou: true, title: "@deals needs your approval in Deals", open: { to: "chat", chatId: "chat-1" } });
+    expect(item.text).toContain("crm.update_deal");
+    expect(item.from?.agent?.id).toBe("a".repeat(16));
+    // Added again (a retry): one item.
+    expect(feed.add(approvalFeed(view, "Deals", "group"))).toBe("same");
+    expect(approvalFeed(held({ kind: "proposal", actor: { name: "pi" } }), "Deals", "group")).toMatchObject({ title: "pi proposes a change in Deals", from: { name: "pi" } });
+  });
+
+  for (const end of ["done", "declined", "expired"] as const) {
+    it(`waits no more once it is ${end === "done" ? "approved" : end}`, () => {
+      const actions = chatActions();
+      const feed = new FeedStore(memorySql());
+      const view = held({}, actions);
+      feed.add(approvalFeed(view, "Deals", "group"));
+      if (end === "done") {
+        actions.move(view.id, "pending", "running");
+        actions.move(view.id, "running", "done", "{}");
+      } else actions.move(view.id, "pending", end);
+      // What the chat's #actionEnded calls for every end: UserDirectory.removeNeedsYou, which resolves the ref.
+      expect(feed.resolve(approvalRef("chat-1", view.id))).toBe(1);
+      expect(feed.counts()).toEqual({ unread: 0, needsYou: 0 });
+      expect(feed.list().items[0]).toMatchObject({ kind: "approval", read: true });
+    });
+  }
+
+  it("never reaches the feed from a chat off the record", () => {
+    const feed = new FeedStore(memorySql());
+    expect(feed.add(approvalFeed(held(), "Secret", "off_record"))).toBe("refused");
+  });
+
+  it("a run waiting for a held call has not ended: no run item until it does", () => {
+    const ended: string[] = [];
+    const runs = new AgentRuns(memorySql(), () => T0, (run) => ended.push(run.status));
+    runs.begin("a1", T0, "schedule", false);
+    runs.update("a1", T0, { status: "waiting" });
+    expect(ended).toEqual([]);
+    runs.update("a1", T0, { status: "sent" });
+    expect(ended).toEqual(["sent"]);
   });
 });
 
