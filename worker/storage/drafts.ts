@@ -29,6 +29,12 @@ export interface DraftPage {
   artifactId?: string;
   /** The skill files the page names are read from these sets, which never change: what was checked is what is published. */
   skillSets?: SkillSets;
+  /**
+   * The code review (worker/artifacts/review.ts) ran on this draft, or on the one it was edited from: a page is
+   * reviewed once, so a fix of what the review found is not reviewed again, nor a draft checked again unchanged. Kept in
+   * the index, like the check.
+   */
+  reviewed?: true;
 }
 
 /** What a page's check found: errors is null when no browser could check it. */
@@ -85,20 +91,32 @@ export class ChatDrafts {
     const { html, manifest, artifactId, skillSets, savedAt } = (await object.json()) as Draft;
     const entry = index.find((e) => e.id === id);
     const stopped = entry?.lookStopped;
-    return { id, html, manifest, artifactId, skillSets, savedAt, errors: entry?.errors ?? null, warnings: entry?.warnings ?? 0, ...(stopped && { lookStopped: stopped }) };
+    return {
+      id,
+      html,
+      manifest,
+      artifactId,
+      skillSets,
+      savedAt,
+      errors: entry?.errors ?? null,
+      warnings: entry?.warnings ?? 0,
+      ...(stopped && { lookStopped: stopped }),
+      ...(entry?.reviewed && { reviewed: true }),
+    };
   }
 
   /**
    * Save a page as the newest draft, with what its check found (`check`; null when it was not checked). A page saved
-   * before keeps the artifact it was for, and its check when this save has none. Beyond MAX_DRAFTS the oldest go.
+   * before keeps the artifact it was for, its check when this save has none, and having been reviewed. Beyond
+   * MAX_DRAFTS the oldest go.
    */
   async save(page: DraftPage, check: DraftCheck | null): Promise<Draft & { bytes: number }> {
     if (!DRAFT_ID.test(page.id)) throw new Error("Invalid draft id.");
     return this.#serial(() => this.#save(page, check));
   }
 
-  /** Keep what a check of a saved draft found: in the index only, where it stays in its place. A draft not listed is skipped. */
-  async recordCheck(id: string, check: DraftCheck): Promise<void> {
+  /** Keep what a check of a saved draft found (and whether it reviewed it): in the index only, where it stays in its place. A draft not listed is skipped. */
+  async recordCheck(id: string, check: DraftCheck & Pick<DraftPage, "reviewed">): Promise<void> {
     await this.#serial(async () => {
       const index = await this.#index();
       const entry = index.find((e) => e.id === id);
@@ -116,6 +134,7 @@ export class ChatDrafts {
       artifactId: page.artifactId ?? before?.artifactId,
       savedAt: Date.now(),
       ...(check ?? { errors: before?.errors ?? null, warnings: before?.warnings ?? 0, ...(before?.lookStopped && { lookStopped: before.lookStopped }) }),
+      ...((page.reviewed || before?.reviewed) && { reviewed: true }),
     };
     const { html, manifest, skillSets, ...summary } = draft;
     const bytes = new TextEncoder().encode(html).byteLength;

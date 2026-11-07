@@ -6,6 +6,7 @@ import { BrowserUnavailable, CheckTimedOut } from "../artifacts/browser.ts";
 import { timedOutReport, type CheckInput, type CheckReport } from "../artifacts/check.ts";
 import { reviewLook, type Look, type Reviewed } from "../artifacts/look.ts";
 import { checkManifest, MAX_HTML_BYTES } from "../artifacts/manifest.ts";
+import { ReviewStopped, withReview, type PageReview, type PageReviewer } from "../artifacts/review.ts";
 import type { McpHub } from "../mcp/hub.ts";
 import type { ArtifactStore } from "../storage/artifacts.ts";
 import { draftId, passed, type ChatDrafts, type Draft, type DraftCheck, type DraftSummary, type SkillSets } from "../storage/drafts.ts";
@@ -24,6 +25,11 @@ export interface PublishScope {
   checkPage(input: CheckInput, signal?: AbortSignal): Promise<CheckReport>;
   /** A vision classifier's look at each check's screenshot (worker/artifacts/look.ts); unset, the checks go without. */
   look?: Look;
+  /**
+   * A small model's code review of a page, beside its first check (worker/artifacts/review.ts); unset, or resolving to
+   * none (no REVIEW_MODEL the deployment can run), pages go unreviewed.
+   */
+  review?: () => Promise<PageReviewer | undefined>;
   /** The artifacts published in this chat, newest first. */
   chatArtifacts(): Promise<ArtifactSummary[]>;
   /** The pages written in this chat and not published yet: in the owner's folder, encrypted with their key. */
@@ -197,12 +203,14 @@ export async function writeDraft(scope: PublishScope, input: WriteInput): Promis
   const drafts = await scope.drafts();
   let { html, mcp } = input;
   let artifactId = artifact?.id;
+  let reviewed: true | undefined;
   if (html === undefined) {
     if (from !== undefined) {
       const draft = await draftNamed(drafts, from, "Not saved.");
       html = applyEdits(draft.html, edits);
       mcp ??= draft.manifest.mcp?.servers;
       artifactId ??= draft.artifactId;
+      reviewed = draft.reviewed;
     } else if (artifact) {
       const at = version ?? artifact.latest;
       const published = await readPageSource(scope, artifact.id, at);
@@ -214,7 +222,7 @@ export async function writeDraft(scope: PublishScope, input: WriteInput): Promis
   const manifest = await validPage(scope, html, mcp, "Not saved.");
   const skillSets = await pinSkillFiles(scope, html, "Not saved.");
   const id = await draftId(html, manifest, skillSets);
-  return drafts.save({ id, html, manifest, artifactId, ...(Object.keys(skillSets).length && { skillSets }) }, null);
+  return drafts.save({ id, html, manifest, artifactId, ...(Object.keys(skillSets).length && { skillSets }), ...(reviewed && { reviewed }) }, null);
 }
 
 /** What checking a draft came to: the draft, and the check's report, or why no browser checked it; what the look cost. */
@@ -225,25 +233,65 @@ export interface CheckedDraft {
   usage?: Usage;
   /** Set when this check's look at the screenshot stopped the draft: what it saw. */
   lookStopped?: string;
+  /** Set when this check reviewed the page's code: the findings are in the report too (withReview). */
+  review?: PageReview;
 }
 
-/** Check a draft in the headless browser, with a look at its screenshot (scope.look), and keep with it what the check found. */
+/**
+ * Check a draft in the headless browser, with a look at its screenshot (scope.look), and keep with it what the check
+ * found. A draft not reviewed yet is reviewed beside the check (scope.review), which takes no longer than the slower of
+ * the two; its findings join the report, and the draft is reviewed from then on, also when the review failed.
+ */
 export async function checkDraft(
   scope: PublishScope,
   id: string,
-  options: Pick<CheckInput, "tests" | "viewport">,
+  { review: reviewIt = true, ...options }: Pick<CheckInput, "tests" | "viewport"> & { review?: boolean },
   signal?: AbortSignal,
 ): Promise<CheckedDraft> {
   const drafts = await scope.drafts();
   const draft = await draftNamed(drafts, id, "Not checked.");
   const { html, pageLine } = await pageToRun(scope, draft, "Not checked.");
-  const { report, unchecked } = await checkInBrowser(scope, { html, manifest: draft.manifest, ...options, ...(html !== draft.html && { pageLine }) }, signal);
-  const looked: Partial<Reviewed> = report && scope.look ? await reviewLook(scope.look, report, { stoppedBefore: draft.lookStopped, signal }) : { report };
-  const check = draftCheck(looked.report);
+  // Stops the review when the check fails or could not run: it is no longer waited for, and a review costs.
+  const stop = new AbortController();
+  const both = signal ? AbortSignal.any([signal, stop.signal]) : stop.signal;
+  // The page as written, without the skill files it names: those are the skill's, not the page's code. A review
+  // stopped here comes to none; stopped from outside, the check throws why.
+  const reviewing =
+    !reviewIt || draft.reviewed
+      ? undefined
+      : scope
+          .review?.()
+          .then((review) => review?.(draft.html, both))
+          .catch((error: unknown) => {
+            if (signal?.aborted || !stop.signal.aborted) throw error instanceof ReviewStopped ? error.reason : error;
+            return undefined;
+          });
+  // The look follows the browser check while the review runs: the check takes as long as the slower of the two.
+  const looking = checkInBrowser(scope, { html, manifest: draft.manifest, ...options, ...(html !== draft.html && { pageLine }) }, signal).then(
+    async ({ report, unchecked }): Promise<Partial<Reviewed> & { unchecked?: string }> => {
+      // A page no browser checked gets its review with its first check that runs: this one's would be thrown away.
+      if (!report) stop.abort();
+      return report && scope.look ? await reviewLook(scope.look, report, { stoppedBefore: draft.lookStopped, signal }) : { report, unchecked };
+    },
+  );
+  const [looked, review] = await Promise.all([looking, reviewing]).catch((error: unknown) => {
+    stop.abort();
+    throw error;
+  });
+  const used = looked.report && review;
+  const report = used ? withReview(looked.report!, used) : looked.report;
+  const check = draftCheck(report);
   const stopped = looked.stopped ?? draft.lookStopped;
   if (check && stopped) check.lookStopped = stopped;
-  if (check) await drafts.recordCheck(id, check);
-  return { draft: { ...draft, ...check }, report: looked.report, unchecked, usage: looked.usage, lookStopped: looked.stopped };
+  if (check) await drafts.recordCheck(id, used ? { ...check, reviewed: true } : check);
+  return {
+    draft: { ...draft, ...check, ...(used && { reviewed: true as const }) },
+    report,
+    unchecked: looked.unchecked,
+    usage: looked.usage,
+    lookStopped: looked.stopped,
+    review: used || undefined,
+  };
 }
 
 /** How many checks in a row may find errors before the agent stops fixing and asks the user. */
@@ -355,7 +403,8 @@ async function artifactFor(scope: PublishScope, target: PublishTarget, writtenFo
 export async function publishDraft(scope: PublishScope, input: PublishInput, signal?: AbortSignal): Promise<Published> {
   const drafts = await scope.drafts();
   let draft = await draftNamed(drafts, input.draftId, "Not published.");
-  if (draft.errors === null && scope.publishUnchecked) draft = (await checkDraft(scope, draft.id, {}, signal)).draft;
+  // Without the code review: its findings would stop the publish unseen, and the draft would then be reviewed already.
+  if (draft.errors === null && scope.publishUnchecked) draft = (await checkDraft(scope, draft.id, { review: false }, signal)).draft;
   const unchecked = draft.errors === null;
   if (draft.errors)
     throw new Error(

@@ -1,10 +1,9 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import type { Models, UserMessage } from "@earendil-works/pi-ai";
+import type { Api, Model, Models, Usage, UserMessage } from "@earendil-works/pi-ai";
 import { createRegistry, Harness, ROOT_CONVERSATION_ID, type Agent, type AgentChange, type AgentState, type Submission, type Conversation, type Cursor, type EntryId, type EntryRecord, type Extension, type JsonObject, type AgentEvent, type AgentEventStream, type ConversationView, type SnapshotEvent } from "@earendil-works/pi-durable";
 import { createToolSearchExtension } from "@earendil-works/pi-durable/tool-search";
 import { PiHarness, skills } from "agents/harness/pi";
 import { Lifecycle, LifecycleCapability, type DurableObjectCapability } from "agents/lifecycle";
-import { createAI } from "agents/models/pi-ai";
 import { DurableObject, exports } from "cloudflare:workers";
 import {
   CHAT_ASIDE_KIND,
@@ -51,9 +50,11 @@ import {
   AUTO_LEDGER_PREFIX,
   AUTO_MODEL,
   COMPACTION,
+  compactionOverrides,
   HINT_LEDGER_PREFIX,
   isAuto,
   modelKey,
+  REVIEW_LEDGER_PREFIX,
   SKILLS_LEDGER_PREFIX,
   TOOL_PICK_LEDGER_PREFIX,
   type AutoCandidate,
@@ -84,10 +85,13 @@ import { artifactExtension, filesExtension, filesIndexExtension, reactionsExtens
 import type { SandboxFile } from "./sandbox.ts";
 import { formatSkillFile } from "./skills/index.ts";
 import { ChatReactions } from "./reactions.ts";
+import { clearImported, DumpError, dumpChat, hasConversation, restorePart } from "./chat-dump.ts";
+import { idRemapper, type ChatDumpCursor, type ChatDumpPage, type ChatDumpPart, type ChatImportStart } from "../shared/data-export.ts";
 import { checkDraft, FailedChecks, publishDraft, writeDraft, type PublishTarget, type WriteInput } from "./agent/publish.ts";
 import { CheckBrowser } from "./artifacts/browser.ts";
 import { CHECK_MS, checkPage, type Bridge } from "./artifacts/check.ts";
 import { lookFrom } from "./artifacts/look.ts";
+import { modelReviewer, ReviewStopped, type PageReviewer } from "./artifacts/review.ts";
 import type { ChatAnswer } from "./artifacts/page-calls.ts";
 import { chatOutFolder, chatTraces, type ChatTraces } from "./chat-traces.ts";
 import { Storage } from "./storage/index.ts";
@@ -97,6 +101,7 @@ import { connectStreamableHttp, signInRequired } from "./mcp/connect.ts";
 import { McpOAuthClient } from "./mcp/oauth.ts";
 import { McpFailure, McpHub } from "./mcp/hub.ts";
 import { mcpServers, sharesResults, type McpServerConfig } from "./mcp/servers.ts";
+import { CacheWarmer } from "./cache-warmer.ts";
 import { GeminiCompat } from "./gemini.ts";
 import { ChatMembers, formatInviteToken } from "./members.ts";
 import {
@@ -104,12 +109,17 @@ import {
   checkSetting,
   currentCatalog,
   defaultModelChoice,
+  gatewayAI,
+  startingSetting,
   piModels,
   loadCatalog,
+  markFailing,
+  modelsNamed,
   type Catalog,
 } from "./models.ts";
+import { withFailuresReported } from "./model-health.ts";
 import { inboxIds, queuedIdsOf, queuedMessages } from "./queue.ts";
-import { mcpAuthStore, readSystemPrompt, saveSystemPrompt, type Tag } from "./users.ts";
+import { mcpAuthStore, readSystemPrompt, saveSystemPrompt, SYSTEM_PROMPT_KEY, type Tag } from "./users.ts";
 
 /** Artifacts from the owner's other chats one chat remembers as named with "@" (see ChatAgent.#broughtIn). */
 const MAX_BROUGHT_IN = 200;
@@ -169,6 +179,14 @@ const AUTO_KEY = "auto";
 const ROUTE_ENTRIES = 40;
 /** The names of the skills shown in this chat so far, once SKILLS_MODEL picks them (worker/agent/skill-pick.ts). */
 const SHOWN_SKILLS_KEY = "skillsShown";
+/** The artifacts of the owner's other chats this one brought in (see #broughtIn). */
+const BROUGHT_IN_KEY = "broughtIn";
+/** The settings of a chat its export carries, beside its tables (worker/chat-dump.ts), its own system prompt among them. */
+const EXPORTED_KV = [AUTO_KEY, SHOWN_SKILLS_KEY, BROUGHT_IN_KEY, SYSTEM_PROMPT_KEY];
+/** Set while an import fills the chat (ChatImportStart): what it puts in place of what. */
+const IMPORTING_KEY = "importing";
+/** Set once an import stored every part: until its owner's list has the chat, the same import may start it again. */
+const IMPORTED_KEY = "imported";
 
 /** The newest transcript entries, read at most once per message (see #recentEntries). */
 type RecentEntries = () => Promise<readonly EntryRecord[] | undefined>;
@@ -212,22 +230,30 @@ export class ChatAgent extends DurableObject<Env> {
   readonly storage = new Storage(this.env);
   /** Gemini's thought signatures, read off its answers by the AI binding below and put back on its next requests. */
   readonly gemini = new GeminiCompat();
-  readonly ai = createAI({ binding: this.gemini.binding(this.env.AI), gateway: this.env.AI_GATEWAY_ID, byokAlias: this.env.AI_BYOK_ALIAS || undefined });
+  /** Keeps the chat's Claude prompt cache from expiring between its calls (cache-warmer.ts). */
+  readonly warmer = new CacheWarmer();
+  readonly ai = gatewayAI(this.env, this.gemini, this.warmer);
   readonly registry = createRegistry();
   readonly harness = new PiHarness({
     harness: async ({ storage, context, onWake }) => {
       // The chat's model may be one a provider listed: have the list before pi looks the model up.
       await this.#catalog();
-      const models = piModels(this.ai.provider, this.gemini);
+      const models = this.#models();
       // A failed run goes on to the messages queued behind it: in a shared chat they are other people's, and would
-      // otherwise wait, shown as queued, until someone writes again. Compaction is set here, where the app reads it too.
-      const settings = { afterFailedRun: "continue" as const, progress: PROGRESS, compaction: COMPACTION };
+      // otherwise wait, shown as queued, until someone writes again. Compaction is set here, where the app reads it too:
+      // at most CONTEXT_BUDGET tokens, however large the model's window. pi reads the settings at each use, so a model a
+      // provider lists later is held to the budget too.
+      const settings = () => ({
+        afterFailedRun: "continue" as const,
+        progress: PROGRESS,
+        compaction: { ...COMPACTION, modelOverrides: compactionOverrides(models.getModels()) },
+      });
       const pi = await Harness.open(storage, { models, registry: this.registry, onWake, settings }, context);
       try {
-        // A new chat starts on the model its user last picked, or on Auto (which starts from the deployment's default);
-        // PiHarness then finds the root and leaves it as it is.
+        // A new chat starts on its user's last pick, else on Auto (startingSetting); PiHarness then finds the root and
+        // leaves it as it is.
         if (!(await pi.conversation(ROOT_CONVERSATION_ID, context))) {
-          const setting = await this.#savedModel();
+          const setting = startingSetting(await this.#savedModel(), this.env.ROUTER_MODEL);
           if (isAuto(setting)) this.ctx.storage.kv.put(AUTO_KEY, true);
           else if (setting) await pi.root(context, { agent: this.#agentChange(setting) });
         }
@@ -237,7 +263,7 @@ export class ChatAgent extends DurableObject<Env> {
       }
       return pi;
     },
-    // What a new chat starts on before its user has picked a model.
+    // What a chat runs on until someone picks a model, or Auto picks one for it.
     defaults: this.#defaults(defaultModelChoice(this.env.MODEL, this.env.THINKING_LEVEL)),
   });
   readonly members = new ChatMembers(this.ctx.storage.sql);
@@ -338,6 +364,7 @@ export class ChatAgent extends DurableObject<Env> {
       readSkillFile: (skill, set, path) => this.#readSkillSetFile(skill, set, path),
       skillFolders: (names, maxBytes) => this.#skillFolders(names, maxBytes),
       look: lookFrom(env.CHECK_LOOK_MODEL, env.AI),
+      review: () => this.#pageReviewer(),
       publishUnchecked: env.AUTH_MODE === "demo",
       failedChecks: new FailedChecks(),
       react: (emoji) => this.#agentReact(emoji),
@@ -385,7 +412,7 @@ export class ChatAgent extends DurableObject<Env> {
     return loadCatalog(catalogSource(this.env, this.storage.models, (promise) => this.ctx.waitUntil(promise)));
   }
 
-  /** The user's last pick, checked again: the list of models can change. On a failure, the deployment's default. */
+  /** The user's last pick, checked again: the list of models can change. Null when there is none, or on a failure. */
   async #savedModel(): Promise<ModelSetting | null> {
     try {
       const saved = await this.#directory.modelChoice();
@@ -482,11 +509,11 @@ export class ChatAgent extends DurableObject<Env> {
    */
   async #route(message: string, images: number, files: number, recent: RecentEntries): Promise<Routing | undefined> {
     const started = Date.now();
-    const kept = (failed: string): Routing => ({ kept: { failed, ms: Date.now() - started } });
+    const kept = (failed: string, more?: Pick<AutoPick, "running" | "missed">): Routing => ({ kept: { failed, ...more, ms: Date.now() - started } });
     let read;
     try {
       const [root, catalog, busy] = await Promise.all([this.#root(), this.#catalog(), this.#replying()]);
-      if (busy) return kept(RUNNING_WHEN_SENT);
+      if (busy) return kept(RUNNING_WHEN_SENT, { running: true });
       const [agent, items] = await Promise.all([root.agent(BACKGROUND_CONTEXT), recent()]);
       if (!items) return undefined;
       read = { root, catalog, agent, items };
@@ -507,8 +534,16 @@ export class ChatAgent extends DurableObject<Env> {
         .catch((error: unknown) => console.error("auto spend:", errorMessage(error)));
       // An effort the model does not take moves to the nearest it does; none named asks for its usual one.
       const choice = catalog.check({ model: routed.pick.model, thinkingLevel: routed.pick.thinkingLevel });
-      if (!choice) return kept(`the router picked ${routed.pick.model}, which is not in the picker`);
-      const pick: AutoPick = { ...choice, ...(routed.pick.reason && { reason: routed.pick.reason }), router: routed.router, ms: Date.now() - started };
+      if (!choice) {
+        return kept(`the router picked ${routed.pick.model}, which is not in the picker`, { ...(routed.missed && { missed: routed.missed }) });
+      }
+      const pick: AutoPick = {
+        ...choice,
+        ...(routed.pick.reason && { reason: routed.pick.reason }),
+        router: routed.router,
+        ...(routed.missed && { missed: routed.missed }),
+        ms: Date.now() - started,
+      };
       return { pick, choice };
     } catch (error) {
       console.error("auto:", errorMessage(error));
@@ -527,7 +562,11 @@ export class ChatAgent extends DurableObject<Env> {
     const { root, busy, agent } = await now();
     const current = this.#modelOf(agent);
     if ("kept" in routed || busy) {
-      const kept = "kept" in routed ? routed.kept : { failed: RUNNING_WHEN_PICKED, ms: routed.pick.ms };
+      // A reply started meanwhile: the pick goes unused, but what failed on the way to it still shows.
+      const kept =
+        "kept" in routed
+          ? routed.kept
+          : { failed: RUNNING_WHEN_PICKED, running: true as const, ...(routed.pick.missed && { missed: routed.pick.missed }), ms: routed.pick.ms };
       return { model: current, thinkingLevel: agent.thinkingLevel, ...kept };
     }
     if (current !== routed.choice.model || agent.thinkingLevel !== routed.choice.thinkingLevel) {
@@ -580,13 +619,14 @@ export class ChatAgent extends DurableObject<Env> {
       tools = deferredTools(await root.agent(BACKGROUND_CONTEXT));
       if (!tools.length) return undefined;
       const history = routeHistory((await recent()) ?? []);
+      const asked = Date.now();
       const picked = await pickTools(this.env.AI, picker, { message, history, tools }, AbortSignal.timeout(TOOL_PICK_MS));
       const id = pickerId(picker);
       // Paid for whether or not the pick is used. Only a record, off the prompt's path: a failure is logged.
       void root
         .commit((tx) => recordSpend(tx, root.id, `${TOOL_PICK_LEDGER_PREFIX}${id}`, picked.usage), BACKGROUND_CONTEXT)
         .catch((error: unknown) => console.error("tool pick spend:", errorMessage(error)));
-      return { tools: picked.tools, of: tools.length, picker: routerSpend(id, picked.usage), ms: Date.now() - started };
+      return { tools: picked.tools, of: tools.length, picker: routerSpend(id, picked.usage, Date.now() - asked), ms: Date.now() - started };
     } catch (error) {
       console.error("tool pick:", errorMessage(error));
       return tools.length ? { tools: [], of: tools.length, failed: pickFailure(error), ms: Date.now() - started } : undefined;
@@ -617,7 +657,13 @@ export class ChatAgent extends DurableObject<Env> {
 
   /** pi-ai's models for the chat's calls outside its runs (Auto's router, the chat's title): made once. */
   get #oneShotModels(): Models {
-    return (this.#oneShot ??= piModels(this.ai.provider, this.gemini));
+    return (this.#oneShot ??= this.#models());
+  }
+
+  /** pi-ai's models as the chat calls them: a model that cannot be called is marked for every chat (markFailing), so Auto leaves it out. */
+  #models(): Models {
+    const source = catalogSource(this.env, this.storage.models);
+    return withFailuresReported(piModels(this.ai.provider, this.gemini), (id, error) => this.ctx.waitUntil(markFailing(source, id, error)));
   }
 
   /** The chat's one conversation. PiHarness has made it by the time pi() resolves. */
@@ -722,6 +768,45 @@ export class ChatAgent extends DurableObject<Env> {
       if (!this.#skillClassifier && this.env.SKILLS_MODEL.trim()) console.error(`skills: SKILLS_MODEL names no System One model: ${this.env.SKILLS_MODEL}`);
     }
     return this.#skillClassifier ?? undefined;
+  }
+
+  /**
+   * The code review of pages before they are published: by the first of REVIEW_MODEL's models this deployment can run
+   * that answers, its calls counted in pi's ledger under REVIEW_LEDGER_PREFIX and that model's id. Undefined when it
+   * names none: pages then go unreviewed. Never throws.
+   */
+  async #pageReviewer(): Promise<PageReviewer | undefined> {
+    if (!this.env.REVIEW_MODEL.trim()) return undefined;
+    let candidates: Model<Api>[];
+    try {
+      candidates = modelsNamed(this.env.REVIEW_MODEL, await this.#catalog());
+    } catch (error) {
+      console.error("page review:", errorMessage(error));
+      return undefined;
+    }
+    if (!candidates.length) {
+      console.error(`page review: REVIEW_MODEL names no model this deployment can run: ${this.env.REVIEW_MODEL}`);
+      return undefined;
+    }
+    const review = modelReviewer(this.#oneShotModels, candidates);
+    const spent = (usage: Usage, by: string | undefined) => {
+      if (usage.totalTokens === 0 && usage.cost.total === 0) return;
+      // A review that failed, or was stopped, after a billed attempt counts under the first model asked.
+      const model = by ?? modelKey(candidates[0].provider, candidates[0].id);
+      void this.#root()
+        .then((root) => root.commit((tx) => recordSpend(tx, root.id, `${REVIEW_LEDGER_PREFIX}${model}`, usage), BACKGROUND_CONTEXT))
+        .catch((error: unknown) => console.error("page review spend:", errorMessage(error)));
+    };
+    return async (html, signal) => {
+      try {
+        const reviewed = await review(html, signal);
+        spent(reviewed.usage, reviewed.by);
+        return reviewed;
+      } catch (error) {
+        if (error instanceof ReviewStopped) spent(error.usage, undefined);
+        throw error;
+      }
+    };
   }
 
   /**
@@ -962,13 +1047,13 @@ export class ChatAgent extends DurableObject<Env> {
    * MAX_BROUGHT_IN.
    */
   #broughtIn(): string[] {
-    return this.ctx.storage.kv.get<string[]>("broughtIn") ?? [];
+    return this.ctx.storage.kv.get<string[]>(BROUGHT_IN_KEY) ?? [];
   }
 
   #bringIn(ids: readonly string[]): void {
     if (!ids.length) return;
     const kept = [...this.#broughtIn().filter((id) => !ids.includes(id)), ...ids].slice(-MAX_BROUGHT_IN);
-    this.ctx.storage.kv.put("broughtIn", kept);
+    this.ctx.storage.kv.put(BROUGHT_IN_KEY, kept);
   }
 
   /** For what a socket sends: its person may have been removed since it opened. */
@@ -1087,7 +1172,9 @@ export class ChatAgent extends DurableObject<Env> {
     const images = attachments.filter((attachment) => attachment.image).length;
     // What the router, the skill classifier and the tool picker read of the conversation: read once for all, and only if one asks.
     const recent = calling ? memoAsync(() => this.#recentEntries()) : undefined;
-    const routing = recent && this.#auto() ? this.#route(text, images, attachments.length + own.length - images, recent) : undefined;
+    // A new chat is put on Auto as it opens (startingSetting), which its first message may come before: wait for that.
+    const onAuto = recent && (this.#auto() || ((await this.harness.pi()) && this.#auto()));
+    const routing = onAuto ? this.#route(text, images, attachments.length + own.length - images, recent) : undefined;
     this.#announce({
       uid: author.uid,
       name: author.name,
@@ -1673,6 +1760,61 @@ export class ChatAgent extends DurableObject<Env> {
   }
 
   /**
+   * One part of the chat's own storage, for its owner's export (worker/chat-dump.ts): its conversation, reactions and
+   * settings, from `cursor` on. Read in one go, so a part is as the chat stood at that moment.
+   */
+  exportPart(cursor?: ChatDumpCursor): ChatDumpPage | ChatRefusal {
+    if (this.#gone) return refuse(404, DELETED);
+    if (this.ctx.storage.kv.get(IMPORTING_KEY) !== undefined) return refuse(409, "This chat is still being imported.");
+    return dumpChat(this.ctx.storage.sql, this.ctx.storage.kv, EXPORTED_KV, cursor);
+  }
+
+  /**
+   * Start filling this chat from an export: only one that has no conversation here (a chat deleted here may be imported
+   * again). Its owner's list does not show it until importFinish, so nobody can open it meanwhile, and nothing runs in it.
+   * An import that stopped part way starts again from nothing.
+   */
+  importBegin(start: ChatImportStart): ChatRefusal | null {
+    const { sql, kv } = this.ctx.storage;
+    // An imported chat whose listing failed after importFinish (the Worker refuses one its owner's list has) starts again too.
+    const resuming = kv.get(IMPORTING_KEY) !== undefined || kv.get(IMPORTED_KEY) === true;
+    if (!resuming && !this.#deleted() && hasConversation(sql)) return refuse(409, "This chat already has a conversation here.");
+    this.ctx.storage.transactionSync(() => {
+      clearImported(sql, kv, EXPORTED_KV);
+      kv.delete(GONE_KEY);
+      kv.put(IMPORTING_KEY, start);
+    });
+    this.#gone = false;
+    return null;
+  }
+
+  /** Store one part of the chat's export, its ids changed as importBegin was told, all of it or none. */
+  importPart(part: ChatDumpPart): ChatRefusal | null {
+    const start = this.ctx.storage.kv.get<ChatImportStart>(IMPORTING_KEY);
+    if (!start) return refuse(409, "This chat's import has not begun.");
+    const remap = idRemapper([[start.from, this.uid], [secondSeatUid(start.from), secondSeatUid(this.uid)], ...Object.entries(start.artifacts)]);
+    try {
+      this.ctx.storage.transactionSync(() => restorePart(this.ctx.storage.sql, this.ctx.storage.kv, EXPORTED_KV, part, remap));
+    } catch (error) {
+      if (error instanceof DumpError) return refuse(400, error.message);
+      throw error;
+    }
+    return null;
+  }
+
+  /** The import has stored every part: the chat opens as it was, with nobody in it but its owner. */
+  importFinish(): ChatRefusal | null {
+    const kv = this.ctx.storage.kv;
+    if (kv.get(IMPORTING_KEY) === undefined) return refuse(409, "This chat's import has not begun.");
+    // The chat's system prompt came as the zip had it: keep it only within what a saved one may be.
+    const prompt = readSystemPrompt(kv);
+    if (prompt && "error" in saveSystemPrompt(kv, prompt)) kv.delete(SYSTEM_PROMPT_KEY);
+    kv.delete(IMPORTING_KEY);
+    kv.put(IMPORTED_KEY, true);
+    return null;
+  }
+
+  /**
    * What this chat left outside its object: the artifacts it published, by the owner's list and by its transcript (so
    * one the list missed goes too), and the files it attached or saved. Read a page of the history at a time.
    */
@@ -1705,7 +1847,8 @@ export class ChatAgent extends DurableObject<Env> {
    */
   async devPublish({ html, mcp, ...target }: PublishTarget & { html: string; mcp?: WriteInput["mcp"] }) {
     const { id } = await writeDraft(this.scope, { html, mcp });
-    const { report, unchecked } = await checkDraft(this.scope, id, {});
+    // Without the code review: a model's findings would make this publish fail at random.
+    const { report, unchecked } = await checkDraft(this.scope, id, { review: false });
     if (report?.errors.length) throw new Error(`The check found errors:\n${report.errors.join("\n")}`);
     if (!report && !this.scope.publishUnchecked) throw new Error(`Not checked, so not published: ${unchecked}`);
     const { meta } = await publishDraft(this.scope, { ...target, draftId: id });
@@ -1902,9 +2045,8 @@ interface ChatNow {
   agent: Agent;
 }
 
-/** Auto's pick for a message, and the model and effort to run on when a router picked (see ChatAgent's #route). */
 /** What #route found: a router's pick and the model choice it names, or why the chat keeps its model, and how long that took. */
-type Routing = { pick: AutoPick; choice: ModelChoice } | { kept: { failed: string; ms: number } };
+type Routing = { pick: AutoPick; choice: ModelChoice } | { kept: Pick<AutoPick, "running" | "missed" | "ms"> & { failed: string } };
 
 /** What the chat's sockets need from the chat. */
 interface ChatSession {

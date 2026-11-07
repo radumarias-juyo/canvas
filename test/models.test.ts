@@ -3,9 +3,9 @@ import { fauxAssistantMessage, fauxProvider, type AssistantMessage } from "@eare
 import { createModels } from "@earendil-works/pi-ai/models";
 import { createAI } from "agents/models/pi-ai";
 import { discoverModels, type Discovery } from "../worker/gateway-models.ts";
-import { baseCatalog, catalogFrom, defaultModelChoice, forgetCatalog, listedProviders, loadCatalog, PRICES, withEffortRecorded } from "../worker/models.ts";
+import { baseCatalog, catalogFrom, defaultModelChoice, forgetCatalog, listedProviders, loadCatalog, PRICES, startingSetting, withEffortRecorded } from "../worker/models.ts";
 import { ModelCache } from "../worker/storage/model-cache.ts";
-import { modelKeyOfLedger } from "../shared/models.ts";
+import { AUTO_MODEL, COMPACTION, compactionOverrides, compactionPoint, CONTEXT_BUDGET, modelKeyOfLedger } from "../shared/models.ts";
 import { FakeBucket } from "./fakes.ts";
 
 // The catalog before any provider was asked, as the Worker builds it from pi-ai.
@@ -74,8 +74,21 @@ describe("default model", () => {
   it("checks the deployment's default like a pick when listed, and keeps an unlisted one as configured", () => {
     expect(defaultModelChoice("anthropic/claude-opus-5.5", "off")).toEqual({ model: "anthropic/claude-opus-5.5", thinkingLevel: "low" });
     expect(defaultModelChoice("anthropic/claude-opus-5.5", "high")).toEqual({ model: "anthropic/claude-opus-5.5", thinkingLevel: "high" });
+    // The deployment's default (MODEL) is one AI Gateway's catalog lists, so it is checked like a pick.
+    expect(defaultModelChoice("anthropic/claude-sonnet-5.5", "off")).toEqual({ model: "anthropic/claude-sonnet-5.5", thinkingLevel: "low" });
+    expect(defaultModelChoice("anthropic/claude-sonnet-5.5", "high")).toEqual({ model: "anthropic/claude-sonnet-5.5", thinkingLevel: "high" });
     expect(defaultModelChoice("@cf/meta/llama-3.3-70b-instruct-fp8-fast", "high")).toEqual({ model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast", thinkingLevel: "high" });
     expect(defaultModelChoice("@cf/meta/llama-3.3-70b-instruct-fp8-fast", "hgih").thinkingLevel).toBe("medium");
+  });
+
+  it("starts a new chat on its user's last pick, else on Auto when the deployment has a router", () => {
+    const picked = { model: "anthropic/claude-haiku-5.5", thinkingLevel: "low" as const };
+    expect(startingSetting(picked, "system-one:typesafe/jev")).toEqual(picked);
+    expect(startingSetting({ model: AUTO_MODEL }, "")).toEqual({ model: AUTO_MODEL });
+    expect(startingSetting(null, "system-one:typesafe/jev")).toEqual({ model: AUTO_MODEL });
+    expect(startingSetting(null, " ")).toBeNull();
+    // A list that names no router, as routersFrom reads it, is no router.
+    expect(startingSetting(null, " , ")).toBeNull();
   });
 });
 
@@ -329,5 +342,26 @@ describe("effort per reply", () => {
   it("keeps an effort the reply already says", async () => {
     const { models, model } = answering({ ...fauxAssistantMessage("a"), thinkingLevel: "medium" });
     expect((await models.streamSimple(model, context, { reasoning: "high" }).result()).thinkingLevel).toBe("medium");
+  });
+});
+
+describe("context budget", () => {
+  it("brings a large window's summary point down to CONTEXT_BUDGET and leaves smaller ones as they are", () => {
+    const overrides = compactionOverrides([
+      { provider: "anthropic", id: "anthropic/claude-opus-5.5", contextWindow: 1_000_000 },
+      { provider: "cloudflare-workers-ai", id: "@cf/small", contextWindow: 128_000 },
+    ]);
+    expect(overrides).toEqual({ "anthropic/anthropic/claude-opus-5.5": { reserveTokens: 1_000_000 - CONTEXT_BUDGET } });
+    expect(1_000_000 - overrides["anthropic/anthropic/claude-opus-5.5"].reserveTokens).toBe(compactionPoint(1_000_000));
+    expect(compactionPoint(128_000)).toBe(128_000 - COMPACTION.reserveTokens);
+  });
+
+  it("keys the overrides as pi looks a chat's model up: the provider and id of the catalog's model", () => {
+    const ai = createAI({ binding: { fetch: async () => new Response(), run: async () => new Response() } as never, gateway: "gw" });
+    const registry = createModels();
+    registry.setProvider(ai.provider);
+    const model = baseCatalog().model("anthropic/claude-opus-5.5")!;
+    const overrides = compactionOverrides(registry.getModels());
+    expect(overrides[`${model.provider}/${model.id}`]).toEqual({ reserveTokens: model.contextWindow - CONTEXT_BUDGET });
   });
 });

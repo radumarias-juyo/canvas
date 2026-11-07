@@ -236,6 +236,17 @@ it stops a draft only once: checked again unchanged, after the agent looked at t
 The look answers without writing text (input priced only) and its spend counts in the chat's cost panel; when it fails
 or takes over 6 s, the check goes on without it. An empty `CHECK_LOOK_MODEL` turns it off.
 
+A page's first check also gets a **code review** (`worker/artifacts/review.ts`), like the review pass run on the app's
+own code: a small, cheap model (`REVIEW_MODEL`, by default gpt-oss-120b on Workers AI, then Gemini Flash-Lite) reads the
+page's source, with line numbers, beside the browser check, so it adds no time unless it is the slower of the two. It
+looks for bugs, security holes (untrusted text from MCP calls, storage or `pi.use("ai")` put into `innerHTML` unescaped,
+MCP data saved to storage, where every viewer reads the author's values), work that never ends (polling without an end,
+`pi.use("ai")` on load or on a timer) and simpler code. What it says to fix is an error, so the agent fixes it with
+edits before publishing; a suggestion is a warning. The review is bounded to one round: a draft edited from a reviewed
+one is not reviewed again, and a draft it stopped passes when checked again unchanged, since the reviewer can be wrong.
+When it fails or takes over 45 s, the check goes on without it. The chat shows it as a step of its own under the check,
+and its spend in the cost panel ("Page code reviews"). An empty `REVIEW_MODEL` turns it off.
+
 A draft that passes is published by its `draft_id`. A publish without an `artifact_id` goes to the artifact the draft was
 written for, else to the chat's artifact whose title matches (`new_artifact: true` makes a separate one), so a fix the
 model publishes without the id never turns into a second artifact stuck at version 1. `artifact_publish` takes only a
@@ -373,6 +384,21 @@ a request fits one, the agent calls `activate_skill` and gets the rest. Skills u
   of time, every skill it was asked about is listed, as before; an empty `SKILLS_MODEL` lists every enabled skill. Its
   calls count in the chat's AI cost ("Skill picks").
 
+## Keeping model calls small
+
+Every model call sends the whole conversation again, so most of what a chat costs is its context, read from the
+provider's prompt cache or written to it again:
+
+- **Context budget.** A conversation is summarized once it passes `CONTEXT_BUDGET` (160K tokens, `shared/models.ts`),
+  whatever the model's window; the summary starts in the background 32K before that. With 1M-token windows, long
+  page builds otherwise reached 400-740K tokens a call. The context meter fills up to that point.
+- **Warm cache.** Claude keeps a prompt cache for 5 minutes after its last use; a later call writes the whole
+  conversation again. `worker/cache-warmer.ts` sends a chat's last large Claude request again with `max_tokens: 0`
+  every 4.5 minutes, until 15 minutes after its last call, which keeps the cache at the price of a cache read.
+- **Smaller tool results.** MCP results go to the model as compact JSON, check screenshots at 1,280 px at most,
+  `run_python`/`run_bash` output by its last 10,000 characters, and `artifact_read`/`artifact_drafts` can return
+  part of a page (`part`: a line range or a piece of text).
+
 ## System prompts
 
 You can add your own instructions to the agent's built-in system prompt, which they never replace:
@@ -387,6 +413,32 @@ You can add your own instructions to the agent's built-in system prompt, which t
 - The agent's system prompt stays on the server: the chat's socket sends its `pi.system` entries without their
   sections and tools, so a member's browser never gets the owner's prompts, file list or MCP tools. That is hygiene,
   not a boundary: the agent acts as the owner and may tell anyone in the chat what it was told.
+
+## Export and import
+
+Everything you have can leave as one zip and come back, on the same deployment or another (account menu, **Export
+data** and **Import data**). The browser builds the zip a piece at a time and reads one back the same way
+(`src/data/`, routes in `worker/data-routes.ts`, format in `shared/data-export.ts`), so no request carries more than one
+piece and the zip is not bound by what one Worker request may hold.
+
+- **In it:** your own chats (each chat object's conversation, reactions and settings, `worker/chat-dump.ts`, and the
+  pages its agent saved and did not publish), your artifacts with every version, your files, your skills with the files
+  of those imported as packages, your system prompt, model pick and built-in skills turned off, and what pages saved for
+  you (`pi.use("storage")`).
+- **Not in it:** your sign-ins to MCP servers (tokens, which belong to the deployment), what pages' model calls cost you,
+  the chats others shared with you (listed by name only: they are their owners'), and the people in your shared chats
+  and their invites: their ids mean nothing on another deployment, so an imported chat has only you in it. Their
+  messages stay in its conversation, under their names. Work still running in a chat (a run, a queued message) is left
+  out too, so nothing runs on import as you without being asked.
+- **Ids:** your user id differs between deployments, so an import puts yours in place of the export's wherever a chat
+  stores it. Chats keep their ids. An artifact keeps its id unless someone else's artifact has it on this deployment;
+  then it gets one derived from your id and its old one, the same on every try, and chats that name it are changed to
+  match.
+- **Never over what is here:** a chat, artifact version, file or skill you have already is skipped, and settings are set
+  only where you have none. An import that stopped part way is run again with the same zip and goes on: a chat becomes
+  yours only once all of it is in.
+- **Limits:** a plain zip (up to 4 GB and 65,535 files); one file of at most 95 MB per import request (Cloudflare takes
+  100 MB in one).
 
 ## Shared chats
 
@@ -495,7 +547,17 @@ the chat's own (pi's agent state, so a change reaches every open view of the cha
 request. Everyone in a [shared chat](#shared-chats) can change it. The latest pick is also the default for new chats
 of whoever made it (kept in their `UserDirectory`): a chat takes it when it is first opened and keeps its model from
 then on, even before its first message, until someone changes it. Before a user has picked anything, chats start on
-`MODEL` at `THINKING_LEVEL` from `cloudflare.config.ts` (Claude Opus 5.5 at high effort).
+Auto (when the deployment has a `ROUTER_MODEL`), which runs on `MODEL` at `THINKING_LEVEL` from `cloudflare.config.ts`
+(Claude Sonnet 5.5 at high effort) until it picks, and keeps that when no router answers.
+
+A provider lists its models whether or not its account can pay for a call (a key with no credits left still lists
+them), so Auto picks only models that answer: each time the providers are asked for their lists, every model in
+`AUTO_MODELS` gets a tiny call (a few tokens), and a model whose call, or any real call, fails for a reason that will
+not pass on its own (no key or credits, a quota, no access, no such model; not a rate limit or a busy server) is marked
+for every chat until the next try (`worker/model-health.ts`). Auto leaves marked models out; the picker says "not
+answering", with why in its tooltip. The tries run in the background, after the lists are kept. A stream that ends
+with an error event names the provider's own code and message, nested or not (a patch to pi-ai in `patches/`, until
+pi-ai reads OpenAI's nested errors itself).
 
 With many providers the list is long, so the picker is a searchable menu: a search box over every model (by name, id
 or provider), then the user's favorites (the star on each row) and recent picks, then each provider's models in a
@@ -524,6 +586,25 @@ the file it writes. `pnpm prices` reads them now. A live list's own price (OpenR
 a model no source prices keeps pi-ai's, and one pi-ai does not know either counts as free (so a provider keyed after the last build has its models priced from the next build), which the picker and the
 cost panel say ("price unknown"). They are list prices: Workers AI's free daily allowance, and any discount the
 account has, are not taken off. Everyone in a shared chat sees them.
+
+## Dictation
+
+The microphone under the message box tries three ways, best first (`src/chat/dictation-engine.ts`):
+
+1. **On this device**: the browser's own speech recognition with `processLocally` (Chrome 139+), once
+   `SpeechRecognition.available()` says the language pack is installed. It works offline, and the audio never leaves
+   the device. A pack that can be downloaded starts downloading on the first press, for the next time.
+2. **The browser's service**: the same API without `processLocally`. In Chrome it sends the audio to Google's service,
+   so Chromium browsers without Google's key (Brave, Arc) and blocked networks fail it with a `network` error.
+3. **The Worker**: when that API is missing (Firefox) or fails that way while online, the composer records the clip
+   (up to 2 minutes), turns it into 16 kHz mono WAV and posts it to `POST /api/dictation`, which runs
+   `DICTATION_MODEL` (Whisper large v3 turbo on Workers AI, through the `AI` binding) and returns the text when the
+   recording stops. Each person may send 12 clips a minute (`DICTATION`) and have `DICTATION_DAILY_MINUTES` (60) of
+   audio written out a day, counted in their `UserDirectory`. An empty `DICTATION_MODEL` turns it off.
+
+| Recording for the Worker | Writing it out | Done |
+| --- | --- | --- |
+| ![Recording](docs/media/dictation/recording-dark.png) | ![Writing out what you said](docs/media/dictation/transcribing-light.png) | ![The text in the message box](docs/media/dictation/done-dark.png) |
 
 ## Layout
 
@@ -583,11 +664,13 @@ The project uses Cloudflare's [`cf` CLI](https://developers.cloudflare.com/cf/);
 3. Create an AI Gateway named `pi-artifacts` and store an Anthropic key and an OpenAI key in it (Provider Keys,
    BYOK), or use unified billing. Keys for other providers (Google AI Studio, xAI, Mistral, DeepSeek, Groq, Cerebras,
    Cohere, OpenRouter, Hugging Face) add their models to the picker within the hour, or at once with its refresh
-   button; no redeploy is needed. `MODEL` in `cloudflare.config.ts`, what new chats start on, is a pi-ai gateway specifier
-   (`anthropic/claude-opus-5.5`); a Workers AI id such as `@cf/zai-org/glm-5.3-flash` needs no key. See [Models](#models).
+   button; no redeploy is needed. `MODEL` in `cloudflare.config.ts`, what new chats run on until Auto or their user picks, is a pi-ai
+   gateway specifier (`anthropic/claude-sonnet-5.5`); a Workers AI id such as `@cf/zai-org/glm-5.3-flash` needs no key. See [Models](#models).
 4. Put the app behind Cloudflare Access: create a self-hosted Access application for the Worker's hostname with a
    policy listing who may sign in, then set `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` (the application's audience tag) in
-   `cloudflare.config.ts`.
+   `cloudflare.config.ts`. That hostname is `domains` there, a custom domain on a zone in your account, with
+   workers.dev and Preview URLs off so the Worker is reachable only through Access; change it to yours, or drop it and
+   set `workersDev: true` to serve on workers.dev.
 5. Generate the file-encryption master key (`openssl rand -base64 32`, at least 32 bytes) and keep a copy somewhere
    safe: losing it makes every user's files unreadable, and changing it later needs a migration (see
    [How file encryption works](#how-file-encryption-works)). Pass it as a secret:

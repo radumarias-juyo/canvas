@@ -300,9 +300,84 @@ describe("step run", () => {
     expect(tookTogether([result(1_000, 1_000), result(1_500, 1_000), result(4_000, 1_000), result(undefined, 200)])).toBe(2_700);
   });
 
-  it("spins while a step in it runs", () => {
+  it("spins while a step in it runs, saying in red what failed so far", () => {
     const html = render(items("ok", "open"), [{ ...slot("running"), startedAt: Date.now() - 5_000 }], true);
     expect(html).toMatch(/^<details class="step step-run active">/);
     expect(html).toContain('<span class="step-status">Running…</span><span class="step-time">5s</span>');
+    expect(html).not.toContain("step-failed");
+    const failing = render(items("bad", "open"), [{ ...slot("running"), startedAt: Date.now() - 5_000 }], true);
+    expect(failing).toContain('<span class="step-time">5s</span><span class="step-time step-failed">· 1 failed</span>');
+  });
+
+  it("says what failed when it stopped", () => {
+    // "open" has no result and no run goes on: stopped, after "bad" failed and "ok" succeeded.
+    const html = render(items("ok", "bad", "open"));
+    expect(html).toContain('<span class="step-status">Stopped</span><span class="step-time step-failed">· 1 failed</span>');
+  });
+});
+
+describe("code review step", () => {
+  const review = {
+    findings: [
+      { severity: "fix", kind: "security", line: 12, problem: "MCP text goes into innerHTML.", fix: "Use textContent." },
+      { severity: "suggest", kind: "simplify", problem: "Two render functions do the same." },
+    ],
+    by: "@cf/openai/gpt-oss-120b",
+    cost: 0.0021,
+    ms: 8_200,
+  };
+  const checked = (details: unknown) =>
+    [
+      { id: "1", kind: "pi.assistant", model: [{ role: "assistant", content: [call("c", "artifact_check", { draft_id: "0123456789abcdef" })] }] },
+      {
+        id: "2",
+        kind: "pi.tool-result",
+        model: [
+          {
+            role: "toolResult",
+            toolCallId: "c",
+            toolName: "artifact_check",
+            content: [{ type: "text", text: "The check found 1 error" }],
+            isError: true,
+            durationMs: 9_000,
+            details,
+          },
+        ],
+      },
+    ] as never;
+  const render = (details: unknown) =>
+    renderToStaticMarkup(
+      <StepsProvider entries={checked(details)} tools={[]} busy={false}>
+        <ToolStep call={call("c", "artifact_check", { draft_id: "0123456789abcdef" }) as never} />
+      </StepsProvider>,
+    );
+  const check = { thumb: "", errors: 1, warnings: 1 };
+
+  it("shows under its check as a step of its own: what it found and what it cost", () => {
+    const html = render({ check, review });
+    expect(html).toContain('<span class="step-label">Check page</span>');
+    expect(html).toContain(
+      '<details class="step error"><summary class="step-line"><span class="step-icon">!</span><span class="step-label">Review code</span><span class="step-hint">1 to fix, 1 suggestion · $0.0021</span>',
+    );
+    expect(html).toContain('<span class="step-status">Found issues · 8.2s</span>');
+  });
+
+  it("is a line alone when it found nothing, or did not finish; a check without one has no such step", () => {
+    expect(render({ check, review: { ...review, findings: [] } })).toContain(
+      '<div class="step done static"><div class="step-line"><span class="step-icon">✓</span><span class="step-label">Review code</span><span class="step-hint">Nothing to change · $0.0021</span>',
+    );
+    expect(render({ check, review: { findings: [], cost: 0, ms: 45_000, failed: "no answer in 45 s" } })).toContain(
+      '<span class="step-label">Review code</span><span class="step-hint">no answer in 45 s</span><span class="step-status">Did not finish · 45s</span>',
+    );
+    expect(render({ check })).not.toContain("Review code");
+  });
+
+  it("counts in its run's summary after the check", () => {
+    const item = { kind: "tool", key: "c", call: call("c", "artifact_check", {}), streaming: false } as StepItem;
+    const results = stepResults(checked({ check, review })).results;
+    expect(runSummary([item], results)).toBe("Checked the page, reviewed the code");
+    expect(runSummary([item])).toBe("Checked the page");
+    const failed = stepResults(checked({ check, review: { findings: [], cost: 0, ms: 45_000, failed: "no answer in 45 s" } })).results;
+    expect(runSummary([item], failed)).toBe("Checked the page");
   });
 });

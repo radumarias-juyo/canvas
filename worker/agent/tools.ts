@@ -11,19 +11,24 @@ import {
   WRITE_TOOL,
   type ArtifactMeta,
   type CheckedDetails,
+  type CheckedResultDetails,
+  countFindings,
   type PublishedDetails,
+  type ReviewedDetails,
   type SavedFilesDetails,
 } from "../../shared/protocol.ts";
 import { AGENT_REACTIONS, type Reaction } from "../../shared/reactions.ts";
 import { MAX_SKILL_DESCRIPTION, type SkillInput, type SkillResult } from "../../shared/skills.ts";
 import { formatBytes, listSome, plural } from "../../shared/util.ts";
 import { describeReport, type CheckReport } from "../artifacts/check.ts";
+import type { PageReview } from "../artifacts/review.ts";
 import { chatOutFolder, FILES_WRITE_TOOL, RUN_BASH_TOOL, RUN_PYTHON_TOOL, savedReport, wroteReport } from "../chat-traces.ts";
-import type { SandboxFile, SandboxRun } from "../sandbox.ts";
+import { MAX_RUN_STDERR, MAX_RUN_STDOUT, type SandboxFile, type SandboxRun } from "../sandbox.ts";
 import { literalPath, MAX_DRAFTS, type FileEntry, type UserFiles } from "../storage/index.ts";
 import { checkDraft, draftLine, draftNamed, FailedChecks, publishDraft, readPageSource, writeDraft, type PublishScope } from "./publish.ts";
 import { FileRefError, MAX_SANDBOX_BYTES, outputPaths, resolveFile, resolveRef, sandboxLayout } from "./file-refs.ts";
 import { clip, MAX_TOOL_TEXT, text } from "./output.ts";
+import { pagePart } from "./page-part.ts";
 
 /** What the tools need from the chat they run in. */
 export interface ChatScope extends PublishScope {
@@ -134,7 +139,7 @@ const SANDBOX_FILES =
   "Anything written to ./out/ (top level, not subfolders) is saved back to this chat's folder under out/ in the user's files (named with them). " +
   "Skills you name are copied into ./skills/<name>/, so their scripts run as the skill says. " +
   "Each run starts with fresh ./files, ./skills and ./out; other files under the working directory stay while the sandbox is up (10 minutes after the last run). " +
-  "Returns exit code, stdout and stderr.";
+  `Returns exit code, the last ${MAX_RUN_STDOUT.toLocaleString("en")} characters of stdout and the last ${MAX_RUN_STDERR.toLocaleString("en")} of stderr: print a summary, and write anything longer to ./out.`;
 
 /** The files `refs` name, read, keyed by where they go under ./files/ (see sandboxLayout). */
 async function sandboxInputs(files: UserFiles, refs: readonly string[], ownFolder: string, maxBytes = MAX_SANDBOX_BYTES): Promise<SandboxFile[]> {
@@ -266,11 +271,46 @@ const mcpParameter = (more = "") =>
     }),
   );
 
+const pagePartParameter = Type.Optional(
+  Type.String({
+    description:
+      'Only part of the page: "120-180" for those lines, or a piece of its text for the lines around each place it occurs. ' +
+      "What you read stays in this chat's context, which every later step sends again, so to change one part, read that part.",
+  }),
+);
+
 /** What a check's result gives the model: a line on what came of it, the report, then the screenshot. */
 function checkOutput(headline: string, report: CheckReport) {
   const content: ({ type: "text"; text: string } | { type: "image"; data: string; mimeType: string })[] = text(clip(`${headline}\n\n${describeReport(report)}`));
   if (report.screenshot) content.push({ type: "image", data: report.screenshot, mimeType: "image/jpeg" });
   return content;
+}
+
+/**
+ * What the agent is told of a check's code review, after the headline: that a small model can be wrong, so it fixes
+ * the findings that are real, and how it goes on when one to fix is not.
+ */
+function reviewNote(review: PageReview, id: string): string {
+  if (review.failed) return " The page's code review did not finish; it goes on without one.";
+  const { fixes, suggestions } = countFindings(review.findings);
+  if (!fixes && !suggestions) return " A code review of the page found nothing to change.";
+  const parts = [
+    fixes &&
+      `A code review by a small model (it can be wrong) found ${plural(fixes, "thing")} to fix, among the errors: fix the real ones. It runs once: ` +
+        `if all left are wrong and nothing else failed, check draft "${id}" again unchanged.`,
+    suggestions && `Its ${plural(suggestions, "suggestion")}, among the warnings, are optional.`,
+  ];
+  return ` ${parts.filter(Boolean).join(" ")}`;
+}
+
+function reviewedDetails(review: PageReview): ReviewedDetails {
+  return {
+    findings: review.findings,
+    ...(review.by && { by: review.by }),
+    cost: review.usage.cost.total,
+    ms: review.ms,
+    ...(review.failed && { failed: review.failed }),
+  };
 }
 
 function checkedDetails(report: CheckReport): CheckedDetails {
@@ -336,7 +376,8 @@ export function artifactExtension(scope: ChatScope): Extension {
           `Render a draft (saved with ${WRITE_TOOL}) in a headless browser before publishing it, with its live MCP calls answered as the viewer's would be (read-only tools only; ` +
           "a write tool gets a not_granted error instead of running). Returns errors (uncaught exceptions, console errors, blocked or failed loads, " +
           "calls the page got wrong, failed tests, a screenshot a vision model is sure looks blank or shows an error), warnings, how the live calls went, " +
-          "the visible text and a screenshot. Nothing is published, " +
+          "the visible text and a screenshot. On a page's first check, a small model also reviews its code (bugs, security, performance, simpler code): " +
+          "what to fix is among the errors, suggestions among the warnings; a draft edited from a reviewed one is not reviewed again. Nothing is published, " +
           `so fixing and checking again uses up no versions. Fix what it finds with ${WRITE_TOOL}, draft_id and edits, then check the new draft. ` +
           "Pass `tests`: a few short checks of what the page must show once its data arrived.",
         parameters: Type.Object({
@@ -358,7 +399,12 @@ export function artifactExtension(scope: ChatScope): Extension {
         }),
         execute: async (args, _api, context) => {
           scope.failedChecks.allow();
-          const { draft, report, unchecked, usage, lookStopped } = await checkDraft(scope, args.draft_id, { tests: args.tests, viewport: args.viewport }, context.abortSignal);
+          const { draft, report, unchecked, usage, lookStopped, review } = await checkDraft(
+            scope,
+            args.draft_id,
+            { tests: args.tests, viewport: args.viewport },
+            context.abortSignal,
+          );
           const { id } = draft;
           const failed = report ? report.errors.length > 0 : undefined;
           // A check that could not run counts too, unless such a page is published anyway (local development): a browser
@@ -378,7 +424,8 @@ export function artifactExtension(scope: ChatScope): Extension {
           const headline = failed
             ? `The check found ${plural(report.errors.length, "error")} in draft "${id}". ${fix} Nothing was published.${stop}`
             : `${passedLine(report)} To publish this page, call ${PUBLISH_TOOL} with draft_id "${id}".`;
-          return { output: checkOutput(headline, report), details: { check: checkedDetails(report) }, isError: failed, usage };
+          const details: CheckedResultDetails = { check: checkedDetails(report), ...(review && { review: reviewedDetails(review) }) };
+          return { output: checkOutput(`${headline}${review ? reviewNote(review, id) : ""}`, report), details, isError: failed, usage };
         },
       }),
       defineTool({
@@ -415,7 +462,7 @@ export function artifactExtension(scope: ChatScope): Extension {
           `List this chat's drafts, newest first: pages you wrote that are not published yet, with how their checks went (the newest ${MAX_DRAFTS} are kept; ` +
           "a published page's draft goes). Pass draft_id to get one back, its html and mcp, to carry on from it: after a fix went wrong, " +
           "when the user asks for an earlier attempt, or when you no longer have the page you were working on.",
-        parameters: Type.Object({ draft_id: Type.Optional(Type.String()) }),
+        parameters: Type.Object({ draft_id: Type.Optional(Type.String()), part: pagePartParameter }),
         replay: "safe",
         execute: async (args) => {
           const drafts = await scope.drafts();
@@ -426,13 +473,13 @@ export function artifactExtension(scope: ChatScope): Extension {
           }
           const draft = await draftNamed(drafts, args.draft_id);
           const declared = JSON.stringify(draft.manifest.mcp?.servers ?? []);
-          return { output: text(`Draft ${draftLine(draft)}, mcp ${declared}:\n\n${draft.html}`) };
+          return { output: text(`Draft ${draftLine(draft)}, mcp ${declared}:\n\n${pagePart(draft.html, args.part)}`) };
         },
       }),
       defineTool({
         name: "artifact_read",
         description: "Read the HTML of an artifact published in this chat, to revise it, or of one the user named with @ from another of their chats, to build on it.",
-        parameters: Type.Object({ artifact_id: Type.String(), version: Type.Optional(Type.Number()) }),
+        parameters: Type.Object({ artifact_id: Type.String(), version: Type.Optional(Type.Number()), part: pagePartParameter }),
         replay: "safe",
         execute: async (args) => {
           const meta = await ownArtifact(scope, args.artifact_id);
@@ -440,7 +487,7 @@ export function artifactExtension(scope: ChatScope): Extension {
           const html = await readPageSource(scope, meta.id, version);
           if (html === null) throw new Error(`Artifact ${meta.id} has no version ${version}.`);
           const declared = JSON.stringify(manifestOf(meta, version) ?? {});
-          return { output: text(`Version ${version} of ${meta.latest}, manifest ${declared}:\n\n${html}`) };
+          return { output: text(`Version ${version} of ${meta.latest}, manifest ${declared}:\n\n${pagePart(html, args.part)}`) };
         },
       }),
       defineTool({

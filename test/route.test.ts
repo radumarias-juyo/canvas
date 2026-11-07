@@ -21,7 +21,7 @@ import {
 } from "../worker/agent/route.ts";
 import { recordSpend } from "../worker/agent/ledger.ts";
 import { baseCatalog } from "../worker/models.ts";
-import { CHAT_MESSAGE_KIND } from "../shared/protocol.ts";
+import { autoPickFailed, CHAT_MESSAGE_KIND } from "../shared/protocol.ts";
 
 const models = baseCatalog().models;
 const WANTED = [
@@ -243,12 +243,19 @@ describe("routing", () => {
       expect(hung.state.stopped).toBe(true);
     });
 
-    it("has the next one asked at once when one fails", async () => {
+    it("has the next one asked at once when one fails, saying which failed before it", async () => {
       const failing: Router = { id: "failing", ask: () => Promise.reject(new Error("no credits")) };
       const next = timed("next", 10);
       const quick = route([failing, next.router], request());
       await vi.advanceTimersByTimeAsync(10);
-      expect((await quick).router.model).toBe("next");
+      const routed = await quick;
+      expect(routed.router.model).toBe("next");
+      expect(routed.missed).toBe("failing: no credits");
+      // A slow router outrun by the next one did not fail.
+      const slow = timed("slow", 1_800);
+      const won = route([slow.router, timed("fast", 100).router], request());
+      await vi.advanceTimersByTimeAsync(1_600);
+      expect((await won).missed).toBeUndefined();
     });
   });
 
@@ -284,7 +291,7 @@ describe("the Decisions router", () => {
     const { options, sent } = gateway(() => Response.json(answer("anthropic/claude-haiku-5.5")), "team");
     const routed = await route([decisionsRouter(options, luna)], { ...request(), current: "openai/gpt-4o" });
     expect(routed.pick).toEqual({ model: "anthropic/claude-haiku-5.5", thinkingLevel: "low" });
-    expect(routed.router).toEqual({ model: "openai/gpt-6-luna", cost: 0.0002, input: 2_000, output: 0 });
+    expect(routed.router).toEqual({ model: "openai/gpt-6-luna", cost: 0.0002, input: 2_000, output: 0, ms: expect.any(Number) });
     expect(sent[0].url).toBe("https://workers-binding.ai/ai-gateway/gateways/gw/openai/v1/decisions");
     expect(sent[0].init?.headers).toMatchObject({ "cf-aig-byok-alias": "team", "cf-aig-collect-log": "false" });
     // The gateway's stored key answers, not one of the request's.
@@ -354,7 +361,7 @@ describe("a System One classifier on Workers AI as a router", () => {
     }));
     const routed = await route([workersAIClassifierRouter(ai, jev)], request());
     expect(routed.pick).toEqual({ model: "anthropic/claude-haiku-5.5", thinkingLevel: "low" });
-    expect(routed.router).toEqual({ model: "cloudflare-workers-ai/typesafe/jev", cost: expect.closeTo(0.000042, 12), input: 1_000, output: 0 });
+    expect(routed.router).toEqual({ model: "cloudflare-workers-ai/typesafe/jev", cost: expect.closeTo(0.000042, 12), input: 1_000, output: 0, ms: expect.any(Number) });
     expect(runs[0].model).toBe("typesafe/jev");
     const questions = runs[0].input.questions as Record<string, { type: string; criteria: Record<string, string> }>;
     expect(Object.keys(questions)).toEqual(["model", "effort"]);
@@ -401,5 +408,22 @@ describe("the router's spend", () => {
     expect(Object.keys(ledger.tools)).toEqual(["auto:cerebras/gpt-oss-120b"]);
     expect(ledger.tools["auto:cerebras/gpt-oss-120b"]).toMatchObject({ input: 2_000, output: 40, totalTokens: 2_040 });
     expect(ledger.tools["auto:cerebras/gpt-oss-120b"].cost.total).toBeCloseTo(0.003);
+  });
+});
+
+describe("a failed Auto pick", () => {
+  const router = { model: "first", cost: 0, input: 0, output: 0 };
+  const pick = { model: "openai/gpt-4o", thinkingLevel: "low" as const, ms: 10 };
+  it("is one no router could pick for, or one a fallback picked, not one kept for a running reply", () => {
+    expect(autoPickFailed({ ...pick, router })).toBe(false);
+    expect(autoPickFailed({ ...pick, router, missed: "jev: 402 Insufficient balance" })).toBe(true);
+    expect(autoPickFailed({ ...pick, failed: "no router could pick: jev: 402" })).toBe(true);
+    expect(autoPickFailed(pick)).toBe(true);
+    expect(autoPickFailed({ ...pick, failed: "a reply was running", running: true })).toBe(false);
+    // Kept for a reply that started while a fallback router picked: the router that failed still shows.
+    expect(autoPickFailed({ ...pick, failed: "a reply was running", running: true, missed: "jev: 402" })).toBe(true);
+    // Sent before picks said so with `running`.
+    expect(autoPickFailed({ ...pick, failed: "a reply was still running when it was sent, so the router was not asked" })).toBe(false);
+    expect(autoPickFailed({ ...pick, failed: "a reply started while the router picked, so the message went in on the model it runs on" })).toBe(false);
   });
 });

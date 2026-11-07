@@ -10,13 +10,16 @@ import {
   providerLabel,
   type ModelCatalog,
   type ModelChoice,
+  type AutoCandidate,
   type ModelInfo,
   type ModelSetting,
   type ProviderId,
 } from "../shared/models.ts";
 import { errorMessage } from "../shared/util.ts";
+import type { CacheWarmer } from "./cache-warmer.ts";
 import { discoverModels, GATEWAY_PROVIDERS, ROUTED_APIS, SNAPSHOT, type Discovery, type GatewayFetcher, type GatewayOptions, type GatewayProviderId, type ListedModel } from "./gateway-models.ts";
-import type { GeminiCompat } from "./gemini.ts";
+import { GeminiCompat } from "./gemini.ts";
+import { failureOf, tryModels, type ModelFailures } from "./model-health.ts";
 import prices from "./prices.json";
 import { tapStream } from "./streams.ts";
 import type { ModelCache } from "./storage/model-cache.ts";
@@ -260,8 +263,10 @@ export class Catalog {
         if (!entries.has(entry.info.id)) entries.set(entry.info.id, entry);
       }
     }
+    const failing = discovery?.failing ?? {};
     for (const entry of [...entries.values()].sort(byPickerOrder)) {
-      this.#entries.set(entry.info.id, entry);
+      const failure = Object.hasOwn(failing, entry.info.id) ? failing[entry.info.id] : undefined;
+      this.#entries.set(entry.info.id, failure ? { ...entry, info: { ...entry.info, failing: failure.error } } : entry);
       const { provider } = entry.model;
       if (!Object.hasOwn(GATEWAY_PROVIDERS, provider)) continue;
       const own = this.#listed.get(provider as GatewayProviderId);
@@ -331,6 +336,14 @@ export function checkSetting(catalog: Catalog, input: { model?: unknown; thinkin
 }
 
 /**
+ * What a new chat starts on: its user's last pick (`saved`), else Auto when the deployment names a router
+ * (`ROUTER_MODEL`, a comma-separated list, read as routersFrom reads it), else null, the deployment's default.
+ */
+export function startingSetting(saved: ModelSetting | null, routers: string): ModelSetting | null {
+  return saved ?? (routers.split(",").some((id) => id.trim()) ? { model: AUTO_MODEL } : null);
+}
+
+/**
  * The deployment's default (`MODEL` at `THINKING_LEVEL`), checked like a pick when AI Gateway's catalog or Workers AI
  * has the model, so a level the model rejects (Claude 5.5 takes no "off") moves to one it takes. Any other model is
  * used as configured, at medium when `THINKING_LEVEL` is not one of pi's levels.
@@ -366,15 +379,40 @@ export interface CatalogSource extends GatewayOptions {
   cache: ModelCache;
   /** Keeps a background refresh alive after the response (the Worker's waitUntil). */
   waitUntil?: (promise: Promise<unknown>) => void;
+  /** Tries the models that must answer (Auto's) after each discovery: those that cannot be called, with why. */
+  tryModels?: (catalog: Catalog) => Promise<ModelFailures>;
+}
+
+/** What a Worker or chat object reaches AI Gateway with: the AI binding, the gateway's id, and the key alias. */
+interface GatewayEnv {
+  AI: NonNullable<Parameters<typeof createAI>[0]["binding"]>;
+  AI_GATEWAY_ID: string;
+  AI_BYOK_ALIAS?: string;
+}
+
+/** agents/models/pi-ai over the deployment's AI Gateway, with Gemini's answers read by `gemini`. */
+export function gatewayAI(env: GatewayEnv, gemini: GeminiCompat, warmer?: CacheWarmer) {
+  const binding = gemini.binding(env.AI);
+  return createAI({ binding: warmer ? warmer.binding(binding) : binding, gateway: env.AI_GATEWAY_ID, byokAlias: env.AI_BYOK_ALIAS || undefined });
 }
 
 /** Where a Worker or chat object finds the catalog, from its environment. */
-export function catalogSource(
-  env: { AI: unknown; AI_GATEWAY_ID: string; AI_BYOK_ALIAS?: string },
-  cache: ModelCache,
-  waitUntil?: (promise: Promise<unknown>) => void,
-): CatalogSource {
-  return { cache, ai: env.AI as GatewayFetcher, gateway: env.AI_GATEWAY_ID, byokAlias: env.AI_BYOK_ALIAS || undefined, waitUntil };
+export function catalogSource(env: GatewayEnv & { AUTO_MODELS?: unknown }, cache: ModelCache, waitUntil?: (promise: Promise<unknown>) => void): CatalogSource {
+  const auto = (env.AUTO_MODELS as AutoCandidate[] | undefined)?.map(({ id }) => id) ?? [];
+  return {
+    cache,
+    ai: env.AI as unknown as GatewayFetcher,
+    gateway: env.AI_GATEWAY_ID,
+    byokAlias: env.AI_BYOK_ALIAS || undefined,
+    waitUntil,
+    ...(auto.length && {
+      tryModels: (catalog: Catalog) => {
+        const gemini = new GeminiCompat();
+        const targets = auto.flatMap((id) => catalog.model(id) ?? []);
+        return tryModels(piModels(gatewayAI(env, gemini).provider, gemini, () => catalog), targets);
+      },
+    }),
+  };
 }
 
 /** The isolate's catalog, and when it was read. */
@@ -385,10 +423,17 @@ export function currentCatalog(): Catalog {
   return held?.catalog ?? baseCatalog();
 }
 
+/** A discovery's marks, to compare: a mark made or cleared since it was held makes it another one (not by time: isolates' clocks differ). */
+function marksOf(discovery: Discovery | null | undefined): string {
+  return Object.keys(discovery?.failing ?? {})
+    .sort()
+    .join("\n");
+}
+
 /** Hold a discovery, building its catalog only when it is not the one already held. */
 function hold(discovery: Discovery | null): Catalog {
   const readAt = Date.now();
-  if (held && held.discovery?.checkedAt === discovery?.checkedAt) {
+  if (held && held.discovery?.checkedAt === discovery?.checkedAt && marksOf(held.discovery) === marksOf(discovery)) {
     held.readAt = readAt;
     return held.catalog;
   }
@@ -420,12 +465,49 @@ function readCached(cache: ModelCache): Promise<Discovery | null> {
  */
 function rediscover(source: CatalogSource, previous: Discovery | null | undefined): Promise<Catalog> {
   return (discovering ??= (async () => {
-    const discovery = await discoverModels({ ai: source.ai, gateway: source.gateway, byokAlias: source.byokAlias, previous: previous ?? held?.discovery });
+    const before = previous ?? held?.discovery;
+    // The marks stand until the models are tried again, after the lists are kept: no one waits on the tries. With no
+    // models to try, they end here, as markFailing says.
+    const listed = await discoverModels({ ai: source.ai, gateway: source.gateway, byokAlias: source.byokAlias, previous: before });
+    const discovery = { ...listed, failing: source.tryModels ? before?.failing : undefined };
     await source.cache.write(discovery).catch((error: unknown) => console.error("models: could not keep the discovery:", errorMessage(error)));
-    return hold(discovery);
+    const catalog = hold(discovery);
+    if (!source.tryModels) return catalog;
+    const trying = retry(source, discovery, catalog);
+    // In the background where the Worker can keep it alive; else (tests) waited on.
+    if (!source.waitUntil) return await trying;
+    source.waitUntil(trying);
+    return catalog;
   })().finally(() => {
     discovering = undefined;
   }));
+}
+
+/**
+ * Try the models that must answer, on `catalog` (that of `discovery`), and keep what they say for every isolate: afresh,
+ * so a model that answers again loses its mark. The catalog with the new marks; never throws: a try that fails keeps the
+ * marks as they were.
+ */
+async function retry(source: CatalogSource, discovery: Discovery, catalog: Catalog): Promise<Catalog> {
+  try {
+    const failing = await source.tryModels!(catalog);
+    for (const [id, failure] of Object.entries(failing)) console.error(`models: ${id} cannot be called:`, failure.error);
+    const tried = { ...discovery, failing };
+    await source.cache.write(tried);
+    return hold(tried);
+  } catch (error) {
+    console.error("models: could not try the Auto models:", errorMessage(error));
+    return catalog;
+  }
+}
+
+/** The models a comma-separated list of the picker's ids names (PAGE_AI_MODEL, REVIEW_MODEL), in order: those `catalog` has. */
+export function modelsNamed(list: string, catalog: Catalog): Model<Api>[] {
+  return list
+    .split(",")
+    .map((id) => id.trim())
+    .filter(Boolean)
+    .flatMap((id) => catalog.model(id) ?? []);
 }
 
 /**
@@ -453,6 +535,28 @@ export async function loadCatalog(source: CatalogSource, { refresh = false } = {
   return catalog;
 }
 
+/**
+ * Mark a model that failed a call for a reason that will not pass on its own (worker/model-health.ts cannotCall), for
+ * every isolate, until the providers are next asked: Auto leaves it out meanwhile. Not marked when there is no
+ * discovery to keep the mark in (nothing was asked yet). Never throws: a mark that cannot be kept is logged.
+ */
+export async function markFailing(source: CatalogSource, id: string, error: string): Promise<void> {
+  try {
+    console.error(`models: ${id} cannot be called:`, error);
+    // Marked already, here: every call to a model with no credits fails, and one mark is enough.
+    if (held?.discovery?.failing?.[id]) return;
+    const discovery = (await readCached(source.cache)) ?? held?.discovery;
+    if (!discovery) return;
+    // Marked already, by another isolate: held here too, so this one's Auto leaves it out now.
+    if (discovery.failing?.[id]) return void hold(discovery);
+    const marked: Discovery = { ...discovery, failing: { ...discovery.failing, [id]: failureOf(error) } };
+    await source.cache.write(marked);
+    hold(marked);
+  } catch (caught) {
+    console.error("models: could not mark a failing model:", errorMessage(caught));
+  }
+}
+
 /** Forget what this isolate holds (tests). */
 export function forgetCatalog(): void {
   held = undefined;
@@ -463,9 +567,9 @@ export function forgetCatalog(): void {
  * Gemini's tool calls signed: AI Gateway's catalog and Workers AI's through `provider`, and the models the providers list
  * (as this isolate's catalog has them now) through one pi provider each.
  */
-export function piModels(provider: Provider, gemini: GeminiCompat) {
+export function piModels(provider: Provider, gemini: GeminiCompat, catalog: () => Catalog = currentCatalog) {
   const models = createModels();
   models.setProvider(withCurrentPrices(provider));
-  for (const listed of listedProviders(provider, currentCatalog)) models.setProvider(listed);
+  for (const listed of listedProviders(provider, catalog)) models.setProvider(listed);
   return gemini.models(withEffortRecorded(models));
 }

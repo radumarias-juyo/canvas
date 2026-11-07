@@ -219,6 +219,38 @@ export type CheckedDetails = {
   warnings: number;
 };
 
+/** What a code review of a page found (worker/artifacts/review.ts): "fix" stops the page until it is fixed, "suggest" does not. */
+export type ReviewFindingKind = "bug" | "security" | "performance" | "simplify";
+export type ReviewFinding = {
+  severity: "fix" | "suggest";
+  kind: ReviewFindingKind;
+  /** The page's line it is about, when the reviewer said. */
+  line?: number;
+  problem: string;
+  fix?: string;
+};
+
+/** How many of `findings` are to fix, and how many are suggestions. */
+export function countFindings(findings: readonly ReviewFinding[]): { fixes: number; suggestions: number } {
+  const fixes = findings.filter((finding) => finding.severity === "fix").length;
+  return { fixes, suggestions: findings.length - fixes };
+}
+
+/** A check's code review as its result shows it in the chat: a step of its own under the check. */
+export type ReviewedDetails = {
+  findings: ReviewFinding[];
+  /** The model that answered, by its id. */
+  by?: string;
+  /** In dollars, at list prices; counted in the chat's cost under REVIEW_LEDGER_PREFIX. */
+  cost: number;
+  ms: number;
+  /** Set when the review did not finish: why. */
+  failed?: string;
+};
+
+/** A check's result details: what the chat shows of the check, and of the code review that ran beside it. */
+export type CheckedResultDetails = { check: CheckedDetails; review?: ReviewedDetails };
+
 /** The tool that saves a page the agent writes, or its edits to one, as a draft for the check and the publish to take by id. */
 export const WRITE_TOOL = "artifact_write";
 
@@ -396,13 +428,30 @@ export type AutoPick = {
   /** The router's reason, a few words. */
   reason?: string;
   router?: RouterSpend;
+  /**
+   * Routers that failed before one picked (ahead of it in the order, or asked beside it), each with its error, cut short:
+   * also when the chat then kept its model (a reply started meanwhile, or the pick was not in the picker).
+   */
+  missed?: string;
   /** With no router: why the chat kept its model, as the tooltip shows it (a running reply, or each router's error, cut short). */
   failed?: string;
+  /** With no router: it kept its model because a reply was running, which is no failure. */
+  running?: true;
   ms: number;
 };
 
-/** A router call: the router's picker id, and what the call cost, in dollars and tokens. */
-export type RouterSpend = { model: string; cost: number; input: number; output: number };
+/** What `failed` said of a running reply before picks had `running`: messages sent then keep it. */
+const LEGACY_RUNNING = /^a reply (was still running when it was sent|started while the router picked)/;
+
+/** Whether a call behind Auto's pick failed: a router failed before one picked, or no router could pick (not for a running reply). */
+export function autoPickFailed(pick: AutoPick): boolean {
+  if (pick.missed) return true;
+  if (pick.router) return false;
+  return !pick.running && !LEGACY_RUNNING.test(pick.failed ?? "");
+}
+
+/** A router call: the router's picker id, what the call cost, in dollars and tokens, and how long the call alone took (`ms`, absent on older picks). */
+export type RouterSpend = { model: string; cost: number; input: number; output: number; ms?: number };
 
 /** A message a reply quotes: its transcript entry, who wrote it (the agent, or a person) and the start of its text. */
 export type ReplyQuote = { id: number; name: string; text: string } & ({ agent: true } | { uid: string });
