@@ -14,11 +14,13 @@ export const NOT_YOUR_AGENT = "Only the agent's owner can open its window.";
 
 /**
  * Where `uid`'s window on agent `agentId` of chat `chatId` (whose owner is `chatOwner`) is read: the chat's object for
- * the owner (their agents run there; it refuses one of a member's), and the member's own object for anyone else, where
- * their agent's seat is. Named after `uid` from the verified token, so nobody reaches another person's seat.
+ * the owner (their agents run there; it refuses one of a member's), and for anyone else their own object of that agent's
+ * seat in this room (seatChatId: one per agent and room), never another room's. Named after `uid` from the verified
+ * token, so nobody reaches another person's seat.
  */
-export function windowObject(chatOwner: string, uid: string, chatId: string, agentId: string): { room: true } | { seat: string } {
-  return chatOwner === uid ? { room: true } : { seat: chatAgentName(uid, seatChatId(agentId)) };
+export async function windowObject(chatOwner: string, uid: string, chatId: string, agentId: string): Promise<{ room: true } | { seat: string }> {
+  if (chatOwner === uid) return { room: true };
+  return { seat: chatAgentName(uid, await seatChatId(agentId, { ownerUid: chatOwner, chatId })) };
 }
 
 /** The roster entry of `uid`'s own agent that runs in the chat's object; null for any other (a member's seat among them). */

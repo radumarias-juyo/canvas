@@ -7,7 +7,7 @@ import type { McpToolInfo } from "../worker/agent/mcp.ts";
 import { AgentTurns, operationId, type Caller, type TurnHost, type TurnOutcome, type TurnResult } from "../worker/agents/controller.ts";
 import { ChatRoster, newestShown, type AgentTurn, type PostedPage, type RosterEntry, type RunningTurn } from "../worker/agents/roster.ts";
 import type { RoomLink, RoomRef, SeatBatch, SeatLink, SeatResult, SeatTurn } from "../worker/agents/seats/link.ts";
-import { memberAgentName } from "../worker/agents/seats/names.ts";
+import { memberAgentName, seatChatId } from "../worker/agents/seats/names.ts";
 import { addRefusal, mayRemove, mayShare, seatedEntry, type ChatRules } from "../worker/agents/seats/rules.ts";
 import { AgentSeats, type SeatHost } from "../worker/agents/seats/seat.ts";
 import { allowedTools, askLine, askOf, messageAskKey, sharedServer, turnSources, UNKNOWN_SOURCE } from "../worker/agents/turns.ts";
@@ -1921,9 +1921,20 @@ describe("An agent's window, for its owner alone", () => {
     const mine = chat.add(RADU, "planner");
     const hers = chat.add(ANA, "helper");
     // Where each person's window is read: the chat's owner in the chat's object, anyone else in their own, by their uid.
-    expect(windowObject(RADU.uid, RADU.uid, ROOM.chatId, hers.agentId)).toEqual({ room: true });
-    expect(windowObject(RADU.uid, ANA.uid, ROOM.chatId, hers.agentId)).toEqual({ seat: `${ANA.uid}:${seatChatId(hers.agentId)}` });
-    expect(windowObject(RADU.uid, MIA.uid, ROOM.chatId, hers.agentId)).toEqual({ seat: `${MIA.uid}:${seatChatId(hers.agentId)}` });
+    expect(await windowObject(RADU.uid, RADU.uid, ROOM.chatId, hers.agentId)).toEqual({ room: true });
+    const anasSeat = await seatChatId(hers.agentId, ROOM);
+    expect(await windowObject(RADU.uid, ANA.uid, ROOM.chatId, hers.agentId)).toEqual({ seat: `${ANA.uid}:${anasSeat}` });
+    expect(await windowObject(RADU.uid, MIA.uid, ROOM.chatId, hers.agentId)).toEqual({ seat: `${MIA.uid}:${anasSeat}` });
+    // That room's seat object: not the one the same agent has in another room, of this owner's or of another's.
+    const elsewhere = await Promise.all([
+      windowObject(RADU.uid, ANA.uid, "room2", hers.agentId),
+      windowObject(MIA.uid, ANA.uid, ROOM.chatId, hers.agentId),
+    ]);
+    expect(elsewhere.map((where) => ("seat" in where ? where.seat : null))).toEqual([
+      `${ANA.uid}:${await seatChatId(hers.agentId, { ownerUid: RADU.uid, chatId: "room2" })}`,
+      `${ANA.uid}:${await seatChatId(hers.agentId, { ownerUid: MIA.uid, chatId: ROOM.chatId })}`,
+    ]);
+    expect(new Set([anasSeat, ...elsewhere.map((where) => ("seat" in where ? where.seat.split(":")[1] : ""))]).size).toBe(3);
     // The chat's object opens only its owner's own agents: not one of theirs for a member, nor a member's seat for them.
     expect(ownWindowEntry(chat.roster, mine.agentId, RADU.uid)).toMatchObject({ agentId: mine.agentId });
     expect(ownWindowEntry(chat.roster, mine.agentId, ANA.uid)).toBeNull();

@@ -220,7 +220,7 @@ export async function chatRoute(
     if (method !== "GET" || !item) return null;
     // The agent's owner only: theirs in this chat's object, a member's seat in their own object, named after them.
     const session = url.searchParams.get("session") ?? undefined;
-    const where = windowObject(ownerUid, person.uid, chatId, item);
+    const where = await windowObject(ownerUid, person.uid, chatId, item);
     const result =
       "room" in where
         ? await chat.agentWindow(person, item, session)
