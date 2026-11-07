@@ -296,7 +296,13 @@ export class ChatMemory {
       recall: async (conversation, query, offset) => {
         const who = this.#who(conversation);
         const { ids } = await this.#section(who);
-        const found = await this.#directory(who.agent).recallNotes(this.#reader(who.agent), query, ids, offset);
+        const directory = this.#directory(who.agent);
+        const reader = this.#reader(who.agent);
+        let found = await directory.recallNotes(reader, query, ids, offset);
+        // Someone joined meanwhile: a fresh start may have read the context already, and would never leave this out.
+        // Read again for those who read the chat now (they read no more than the first reader, so once is enough).
+        const now = this.#reader(who.agent);
+        if (readsOwnNotes(reader) && !readsOwnNotes(now)) found = await directory.recallNotes(now, query, ids, offset);
         // Now in the transcript too: left out once the chat has more readers (freshPrompt).
         if (found.notes.some((note) => note.scope === "user")) this.#markOwn(who.key);
         return found;

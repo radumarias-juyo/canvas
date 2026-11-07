@@ -502,7 +502,7 @@ describe("ChatMemory", () => {
    * turn answers the owner, and the conversations whose prompt was started afresh.
    */
   function chat(chatId: string, kind: ChatKind, alone: boolean, owner = directory(), kv = new Map<string, unknown>()) {
-    const state: { kind: ChatKind; alone: boolean; piByOwner: boolean; done?: Promise<boolean> } = {
+    const state: { kind: ChatKind; alone: boolean; piByOwner: boolean; done?: Promise<boolean>; recalling?: () => void } = {
       kind,
       alone,
       piByOwner: true,
@@ -527,7 +527,12 @@ describe("ChatMemory", () => {
           used = [...used, ...ids];
           owner.memory.use(ids);
         },
-        recallNotes: (reader, query, shown, offset) => owner.memory.recall(reader, query, shown, offset),
+        recallNotes: async (reader, query, shown, offset) => {
+          const found = owner.memory.recall(reader, query, shown, offset);
+          // What happens in the chat while the owner's directory answers.
+          state.recalling?.();
+          return found;
+        },
         learnNote: (writer, input) => owner.memory.learn(writer, input),
         forgetNoteFor: (writer, id) => owner.memory.forgetFor(writer, id),
       }),
@@ -737,6 +742,23 @@ describe("ChatMemory", () => {
     expect(notShown).toBeGreaterThan(0);
     const found = await host.recall("root", "");
     expect(found.notes.slice(0, notShown).every((note) => !section.includes(note.text))).toBe(true);
+  });
+
+  it("recalls again for the chat's readers when someone joins while a recall is answered", async () => {
+    const owner = directory();
+    for (let n = 0; n < 30; n++) saved(owner.memory.add({ text: `Salary note ${n} ${"x".repeat(150)}.`, scope: "user" }));
+    const { host, state } = chat(PRIVATE, "private", true, owner);
+    let joined = 0;
+    state.recalling = () => {
+      if (joined++) return;
+      state.alone = false;
+      state.kind = "group";
+    };
+    expect((await host.recall("root", "salary")).notes).toEqual([]);
+    // Alone all the while: as it was found.
+    const { host: alone, state: still } = chat(PRIVATE, "private", true, owner);
+    still.recalling = () => undefined;
+    expect((await alone.recall("root", "salary")).notes.length).toBeGreaterThan(0);
   });
 
   it("pages through the notes that match, saying how many more there are", async () => {
