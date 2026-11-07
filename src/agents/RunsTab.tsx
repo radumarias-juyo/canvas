@@ -256,12 +256,15 @@ function RunPage({ agent, dueAt, chat, shared, navigate }: { agent: RunsAgent; d
       )}
 
       <h4 className="run-section">How it got there</h4>
-      {shared && <p className="skills-note">Only {shared.ownerName} sees how a run got there: it reads as them, with their sign-ins.</p>}
-      <ol className="run-items">
-        {run.itemsList.map((item, index) => (
-          <RunItem key={item.item} id={scoped ? itemAnchor(index) : undefined} agentId={agent.id} dueAt={run.dueAt} item={item} scoped={scoped} />
-        ))}
-      </ol>
+      {shared ? (
+        <p className="skills-note">Only {shared.ownerName} sees how a run got there: it reads as them, with their sign-ins.</p>
+      ) : (
+        <ol className="run-items">
+          {run.itemsList.map((item, index) => (
+            <RunItem key={item.item} id={scoped ? itemAnchor(index) : undefined} agentId={agent.id} dueAt={run.dueAt} item={item} scoped={scoped} />
+          ))}
+        </ol>
+      )}
 
       {used.length > 0 && (
         <div className="run-used">
