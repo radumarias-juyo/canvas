@@ -117,11 +117,15 @@
     "worker/dictation.ts",
     "src/chat/dictation-engine.ts",
     "src/agents/glance.ts",
+    "src/agents/AgentTabs.tsx",
     "src/agents/nav.ts",
     "src/agents/runs.ts",
     "src/agents/workflow.ts",
     "src/agents/limits/rules.ts",
     "src/chat/ActionCard.tsx",
-    "src/chat/people.tsx"
+    "src/chat/people.tsx",
+    "src/SignIns.tsx",
+    "src/push.ts",
+    "src/sidebar.ts"
   ]
 }

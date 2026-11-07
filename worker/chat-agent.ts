@@ -67,7 +67,7 @@ import {
   type ModelChoice,
   type ModelSetting,
 } from "../shared/models.ts";
-import { deadline, errorMessage, formatBytes, mapLimit, memoAsync, serial, sha256Hex, singleFlight } from "../shared/util.ts";
+import { deadline, errorMessage, formatBytes, listSome, mapLimit, memoAsync, serial, sha256Hex, singleFlight } from "../shared/util.ts";
 import type { ChatSystemPrompt } from "../shared/system-prompt.ts";
 import type { SkillFileInfo } from "../shared/skill-files.ts";
 import { attachmentContent, parseAttachments, withoutImageData, type ToMarkdown } from "./agent/attachments.ts";
@@ -95,7 +95,17 @@ import { formatSkillFile } from "./skills/index.ts";
 import { ChatReactions } from "./reactions.ts";
 import { clearImported, DumpError, dumpChat, hasConversation, importedRoster, restorePart } from "./chat-dump.ts";
 import { idRemapper, type ChatDumpCursor, type ChatDumpPage, type ChatDumpPart, type ChatImportStart } from "../shared/data-export.ts";
-import { checkDraft, FailedChecks, publishDraft, writeDraft, type PublishScope, type PublishTarget, type WriteInput } from "./agent/publish.ts";
+import {
+  afterPublish,
+  checkDraft,
+  FailedChecks,
+  publishDraft,
+  writeDraft,
+  type PublishedHost,
+  type PublishScope,
+  type PublishTarget,
+  type WriteInput,
+} from "./agent/publish.ts";
 import { CheckBrowser } from "./artifacts/browser.ts";
 import { CHECK_MS, checkPage, type Bridge } from "./artifacts/check.ts";
 import { lookFrom } from "./artifacts/look.ts";
@@ -158,7 +168,7 @@ import { ChatRoster, type AgentTurn, type RosterEntry } from "./agents/roster.ts
 import { actedOf, jsonOf, reportOf, SignInNeeded, whenOf, type ActContext, type ActResult, type DeliveryRequest } from "./agents/runs/executor.ts";
 import { AgentRunner, type RunAlarm, type RunnerHost, type WatchAlarm } from "./agents/runs/runner.ts";
 import { actedMark, AgentRuns, type EndedRun, type RunRecord } from "./agents/runs/store.ts";
-import { reportContext, runInstructions, RUN_STEP_KIND, workSpend, type RunStepData } from "./agents/runs/report.ts";
+import { answeredIn, reportContext, runInstructions, RUN_STEP_KIND, workSpend, type RunStepData } from "./agents/runs/report.ts";
 import { publishedAlready, publishFindings, publishRebuilt, readOnlyDeclaration, runMark } from "./agents/runs/page.ts";
 import { compileWorkflow } from "./agents/runs/compile.ts";
 import { sourceName } from "./agents/runs/source.ts";
@@ -192,6 +202,7 @@ import {
   type BranchedFrom,
   type ChatEventData,
   type ChatKind,
+  type ChatRef,
   type ChatMemberVia,
   type ChatPage,
 } from "../shared/chat-kinds.ts";
@@ -543,7 +554,7 @@ export class ChatAgent extends DurableObject<Env> {
       artifacts: this.storage.artifacts,
       // Deriving the user's key is not free, so derive it once per object.
       files: memoAsync(() => this.storage.userFiles(this.uid)),
-      onPublished: this.#onPublished(this.chatId),
+      onPublished: (artifact, chatId) => afterPublish(this.#published, artifact, chatId),
       broughtIn: (id) => this.#broughtIn().includes(id),
       proposeSkill: (skill) => this.#directory.saveSkill(skill, "agent", false),
       proposeAgent: (input) => this.#directory.saveAgent(input, "agent", false),
@@ -2212,30 +2223,15 @@ export class ChatAgent extends DurableObject<Env> {
     this.sockets.broadcastPeople();
   }
 
-  /**
-   * What every publish does once a version is out, whoever published it (pi, an agent, a run's page step): record it
-   * as `chatId`'s, and, off the publish's path, tell the chat that discusses the page of its new version.
-   */
-  #onPublished(chatId: string): (artifact: Omit<ArtifactSummary, "chatId">) => Promise<void> {
-    return async (artifact) => {
-      // The chat it belongs to says its kind (the owner's row of it can lag): a version of an off-the-record chat reaches
-      // no follower. One that cannot be asked counts as off the record.
-      const kind =
-        chatId === this.chatId
-          ? this.kinds.kind()
-          : await exports.ChatAgent.getByName(chatAgentName(this.uid, chatId))
-              .chatKind()
-              .catch((): ChatKind => "off_record");
-      await this.#directory.recordArtifact({ ...artifact, chatId }, false, kind);
-      void this.#tellPageChat(artifact).catch((error: unknown) => console.error("page chat:", errorMessage(error)));
+  /** Where `afterPublish` records a version and finds the chat that discusses its page. */
+  get #published(): PublishedHost {
+    return {
+      chatId: this.chatId,
+      kind: () => this.kinds.kind(),
+      directory: this.#directory,
+      chat: (chatId) => exports.ChatAgent.getByName(chatAgentName(this.uid, chatId)),
+      later: (work) => void work.catch((error: unknown) => console.error("page chat:", errorMessage(error))),
     };
-  }
-
-  /** Tell the chat that discusses a page this chat just published a version of, if there is one. Only a notice. */
-  async #tellPageChat(artifact: Omit<ArtifactSummary, "chatId">): Promise<void> {
-    const chatId = await this.#directory.pageChat(artifact.id);
-    if (!chatId || chatId === this.chatId) return;
-    await exports.ChatAgent.getByName(chatAgentName(this.uid, chatId)).pageVersion({ id: artifact.id, title: artifact.title, version: artifact.latest });
   }
 
   /**
@@ -2770,7 +2766,9 @@ export class ChatAgent extends DurableObject<Env> {
       },
       turnEntries,
       // Request ids, so a reply posted again after a restart is placed once.
-      post: (reply) => this.#postAgentReply(reply, `agent-reply:${reply.agentId}:${reply.turn}`),
+      post: async (reply) => {
+        await this.#postAgentReply(reply, `agent-reply:${reply.agentId}:${reply.turn}`);
+      },
       tellPi: async (reply) => {
         if (!reply.text) return;
         await this.#writeAside(await this.#root(), askOf({ name: reply.name, kind: "agent" }, reply.text), `agent-aside:${reply.agentId}:${reply.turn}`);
@@ -2809,22 +2807,27 @@ export class ChatAgent extends DurableObject<Env> {
 
   /**
    * An agent's post in this chat's log, placed once per `requestId`, and unread in everyone's sidebar as a person's
-   * message is (`tags`: the uids it notifies). The sidebars are only a view: a failure there is logged.
+   * message is (`tags`: the uids it notifies). The sidebars are only a view: a failure there is logged. Returns when it
+   * was placed: only a message sent after that can answer it.
    */
-  async #postAgentReply(reply: ChatAgentReplyData, requestId: string, tags: readonly string[] = []): Promise<void> {
+  async #postAgentReply(reply: ChatAgentReplyData, requestId: string, tags: readonly string[] = []): Promise<number> {
     await (await this.#root()).submit({ type: "write", requestId, entry: { kind: CHAT_AGENT_KIND, data: reply } }, BACKGROUND_CONTEXT);
+    // After every message sent before it, even in the same millisecond: none of those saw it.
+    const placedAt = Math.max(Date.now(), this.#lastSentAt + 1);
     const author = { uid: `agent:${reply.agentId}`, name: reply.name };
     void this.#touchIndexes(reply.text || reply.name, author, tags, reply.text, requestId, { run: Boolean(reply.run) }).catch((error) =>
       console.error("chat index:", errorMessage(error)),
     );
-    this.#feedQuestion(reply, requestId);
+    this.#feedQuestion(reply, requestId, placedAt);
+    return placedAt;
   }
 
   /**
    * An agent's reply that ends on a question to the person who called it: in that person's feed, as one that needs
-   * them, unless the chat is off the record. A run's report is its owner's run item instead (#runEnded).
+   * them, unless the chat is off the record. A run's report is its owner's run item instead (#runEnded). Asked at
+   * `placedAt`, when it was placed, not when its turn ended: a message sent between the two never saw it.
    */
-  #feedQuestion(reply: ChatAgentReplyData, requestId: string): void {
+  #feedQuestion(reply: ChatAgentReplyData, requestId: string, placedAt: number): void {
     const asker = reply.calledBy.uid;
     if (reply.run || reply.failed || !asker || reply.calledBy.agentId || !asksUser(reply.text) || !this.isInChat(asker)) return;
     // The owner's second seat has no feed of its own: the owner's has it. Refused there when the chat is off the record.
@@ -2832,12 +2835,12 @@ export class ChatAgent extends DurableObject<Env> {
     const added = this.#index(account).addFeed({
       kind: "question",
       ref: `question:${this.chatId}:${requestId}`,
-      at: reply.endedAt,
+      at: placedAt,
       title: `@${reply.name} asks you something`,
       text: excerpt(reply.text, MAX_FEED_TEXT),
       from: agentFrom({ id: reply.agentId, name: reply.name, avatar: reply.avatar, color: reply.color }),
       open: { to: "chat", chatId: this.chatId },
-      chat: { id: this.chatId, kind: this.kinds.kind() },
+      chat: this.#chatRef(),
     });
     this.ctx.waitUntil(added.catch((error: unknown) => console.error("feed:", errorMessage(error))));
   }
@@ -3156,19 +3159,19 @@ export class ChatAgent extends DurableObject<Env> {
    * an agent of this chat's owner that is on its roster. Its session here reads the report as context, so a reply
    * here can be about it. Placed once per `requestId`.
    */
-  async postRun(reply: ChatAgentReplyData, context: string, requestId: string): Promise<ChatRefusal | null> {
+  async postRun(reply: ChatAgentReplyData, context: string, requestId: string): Promise<ChatRefusal | { sentAt: number; chat: ChatRef }> {
     if (this.#gone) return refuse(404, DELETED);
     const entry = this.roster.get(reply.agentId);
     if (reply.ownerUid !== this.uid || !entry) return refuse(403, `@${reply.name} is not in this chat.`);
-    await this.#placeRun(reply, context, requestId, entry);
-    return null;
+    return { sentAt: await this.#placeRun(reply, context, requestId, entry), chat: this.#chatRef() };
   }
 
-  /** A run's report in this chat's log, and as context in the agent's session here when it has one. */
-  async #placeRun(reply: ChatAgentReplyData, context: string, requestId: string, entry: RosterEntry | null, tags: readonly string[] = []): Promise<void> {
-    await this.#postAgentReply(reply, requestId, tags);
+  /** A run's report in this chat's log, and as context in the agent's session here when it has one; when it was placed. */
+  async #placeRun(reply: ChatAgentReplyData, context: string, requestId: string, entry: RosterEntry | null, tags: readonly string[] = []) {
+    const placedAt = await this.#postAgentReply(reply, requestId, tags);
     const session = entry && (await this.harness.conversation(entry.session));
     if (session) await this.#writeAside(session, context, `${requestId}:context`);
+    return placedAt;
   }
 
   /**
@@ -3218,8 +3221,9 @@ export class ChatAgent extends DurableObject<Env> {
       signInServers: async () => {
         const servers = oauthServerNames(this.env);
         if (!servers.length) return [];
-        const signedIn = new Set(await this.#directory.mcpSignedIn());
-        return servers.filter((server) => signedIn.has(server));
+        // By the record, not the tokens: a refused refresh clears those, and the run should wait for a new sign-in.
+        const known = new Set(await this.#directory.mcpSignInRecords());
+        return servers.filter((server) => known.has(server));
       },
       // Each sign-in refreshed now, as nobody is there to sign in (worker/mcp/sign-ins.ts).
       needsSignIn: async (servers) => {
@@ -3323,9 +3327,19 @@ export class ChatAgent extends DurableObject<Env> {
       ...(run.summary && { summary: run.summary }),
       chatId: this.chatId,
       chatKind: this.kinds.kind(),
-      ...(posted?.text && { post: posted.text, ...(posted.sentAt && { sentAt: posted.sentAt }), ...(asksUser(posted.text) && { asks: true }) }),
+      ...(posted?.text && {
+        post: posted.text,
+        ...(posted.sentAt && { sentAt: posted.sentAt }),
+        ...(posted.chat && { postedIn: posted.chat }),
+        ...(asksUser(posted.text) && { asks: true }),
+      }),
     });
     this.ctx.waitUntil(ended.catch((error: unknown) => console.error("feed:", errorMessage(error))));
+  }
+
+  /** This chat, with its kind as it is now. */
+  #chatRef(): ChatRef {
+    return { id: this.chatId, kind: this.kinds.kind() };
   }
 
   /** A run's report as a post of its agent's, carrying the run. */
@@ -3366,14 +3380,15 @@ export class ChatAgent extends DurableObject<Env> {
       if (others.length === step.to.length)
         return { kind: "notify", to: step.to.join(", "), status: "refused", detail: "at Inform, an agent notifies only its owner" };
       // Posted here, tagging the owner: their sidebar's notice, and a browser notification when they allow one.
-      const sentAt = Date.now();
-      await this.#placeRun(this.#runReply(request), context, `run-post:${agent.id}:${request.run.dueAt}:${request.key}`, this.roster.get(agent.id), [this.uid]);
+      const requestId = `run-post:${agent.id}:${request.run.dueAt}:${request.key}`;
+      const sentAt = await this.#placeRun(this.#runReply(request), context, requestId, this.roster.get(agent.id), [this.uid]);
       return {
         kind: "notify",
         to: "you",
         text: request.text,
         status: "sent",
         sentAt,
+        chat: this.#chatRef(),
         ...(others.length && { detail: `not ${others.join(", ")}: at Inform, an agent notifies only its owner` }),
       };
     }
@@ -3381,28 +3396,32 @@ export class ChatAgent extends DurableObject<Env> {
     // The owner's names ("owner", "me", "@agent") are one place: the report goes there once.
     const targets = [...new Set(step.to.map((to) => to.trim()).map((to) => (isOwner(to) ? "owner" : to)))];
     const chats = targets.every(isOwner) ? [] : (await this.#directory.listChats()).filter((chat) => !chat.sharedBy);
-    const sentAt = Date.now();
     const outcomes = await Promise.all(
-      targets.map(async (target): Promise<{ sent: string } | { refused: string }> => {
+      targets.map(async (target): Promise<{ sent: string; at: number; chat: ChatRef } | { refused: string }> => {
         const requestId = `run-post:${agent.id}:${request.run.dueAt}:${request.key}:${target}`;
         if (isOwner(target)) {
-          await this.#placeRun(this.#runReply(request), context, requestId, this.roster.get(agent.id));
-          return { sent: "its chat" };
+          const at = await this.#placeRun(this.#runReply(request), context, requestId, this.roster.get(agent.id));
+          return { sent: "its chat", at, chat: this.#chatRef() };
         }
         const chat = chats.find((one) => one.id === target) ?? chats.find((one) => one.title.toLowerCase() === target.toLowerCase());
         if (!chat) return { refused: `${target} (no such chat of yours)` };
         const answer = await exports.ChatAgent.getByName(chatAgentName(this.uid, chat.id)).postRun(this.#runReply(request), context, requestId);
-        return answer ? { refused: `${chat.title} (${answer.error})` } : { sent: chat.title };
+        if ("error" in answer) return { refused: `${chat.title} (${answer.error})` };
+        return { sent: chat.title, at: answer.sentAt, chat: answer.chat };
       }),
     );
-    const sent = outcomes.flatMap((outcome) => ("sent" in outcome ? [outcome.sent] : []));
+    // Where its owner answers it: home when it went there, else the first chat it went to; dated when it was placed
+    // there, not before, as a message sent while it was being posted never saw it.
+    const placed = outcomes.flatMap((outcome) => ("sent" in outcome ? [outcome] : []));
+    const answered = answeredIn(placed, this.chatId);
+    const sent = placed.map((outcome) => outcome.sent);
     const refused = outcomes.flatMap((outcome) => ("refused" in outcome ? [outcome.refused] : []));
     return {
       kind: "chat",
       to: [...sent, ...refused].join(", ") || step.to.join(", "),
       text: request.text,
       status: sent.length ? "sent" : "refused",
-      ...(sent.length && { sentAt }),
+      ...(answered && { sentAt: answered.at, chat: answered.chat }),
       ...(refused.length && { detail: `not posted to ${refused.join(", ")}` }),
     };
   }
@@ -3441,11 +3460,8 @@ export class ChatAgent extends DurableObject<Env> {
     const meta = await this.storage.artifacts.readMeta(step.artifactId);
     const to = meta?.title ?? `page ${step.artifactId}`;
     if (!meta || meta.ownerUid !== this.uid) return { kind: "page", to, status: "refused", detail: "page not updated: it is not one of your pages" };
-    const scope: PublishScope = {
-      ...this.scope,
-      chatId: meta.chatId,
-      onPublished: this.#onPublished(meta.chatId),
-    };
+    // Published as the page's own chat's: onPublished records it there and tells the chat that discusses it.
+    const scope: PublishScope = { ...this.scope, chatId: meta.chatId };
     const mark = runMark(request.agent.id, request.run.dueAt, request.key);
     // A run that goes on after a restart publishes once: a version with its mark is the one it sent.
     const already = publishedAlready(meta, mark);
@@ -3465,7 +3481,7 @@ export class ChatAgent extends DurableObject<Env> {
     // artifact_read takes this chat's pages and the ones brought in.
     this.#bringIn([meta.id]);
     // The page as it is, declaring only its read-only tools: a snapshot never writes as the owner (publishRebuilt).
-    const mcp = await readOnlyDeclaration(manifestOf(meta, meta.latest), async (server, name) => {
+    const { servers: mcp, dropped } = await readOnlyDeclaration(manifestOf(meta, meta.latest), async (server, name) => {
       // A listing that fails fails the step: dropping the tool would publish a version without a read tool it declared.
       const tool = await this.hub.tool(server, name);
       return !!tool && isReadOnly(tool);
@@ -3480,10 +3496,17 @@ export class ChatAgent extends DurableObject<Env> {
       `The page as it is now is the draft "${seed.id}" (read it with artifact_read, artifact_id "${meta.id}"). Change it with ${WRITE_TOOL}, ` +
         `draft_id "${seed.id}" and edits (a new page written whole is not this page's and is not published), check the new draft with ` +
         `${CHECK_TOOL} and fix what it finds. The newest draft that passes is published for you. Answer with one line on what changed.`,
+      ...(dropped.length
+        ? [
+            "A snapshot only reads: it declares no tools that change data, " +
+              `so ${listSome(dropped, 10)} ${dropped.length === 1 ? "is" : "are"} left out of it. ` +
+              "Remove or disable the buttons and forms that used them, so none of them is left to fail.",
+          ]
+        : []),
     ].join("\n\n");
     const { result, entries } = await this.#runStep(session, prompt, operationId);
     const written = entries.flatMap((entry) => writtenBy(entry) ?? []);
-    const delivery = await publishRebuilt(scope, meta, seed, written, `Snapshot, ${whenOf(agent)}`, mark);
+    const delivery = await publishRebuilt(scope, meta, seed, written, `Snapshot, ${whenOf(agent)}`, mark, dropped);
     // The seed is only the page as it was: left behind, each run's would push the owner's own drafts out of the chat's.
     await (await scope.drafts()).remove(seed.id).catch((error: unknown) => console.error("draft:", errorMessage(error)));
     return delivery.status === "failed" && result.reason ? { ...delivery, detail: `${delivery.detail} (${result.reason})` } : delivery;

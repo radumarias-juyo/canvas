@@ -6,7 +6,7 @@
 import { canonicalJson } from "../../../shared/canonical.ts";
 import type { ArtifactManifest, ArtifactMeta } from "../../../shared/protocol.ts";
 import type { RunDelivery } from "../../../shared/runs.ts";
-import { errorMessage, plural } from "../../../shared/util.ts";
+import { errorMessage, listSome, plural } from "../../../shared/util.ts";
 import { checkDraft, publishDraft, readPageSource, writeDraft, type PublishScope } from "../../agent/publish.ts";
 import { MAX_VERSION_MESSAGE } from "../../storage/artifacts.ts";
 import { passed, type Draft } from "../../storage/drafts.ts";
@@ -69,6 +69,7 @@ export async function publishRebuilt(
   written: readonly string[],
   message: string,
   mark: string,
+  dropped: readonly string[] = [],
 ): Promise<RunDelivery> {
   try {
     const drafts = await scope.drafts();
@@ -79,7 +80,8 @@ export async function publishRebuilt(
       if (!draft || draft.artifactId !== meta.id || !(passed(draft) || (draft.errors === null && scope.publishUnchecked))) continue;
       if (canonicalJson(draft.manifest.mcp ?? null) !== declared)
         return notUpdated(meta, "the rebuilt page declares other servers or tools than its read-only ones");
-      return await publishMarked(scope, meta, draft.id, message, mark);
+      const delivery = await publishMarked(scope, meta, draft.id, message, mark);
+      return delivery.status === "sent" ? { ...delivery, detail: `${delivery.detail}${withoutWrites(dropped)}` } : delivery;
     }
     return notUpdated(meta, "no draft of it passed its check");
   } catch (error) {
@@ -87,18 +89,34 @@ export async function publishRebuilt(
   }
 }
 
-/** A page's MCP declaration with only its read-only tools (`readOnly` says which): what a snapshot of it may call. */
+/**
+ * A page's MCP declaration with only its read-only tools (`readOnly` says which): what a snapshot of it may call; and
+ * the tools left out (`server.tool`), which change data, so the snapshot's controls that used them no longer work.
+ */
 export async function readOnlyDeclaration(
   manifest: ArtifactManifest | undefined,
   readOnly: (server: string, tool: string) => Promise<boolean>,
-): Promise<NonNullable<ArtifactManifest["mcp"]>["servers"]> {
-  const servers = await Promise.all(
+): Promise<{ servers: NonNullable<ArtifactManifest["mcp"]>["servers"]; dropped: string[] }> {
+  const entries = await Promise.all(
     (manifest?.mcp?.servers ?? []).map(async (entry) => {
-      const kept = await Promise.all(entry.tools.map(async (tool) => ((await readOnly(entry.server, tool)) ? tool : null)));
-      return { server: entry.server, tools: kept.filter((tool): tool is string => tool !== null) };
+      const keeps = await Promise.all(entry.tools.map((tool) => readOnly(entry.server, tool)));
+      return {
+        server: entry.server,
+        tools: entry.tools.filter((_, index) => keeps[index]),
+        dropped: entry.tools.filter((_, index) => !keeps[index]).map((tool) => `${entry.server}.${tool}`),
+      };
     }),
   );
-  return servers.filter((entry) => entry.tools.length);
+  // In the declaration's order, whichever server's listing answers first.
+  return {
+    servers: entries.filter((entry) => entry.tools.length).map(({ server, tools }) => ({ server, tools })),
+    dropped: entries.flatMap((entry) => entry.dropped),
+  };
+}
+
+/** How a delivery names the write tools a snapshot was published without. */
+function withoutWrites(dropped: readonly string[]): string {
+  return dropped.length ? ` as a snapshot without ${listSome(dropped, 5)}, which ${dropped.length === 1 ? "writes" : "write"}` : "";
 }
 
 async function publishMarked(scope: PublishScope, meta: ArtifactMeta, draftId: string, message: string, mark: string): Promise<RunDelivery> {

@@ -98,8 +98,9 @@ export interface RunHost {
    */
   act(call: { server: string; tool: string; input: StepInput }, context: ActContext): Promise<ActResult>;
   /**
-   * The servers that sign in each user (`auth: "oauth"`) its owner has signed in to: a work step's tools may come from
-   * them, so a run checks them too. One they never signed in to (or left) is no reason to wait.
+   * The servers that sign in each user (`auth: "oauth"`) its owner has a sign-in record for (signed in now, or lapsed):
+   * a work step's tools may come from them, so a run checks them too. One they never signed in to (or Disconnected) is
+   * no reason to wait.
    */
   signInServers(): Promise<readonly string[]>;
   /** Which of these servers need their owner to sign in again before a run can read them. */
@@ -721,6 +722,8 @@ export class RunExecutor {
           ? `Failed: ${(undelivered ? undelivered.detail : failed[0]?.reason) ?? "a step failed"}`
           : `Not today: ${items[0]?.reason ?? "nothing to report"}`;
     runs.update(agent.id, run.dueAt, { status, summary });
+    // It went: older runs still waiting for a sign-in would only post after it.
+    if (status !== "failed") runs.skipReplaced(agent.id, run.dueAt, run.test);
     return status;
   }
 

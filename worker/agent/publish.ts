@@ -1,4 +1,5 @@
 import type { Usage } from "@earendil-works/pi-ai";
+import type { ChatKind, ChatPage } from "../../shared/chat-kinds.ts";
 import { CHECK_TOOL, DRAFTS_TOOL, isReadOnly, manifestOf, WRITE_TOOL, type ArtifactManifest, type ArtifactMeta, type ArtifactSummary } from "../../shared/protocol.ts";
 import { collapseSkillFiles, inlinedSkillFiles, inlineSkillFiles, skillRefs, type InlinedPage, type SkillFileInfo } from "../../shared/skill-files.ts";
 import { errorMessage, formatBytes, plural } from "../../shared/util.ts";
@@ -11,13 +12,49 @@ import type { McpHub } from "../mcp/hub.ts";
 import type { ArtifactStore } from "../storage/artifacts.ts";
 import { draftId, passed, type ChatDrafts, type Draft, type DraftCheck, type DraftSummary, type SkillSets } from "../storage/drafts.ts";
 
+/** What `afterPublish` needs from the chat object that published: its chat, the owner's directory, and other chats. */
+export interface PublishedHost {
+  chatId: string;
+  /** This chat's kind, read where it lives (the owner's row of it can lag). */
+  kind(): ChatKind;
+  directory: {
+    recordArtifact(artifact: ArtifactSummary, seen: boolean, chatKind: ChatKind): unknown;
+    pageChat(artifactId: string): string | null | Promise<string | null>;
+  };
+  /** Another chat of the owner's, by id. */
+  chat(chatId: string): { chatKind(): Promise<ChatKind>; pageVersion(page: ChatPage): Promise<void> };
+  /** Work off the publish's path. */
+  later(work: Promise<void>): void;
+}
+
+/**
+ * What every publish does once a version is out, whoever published it (pi, an agent, a run's page step, which
+ * publishes as the page's own chat): record it as `chatId`'s, and, off the publish's path, tell the chat that discusses
+ * the page of its new version. ChatAgent's PublishScope.onPublished; a scope sets only its chatId, never its own.
+ */
+export async function afterPublish(host: PublishedHost, artifact: Omit<ArtifactSummary, "chatId">, chatId: string): Promise<void> {
+  // The chat it belongs to says its kind: a version of an off-the-record chat reaches no follower. One that cannot be
+  // asked counts as off the record.
+  const kind = chatId === host.chatId ? host.kind() : await host.chat(chatId).chatKind().catch((): ChatKind => "off_record");
+  await host.directory.recordArtifact({ ...artifact, chatId }, false, kind);
+  host.later(
+    (async () => {
+      // Only a notice, to the chat that discusses the page, if there is one other than the publishing chat.
+      const pageChat = await host.directory.pageChat(artifact.id);
+      if (!pageChat || pageChat === host.chatId) return;
+      await host.chat(pageChat).pageVersion({ id: artifact.id, title: artifact.title, version: artifact.latest });
+    })(),
+  );
+}
+
 /** What publishing a page needs from the chat it is published in (and the tools, ChatScope, more). */
 export interface PublishScope {
   uid: string;
   chatId: string;
   hub: McpHub;
   artifacts: ArtifactStore;
-  onPublished(artifact: Omit<ArtifactSummary, "chatId">): Promise<void>;
+  /** A version is out, published as `chatId`'s (the scope's): record it, and tell the chat that discusses the page. */
+  onPublished(artifact: Omit<ArtifactSummary, "chatId">, chatId: string): Promise<void>;
   /**
    * Render a page in a headless browser and report on it (worker/artifacts/check.ts), for at most CHECK_MS and until
    * `signal` aborts. Throws BrowserUnavailable without a browser, CheckTimedOut when the page held it too long.
@@ -458,7 +495,7 @@ export async function publishDraft(scope: PublishScope, input: PublishInput, sig
     manifest: draft.manifest,
     message: input.message,
   });
-  await scope.onPublished({ id: meta.id, title: meta.title, latest: meta.latest, updatedAt: meta.updatedAt });
+  await scope.onPublished({ id: meta.id, title: meta.title, latest: meta.latest, updatedAt: meta.updatedAt }, scope.chatId);
   // Published already: a draft left behind is only clutter, never a reason to fail.
   await drafts.remove(draft.id).catch((error: unknown) => console.error("draft:", errorMessage(error)));
   return { meta, byTitle: target.byTitle, ...(unchecked && { unchecked }) };
