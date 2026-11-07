@@ -605,6 +605,8 @@ export class ChatAgent extends DurableObject<Env> {
   readonly #hinter: CallHinter | undefined = callHinter(this.env.AI as unknown as ModelRunner, this.env.CALL_HINT_MODEL);
   /** See #place. */
   #placing: Promise<void> = Promise.resolve();
+  /** How many times #piTools changed pi's tools: a tool pick read before a change is made again (#prompt). */
+  #piToolsChanges = 0;
   /** The deployment's tool picker (TOOL_PICK_MODEL); undefined: every MCP tool is offered with every message. */
   readonly #toolPicker = toolPicker(this.env.TOOL_PICK_MODEL);
   /** tool_search, which loads a deferred MCP tool the picker left out: installed while the MCP tools are deferred. */
@@ -1497,29 +1499,36 @@ export class ChatAgent extends DurableObject<Env> {
    * them again. A message that joins a Yes's run gets what that run has: the tools come back once it is over. Called
    * only inside #place, and only between runs (#replying, never the lagging run watch): a Yes refused while pi works.
    */
-  async #piTools(drafts: boolean): Promise<boolean> {
+  async #piTools(drafts: boolean): Promise<void> {
     // A Yes always sets the draft tools, whatever the mark says; only a restore goes by it.
-    if (!drafts && this.ctx.storage.kv.get<boolean>(DRAFTING_KEY) !== true) return false;
+    if (!drafts && !this.#drafting()) return;
     if (await this.#replying()) {
       if (drafts) throw new Error(PI_BUSY_FOR_YES);
-      return false;
+      return;
     }
     const root = await this.#root();
-    // Marked only once the change is in, and cleared only once it is undone: a failed change leaves the mark true to pi's tools.
+    this.#piToolsChanges++;
     if (drafts) {
-      await root.configure({ tools: this.#installedTools((names) => draftTools(names, this.#mcpTools, {})) }, BACKGROUND_CONTEXT);
+      // Marked first: a change that fails halfway (or lands though its call failed) is undone with the next message.
+      // A restore of tools that were never narrowed only sets them as they are; a Yes sets them again whatever the mark.
       this.ctx.storage.kv.put(DRAFTING_KEY, true);
+      await root.configure({ tools: this.#installedTools((names) => draftTools(names, this.#mcpTools, {})) }, BACKGROUND_CONTEXT);
     } else {
+      // Cleared only once it is undone: a failed restore is tried again.
       await root.configure({ tools: null }, BACKGROUND_CONTEXT);
       this.ctx.storage.kv.delete(DRAFTING_KEY);
     }
-    return true;
   }
 
-  /** pi's tools back after a Yes, in turn with the messages going in: before a hand-off reaches pi, and once a run or turn is over. */
-  #restorePiTools(): Promise<unknown> {
-    if (!this.ctx.storage.kv.get(DRAFTING_KEY)) return Promise.resolve();
-    return this.#place(async () => void (await this.#piTools(false))).catch((error: unknown) => console.error("pi tools:", errorMessage(error)));
+  /** Whether pi's tools may still be a Yes's narrowed ones (#piTools). */
+  #drafting(): boolean {
+    return this.ctx.storage.kv.get<boolean>(DRAFTING_KEY) === true;
+  }
+
+  /** pi's tools back after a Yes, in turn with the messages going in: once a run or turn is over. Never throws. */
+  #restorePiTools(): Promise<void> {
+    if (!this.#drafting()) return Promise.resolve();
+    return this.#place(() => this.#piTools(false)).catch((error: unknown) => console.error("pi tools:", errorMessage(error)));
   }
 
   /** The installed tools `allowed` keeps of them, by name, in install order. */
@@ -1637,6 +1646,8 @@ export class ChatAgent extends DurableObject<Env> {
     void routing?.then(() => this.#picked(incomingKey({ uid: author.uid, sentAt })));
     // The tool picker reads the tools the refresh installs, while the rest gets ready. Used only if the message is a prompt.
     const refreshing = calling ? this.refreshMcpTools().catch(() => {}) : undefined;
+    // pi's tools as the picker reads them: changed since (a Yes's narrowing undone), the pick is made again (#place below).
+    const toolsSeen = this.#piToolsChanges;
     const tooling = refreshing && Promise.all([picks, refreshing]).then(([picking]) => (picking ? this.#pickTools(text, recentOnce) : undefined));
     const [[attached, title], { mentions, note, broughtIn }] = await Promise.all([
       // Named after its text, or its files when it has none: for the sidebars.
@@ -1700,12 +1711,16 @@ export class ChatAgent extends DurableObject<Env> {
       await this.#place(async () => {
         // A Yes only reads and drafts, also one pi answers in place of an agent no longer on the roster; any other
         // message gets pi all its tools back. First, so what follows reads pi as it will run.
-        const restored = (await this.#piTools(drafts)) && !drafts;
+        // A restore that fails leaves pi on a Yes's narrowed tools (the mark stays, so it is tried again): the message
+        // still goes in. A Yes that cannot narrow them is refused.
+        await (drafts ? this.#piTools(true) : this.#piTools(false).catch((error: unknown) => console.error("pi tools:", errorMessage(error))));
         const now = memoAsync(() => this.#now());
         const auto = routing && (await this.#applyPick(await routing, now));
         const picked = await tooling;
-        // The picker read pi's tools while a Yes still narrowed them: pick again, from all of them.
-        const tools = restored && picked ? await this.#pickTools(text, recentOnce) : picked;
+        // The picker may have read pi's tools while a Yes still narrowed them (undone by this message, a run's end or a
+        // hand-off since): pick again, from all of them.
+        const repick = !drafts && this.#piToolsChanges !== toolsSeen && (await picks);
+        const tools = repick ? await this.#pickTools(text, recentOnce) : picked;
         await summon(dataWith(auto, await this.#applyTools(tools, now)));
       });
     } else {
@@ -3302,14 +3317,19 @@ export class ChatAgent extends DurableObject<Env> {
       },
       handToPi: async (input, data) => {
         await this.#watchRuns().catch((error: unknown) => console.error("chat status:", errorMessage(error)));
-        // A hand-off: nobody may have asked for it, so pi saves nothing as the owner in its run (runAskedByOwner). Never
-        // on a Yes's narrowed tools: a Yes's chain hands pi nothing (unattended), so this is someone's own ask.
-        await Promise.all([this.#refreshForTurn(input), this.memory.refresh(), this.#restorePiTools()]);
+        // A hand-off: nobody may have asked for it, so pi saves nothing as the owner in its run (runAskedByOwner).
+        await Promise.all([this.#refreshForTurn(input), this.memory.refresh()]);
         // The handing turn names the input: handed again after a restart, it is placed once. Its entry says which chain
         // pi's answer is in (#piScan).
         try {
           const operationId = `pi-turn:${data.turn}`;
-          await this.harness.submit(input, { operationId, whenBusy: "followUp", entry: { kind: CHAT_TURN_KIND, data } });
+          // Placed in turn with the messages, after pi's tools come back from a Yes's narrowing (a Yes's chain hands pi
+          // nothing, unattended, so this is someone's own ask): no Yes narrows them between the two. One that joins a
+          // Yes's run still going gets what that run has, as a message does.
+          await this.#place(async () => {
+            await this.#piTools(false).catch((error: unknown) => console.error("pi tools:", errorMessage(error)));
+            await this.harness.submit(input, { operationId, whenBusy: "followUp", entry: { kind: CHAT_TURN_KIND, data } });
+          });
         } catch (error) {
           this.#resumeSettle();
           throw error;

@@ -301,15 +301,15 @@ export class RunExecutor {
     this.#host.changed(agent.id);
     const startedAt = Date.now();
     try {
-      const [capped, servers] = await Promise.all([
+      const [capped, needed] = await Promise.all([
         run.test ? undefined : this.#host.spendCap?.(),
-        this.#host.signInServers().then((signedIn) => runServers(agent, signedIn)),
+        this.#host.signInServers().then((signedIn) => this.#host.needsSignIn(runServers(agent, signedIn))),
       ]);
       if (capped) {
         runs.update(agent.id, dueAt, { status: "failed", summary: capped });
         return { status: "failed", started };
       }
-      let missing = await this.#host.needsSignIn(servers);
+      let missing = needed;
       // Read before the check for a late sign-in below, so no await comes between that and the wait.
       const off = missing.length ? await this.#turnedOffNow(agent, run) : null;
       if (off) return off;

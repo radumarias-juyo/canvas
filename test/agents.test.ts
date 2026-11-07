@@ -180,6 +180,8 @@ describe("checkAgent: nothing hidden", () => {
     expect(checked.workflow).toEqual([{ kind: "work", prompt: "Sum it up." }]);
     // Emoji keep their joiner and presentation selector.
     expect(agent({ job: "Pings the \u{1F469}\u200d\u{1F4BB} team \u2764\ufe0f" }).job).toBe("Pings the \u{1F469}\u200d\u{1F4BB} team \u2764\ufe0f");
+    // The non-joiner keeps Persian letters apart; the Arabic number sign draws as one.
+    expect(agent({ job: "Reads \u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645 \u0600\u0661" }).job).toBe("Reads \u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645 \u0600\u0661");
   });
 });
 
