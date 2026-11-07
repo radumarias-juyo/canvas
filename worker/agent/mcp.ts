@@ -3,8 +3,9 @@ import { defineExtension, defineTool, section, type Extension } from "@earendil-
 import { TOOL_SEARCH_TOOL_NAME } from "@earendil-works/pi-durable/tool-search";
 import { itemsOf, type McpResultDetails } from "../../shared/items.ts";
 import { isReadOnly, MCP_DISCOVER_TOOL, MCP_TOOL_SEPARATOR, type ToolInfo } from "../../shared/protocol.ts";
+import { errorMessage } from "../../shared/util.ts";
 import type { McpHub } from "../mcp/hub.ts";
-import { clip, text } from "./output.ts";
+import { clip, MAX_TOOL_TEXT, text } from "./output.ts";
 
 /** Tool names the providers accept: the server's name as a slug, then the MCP tool's name. */
 export function mcpToolName(server: string, tool: string): string {
@@ -23,6 +24,22 @@ export interface ServerCatalog {
   instructions?: string;
 }
 
+/** What follows the head of a result too long for a turn: how much is shown, and where the whole of it is. */
+export function spillNote(path: string, totalChars: number, shownChars: number): string {
+  const n = (count: number) => count.toLocaleString("en");
+  return (
+    `[The result is ${n(totalChars)} characters long; the first ${n(shownChars)} are shown. The whole result is saved at ${path}: ` +
+    `read it with files_read (its first ${n(MAX_TOOL_TEXT)} characters) or with run_python.]`
+  );
+}
+
+/** The head of `full` saved at `path`, and the note after it: together no longer than a turn shows. */
+function spilled(full: string, path: string): string {
+  // The note's numbers only get shorter once `shown` is known, so a note worked out for MAX_TOOL_TEXT shown fits.
+  const shown = MAX_TOOL_TEXT - spillNote(path, full.length, MAX_TOOL_TEXT).length - 2;
+  return `${full.slice(0, Math.max(0, shown))}\n\n${spillNote(path, full.length, Math.max(0, shown))}`;
+}
+
 /**
  * One pi tool per MCP tool, calling through the hub the artifacts also use.
  * The agent knows only what the servers say about themselves. Servers that
@@ -34,13 +51,17 @@ export interface ServerCatalog {
  *
  * `deferred`: the MCP tools are pi's deferred tools, offered to the model only once loaded: the tool picker loads the
  * few each message needs (worker/agent/tool-pick.ts), and the model loads others with tool_search.
+ *
+ * `spill`: where a result longer than a turn shows (MAX_TOOL_TEXT) is kept whole. It is given the agent tool's name and
+ * the whole text, and returns the path it saved it at; the model gets the head of the result and a note naming the path
+ * (spillNote). Without it, or when it fails, the result is cut and the rest is lost.
  */
 export function mcpExtension(
   hub: McpHub,
   catalog: Map<string, ServerCatalog>,
   unavailable: Map<string, string>,
   discover: () => Promise<string>,
-  { deferred = false }: { deferred?: boolean } = {},
+  { deferred = false, spill }: { deferred?: boolean; spill?: (tool: string, text: string) => Promise<string> } = {},
 ): { extension: Extension; summary: string; listing: string; toolInfo: Map<string, McpToolInfo> } {
   // Slugging and the 64-character cut can map two tools to one name ("My Server" and "my-server", "a.b" and "a_b"),
   // and providers reject a request whose tool names repeat: number the later ones.
@@ -74,8 +95,17 @@ export function mcpExtension(
             const items = itemsOf(server, payload);
             // Compact JSON: the result stays in the conversation, which every later call sends again, and indenting
             // a table of rows adds a token or so per field.
+            const full = typeof payload === "string" ? payload : JSON.stringify(payload);
+            let shown: string | undefined;
+            if (spill && full.length > MAX_TOOL_TEXT) {
+              try {
+                shown = spilled(full, await spill(name, full));
+              } catch (error) {
+                console.error("mcp spill:", name, errorMessage(error));
+              }
+            }
             return {
-              output: text(clip(typeof payload === "string" ? payload : JSON.stringify(payload))),
+              output: text(shown ?? clip(full)),
               ...(items.length && { details: { items } satisfies McpResultDetails }),
             };
           },
