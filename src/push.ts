@@ -120,7 +120,14 @@ export function onPushOpen(navigate: (path: string) => void): () => void {
   if (!supported) return () => {};
   const listener = (event: MessageEvent) => {
     const data = event.data as { type?: unknown; url?: unknown } | null;
-    if (data?.type === "open" && typeof data.url === "string" && /^\/(?![/\\])/.test(data.url) && !data.url.includes("\\") && !data.url.startsWith("/api/")) navigate(data.url);
+    if (
+      data?.type === "open" &&
+      typeof data.url === "string" &&
+      /^\/(?![/\\])/.test(data.url) &&
+      !data.url.includes("\\") &&
+      !data.url.startsWith("/api/")
+    )
+      navigate(data.url);
   };
   navigator.serviceWorker.addEventListener("message", listener);
   return () => navigator.serviceWorker.removeEventListener("message", listener);

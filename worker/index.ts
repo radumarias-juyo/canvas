@@ -13,6 +13,7 @@ import { json, readJson } from "./http.ts";
 import { chatRoute } from "./chat-routes.ts";
 import { mcpRoute } from "./mcp-routes.ts";
 import { pushRoute } from "./push-routes.ts";
+import { mcpServers } from "./mcp/servers.ts";
 import { catalogSource, loadCatalog } from "./models.ts";
 import { skillsRoute } from "./skills-routes.ts";
 import { agentsRoute } from "./agents-routes.ts";
@@ -188,7 +189,12 @@ async function route(request: Request, env: Env): Promise<Response> {
   const skills = await skillsRoute(request, directory, () => storage.skillFiles(uid));
   if (skills) return skills;
 
-  const agents = await agentsRoute(request, directory);
+  const agents = await agentsRoute(
+    request,
+    directory,
+    (chatId, agentId) => exports.ChatAgent.getByName(chatAgentName(uid, chatId)).agentDeleted(agentId),
+    mcpServers(env),
+  );
   if (agents) return agents;
 
   // A chat's Durable Object is named after its owner's verified uid; others reach it only once they joined by an invite.
@@ -204,6 +210,12 @@ async function route(request: Request, env: Env): Promise<Response> {
     } catch (error) {
       return json({ error: errorMessage(error) }, 400);
     }
+  }
+
+  // Save an agent as the model proposes one (off, for review), to try its draft card and page without the model.
+  if (path === "/api/dev/agents/propose" && method === "POST" && env.DEV_TOOLS === "true") {
+    const saved = await directory.saveAgent(await readJson(request), "agent", false);
+    return json(saved, "error" in saved ? 400 : 201);
   }
 
   const files = await filesRoute(request, () => storage.userFiles(uid));

@@ -1,6 +1,6 @@
 import type { UserMessage } from "@earendil-works/pi-ai";
 import type { EntryRecord } from "@earendil-works/pi-durable";
-import { CHAT_AGENT_KIND, type ChatAgentReplyData } from "../../shared/agents.ts";
+import { CHAT_AGENT_KIND, proposedBy, type ChatAgentReplyData } from "../../shared/agents.ts";
 import { CHAT_MESSAGE_KIND, CHAT_PEOPLE_KIND, publishedBy, type ChatMessageData, type ChatPeopleData } from "../../shared/protocol.ts";
 
 /** When an entry was sent, for one that has a time: messages from before chats kept `sentAt` have only the time pi wrote them, and asides not even that. */
@@ -24,6 +24,9 @@ export function isAgent(entry: EntryRecord): boolean {
 
 /** The artifact a publish's result made, which shows as a card. */
 export const published = publishedBy;
+
+/** A tool result that shows as a card of its own (a published artifact, a drafted agent), not as a step of its call. */
+export const showsAsCard = (entry: EntryRecord): boolean => published(entry) !== undefined || proposedBy(entry) !== undefined;
 
 /** Whether the viewer `uid` wrote the entry, or caused it (joined, left). A plain `pi.user` entry is the owner's (`isOwner`). */
 export function byViewer(entry: EntryRecord, uid: string, isOwner: boolean): boolean {

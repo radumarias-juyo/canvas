@@ -378,7 +378,9 @@ export class McpSignIns {
   }
 
   #row(server: string): AuthRow | undefined {
-    return this.#host.sql.exec("SELECT server, signed_in_at, warned_at, keep_at FROM mcp_auth WHERE server = ?", server).toArray()[0] as AuthRow | undefined;
+    return this.#host.sql.exec("SELECT server, signed_in_at, warned_at, keep_at FROM mcp_auth WHERE server = ?", server).toArray()[0] as
+      | AuthRow
+      | undefined;
   }
 
   #rows(): AuthRow[] {

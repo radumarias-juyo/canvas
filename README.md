@@ -162,7 +162,8 @@ An agent's scheduled runs use your sign-ins while you are away (`worker/mcp/back
   run can go again.
 - **How long a sign-in lasts** is not something Access or OAuth says, so the app counts it from the sign-in:
   `MCP_GRANT_DAYS` (default 30) should match the grant session duration of the portal's Access application. Three days
-  before it ends, you get one warning per sign-in.
+  before it ends (a tenth of a grant shorter than 30 days), you get one warning per sign-in. A sign-in a refresh cannot
+  renew ends there: it shows as signed out until you sign in again.
 - **Keep-alive:** sign-ins that runs use are refreshed about once a day, in case the authorization server ends a
   session idle for 24 hours.
 - **Runs only read:** the helpers for the run code, `readOnlyTools` and `assertReadOnly`, offer a run only the tools a
@@ -175,7 +176,9 @@ An agent's scheduled runs use your sign-ins while you are away (`worker/mcp/back
 With the VAPID secrets set, the app also reaches people while it is closed (Web Push, `worker/push/`): RFC 8291
 payload encryption and an RFC 8292 VAPID token, with WebCrypto alone. Turning on notifications in the app subscribes
 the browser (a service worker, `public/sw.js`); a push goes out only when none of the user's apps is open, says only
-that something arrived (never its content), and opens the chat when clicked. A subscription belongs to the user signed
+that something arrived (never its content), and opens the chat when clicked. Its topic (which the push service sees) is
+an HMAC of the notice's tag, not the tag. A subscription the browser replaces while the app is closed is handed to the
+Worker by the service worker. A subscription belongs to the user signed
 in when it was made: signing out ends it, and a browser where another user signs in next gets a new one. Endpoints are taken only at the known push
 services, and ones a push service reports gone are forgotten. Other code sends one with `UserDirectory.push({ title,
 body, url, tag })`. Without the secrets nothing is pushed and the rest works as before.

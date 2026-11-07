@@ -64,7 +64,10 @@ function useNotificationPermission(): [Permission, () => void] {
 export function useMentionNotices(chatId: string | undefined, navigate: (path: string) => void) {
   const [toasts, setToasts] = useState<MentionNotice[]>([]);
   const visible = useVisible();
-  const dismiss = useCallback((notice: MentionNotice) => setToasts((list) => list.filter((t) => t.chatId !== notice.chatId || t.at !== notice.at)), []);
+  const dismiss = useCallback(
+    (notice: MentionNotice) => setToasts((list) => list.filter((t) => t.chatId !== notice.chatId || t.at !== notice.at)),
+    [],
+  );
   /** Go to the chat a notice is from. */
   const open = useCallback(
     (notice: MentionNotice) => {
@@ -121,7 +124,12 @@ export function MentionToasts({
   const [now] = useState(Date.now);
   const push = usePushAvailable();
   const askCard = (asking.mentions || asking.signIns) && permission === "default" && now - askedAt > ASK_AGAIN_MS;
-  const about = asking.mentions && asking.signIns ? "someone mentions you or a sign-in needs you" : asking.mentions ? "someone mentions you" : "a sign-in needs you";
+  const about =
+    asking.mentions && asking.signIns
+      ? "someone mentions you or a sign-in needs you"
+      : asking.mentions
+        ? "someone mentions you"
+        : "a sign-in needs you";
   if (toasts.length === 0 && !askCard) return null;
   return (
     <div className="toasts">

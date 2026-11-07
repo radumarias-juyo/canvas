@@ -95,9 +95,13 @@ export class PushSubscriptions {
  * name, a chat id), and two tags do not collide.
  */
 export async function topicOf(tag: string, vapid: VapidKeys): Promise<string> {
-  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(`pi-artifacts/push-topic/${vapid.privateKey}`), { name: "HMAC", hash: "SHA-256" }, false, [
-    "sign",
-  ]);
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(`pi-artifacts/push-topic/${vapid.privateKey}`),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
   const mac = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(tag));
   return toBase64url(new Uint8Array(mac)).slice(0, 32);
 }

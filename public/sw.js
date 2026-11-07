@@ -53,8 +53,7 @@ self.addEventListener("notificationclick", (event) => {
 // the Worker the new one, so pushes keep coming. The app's next load does the same, so a failure here loses nothing for
 // long.
 self.addEventListener("pushsubscriptionchange", (event) => {
-  const post = (path, body) =>
-    fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const post = (path, body) => fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   event.waitUntil(
     (async () => {
       const old = event.oldSubscription;
