@@ -232,12 +232,10 @@ export class AgentSeats {
     // what waits in the session's inbox, the batch among it.
     const stale = this.#running(ref, agentId).filter((row) => row.turn !== turn.turn);
     await this.#abort(stale);
-    // One whose input never went in has no run whose end ends it: it ends here, or a wake would set it up again.
-    for (const row of stale) {
-      if (row.submitted !== 1 && !this.#starting.has(turnKey(ref, row.turn))) {
-        this.#end(ref, row.turn, { status: "unanswered", reason: "the room gave a later turn", ...NO_OUTPUTS });
-      }
-    }
+    // One whose input never went in has no run whose end ends it: it ends here, or a wake would set it up again (one
+    // being set up sees it ended before its input goes in).
+    for (const row of stale)
+      if (row.submitted !== 1) this.#end(ref, row.turn, { status: "unanswered", reason: "the room gave a later turn", ...NO_OUTPUTS });
     const delivered = batch ? await this.deliver(ref, agentId, batch) : seat.delivered;
     const byOwner = turn.byOwner && !turn.unattended && turn.hop === 0 && turn.calledBy.uid === this.#host.uid && !turn.calledBy.agentId;
     const checked: SeatTurn = { ...turn, byOwner };
@@ -268,17 +266,27 @@ export class AgentSeats {
    * Set a turn's session up and put its input in, then wait on its run; a failure ends it. While this runs, a resume
    * of the turn (a give again, a wake) leaves it alone: there is no run to wait on before its input is in.
    */
-  async #start(row: SeatTurnRow, agent: AgentDefinition, turn: SeatTurn, seatSession: string): Promise<void> {
+  async #start(row: SeatTurnRow, agent: AgentDefinition, turn: SeatTurn, seatSession: string, claimed = false): Promise<void> {
     const ref = refOf(row);
     const key = turnKey(ref, row.turn);
-    if (this.#starting.has(key)) return;
-    this.#starting.add(key);
+    if (!claimed) {
+      if (this.#starting.has(key)) return;
+      this.#starting.add(key);
+    }
+    const running = () => this.#turn(ref, row.turn)?.status === "running";
     try {
       // Its input goes only into the fork: the seat's session reads the ask as context (the batch left it out).
       const apart = row.forked === 1 ? this.#host.write(seatSession, askedApart(turn.ask), `apart:${row.turn}`) : undefined;
       await Promise.all([apart, this.#host.configure(row.session, agent, turn)]);
+      // Stopped, ended by a later give, or dropped meanwhile: its input never goes in.
+      if (!running()) return;
       // The operation id places it once, also when a give that died after it is set up again.
       await this.#host.submit(row.session, turn.input, operationId(row.turn), { turn: row.turn, calledBy: turn.calledBy, hop: turn.hop });
+      if (!running()) {
+        // Stopped while its input went in: the run it started stops too.
+        await this.#host.abort(row.session).catch((error: unknown) => console.error("agent seat, stop:", errorMessage(error)));
+        return;
+      }
       this.#sql.exec(
         "UPDATE agent_seat_turns SET submitted = 1 WHERE room_owner = ? AND room_chat = ? AND turn = ?",
         ref.ownerUid,
@@ -298,12 +306,18 @@ export class AgentSeats {
   /** A turn kept from a give that died before its input was in: set it up again from the turn as it was given. */
   async #restart(row: SeatTurnRow): Promise<void> {
     const ref = refOf(row);
+    const key = turnKey(ref, row.turn);
+    // Claimed before the first await: a wake or a give meanwhile leaves it to this one.
+    if (this.#starting.has(key)) return;
+    this.#starting.add(key);
     try {
       const seat = this.#seat(ref, row.agent_id);
       if (!seat || !row.given) throw new Error("This turn's seat is gone.");
-      await this.#start(row, await this.#agent(row.agent_id), JSON.parse(row.given) as SeatTurn, seat.session);
+      await this.#start(row, await this.#agent(row.agent_id), JSON.parse(row.given) as SeatTurn, seat.session, true);
     } catch (error) {
       await this.#fail(ref, row.turn, error);
+    } finally {
+      this.#starting.delete(key);
     }
   }
 
@@ -441,7 +455,10 @@ export class AgentSeats {
   /** Stop a turn the room stopped; its result, the stop's, still goes back. */
   async abort(ref: RoomRef, turn: number): Promise<void> {
     const row = this.#turn(ref, turn);
-    if (row?.status === "running") await this.#host.abort(row.session);
+    if (row?.status !== "running") return;
+    // One whose input is not in has no run to stop: it ends here, so a set-up going on (or a wake's) never puts it in.
+    if (row.submitted !== 1) this.#end(ref, turn, { status: "unanswered", reason: "stopped", ...NO_OUTPUTS });
+    await this.#host.abort(row.session);
   }
 
   /**

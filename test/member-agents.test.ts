@@ -1407,6 +1407,42 @@ describe("Member agents: a seat's turn given again while it is set up, or after 
     expect(later.ended).toEqual([{ turn: 1, result: expect.objectContaining({ status: "done" }) }]);
   });
 
+  it("never puts in a turn stopped, ended by a later give, or dropped while it was set up, also on a cold seat", async () => {
+    for (const stop of ["abort", "later give", "drop"] as const) {
+      const host = new SlowSeat();
+      const seats = new AgentSeats(memorySql(), host);
+      const gate = (host.gate = deferred());
+      const first = seats.give(ROOM, "p", turn(1, true));
+      await settle();
+      if (stop === "abort") await seats.abort(ROOM, 1);
+      else if (stop === "drop") await seats.drop(ROOM, "p");
+      else void seats.give(ROOM, "p", turn(2));
+      await settle();
+      gate.resolve();
+      await first;
+      await settle();
+      expect(host.submits.filter((submit) => submit.endsWith("|turn:1"))).toEqual([]);
+    }
+    // The seat object went away while configuring; the room stopped the turn, and that call starts the seat again.
+    const sql = memorySql();
+    const host = new SlowSeat();
+    host.gate = deferred();
+    void new AgentSeats(sql, host).give(ROOM, "p", turn(1, true));
+    await settle();
+    const later = new SlowSeat();
+    const seats = new AgentSeats(sql, later);
+    const slow = (later.gate = deferred());
+    seats.wake();
+    await settle();
+    // Its set-up again is going on when the stop comes: it ends, and its input never goes in.
+    await seats.abort(ROOM, 1);
+    seats.wake();
+    slow.resolve();
+    await settle();
+    expect(later.submits).toEqual([]);
+    expect(later.configures).toHaveLength(1);
+  });
+
   it("runs nothing for a late give of a turn the room took already", async () => {
     const host = new SlowSeat();
     const seats = new AgentSeats(memorySql(), host);
