@@ -17,6 +17,8 @@ import type { PushSubscriptionKeys } from "./push/web-push.ts";
 import { mcpTokensKey } from "./storage/index.ts";
 import type { McpSignInView, SignInNotice } from "../shared/sign-ins.ts";
 import { AgentStore, type AgentSave } from "./agents/store.ts";
+import { LimitsDirectory, type CallEntry } from "./agents/limits/directory.ts";
+import { type CallLogView, type GuardrailRule, type NeedsYouItem } from "../shared/limits.ts";
 import { ChatRows } from "./chat-rows.ts";
 import { addColumns } from "./members.ts";
 import type { ChatKind } from "../shared/chat-kinds.ts";
@@ -94,6 +96,8 @@ export class UserDirectory extends DurableObject<Env> {
   readonly #signIns: McpSignIns;
   /** The browsers the user turned notifications on in (worker/push/subscriptions.ts). */
   readonly #push: PushSubscriptions;
+  /** Their rules for all agents, the log of calls that change data, and the actions waiting for them (worker/agents/limits/). */
+  readonly #limits: LimitsDirectory;
   /** What of each sidebar row is this user's alone (pinned, closed, their name for it), chats' kinds, page chats, people (worker/chat-rows.ts). */
   readonly #rows: ChatRows;
 
@@ -101,6 +105,7 @@ export class UserDirectory extends DurableObject<Env> {
     super(ctx, env);
     this.#agents = new AgentStore(ctx.storage.sql);
     this.#push = new PushSubscriptions(ctx.storage.sql);
+    this.#limits = new LimitsDirectory(ctx.storage.sql, ctx.storage.kv);
     ctx.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS chats (id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS artifacts (id TEXT PRIMARY KEY, title TEXT NOT NULL, chat_id TEXT NOT NULL, latest INTEGER NOT NULL, updated_at INTEGER NOT NULL);
@@ -551,6 +556,7 @@ export class UserDirectory extends DurableObject<Env> {
     const home = this.ctx.storage.sql.exec<{ agent_id: string | null }>("SELECT agent_id FROM chats WHERE id = ?", id).toArray()[0]?.agent_id;
     this.#signIns.forgetChat(id);
     this.#agents.forgetChat(id);
+    if (this.#limits.forgetChat(id)) this.#changed("needs-you");
     // The values its pages saved for this user, which were everyone's defaults.
     this.ctx.storage.sql.exec("DELETE FROM page_values WHERE artifact_id IN (SELECT id FROM artifacts WHERE chat_id = ?)", id);
     if (this.ctx.storage.sql.exec("DELETE FROM artifacts WHERE chat_id = ?", id).rowsWritten) this.#changed("artifacts");
@@ -558,6 +564,53 @@ export class UserDirectory extends DurableObject<Env> {
     if (this.ctx.storage.sql.exec("DELETE FROM chats WHERE id = ?", id).rowsWritten) this.#changed("chats");
     // An agent's home deleted while the agent is on: it gets a new one, so its schedule and watches go on there.
     if (home && this.#agents.get(home)?.enabled) this.ensureAgentHome(home);
+  }
+
+  // ---- Limits (worker/agents/limits/) ----
+
+  /** The user's rules for all their agents, pi and pages (shared/limits.ts). */
+  guardrails(): GuardrailRule[] {
+    return this.#limits.rules();
+  }
+
+  setGuardrails(input: unknown): GuardrailRule[] | { error: string } {
+    return this.#limits.setRules(input);
+  }
+
+  /** A call that changes data, as the write gate of one of the user's chats let it through, refused or held it. */
+  logCall(entry: CallEntry): void {
+    this.#limits.log(entry);
+  }
+
+  callsSince(server: string, tool: string, since: number): number {
+    return this.#limits.callsSince(server, tool, since);
+  }
+
+  calls(actor?: string, limit?: number): CallLogView[] {
+    return this.#limits.calls(actor, limit);
+  }
+
+  /** An action of one of the user's chats waits for them: listed, the sidebars told, and a push when no app is open. */
+  async addNeedsYou(item: NeedsYouItem): Promise<void> {
+    this.#limits.addNeedsYou(item);
+    this.#changed("needs-you");
+    const who = item.actor.agentId ? `@${item.actor.name}` : item.actor.name;
+    // Only that something waits: the call itself stays in the app.
+    await this.push({
+      title: item.kind === "proposal" ? `${who} proposes a change` : `${who} needs your approval`,
+      body: excerpt(`In “${item.chatTitle}”`, 120),
+      url: `/c/${item.chatId}`,
+      tag: `action:${item.chatId}:${item.id}`,
+    }).catch((error: unknown) => console.error("push:", errorMessage(error)));
+  }
+
+  /** An action ended (approved, declined, expired): off the list. */
+  removeNeedsYou(chatId: string, id: string): void {
+    if (this.#limits.removeNeedsYou(chatId, id)) this.#changed("needs-you");
+  }
+
+  needsYou(): NeedsYouItem[] {
+    return this.#limits.needsYou();
   }
 
   listArtifacts(): ArtifactSummary[] {
@@ -732,6 +785,13 @@ export class UserDirectory extends DurableObject<Env> {
     if (origin === "agent") {
       const signIn = new Set(oauthServers(this.env).map((server) => server.name));
       input = withoutSignInShares(input, (server) => signIn.has(server));
+      // How far an agent may go on its own is its owner's to set, on its Limits tab: the model's draft keeps the one it
+      // has (Inform for a new one), whatever it asks for.
+      if (input && typeof input === "object") {
+        const { autonomy: _asked, ...rest } = input as Record<string, unknown>;
+        const kept = save?.id === undefined ? undefined : this.#agents.get(save.id)?.autonomy;
+        input = { ...rest, ...(kept !== undefined && { autonomy: kept }) };
+      }
     }
     const saved = this.#agents.save(input, origin, enabled, save);
     if (!("error" in saved)) this.#agentChanged(saved.id);

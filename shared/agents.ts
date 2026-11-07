@@ -7,6 +7,7 @@
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { conditionProblem, MAX_CONDITION } from "./conditions.ts";
 import type { ItemRef } from "./items.ts";
+import { checkRules, GuardrailError, MAX_APPROVAL_HOURS, type GuardrailRule } from "./limits.ts";
 import { AGENT_NAME } from "./mentions.ts";
 import { EFFORT_LABELS } from "./models.ts";
 import type { RunRef } from "./runs.ts";
@@ -112,6 +113,10 @@ export interface AgentInput {
   scope?: { list: LookStep; each: true };
   workflow?: AgentStep[];
   autonomy?: AutonomyLevel;
+  /** Rules on the inputs of the calls it makes that change data (shared/limits.ts), besides its owner's for all agents. */
+  guardrails?: GuardrailRule[];
+  /** How long an action of its waits for its owner before it expires; DEFAULT_APPROVAL_HOURS when absent. */
+  approvalHours?: number;
   /** The fields the model guessed, shown as "Assumed" until a person confirms them. */
   assumed?: string[];
 }
@@ -375,6 +380,17 @@ export function checkAgent(input: unknown): AgentInput {
     const outside = serversNamed({ trigger, scope, workflow }).find((server) => !servers.includes(server));
     if (outside) fail(`A step names ${outside}, which is not one of the agent's servers: add it to its servers, or change the step.`);
   }
+  let guardrails: GuardrailRule[] | undefined;
+  try {
+    guardrails = input.guardrails === undefined || input.guardrails === null ? undefined : checkRules(input.guardrails);
+  } catch (error) {
+    if (error instanceof GuardrailError) fail(`An agent's limits: ${error.message}`);
+    throw error;
+  }
+  const hours = input.approvalHours ?? undefined;
+  if (hours !== undefined && (typeof hours !== "number" || !Number.isInteger(hours) || hours < 1 || hours > MAX_APPROVAL_HOURS)) {
+    fail(`Actions wait 1 to ${MAX_APPROVAL_HOURS} hours for approval.`);
+  }
   const assumed = names(input.assumed, "assumed fields");
   return {
     name,
@@ -390,6 +406,8 @@ export function checkAgent(input: unknown): AgentInput {
     ...(scope && { scope }),
     ...(workflow && { workflow }),
     ...(autonomy !== undefined && { autonomy: autonomy as AutonomyLevel }),
+    ...(guardrails?.length && { guardrails }),
+    ...(hours !== undefined && { approvalHours: hours as number }),
     ...(assumed?.length && { assumed }),
   };
 }

@@ -39,8 +39,11 @@ export interface RunDelivery {
   to: string;
   /** What it sent: the report as posted. */
   text?: string;
-  /** `recorded`: a test run's, nothing was sent; `refused`: not at this autonomy level, or not allowed. */
-  status: "sent" | "recorded" | "refused" | "failed";
+  /**
+   * `recorded`: a test run's, nothing was sent; `refused`: not at this autonomy level, or not allowed; `waiting`: held
+   * for its owner (a proposal or an approval, in its home chat and their Needs you list).
+   */
+  status: "sent" | "recorded" | "refused" | "waiting" | "failed";
   /** Why it was refused or failed, or what came of it ("Signups brief v38 published"). */
   detail?: string;
   /** The page version a page step published. */

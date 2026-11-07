@@ -14,6 +14,7 @@ import { AgentAvatar } from "../chat/people.tsx";
 import { MenuButton, opensElsewhere } from "../layout.tsx";
 import { stateLabel } from "./glance.ts";
 import { agentPath, NEW_AGENT, type AgentPlace } from "./nav.ts";
+import { LimitsTab } from "./LimitsTab.tsx";
 import { SetupTab } from "./SetupTab.tsx";
 import { dropAgent, putAgent, reloadAgents, useAgents } from "./store.ts";
 
@@ -49,10 +50,13 @@ export interface PageNotice {
   error?: boolean;
 }
 
-/** What a tab saves without editing: the rest of the definition (its trigger, scope, workflow, autonomy) stays as it is. */
-const KEPT = [...COPIED_FIELDS, "autonomy"] as const satisfies readonly (keyof AgentInput)[];
+/**
+ * What a tab saves without editing: the rest of the definition (its trigger, scope, workflow, limits) stays as it is.
+ * Every field some tab edits is here, or saving another tab would drop it.
+ */
+const KEPT = [...COPIED_FIELDS, "autonomy", "guardrails", "approvalHours", "assumed"] as const satisfies readonly (keyof AgentInput)[];
 
-/** A tab of the agent page. Later tabs (workflow and runs, limits, what it knows) add themselves here. */
+/** A tab of the agent page. Later tabs (workflow and runs, what it knows) add themselves here. */
 export interface AgentTab {
   id: string;
   label: string;
@@ -65,9 +69,11 @@ export const TABS: AgentTab[] = [
   {
     id: "setup",
     label: "Setup",
-    fields: ["name", "job", "instructions", "avatar", "color", "model", "effort", "servers", "sharedServers"],
+    // Setup also confirms the model's guesses (assumed), which a save of another tab keeps.
+    fields: ["name", "job", "instructions", "avatar", "color", "model", "effort", "servers", "sharedServers", "assumed"],
     Component: SetupTab,
   },
+  { id: "limits", label: "Limits", fields: ["autonomy", "guardrails", "approvalHours"], Component: LimitsTab },
 ];
 
 /** The tab a place opens: the one asked for, else the one that edits its field, else the first. */
@@ -76,9 +82,9 @@ export function tabFor(tabs: readonly AgentTab[], place: Pick<AgentPlace, "tab" 
 }
 
 /**
- * An agent's page: its header (badge, name, job line, whether it is on, Turn on or off, Delete) and its tabs, of which
- * this one has Setup. Someone else's agent, shared in a chat, opens read-only, saying whose it is and that it runs as
- * them; their first change saves their own copy.
+ * An agent's page: its header (badge, name, job line, whether it is on, Turn on or off, Delete) and its tabs, Setup and
+ * Limits. Someone else's agent, shared in a chat, opens read-only, saying whose it is and that it runs as them; their
+ * first change saves their own copy.
  */
 export function AgentPage({
   place,

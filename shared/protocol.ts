@@ -9,6 +9,7 @@ import type { Attachment, AttachmentInput } from "./attachments.ts";
 import type { Mention, MentionInput } from "./mentions.ts";
 import type { AgentColor, ChatAgentView } from "./agents.ts";
 import type { ChatKind, ChatPage } from "./chat-kinds.ts";
+import type { PendingActionView } from "./limits.ts";
 
 export type McpErrorCode =
   | "server_not_connected"
@@ -333,7 +334,7 @@ export interface ChatRowChange {
  * What the sidebar's socket (GET /api/me/ws) sends: the name of a list that changed, so the app reads it again. A
  * MentionNotice, or a SignInNotice (shared/sign-ins.ts), comes as JSON.
  */
-export type SidebarList = "chats" | "artifacts" | "skills" | "agents" | "sign-ins";
+export type SidebarList = "chats" | "artifacts" | "skills" | "agents" | "sign-ins" | "needs-you";
 
 /** Someone tagged this user in a shared chat: the app shows it, and the browser too when it may and the app is not in view. */
 export interface MentionNotice {
@@ -615,6 +616,11 @@ export type ChatServerMessage =
   | { type: "agentEvents"; agent: string; turn: number; events: unknown[]; toolsElapsedMs?: Record<string, number> }
   /** A run of the agent whose home this chat is started, moved on or ended: its runs list is read again. */
   | { type: "runs"; agentId: string }
+  /**
+   * The chat's actions that wait, or waited, for its owner (shared/limits.ts), newest first: on connect, and whenever one
+   * is made or ends. The cards in the log (CHAT_ACTION_KIND entries) show their state from it.
+   */
+  | { type: "actions"; actions: PendingActionView[] }
   /** Sent just before the chat closes a removed person's socket, in case the close code is lost on the way. */
   | { type: "removed" }
   /** Sent to everyone just before the chat closes their sockets, when its owner deleted it. */

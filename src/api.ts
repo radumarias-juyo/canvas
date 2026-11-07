@@ -17,6 +17,7 @@ import { formatCursor, NEXT_PART_HEADER, parseCursor } from "../shared/data-expo
 import { DICTATION_ROUTE, DICTATION_TYPE } from "../shared/dictation.ts";
 import type { MentionOptions } from "../shared/mentions.ts";
 import type { ChatKind } from "../shared/chat-kinds.ts";
+import type { CallLogView, GuardrailRule, NeedsYouItem, PendingActionView } from "../shared/limits.ts";
 import type { ModelCatalog } from "../shared/models.ts";
 import type { McpSignInView } from "../shared/sign-ins.ts";
 import type { ChatSystemPrompt } from "../shared/system-prompt.ts";
@@ -44,6 +45,7 @@ import {
   type ProxyRequest,
   type ProxyResponse,
   type DeclaredTool,
+  type ToolInfo,
 } from "../shared/protocol.ts";
 
 export type { ArtifactSummary };
@@ -260,6 +262,19 @@ export const api = {
   shareChatAgent: (chatId: string, agentId: string, shared: boolean) => request<ChatAgentView[]>(chatPath(chatId, `/agents/${agentId}`), send("PATCH", { shared })),
   /** The user's own copy of an agent shared in a chat, with their changes: saved off, with where it came from. */
   copyAgent: (chatId: string, agentId: string, changes: AgentChanges & { version: number }) => request<AgentDefinition>(chatPath(chatId, `/agents/${agentId}/copy`), post(changes)),
+  /** The actions that wait for this user across their chats, oldest first. */
+  needsYou: () => request<NeedsYouItem[]>("/api/needs-you"),
+  /** (the chat's owner) Run or approve an action, or decline it: the action after, as it ended (or as it already had). */
+  decideAction: (chatId: string, id: string, decision: "approve" | "decline") =>
+    request<PendingActionView>(`/api/needs-you/${chatId}/${encodeURIComponent(id)}`, post({ decision })),
+  /** The user's rules for all their agents: pi's, their agents' and their pages' calls. */
+  guardrails: () => request<GuardrailRule[]>("/api/limits/rules"),
+  saveGuardrails: (rules: readonly GuardrailRule[]) => request<GuardrailRule[]>("/api/limits/rules", send("PUT", { rules })),
+  /** The calls the gate let through, refused or held, newest first: one agent's, or with no `agent` all of them. */
+  callLog: (agent?: string, limit = 50) =>
+    request<CallLogView[]>(`/api/limits/calls?${new URLSearchParams({ ...(agent && { agent }), limit: String(limit) })}`),
+  /** A server's tools as this user sees them, for the rule editor. */
+  serverTools: (server: string) => request<ToolInfo[]>(`/api/limits/tools?server=${encodeURIComponent(server)}`),
   /** A dry run of an agent on today's data, nothing sent or changed. Throws with status 404 where testing is not there yet. */
   testAgent: (id: string) => request<unknown>(`/api/agents/${id}/test`, post({})),
   skills: () => request<SkillInfo[]>("/api/skills"),

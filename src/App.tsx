@@ -27,6 +27,8 @@ import { AgentPage } from "./agents/AgentPage.tsx";
 import { AgentsNav } from "./agents/AgentsNav.tsx";
 import { agentPlace, type AgentPlace } from "./agents/nav.ts";
 import { reloadAgents } from "./agents/store.ts";
+import { NeedsYou } from "./NeedsYou.tsx";
+import type { NeedsYouItem } from "../shared/limits.ts";
 
 /** The app's location, path and query, and a way to go elsewhere in it without loading the page again. */
 function usePath(): [URL, (path: string) => void] {
@@ -275,7 +277,13 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, agentP
   // user (a run waiting, or a sign-in about to run out).
   const [signIns, loadSignIns, setSignIns] = useLatest<McpSignInView[]>(api.signIns, []);
   const onSignIn = useSignInAlerts(loadSignIns);
-  useSidebarSocket({ chats: loadChats, artifacts: loadArtifacts, skills: loadSkills, "sign-ins": loadSignIns, agents: reloadAgents }, notices.onMention, onSignIn);
+  // The actions that wait for the user across their chats: read again whenever one is made or ends.
+  const [needsYou, loadNeedsYou] = useLatest<NeedsYouItem[]>(api.needsYou, []);
+  useSidebarSocket(
+    { chats: loadChats, artifacts: loadArtifacts, skills: loadSkills, "sign-ins": loadSignIns, agents: reloadAgents, "needs-you": loadNeedsYou },
+    notices.onMention,
+    onSignIn,
+  );
   // Pushes reach this browser for the user signed in here, and no one else.
   useEffect(() => setPushUser(uid), [uid]);
   // Another chat shows its own artifacts: the one asked for at once, else the newest it published once it loads.
@@ -415,6 +423,7 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, agentP
             )}
           </div>
           <SignInNotices list={signIns} onChange={(list) => setSignIns(() => list)} />
+          <NeedsYou items={needsYou} reload={loadNeedsYou} navigate={navigate} />
           {/* Chats scroll here; artifacts, skills and the files panel stay below them. */}
           <div className="sidebar-scroll">
             <ChatsHeading order={chatOrder} />

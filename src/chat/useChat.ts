@@ -18,6 +18,7 @@ import {
   type Presence,
   type QueuedMessage,
 } from "../../shared/protocol.ts";
+import type { PendingActionView } from "../../shared/limits.ts";
 import type { EntryReactions, Reaction, Reactions } from "../../shared/reactions.ts";
 import { api, keepAlive } from "../api.ts";
 
@@ -390,6 +391,8 @@ export function useChat(chatId: string) {
   const [agents, setAgents] = useState<ChatAgentView[]>(NO_AGENTS);
   // What the agents working now do, each in its own session.
   const [live, dispatchAgents] = useReducer(reduceAgents, NO_LIVE);
+  // The chat's actions that wait, or waited, for its owner, by id: their cards in the log show this state.
+  const [actions, setActions] = useState<ReadonlyMap<string, PendingActionView>>(NO_ACTIONS);
   const ended = Object.values(live).reduce((first, agent) => Math.min(first, agent.endedAt ?? Infinity), Infinity);
   useEffect(() => {
     if (ended === Infinity) return;
@@ -413,6 +416,7 @@ export function useChat(chatId: string) {
     setAuto(false);
     setHints(NO_HINTS);
     setAgents(NO_AGENTS);
+    setActions(NO_ACTIONS);
     dispatchAgents({ type: "reset" });
     let closed = false;
     let attempt = 0;
@@ -452,6 +456,7 @@ export function useChat(chatId: string) {
         } else if (message.type === "agentEvents") dispatchAgents({ ...message, events: message.events as AgentEvent[], at: Date.now() });
         // For the runs list of the agent whose home this chat is: it reads them itself.
         else if (message.type === "runs") window.dispatchEvent(new CustomEvent(RUNS_EVENT, { detail: message.agentId }));
+        else if (message.type === "actions") setActions(new Map(message.actions.map((action) => [action.id, action])));
         else if (message.type === "removed" || message.type === "deleted") {
           stop(STOPPED[message.type]);
           ws.close();
@@ -520,6 +525,8 @@ export function useChat(chatId: string) {
     agents,
     /** The agents' turns followed live, by agent id (see shownLive). */
     live,
+    /** The chat's actions that wait, or waited, for its owner, by id, as the chat last said. */
+    actions,
     setModel,
     /** Whether the chat is on Auto: a router picks the model and effort for each message. */
     auto,
@@ -535,6 +542,7 @@ export function useChat(chatId: string) {
 
 const NO_HINTS: ReadonlySet<number> = new Set();
 const NO_AGENTS: ChatAgentView[] = [];
+const NO_ACTIONS: ReadonlyMap<string, PendingActionView> = new Map();
 
 /**
  * `next`, keeping `known`'s object for each entry whose reactions are the same: a socket is sent all of them again on

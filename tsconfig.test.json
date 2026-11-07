@@ -115,6 +115,9 @@
     "worker/dictation.ts",
     "src/chat/dictation-engine.ts",
     "src/agents/glance.ts",
-    "src/agents/nav.ts"
+    "src/agents/nav.ts",
+    "src/agents/limits/rules.ts",
+    "src/chat/ActionCard.tsx",
+    "src/chat/people.tsx"
   ]
 }

@@ -3,7 +3,7 @@ import type { AgentDefinition, AgentStep, LookStep, StepInput } from "../shared/
 import type { Value } from "../shared/conditions.ts";
 import type { ArtifactMeta } from "../shared/protocol.ts";
 import type { RunDelivery } from "../shared/runs.ts";
-import { fillInput, itemKey, itemsOf, reportOf, SignInNeeded, type DeliveryRequest, type WorkResult } from "../worker/agents/runs/executor.ts";
+import { fillInput, itemKey, itemsOf, reportOf, SignInNeeded, type ActContext, type ActResult, type DeliveryRequest, type WorkResult } from "../worker/agents/runs/executor.ts";
 import { publishedAlready, publishFindings, publishRebuilt, runMark } from "../worker/agents/runs/page.ts";
 import { findingsEdit, FINDINGS_END, FINDINGS_START, reportHtml, workSpend } from "../worker/agents/runs/report.ts";
 import { AgentRunner, type RunAlarm, type RunnerHost, type WatchAlarm } from "../worker/agents/runs/runner.ts";
@@ -75,6 +75,13 @@ class FakeHome implements RunnerHost {
     const value = this.values.get(`${server}.${tool}`);
     if (value === undefined) throw new Error(`${server} has no tool "${tool}".`);
     return typeof value === "function" ? value(input) : value;
+  }
+  /** The calls that change data a run made, and what the gate said to each (by default, Inform's refusal). */
+  readonly acts: { call: string; input: StepInput; context: ActContext }[] = [];
+  actAnswer: (call: string, input: StepInput) => ActResult = () => ({ status: "refused", message: "Not run: @atlas is at Inform on its own, in a run." });
+  async act(call: { server: string; tool: string; input: StepInput }, context: ActContext): Promise<ActResult> {
+    this.acts.push({ call: `${call.server}.${call.tool}`, input: call.input, context });
+    return this.actAnswer(`${call.server}.${call.tool}`, call.input);
   }
   async needsSignIn(servers: readonly string[]) {
     return servers.filter((server) => this.signIn.has(server));
@@ -307,8 +314,62 @@ describe("scheduled runs", () => {
     await host.settled();
     const [item] = host.runs.items(definition.id, T0);
     expect(item.steps[0]).toMatchObject({ kind: "do", ok: false });
-    expect(item.steps[0].detail).toContain("wait for approvals");
+    expect(item.steps[0].detail).toContain("at Inform");
     expect(host.reads).toHaveLength(0);
+  });
+
+  it("makes a do step's call through the gate with its input filled, and later steps read what it returned", async () => {
+    const workflow: AgentStep[] = [
+      { kind: "look", server: "crm", tool: "weekly_sales", input: {}, as: "sales" },
+      { kind: "do", server: "crm", tool: "update", input: { total: "{{sales.total}}" } },
+      { kind: "onlyIf", condition: "done.ok == true" },
+      { kind: "work", prompt: "Report." },
+    ];
+    const { host, runner, definition } = home(agent({ workflow, autonomy: 4 }));
+    host.actAnswer = () => ({ status: "ran", value: { ok: true } });
+    await runner.now(definition.id, false);
+    await host.settled();
+    expect(host.acts).toEqual([{ call: "crm.update", input: { total: 940 }, context: { agentId: definition.id, dueAt: T0, item: "", step: "1" } }]);
+    const [item] = host.runs.items(definition.id, T0);
+    expect(item.status).toBe("acted");
+    expect(item.steps[1]).toMatchObject({ kind: "do", ok: true });
+    expect([...host.writes.values()].some((write) => write.text.startsWith("Result of crm.update (done)"))).toBe(true);
+  });
+
+  it("records a held do step as waiting, and a test run calls nothing", async () => {
+    const workflow: AgentStep[] = [{ kind: "do", server: "crm", tool: "update", input: {} }, { kind: "work", prompt: "Report." }];
+    const { host, runner, definition } = home(agent({ workflow, autonomy: 3 }));
+    host.actAnswer = () => ({ status: "held", message: "Not run yet: waiting for your owner's approval." });
+    await runner.now(definition.id, false);
+    await host.settled();
+    expect(host.runs.items(definition.id, T0)[0].steps[0]).toMatchObject({ ok: true, detail: expect.stringMatching(/waiting/) });
+    await runner.now(definition.id, true);
+    await host.settled();
+    expect(host.acts).toHaveLength(1);
+  });
+
+  it("makes a do step's call once when the run goes on after a restart", async () => {
+    const workflow: AgentStep[] = [{ kind: "do", server: "crm", tool: "update", input: {} }, { kind: "work", prompt: "Report." }];
+    const { host, runner, definition } = home(agent({ workflow, autonomy: 4 }));
+    host.actAnswer = () => ({ status: "ran", value: 1 });
+    // The work step never answers in the first object: it stopped there, after its call.
+    host.answer = () => new Promise<WorkResult>(() => {});
+    void runner.now(definition.id, false);
+    for (let i = 0; i < 5; i++) await tick();
+    expect(host.acts).toHaveLength(1);
+    // A new object over the same tables: the call it made is read back, not made again.
+    const restarted = new FakeHome();
+    Object.assign(restarted, { sql: host.sql });
+    const runs = new AgentRuns(host.sql, () => restarted.clock.now);
+    Object.defineProperty(restarted, "runs", { value: runs });
+    restarted.definitions.set(definition.id, { ...definition });
+    restarted.actAnswer = () => ({ status: "ran", value: 2 });
+    const again = new AgentRunner(restarted, host.sql);
+    again.resume();
+    await restarted.settled();
+    expect(restarted.works).toHaveLength(1);
+    expect(restarted.acts).toHaveLength(0);
+    expect(runs.list(definition.id)[0].status).toBe("sent");
   });
 
   it("goes on after a restart where its rows say, sending once", async () => {

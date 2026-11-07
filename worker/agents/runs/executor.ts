@@ -5,7 +5,6 @@
 // items that reached it. A test run records them instead.
 
 import {
-  AUTONOMY_LABELS,
   mayUseServer,
   serversNamed,
   stepKey,
@@ -31,7 +30,7 @@ import {
 } from "../../../shared/runs.ts";
 import { clip, errorMessage, mapLimit } from "../../../shared/util.ts";
 import { describeSchedule } from "./schedule.ts";
-import type { AgentRuns, RunRecord } from "./store.ts";
+import type { ActedStep, AgentRuns, RunRecord } from "./store.ts";
 
 /** How much of a read's result goes into the run's session: the rest is cut, with a note. */
 const MAX_RESULT_CHARS = 12_000;
@@ -69,11 +68,28 @@ export type DeliveryRequest = {
   session?: string;
 };
 
+/** What a call that changes data came to: it ran (its result's payload), was held for the owner, or was refused. */
+export type ActResult = { status: "ran"; value: Value } | { status: "held" | "refused"; message: string };
+
+/** Where in a run a call is made: the write gate reads the agent's level and rules from it. */
+export interface ActContext {
+  agentId: string;
+  dueAt: number;
+  item: string;
+  /** The step's key. */
+  step: string;
+}
+
 /** What the executor needs from the chat object it runs in. Tests pass fakes. */
 export interface RunHost {
   readonly runs: AgentRuns;
   /** A read-only call through the hub, as the agent's owner: the result's payload. Throws SignInNeeded for a sign-in. */
   read(server: string, tool: string, input: StepInput): Promise<Value>;
+  /**
+   * A call that changes data, as this run's: through the write gate, at the agent's level and within its rules (run,
+   * held for the owner, or refused). Throws SignInNeeded for a sign-in.
+   */
+  act(call: { server: string; tool: string; input: StepInput }, context: ActContext): Promise<ActResult>;
   /** Which of these servers need their owner to sign in again before a run can read them. */
   needsSignIn(servers: readonly string[]): Promise<string[]>;
   /** Ask the owner to sign in to these servers again, for `agent`'s run: they are told, and this chat when they do. */
@@ -427,13 +443,16 @@ export class RunExecutor {
           record(label, true, firstLine(text), result.cost);
           break;
         }
-        case "do":
-          record(
-            `${STEP_LABELS.do} ${step.server}.${step.tool}`,
-            false,
-            `not done: at ${AUTONOMY_LABELS[state.agent.autonomy]}, writes wait for approvals, which come later`,
-          );
+        case "do": {
+          const label = `${STEP_LABELS.do} ${step.server}.${step.tool}`;
+          const acted = await this.#act(state, step, key);
+          if (acted.value !== undefined) {
+            state.scope.done = acted.value as Value;
+            state.scope.last = acted.value as Value;
+          }
+          record(label, acted.ok, acted.detail);
           break;
+        }
         case "tell":
         case "page":
         case "handOver":
@@ -445,6 +464,36 @@ export class RunExecutor {
       }
     }
     return undefined;
+  }
+
+  /**
+   * A do step: its call, with its input filled from the results so far, through the write gate (the agent's level and
+   * rules decide whether it runs, waits for the owner, or is refused). Kept as it ends, so a run that goes on after a
+   * restart makes it once. A test run calls nothing: it says what it would call.
+   */
+  async #act(state: ItemRun, step: Extract<AgentStep, { kind: "do" }>, key: string): Promise<ActedStep> {
+    const runs = this.#host.runs;
+    const mark = `${state.item}:${key}`;
+    const before = runs.get(state.agent.id, state.run.dueAt)?.detail.acted?.[mark];
+    if (before) return before;
+    if (!mayUseServer(state.agent, step.server)) return { ok: false, detail: `not done: ${step.server} is not one of the servers @${state.agent.name} may use` };
+    const input = fillInput(step.input, state.scope);
+    if (state.run.test) return { ok: true, detail: `a test: would call it with ${excerpt(jsonOf(input), DETAIL_CHARS)}` };
+    const context: ActContext = { agentId: state.agent.id, dueAt: state.run.dueAt, item: state.item, step: key };
+    let acted: ActedStep;
+    try {
+      const result = await this.#host.act({ server: step.server, tool: step.tool, input }, context);
+      if (result.status === "ran") {
+        acted = { ok: true, detail: excerpt(jsonOf(result.value), DETAIL_CHARS), value: result.value };
+        await this.#host.write(state.session, `Result of ${step.server}.${step.tool} (done):\n${clip(jsonOf(result.value), MAX_RESULT_CHARS)}`, `${opId(state)}:do:${key}`);
+      } else acted = { ok: result.status === "held", detail: result.message };
+    } catch (error) {
+      if (error instanceof SignInNeeded) throw error;
+      acted = { ok: false, detail: `failed: ${errorMessage(error)}` };
+    }
+    const run = runs.get(state.agent.id, state.run.dueAt);
+    runs.update(state.agent.id, state.run.dueAt, { detail: { acted: { ...run?.detail.acted, [mark]: acted } } });
+    return acted;
   }
 
   /** Whether a condition holds over the item's results; a condition that cannot be read fails the item. */

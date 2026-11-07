@@ -51,6 +51,19 @@ export interface RunDetail {
   sent?: string[];
   /** A page rebuild's session, by its delivery's key, kept before it starts: a run that goes on uses it again. */
   sessions?: Record<string, string>;
+  /**
+   * What each do step came to, by `<item>:<step key>`, kept as it ends: a run that goes on after a restart makes its
+   * calls that change data once.
+   */
+  acted?: Record<string, ActedStep>;
+}
+
+/** A do step's outcome, as a run keeps it (RunDetail.acted). */
+export interface ActedStep {
+  ok: boolean;
+  detail: string;
+  /** The call's result, when it ran: what later steps read as `done`. */
+  value?: unknown;
 }
 
 /** What an item's row keeps: its steps, its part of the report and why it stopped. */
