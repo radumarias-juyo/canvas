@@ -58,7 +58,7 @@ import type { UserDirectory } from "./users.ts";
  *   POST   /api/chats/:id/agents/:agentId/draft  (the agent's owner) {turn, action: "post" | "discard", text?}: a reply held for review
  *   POST   /api/chats/:id/agents/:agentId/copy  {…fields, version}: someone's own copy of the version of a shared agent
  *   POST   /api/chats/:id/agents/:agentId/mute  {muted}: mute an agent here (anyone in the chat), or unmute it (its owner, the chat's)
- *   PUT    /api/chats/:id/agent-settings    (owner) {router?, speakUp?, servers?, dailyTokens?}: each given replaces, null clears;
+ *   PUT    /api/chats/:id/agent-settings    (owner) {router?, speakUp?, servers?, dailyTokens?, messageTokens?}: each given replaces, null clears;
  *                                             everyone in the chat gets the settings (ChatAgentSettingsView) over its socket
  *                                             they read (a newer one refuses), with their changes,
  *                                             saved off in their directory with copiedFrom; it runs with their sign-ins

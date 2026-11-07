@@ -511,6 +511,27 @@ describe("Member agents: speakers one after another, seats among them", () => {
   });
 });
 
+describe("Member agents: a seat's spend in its chain's budget", () => {
+  it("counts what a seat's turn spent in its owner's object against the message's budget", async () => {
+    const chat = room();
+    const stopped: string[] = [];
+    Object.assign(chat, { messageBudget: () => 1_000, chainStopped: async (_root: number, text: string) => void stopped.push(text) });
+    const mine = chat.add(RADU, "planner", { servers: ["db"] });
+    const hers = chat.add(ANA, "helper", { servers: ["db"] });
+    const [seatTurn] = chat.turns.call([hers.agentId], chat.say(MIA, "@helper-ana totals?"));
+    await settle();
+    const ana = chat.member(ANA.uid);
+    // Her object ran it, and says what it came to with its result.
+    const run = ana.sessions.run(ana.sessions.sessionOf(seatTurn.id), operationId(seatTurn.id));
+    run.resolve({ status: "done", text: "120. @planner check?", spent: { tokens: 1_500, costUsd: 0 } });
+    await settle();
+    expect(chat.posts.map((post) => post.turn)).toEqual([seatTurn.id]);
+    expect(chat.roster.chainTokens(seatTurn.id)).toBe(1_500);
+    expect(chat.roster.recentTurns(mine.agentId)).toEqual([]);
+    expect(stopped).toEqual([expect.stringContaining("so @planner did not get its turn")]);
+  });
+});
+
 describe("Member agents: a seat in the member's own object", () => {
   it("runs a member's agent there, with its owner's tools only when they ask, and posts its reply back to the room", async () => {
     const chat = room();

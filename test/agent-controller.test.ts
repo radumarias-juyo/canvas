@@ -1404,6 +1404,99 @@ class MeteredChat extends FakeChat {
   }
 }
 
+/** A chat with a budget per person's message, where each turn's model calls came to what the test says. */
+class BudgetChat extends FakeChat {
+  budget: number | undefined = 1_000;
+  /** What each turn spent, by id. */
+  readonly spent = new Map<number, number>();
+  /** The chat's lines for chains that stopped, by their root, placed once each. */
+  readonly stopped = new Map<number, string>();
+
+  turnTokens(_entry: RosterEntry, turn: AgentTurn): number {
+    return this.spent.get(turn.id) ?? 0;
+  }
+  messageBudget(): number | undefined {
+    return this.budget;
+  }
+  async chainStopped(root: number, text: string): Promise<void> {
+    this.calls.push("chain stopped");
+    if (!this.stopped.has(root)) this.stopped.set(root, text);
+  }
+}
+
+describe("AgentTurns: the budget per person's message", () => {
+  it("stops a chain once its turns used the budget: no hand-offs, no later speakers, and one line after its reply", async () => {
+    const chat = new BudgetChat([A, B, C]);
+    const [ta, tb] = chat.turns.call([idOf(A), idOf(B)], chat.say(OWNER, "@atlas @bard"));
+    await chat.flush();
+    chat.spent.set(ta.id, 1_200);
+    chat.finish(ta.id, done("Found it. @cora and @pi, take a look."));
+    await chat.flush();
+    // Atlas's reply is posted; bard, cora and pi get no turns.
+    expect(chat.replies().map((reply) => reply.name)).toEqual([A]);
+    expect(chat.roster.turn(tb.id)?.status).toBe("stopped");
+    expect(chat.roster.recentTurns(idOf(C))).toEqual([]);
+    expect(chat.toPi).toEqual([]);
+    expect(chat.submits).toHaveLength(1);
+    expect(chat.stopped.get(ta.id)).toBe(
+      "The agents' turns for this message used 1,200 tokens, past its budget of 1,000, so @cora, @pi, @bard did not get their turns. " +
+        "The chat's owner can raise the budget per message in the chat's agent settings.",
+    );
+    // The chain's last line: after its reply.
+    expect(chat.calls.indexOf("chain stopped")).toBeGreaterThan(chat.calls.indexOf(`post ${A}`));
+    // Another message's chain has its own budget.
+    const [again] = chat.turns.call([idOf(B)], chat.say(OWNER, "@bard now"));
+    await chat.flush();
+    expect(chat.runningOf(B)?.id).toBe(again.id);
+  });
+
+  it("counts every turn of the chain, hand-offs and seats' alike, and lets it go on while under", async () => {
+    const chat = new BudgetChat([A, B, C]);
+    const [ta] = chat.turns.call([idOf(A)], chat.say(OWNER, "@atlas"));
+    await chat.flush();
+    chat.spent.set(ta.id, 400);
+    chat.finish(ta.id, done("@bard over to you"));
+    await chat.flush();
+    const tb = chat.latest(B);
+    expect(chat.runningOf(B)?.id).toBe(tb.id);
+    // A seat's turn reports what it spent in its owner's object: that counts the same.
+    chat.finish(tb.id, { ...done("@cora your turn"), spent: { tokens: 700, costUsd: 0.01 } });
+    await chat.flush();
+    expect(chat.roster.chainTokens(ta.id)).toBe(1_100);
+    expect(chat.roster.recentTurns(idOf(C))).toEqual([]);
+    expect(chat.stopped.get(ta.id)).toMatch(/used 1,100 tokens, past its budget of 1,000, so @cora did not get its turn/);
+  });
+
+  it("stops a turn handed on into a chain that used its budget, when it comes up", async () => {
+    const chat = new BudgetChat([A, B]);
+    const [ta] = chat.turns.call([idOf(A)], chat.say(OWNER, "@atlas"));
+    await chat.flush();
+    chat.spent.set(ta.id, 1_000);
+    chat.finish(ta.id, done("@pi please build it"));
+    await chat.flush();
+    expect(chat.toPi).toEqual([]);
+    // pi's answer in the same chain names bard: its turn stops as it comes up, saying so once.
+    const text = "Built. @bard check it.";
+    chat.turns.fromPi(text, chat.piSays(text), { hop: 1, root: ta.id });
+    await chat.flush();
+    expect(chat.latest(B).status).toBe("stopped");
+    expect(chat.submits).toHaveLength(1);
+    expect([...chat.stopped.values()]).toHaveLength(1);
+  });
+
+  it("goes on with no budget set, however much a chain used", async () => {
+    const chat = new BudgetChat([A, B]);
+    chat.budget = undefined;
+    const [ta] = chat.turns.call([idOf(A)], chat.say(OWNER, "@atlas"));
+    await chat.flush();
+    chat.spent.set(ta.id, 5_000_000);
+    chat.finish(ta.id, done("@bard go"));
+    await chat.flush();
+    expect(chat.runningOf(B)).not.toBeNull();
+    expect(chat.stopped.size).toBe(0);
+  });
+});
+
 describe("AgentTurns: turns nobody asked for, and the budget", () => {
   const unprompted = (chat: FakeChat): Caller => ({
     calledBy: { name: "the conversation", unprompted: "speak-up" },
