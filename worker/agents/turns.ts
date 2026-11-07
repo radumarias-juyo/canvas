@@ -253,7 +253,7 @@ export function allowedTools(
   byOwner: boolean,
   signsIn: (server: string) => boolean,
 ): string[] {
-  const own = ownServer(agent);
+  const own = (server: string) => mayUseServer(agent, server);
   const shared = sharedServer(agent, signsIn);
   return tools.filter((name) => {
     if (NEVER_FOR_AGENTS.includes(name)) return false;
@@ -261,11 +261,6 @@ export function allowedTools(
     if (byOwner) return !info || own(info.server);
     return info ? info.readOnly && shared(info.server) : READ_TOOLS.includes(name);
   });
-}
-
-/** Whether an agent may use `server` when its owner asks: every server when it lists none. */
-export function ownServer(agent: Pick<AgentDefinition, "servers">): (server: string) => boolean {
-  return (server) => mayUseServer(agent, server);
 }
 
 /**
@@ -276,8 +271,7 @@ export function sharedServer(
   agent: Pick<AgentDefinition, "servers" | "sharedServers">,
   signsIn: (server: string) => boolean,
 ): (server: string) => boolean {
-  const own = ownServer(agent);
-  return (server) => own(server) && (agent.sharedServers ? agent.sharedServers.includes(server) : !signsIn(server));
+  return (server) => mayUseServer(agent, server) && (agent.sharedServers ? agent.sharedServers.includes(server) : !signsIn(server));
 }
 
 /**

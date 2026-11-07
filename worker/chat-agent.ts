@@ -2515,7 +2515,6 @@ export class ChatAgent extends DurableObject<Env> {
     if (typeof agentId !== "string" || !AGENT_ID_PATTERN.test(agentId)) return refuse(400, "Expected {agentId}.");
     const here = this.roster.get(agentId);
     if (here) return here.ownerUid === by.uid ? this.agentViews() : refuse(409, "Another agent with this id is in the chat.");
-    const mine = by.uid === this.uid;
     const agent = await this.#index(by.uid).getAgent(agentId);
     if (!agent) return refuse(404, "No such agent.");
     if (!agent.enabled) return refuse(409, `@${agent.name} is off: turn it on first.`);
@@ -3073,11 +3072,15 @@ export class ChatAgent extends DurableObject<Env> {
     if (agent?.enabled && agent.trigger && !agent.workflow?.length) this.ctx.waitUntil(this.#compile(agent).catch(() => {}));
   }
 
-  /** Bring one of the owner's agents onto the roster, in a pi session made for it. */
+  /**
+   * Bring an agent onto the roster: one of the owner's (no `by`, or `by` the owner) in a pi session made for it here; a
+   * member's (`by`) as a seat in their own object, under a name free here (memberAgentName). The name it got.
+   */
   async #addToRoster(agent: AgentDefinition, by?: Person): Promise<{ error: string } | { name: string }> {
-    const ownerUid = by?.uid ?? this.uid;
-    const mine = ownerUid === this.uid;
-    const name = mine ? agent.name : memberAgentName(agent.name, by!.name, (taken) => this.roster.byName(taken) !== null);
+    const member = by && by.uid !== this.uid ? by : undefined;
+    const ownerUid = member?.uid ?? this.uid;
+    const mine = !member;
+    const name = member ? memberAgentName(agent.name, member.name, (taken) => this.roster.byName(taken) !== null) : agent.name;
     if (!name) return { error: `This chat already has an agent named "${agent.name}".` };
     // Before its session is made: a session made for an agent the roster refuses would stay, read by every traces read.
     const early = this.roster.refusal(name);
@@ -3250,7 +3253,7 @@ export class ChatAgent extends DurableObject<Env> {
     if (!from?.session) return undefined;
     const fork = await this.harness.sessions.fork(from.session);
     // A run of several items: the fork has one item's reads; the whole report says what the others came to.
-    if (items.length > 1) await this.#writeAside(await this.#conversation(fork.id), reportContext(record.detail.when ?? "", reportOf(items)), `run-reply:${record.dueAt}`);
+    if (items.length > 1) await this.#writeTo(fork.id, reportContext(record.detail.when ?? "", reportOf(items)), `run-reply:${record.dueAt}`);
     this.runs.setReplySession(data.agentId, record.dueAt, fork.id);
     return { agentId: data.agentId, session: this.runs.get(data.agentId, record.dueAt)!.replySession ?? fork.id, run: ref };
   }
