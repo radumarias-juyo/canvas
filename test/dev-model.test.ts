@@ -1,0 +1,75 @@
+import { createModels, fauxAssistantMessage, fauxToolCall, type AssistantMessage, type Message } from "@earendil-works/pi-ai";
+import { describe, expect, it } from "vitest";
+import { scriptModel, scriptOn, scriptReply, scriptSteps } from "../worker/dev-model.ts";
+
+const user = (text: string): Message => ({ role: "user", content: text, timestamp: 0 });
+const system = (text: string, sections?: Record<string, string>): Message => ({ role: "system", content: text, ...(sections && { sections }), timestamp: 0 });
+const called = (name: string, input = {}): Message => fauxAssistantMessage(fauxToolCall(name, input, { id: "c1" }), { stopReason: "toolUse" });
+const result = (name: string, text: string, isError = false): Message => ({
+  role: "toolResult",
+  toolCallId: "c1",
+  toolName: name,
+  content: [{ type: "text", text }],
+  isError,
+  timestamp: 0,
+});
+const said = (reply: AssistantMessage) => reply.content.map((block) => (block.type === "text" ? block.text : "")).join("");
+
+describe("the scripted dev model", () => {
+  it("is on only with DEV_MODEL=script and DEV_TOOLS=true", () => {
+    expect(scriptOn({ DEV_MODEL: "script", DEV_TOOLS: "true" })).toBe(true);
+    expect(scriptOn({ DEV_MODEL: "script", DEV_TOOLS: "false" })).toBe(false);
+    expect(scriptOn({ DEV_MODEL: "", DEV_TOOLS: "true" })).toBe(false);
+    expect(scriptOn({})).toBe(false);
+  });
+
+  it("reads /say and /tool lines, after other text too", () => {
+    expect(scriptSteps("@helper /say hello from the agent")).toEqual([{ say: "hello from the agent" }]);
+    expect(scriptSteps('/tool crm.list_deals {"stage":"won"}\n/say done')).toEqual([{ tool: "crm__list_deals", input: { stage: "won" } }, { say: "done" }]);
+    expect(scriptSteps("/tool checklist")).toEqual([{ tool: "checklist", input: {} }]);
+    expect(scriptSteps("/tool crm.update_deal {oops")[0]).toHaveProperty("bad");
+    expect(scriptSteps("a path like x/say is no script")).toEqual([]);
+    // A turn's ask indents a message's further lines: the reply has them as written.
+    expect(scriptSteps("[ada · person · your owner]: /say Summary ready.\n  Next step: Send this every Monday?")).toEqual([
+      { say: "Summary ready.\nNext step: Send this every Monday?" },
+    ]);
+    // In instructions, only lines that start with one.
+    expect(scriptSteps("Say /say hi when asked", true)).toEqual([]);
+    expect(scriptSteps("Your owner wrote:\n/say from the instructions", true)).toEqual([{ say: "from the instructions" }]);
+  });
+
+  it("says, calls a tool, then names it with the start of its result", () => {
+    expect(said(scriptReply([user("/say hi there")]))).toBe("hi there");
+    const call = scriptReply([user('/tool crm.update_deal {"id":"d1","stage":"won"}')]);
+    expect(call.stopReason).toBe("toolUse");
+    expect(call.content).toEqual([expect.objectContaining({ type: "toolCall", name: "crm__update_deal", arguments: { id: "d1", stage: "won" } })]);
+    const after = scriptReply([user("/tool crm.update_deal {}"), called("crm__update_deal"), result("crm__update_deal", "Tool not allowed", true)]);
+    expect(said(after)).toBe("crm__update_deal failed: Tool not allowed");
+    const next = scriptReply([user("/tool crm.list_deals {}\n/say listed them"), called("crm__list_deals"), result("crm__list_deals", "{}")]);
+    expect(said(next)).toBe("listed them");
+  });
+
+  it("answers anything else with ok and the message, and never follows an earlier turn's script", () => {
+    expect(said(scriptReply([user("[ada · person]: how are the deals?")]))).toBe("ok: how are the deals?");
+    const earlier = [user("/tool crm.list_deals {}"), called("crm__list_deals"), result("crm__list_deals", "{}"), fauxAssistantMessage("crm__list_deals: {}")];
+    expect(said(scriptReply([...earlier, user("thanks")]))).toBe("ok: thanks");
+  });
+
+  it("falls back to script lines in the instructions", () => {
+    const instructions = system("You are an agent.", { agent: "Your owner wrote these instructions for you:\n/tool agent_propose {\"name\":\"weekly\"}" });
+    const reply = scriptReply([instructions, user("Yes to the next step your message offers")]);
+    expect(reply.content).toEqual([expect.objectContaining({ type: "toolCall", name: "agent_propose", arguments: { name: "weekly" } })]);
+    // The message's own script wins.
+    expect(said(scriptReply([instructions, user("/say mine")]))).toBe("mine");
+  });
+
+  it("answers every call through pi-ai's models", async () => {
+    const { provider, model } = scriptModel();
+    const models = createModels();
+    models.setProvider(provider);
+    for (const text of ["one", "two", "three"]) {
+      const reply = await models.completeSimple(model, { messages: [user(`/say ${text}`)] });
+      expect(said(reply)).toBe(text);
+    }
+  });
+});
