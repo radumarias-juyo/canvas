@@ -447,7 +447,7 @@ export class UserDirectory extends DurableObject<Env> {
       kind: "run",
       ref: `run:${agent.id}:${run.dueAt}`,
       // When it asked, if it did: an answer written since, while the run went on, answers it (FeedStore.add).
-      at: run.sentAt ?? Date.now(),
+      at: (run.asks && run.sentAt) || Date.now(),
       title: `@${agent.name} ${run.asks ? "asks you something" : RUN_FEED_TEXT[run.status]}`,
       ...(text && { text }),
       from,
@@ -749,25 +749,44 @@ export class UserDirectory extends DurableObject<Env> {
 
   /**
    * Bump a shared chat to the top with its current title, as touchChat does for the owner. `byOther`: someone else wrote.
-   * `named`: the title was just cut from this message.
+   * `named`: the title was just cut from this message. `sentAt`: when the message was sent, by the chat's clock.
    */
-  touchSharedChat(id: string, ownerUid: string, title: string, byOther: boolean, tag?: Tag, named = false, answered: readonly string[] = []): void {
-    this.#touch(id, ownerUid, title, byOther, tag, named, answered);
+  touchSharedChat(
+    id: string,
+    ownerUid: string,
+    title: string,
+    byOther: boolean,
+    tag?: Tag,
+    named = false,
+    answered: readonly string[] = [],
+    sentAt = Date.now(),
+  ): void {
+    this.#touch(id, ownerUid, title, byOther, tag, named, answered, sentAt);
   }
 
   /**
    * Bump a chat. With `tag`, the message tagged this user: the chat is marked so until they look, and the open apps hear
    * it (MentionNotice), with the chat's title unless the chat is named after this very message (`named`). `answered`:
-   * this user wrote it (also as the owner's second seat), to these agents: what they asked this user there is answered.
+   * this user wrote it (also as the owner's second seat), to these agents: what they asked this user there before
+   * `sentAt` (the chat's clock, as the questions' times are) is answered.
    */
-  #touch(id: string, ownerUid: string, title: string, byOther: boolean, tag: Tag | undefined, named: boolean, answered: readonly string[]): void {
+  #touch(
+    id: string,
+    ownerUid: string,
+    title: string,
+    byOther: boolean,
+    tag: Tag | undefined,
+    named: boolean,
+    answered: readonly string[],
+    sentAt: number,
+  ): void {
     // This object's own clock for the row, as every other write to it uses: a tag's time comes from the chat, and could
     // put activity_at back behind a later write. The notice keeps the tag's time, which windows share.
     const now = Date.now();
     const set = "title = ?, updated_at = ?, activity_at = CASE WHEN ? THEN ? ELSE activity_at END, mentioned_at = CASE WHEN ? THEN ? ELSE mentioned_at END";
     const listed = this.#updateChat(id, ownerUid, set, title, now, byOther ? 1 : 0, now, tag ? 1 : 0, now);
     // This user wrote in it to `answered` (the agents the message reached): what those agents asked them there is answered.
-    if (listed && this.#feed.resolveReplies(id, answered)) this.#changed("feed");
+    if (listed && this.#feed.resolveReplies(id, answered, sentAt)) this.#changed("feed");
     if (!listed || !tag) return;
     // A tag opens the chat again for someone who closed it.
     this.#rows.reopen(id);
@@ -821,14 +840,21 @@ export class UserDirectory extends DurableObject<Env> {
   /**
    * Bump a chat to the top. A chat still unnamed is named after the prompt, so the first prompt names it (`named`), until
    * a model gives it a better title (nameChat). `byOther`: someone other than this user wrote it; `answered`: the agents
-   * this user's message (as themselves or from their second seat) reached. Returns its title.
+   * this user's message (as themselves or from their second seat) reached, sent at `sentAt`. Returns its title.
    */
-  touchChat(id: string, prompt: string, byOther: boolean, tag?: Tag, answered: readonly string[] = []): { title: string; named: boolean } {
+  touchChat(
+    id: string,
+    prompt: string,
+    byOther: boolean,
+    tag?: Tag,
+    answered: readonly string[] = [],
+    sentAt = Date.now(),
+  ): { title: string; named: boolean } {
     this.#notePreview(id, prompt);
     const before = this.chatTitle(id);
     const named = before === UNNAMED_CHAT;
     const title = named || before === null ? titleFromMessage(prompt) : before;
-    this.#touch(id, this.ctx.id.name!, title, byOther, tag, named, answered);
+    this.#touch(id, this.ctx.id.name!, title, byOther, tag, named, answered, sentAt);
     return { title, named };
   }
 
@@ -1082,7 +1108,7 @@ export class UserDirectory extends DurableObject<Env> {
     // Turning it on confirms its guesses (AgentStore.setEnabled clears them).
     if (!("error" in result) && result.enabled) this.resolveFeed(assumptionRef(id));
     // Off, its runs wait on nothing more: no sign-in or answer is needed for a run that will not go on.
-    if (!("error" in result) && !result.enabled && this.#feed.resolveAbout(aboutOf("agent", id, this.ctx.id.name!))) this.#changed("feed");
+    if (!("error" in result) && !result.enabled && this.#feed.resolveAbout(aboutOf("agent", id, this.ctx.id.name!), "run")) this.#changed("feed");
     return result;
   }
 

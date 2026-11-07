@@ -128,9 +128,15 @@ describe("feed: keeping items", () => {
     feed.add(report(9));
     expect(feed.list({ needsYou: true }).items.map((item) => item.at)).toEqual([T0 + 9]);
     expect(feed.counts()).toEqual({ unread: 1, needsYou: 1 });
+    // A message sent before it was posted (its touch arriving late) does not answer it.
+    expect(feed.resolveReplies("home", ["b1"], T0 + 8)).toBe(0);
     // Turned off, its agent's runs wait on nothing.
     feed.add({ ...report(20), needsYou: true }, null, aboutOf("agent", "b1", "ann"));
-    expect(feed.resolveAbout(aboutOf("agent", "b1", "ann"))).toBe(1);
+    expect(feed.resolveAbout(aboutOf("agent", "b1", "ann"), "run")).toBe(1);
+    // A draft's guesses still wait for the person to confirm them.
+    const confirm = { kind: "assumption", ref: "assumption:b1", at: T0 + 21, title: "Confirm", open: { to: "agent", agentId: "b1" } } as const;
+    feed.add(confirm, null, aboutOf("agent", "b1", "ann"));
+    expect(feed.resolveAbout(aboutOf("agent", "b1", "ann"), "run")).toBe(0);
   });
 
   it("lets a chat, or a page or agent, take its items along when it goes", () => {
@@ -168,6 +174,17 @@ describe("feed: keeping items", () => {
     // Half the feed at most waits; the oldest waiting went first.
     expect(feed.counts().needsYou).toBe(MAX_FEED_ITEMS / 2);
     expect(items.some((item) => item.title === "Confirm a0")).toBe(false);
+  });
+
+  it("gives a feed made before waits_on the agent each waiting question asked", () => {
+    const sql = memorySql();
+    sql.exec(`CREATE TABLE feed (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, ref TEXT NOT NULL UNIQUE, at INTEGER NOT NULL,
+      read INTEGER NOT NULL DEFAULT 0, needs INTEGER NOT NULL DEFAULT 0, chat_id TEXT, about TEXT, data TEXT NOT NULL)`);
+    const from = agentFrom({ id: "b1", name: "brief", avatar: "br", color: "teal" });
+    const data = JSON.stringify({ title: "@brief asks you something", from, open: { to: "chat", chatId: "c1" } });
+    sql.exec("INSERT INTO feed (kind, ref, at, needs, chat_id, data) VALUES ('question', 'question:c1:1', ?, 2, 'c1', ?)", T0, data);
+    const feed = new FeedStore(sql);
+    expect(feed.resolveReplies("c1", ["b1"], T0 + 1)).toBe(1);
   });
 
   it("keeps what still waits on the person when pruning, read or not", () => {

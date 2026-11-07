@@ -1491,7 +1491,7 @@ export class ChatAgent extends DurableObject<Env> {
     // The sidebars are only a convenience: update them off the prompt's path, and let a failure be.
     // Only a tag whose "@name" is in the text: one sent without it would notify someone of nothing they can see.
     const tags = taggedPeople(keptMentions(text, mentions));
-    void this.#touchIndexes(title, author, tags, text, `${author.uid}:${sentAt}`, { reached: speakers }).catch((error) =>
+    void this.#touchIndexes(title, author, tags, text, `${author.uid}:${sentAt}`, { reached: speakers, sentAt }).catch((error) =>
       console.error("chat index:", errorMessage(error)),
     );
     return true;
@@ -1651,7 +1651,7 @@ export class ChatAgent extends DurableObject<Env> {
    * (a Tag). `titleFrom` names an unnamed chat: the message's text, or its files' names. `key` names the message (the
    * same one placed again tags nobody twice in the feed); `run`: it is a run's report, which its owner's feed has already.
    * `reached`: the agents a person's message reached (called, replied to, or the chat's own), whose questions to its
-   * author it answers in their feed.
+   * author asked before `sentAt` (when it was sent: the touch can arrive seconds later) it answers in their feed.
    */
   async #touchIndexes(
     titleFrom: string,
@@ -1659,16 +1659,18 @@ export class ChatAgent extends DurableObject<Env> {
     tags: readonly string[],
     text: string,
     key: string,
-    { run = false, reached = [] }: { run?: boolean; reached?: readonly string[] } = {},
+    { run = false, reached = [], sentAt }: { run?: boolean; reached?: readonly string[]; sentAt?: number } = {},
   ): Promise<void> {
     const now = Date.now();
+    const answeredAt = sentAt ?? now;
     // Someone tagging themselves is told nothing; anyone else tagged is, owner or member.
     const tagged = new Set(tags.filter((uid) => uid !== author.uid));
     const tag: Tag = { from: author.name, text: excerpt(text), at: now, key, kind: this.kinds.kind(), ...(run && { run: true }) };
     const tagOf = (uid: string) => (tagged.has(uid) ? tag : undefined);
     // The owner's second seat writes as the owner: what waits on the owner here for a reply is answered by it too.
     const byOwner = this.#account(author.uid) === this.uid;
-    const { title, named } = await this.#directory.touchChat(this.chatId, titleFrom, author.uid !== this.uid, tagOf(this.uid), byOwner ? reached : []);
+    const answers = byOwner ? reached : [];
+    const { title, named } = await this.#directory.touchChat(this.chatId, titleFrom, author.uid !== this.uid, tagOf(this.uid), answers, answeredAt);
     if (named && titleFrom) void this.#nameChat(titleFrom, title).catch((error: unknown) => console.error("chat title:", errorMessage(error)));
     const all = title !== this.#membersTouched.title || now - this.#membersTouched.at >= MEMBERS_TOUCH_MS;
     if (all) this.#membersTouched = { title, at: now };
@@ -1676,7 +1678,8 @@ export class ChatAgent extends DurableObject<Env> {
     await Promise.allSettled(
       members.map((member) => {
         const answered = member.uid === author.uid ? reached : [];
-        return this.#index(member.uid).touchSharedChat(this.chatId, this.uid, title, member.uid !== author.uid, tagOf(member.uid), named, answered);
+        const byOther = member.uid !== author.uid;
+        return this.#index(member.uid).touchSharedChat(this.chatId, this.uid, title, byOther, tagOf(member.uid), named, answered, answeredAt);
       }),
     );
   }
