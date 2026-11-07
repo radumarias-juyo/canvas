@@ -27,18 +27,28 @@ const LEFT_OUT: Readonly<Record<string, string>> = {
 
 /** `message` with what it says put in place of one that says it is left out, if it is a memory_recall or memory_forget result. */
 function leftOutResult(message: Message | undefined): ToolResultMessage | undefined {
-  const leftOut = message?.role === "toolResult" ? LEFT_OUT[message.toolName] : undefined;
-  return message?.role === "toolResult" && leftOut ? { ...message, content: [{ type: "text", text: leftOut }], details: undefined } : undefined;
+  if (message?.role !== "toolResult") return undefined;
+  const leftOut = LEFT_OUT[message.toolName];
+  return leftOut ? { ...message, content: [{ type: "text", text: leftOut }], details: undefined } : undefined;
 }
 
-/** `entry` with a memory_recall or memory_forget result in it left out (the same entry when it holds none). */
+/**
+ * `entry` with a memory_recall or memory_forget result in it left out, and a compaction's summary (which may have kept
+ * the notes); the same entry when it holds neither.
+ */
 function withoutNoteResult(entry: EntryRecord): EntryRecord {
+  if (CompactionEntry.is(entry) && entry.model?.length)
+    return { ...entry, model: [{ role: "user", content: SUMMARY_LEFT_OUT, timestamp: entry.model[0]?.timestamp ?? 0 }] };
   const [first, ...rest] = entry.model ?? [];
   const result = leftOutResult(first);
   return result ? { ...entry, model: [result, ...rest] } : entry;
 }
 
-const holdsNoteResult = (entry: EntryRecord) => withoutNoteResult(entry) !== entry;
+/** `entries` with withoutNoteResult applied, the same array when none changed. */
+function withoutNoteResultsIn(entries: readonly EntryRecord[]): readonly EntryRecord[] {
+  const shown = entries.map(withoutNoteResult);
+  return shown.some((entry, index) => entry !== entries[index]) ? shown : entries;
+}
 
 /** A memory tool's call with its output and details left out; any other call as it is. */
 function blankCall<Call extends { output?: unknown; details?: unknown }>(call: Call, toolName: string): Call {
@@ -46,15 +56,16 @@ function blankCall<Call extends { output?: unknown; details?: unknown }>(call: C
 }
 
 /**
- * What a socket of someone other than the owner gets of `event`: what memory_recall found and what memory_forget said
- * left out, in the transcript's entries, in a result's message as it starts and in a call's running output. They may
- * hold the owner's own notes, read in this chat before others were in it (from any of the owner's chats). Every event
- * type is named, so a new one fails the typecheck until it is placed here (as in withoutSystemPrompt).
+ * What a socket of someone other than the owner gets of `event`: what memory_recall found, what memory_forget said and
+ * what a compaction summarized left out, in the transcript's entries, in a result's message as it starts and in a
+ * call's running output. They may hold the owner's own notes, read in this chat before others were in it (from any of
+ * the owner's chats). Every event type is named, so a new one fails the typecheck until it is placed here (as in
+ * withoutSystemPrompt).
  */
 export function withoutNoteResults(event: AgentEvent): AgentEvent {
   switch (event.type) {
     case "snapshot": {
-      const entries = event.entries.some(holdsNoteResult) ? event.entries.map(withoutNoteResult) : event.entries;
+      const entries = withoutNoteResultsIn(event.entries);
       const tools = event.tools.some((slot) => LEFT_OUT[slot.name]) ? event.tools.map((slot) => blankCall(slot, slot.name)) : event.tools;
       return entries === event.entries && tools === event.tools ? event : { ...event, entries, tools };
     }
@@ -63,8 +74,10 @@ export function withoutNoteResults(event: AgentEvent): AgentEvent {
       return message ? { ...event, message } : event;
     }
     case "message_end":
-    case "entry_appended":
-      return holdsNoteResult(event.entry) ? { ...event, entry: withoutNoteResult(event.entry) } : event;
+    case "entry_appended": {
+      const entry = withoutNoteResult(event.entry);
+      return entry === event.entry ? event : { ...event, entry };
+    }
     case "tool_execution_end":
       if (!LEFT_OUT[event.toolName]) return event;
       return {

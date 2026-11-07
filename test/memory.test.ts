@@ -638,6 +638,31 @@ describe("ChatMemory", () => {
     done(true);
   });
 
+  it("keeps a conversation marked when its prompt held the owner's own notes again before the fresh start was done", async () => {
+    const owner = directory();
+    saved(owner.memory.add({ text: "My salary is private.", scope: "user" }));
+    const { memory, host, state, fresh } = chat(PRIVATE, "private", true, owner);
+    await memory.refresh();
+    let done!: (clean: boolean) => void;
+    state.done = new Promise<boolean>((resolve) => (done = resolve));
+    state.alone = false;
+    state.kind = "group";
+    await memory.audienceChanged();
+    // Private again while it is not done: the next prompt holds them again.
+    state.alone = true;
+    state.kind = "private";
+    expect(await memory.refresh()).toContain("salary");
+    done(true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // Shared again: that prompt is started afresh too.
+    state.alone = false;
+    state.kind = "group";
+    state.done = Promise.resolve(true);
+    expect(host.leavesOutSummaries("root")).toBe(true);
+    await memory.audienceChanged();
+    expect(fresh).toEqual([undefined, undefined]);
+  });
+
   it("lets pi save as the owner only in a turn that answers the owner's own message", async () => {
     const owner = directory();
     const { host, state } = chat(PRIVATE, "private", true, owner);
@@ -678,6 +703,8 @@ describe("ChatMemory", () => {
     // The owner's message after a run that failed, or was cut off by a restart, starts a run of its own.
     expect(await asked(reply("toolUse"), message("owner"), reply("error"), entry(CHAT_TURN_KIND))).toBe(true);
     expect(await asked(reply("toolUse"), message("owner"), reply("aborted"), message("ana"))).toBe(true);
+    // The owner's message steered into a member's run that failed once and went on: it is still that run.
+    expect(await asked(reply("toolUse"), message("owner"), reply("toolUse"), reply("error"), message("ana"))).toBe(false);
     // A run longer than it reads is not judged the owner's.
     const long = (async function* () {
       for (let page = 0; page <= MAX_RUN_PAGES; page++) yield [reply("toolUse")];
@@ -837,5 +864,17 @@ describe("what someone other than the owner sees of a chat's events", () => {
     // Anything else, as it is.
     const other = { type: "message_start", message: result("files_read", "salary.csv").model![0]! } as AgentEvent;
     expect(withoutNoteResults(other)).toBe(other);
+  });
+
+  it("leaves out a compaction's summary, which may have kept the notes", () => {
+    const summary = {
+      id: 7,
+      conversationId: "1",
+      kind: "pi.compaction",
+      model: [{ role: "user", content: "The conversation history before this point was compacted: My salary is private.", timestamp: 0 }],
+    } as unknown as EntryRecord;
+    const shown = withoutNoteResults({ type: "entry_appended", entry: summary });
+    expect(JSON.stringify(shown)).not.toContain("salary");
+    expect(shown).toMatchObject({ entry: { id: 7, kind: "pi.compaction" } });
   });
 });

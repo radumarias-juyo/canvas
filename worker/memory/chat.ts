@@ -73,6 +73,8 @@ export const MAX_RUN_PAGES = 20;
  */
 export async function runAskedByOwner(pages: AsyncIterable<readonly EntryRecord[]>, ownerUid: string): Promise<boolean> {
   let asked = false;
+  /** Whether the entry read last (the next newer one) is an input. */
+  let newerIsInput = false;
   let read = 0;
   for await (const page of pages) {
     if (++read > MAX_RUN_PAGES) return false;
@@ -81,12 +83,13 @@ export async function runAskedByOwner(pages: AsyncIterable<readonly EntryRecord[
       if (!seen) continue;
       if ("reply" in seen) {
         const { stopReason } = seen.reply;
-        if (stopReason === "toolUse") continue;
-        // A failed or cut off request is retried, or resumed, in the same run, which places no input: one with inputs
-        // after it is a new run (the owner's message after a failed one). Any other reply ends a run.
-        if ((stopReason !== "error" && stopReason !== "aborted") || asked) return asked;
+        // A failed or cut off request is retried, or resumed, in the same run, which places no input before it goes
+        // on: one an input follows at once is a new run's end (the owner's message after a failed one). An input
+        // after a later reply of the run was steered into it. Any other reply ends a run.
+        if (stopReason !== "toolUse" && ((stopReason !== "error" && stopReason !== "aborted") || newerIsInput)) return asked;
+        newerIsInput = false;
       } else if (seen.input !== "message" || seen.uid !== ownerUid) return false;
-      else asked = true;
+      else asked = newerIsInput = true;
     }
   }
   // The start of the log: the run is the conversation's first.
@@ -124,8 +127,11 @@ export class ChatMemory {
   readonly #deps: ChatMemoryDeps;
   /** Each conversation's section, as its turn started, with who could read the chat then (`#audience`). */
   readonly #sections = new Map<string, { audience: string; section: Promise<Section> }>();
-  /** The conversations whose prompt is being started afresh now (#forgetOwn), till it is done. */
-  readonly #freshening = new Map<string, Promise<void>>();
+  /**
+   * The conversations whose prompt is being started afresh now (#forgetOwn), till it is done: its edits written, and
+   * whether it still covers every prompt that held the owner's own notes (`current`; a new one since needs its own).
+   */
+  readonly #freshening = new Map<string, { written: Promise<void>; current: boolean }>();
 
   constructor(deps: ChatMemoryDeps) {
     this.#deps = deps;
@@ -167,6 +173,9 @@ export class ChatMemory {
   }
 
   #markOwn(key: string): void {
+    // A prompt that held them after a fresh start began: that one leaves it marked, and the next starts another.
+    const going = this.#freshening.get(key);
+    if (going) going.current = false;
     const own = this.#own();
     if (!own.includes(key)) this.#deps.kv.put(OWN_KEY, [...own, key]);
   }
@@ -188,17 +197,26 @@ export class ChatMemory {
   #forgetOwn(key: string, reader: MemoryReader): Promise<void> {
     if (readsOwnNotes(reader) || !this.#own().includes(key)) return Promise.resolve();
     const going = this.#freshening.get(key);
-    if (going) return going;
+    if (going?.current) return going.written;
     const started = this.#deps.freshPrompt(key === PI ? undefined : key);
-    const written = started.then(() => undefined);
-    this.#freshening.set(key, written);
+    const fresh = { written: started.then(() => undefined), current: true };
+    this.#freshening.set(key, fresh);
     void started
-      .then(async ({ done }) => {
-        if (await done) this.#unmarkOwn(key);
-      })
-      .catch((error: unknown) => console.error("memory prompt:", errorMessage(error)))
-      .finally(() => this.#freshening.delete(key));
-    return written;
+      .then(
+        ({ done }) =>
+          done.then(
+            (clean) => {
+              if (clean && fresh.current) this.#unmarkOwn(key);
+            },
+            (error: unknown) => console.error("memory prompt:", errorMessage(error)),
+          ),
+        // Not written: the caller logs it (written rejects).
+        () => undefined,
+      )
+      .finally(() => {
+        if (this.#freshening.get(key) === fresh) this.#freshening.delete(key);
+      });
+    return fresh.written;
   }
 
   /**
