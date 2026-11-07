@@ -52,7 +52,12 @@ export class ResultCache {
   readonly #onEvict: ResultCacheOptions["onEvict"];
   readonly #now: () => number;
 
-  constructor(maxBytes: number, lifetimeMs: number, now: () => number = Date.now, { floorBytes = DEFAULT_FLOOR_BYTES, onEvict }: ResultCacheOptions = {}) {
+  constructor(
+    maxBytes: number,
+    lifetimeMs: number,
+    now: () => number = Date.now,
+    { floorBytes = DEFAULT_FLOOR_BYTES, onEvict }: ResultCacheOptions = {},
+  ) {
     this.#maxBytes = maxBytes;
     this.#lifetimeMs = lifetimeMs;
     this.#floorBytes = floorBytes;
