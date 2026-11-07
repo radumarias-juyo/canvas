@@ -365,12 +365,15 @@ function namesOf(entry: string): string[] {
 /** How deep a never rule reads into an object or a list. */
 const NEVER_DEPTH = 6;
 
-/** The text, number and yes-or-no values in a value (itself, when it is one), or null when they lie deeper than NEVER_DEPTH. */
+/**
+ * The text, number and yes-or-no values in a value (itself, when it is one), and the keys of its objects (recipients
+ * kept as {"ann@x.example": true}); null when they lie deeper than NEVER_DEPTH.
+ */
 function leavesOf(value: unknown, depth = 0): unknown[] | null {
   if (value === null || value === undefined) return [];
   if (typeof value !== "object") return [value];
   if (depth >= NEVER_DEPTH) return null;
-  const leaves: unknown[] = [];
+  const leaves: unknown[] = Array.isArray(value) ? [] : Object.keys(value);
   for (const each of Array.isArray(value) ? value : Object.values(value)) {
     const found = leavesOf(each, depth + 1);
     if (found === null) return null;

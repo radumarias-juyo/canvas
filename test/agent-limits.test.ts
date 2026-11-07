@@ -105,6 +105,8 @@ describe("guardrail rules", () => {
     expect(violation(to, call({ to: [{ email: "ok@fine.com" }, { email: "ceo@rival.example", name: "C" }] }))).toMatch(/"ceo@rival.example", which is never allowed/);
     expect(violation(to, call({ to: { primary: { email: "Sam <sam@rival.example>" } } }))).toMatch(/never allowed/);
     expect(violation(to, call({ to: [{ email: "ok@fine.com" }] }))).toBeNull();
+    // Recipients kept as an object's keys.
+    expect(violation(to, call({ to: { "ok@fine.com": true, "ceo@rival.example": true } }))).toMatch(/"ceo@rival.example", which is never allowed/);
     let deep: unknown = "ceo@rival.example";
     for (let i = 0; i < 8; i++) deep = { next: deep };
     expect(violation(to, call({ to: deep as StepInput[string] }))).toMatch(/nested too deep for a never rule to check/);
