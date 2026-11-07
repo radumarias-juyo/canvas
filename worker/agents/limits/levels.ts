@@ -2,10 +2,13 @@
 // allows, and what an agent's turn allows. A run goes as far as its agent's autonomy (gate.ts reads it from the
 // definition); a page runs as its author.
 
-import { CHAT_TURN_KIND, type ChatTurnData } from "../../../shared/agents.ts";
+import { CHAT_TURN_KIND, mayUseServer, type AgentDefinition, type ChatTurnData } from "../../../shared/agents.ts";
 import type { CallerLevel } from "../../../shared/limits.ts";
 import { CHAT_MESSAGE_KIND, type ChatMessageData } from "../../../shared/protocol.ts";
 import type { AgentTurn } from "../roster.ts";
+import type { SeatTurn } from "../seats/link.ts";
+import type { SeatTurnIn } from "../seats/seat.ts";
+import type { Caller, GateCall } from "./gate.ts";
 
 /**
  * What one of pi's inputs allows: the owner's own message runs (4), but not their Yes to an offer, which only drafts
@@ -54,4 +57,33 @@ export function turnLevel(turn: Pick<AgentTurn, "byOwner" | "calledBy">): Caller
   if (calledBy.routed) return { level: 2, because: "on your message, which named no agent (the chat picked it)" };
   if (calledBy.drafts) return { level: 2, because: YES_ONLY_DRAFTS };
   return { level: 4, because: "on your own message" };
+}
+
+/**
+ * What a turn of a member's agent in its seat allows (worker/agents/seats/), `turn` as the seat checked it (its
+ * `byOwner` holds only for its owner's own message, directly): as a turn in its owner's own chat would (turnLevel), but
+ * one anyone else gave it, or a chain no person started, changes nothing (1). Such a turn has no tool that changes data,
+ * and what it asked for would wait for its owner, who did not ask. What both the seat's tools and the write gate go by.
+ */
+export function seatLevel(turn: Pick<SeatTurn, "byOwner" | "calledBy" | "unattended">): CallerLevel {
+  if (!turn.byOwner || turn.unattended) return { level: 1, because: `on a turn ${turn.calledBy.name} gave it in someone else's chat` };
+  return turnLevel(turn);
+}
+
+/**
+ * Who a call from a seat's session is (the write gate's caller, in the member's own object): the seat's agent, at the
+ * level its turn allows (seatLevel), with its own rules; a held action goes to the room the turn is in (`origin.seat`).
+ * Throws, so the call is refused, for an agent of this object's owner that is gone or off, or a server it may not use.
+ */
+export function seatCaller(found: SeatTurnIn, agent: AgentDefinition | null, call: Pick<GateCall, "server">, session: string): Caller {
+  if (!agent) throw new Error("this seat's agent is gone.");
+  if (!agent.enabled) throw new Error(`@${agent.name} is off.`);
+  if (!mayUseServer(agent, call.server)) throw new Error(`${call.server} is not one of the servers @${agent.name} may use.`);
+  const { room, agentId, turn } = found;
+  return {
+    actor: { name: agent.name, agentId: agent.id, avatar: agent.avatar, color: agent.color },
+    agent,
+    ...seatLevel(turn),
+    origin: { session, seat: { ownerUid: room.ownerUid, chatId: room.chatId, agentId } },
+  };
 }

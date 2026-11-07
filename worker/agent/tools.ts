@@ -30,6 +30,7 @@ import {
   checkDraft,
   draftLine,
   draftNamed,
+  draftsListed,
   FailedChecks,
   publishDraft,
   readPageSource,
@@ -587,7 +588,7 @@ export function artifactExtension(scope: ChatScope): Extension {
           // Not the drafts another conversation apart from the chat saved: they are not the chat's yet.
           const [drafts, rules] = await Promise.all([scope.drafts(), rulesOf(scope, api)]);
           if (args.draft_id === undefined) {
-            const list = (await drafts.list()).filter((draft) => !rules?.hiddenDraft(draft.id));
+            const list = await draftsListed(drafts, rules);
             const lines = list.length ? `${plural(list.length, "draft")}, newest first:\n${list.map(draftLine).join("\n")}` : "This chat has no drafts.";
             return { output: text(lines) };
           }

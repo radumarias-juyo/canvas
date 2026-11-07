@@ -71,6 +71,11 @@ export interface AgentTurn extends AgentTurnView {
   session?: string;
   /** Its session is a fork made for a private turn (`session`): it shows only its owner live, and its reply only shared records. */
   forked?: true;
+  /**
+   * It went apart (a fork, a run's reply session) while nobody but the chat's owner was in the chat: it may have read
+   * every server of its agent's, for them alone. A reply built on one is held for them once someone has come in since.
+   */
+  alone?: true;
   /** The run its reply carries, so a reply to that continues the run too. */
   run?: RunRef;
   /**
@@ -98,6 +103,8 @@ export interface Outbox {
   toPi: boolean;
   /** It waits for its agent's owner to review it (reviewBeforePosting): only they see it until they post it. */
   held?: boolean;
+  /** Why it is held, when not only because its owner reviews such replies: shown to them with the draft. */
+  heldWhy?: string;
 }
 
 type RosterRow = {
@@ -204,7 +211,9 @@ type TurnRow = {
   delivered_at: number | null;
   session: string | null;
   held: number;
+  held_why: string | null;
   forked: number;
+  alone: number;
   run: string | null;
   unattended: number;
   by_uid: string | null;
@@ -245,6 +254,7 @@ function turnOf(row: TurnRow): AgentTurn {
     ...(row.ended_at !== null && { endedAt: row.ended_at }),
     ...(row.session !== null && { session: row.session }),
     ...(row.forked === 1 && { forked: true }),
+    ...(row.alone === 1 && { alone: true }),
     ...(row.run !== null && { run: JSON.parse(row.run) as RunRef }),
     ...(row.unattended === 1 && { unattended: true }),
     ...(row.by_uid !== null && { by: row.by_uid }),
@@ -333,6 +343,8 @@ export class ChatRoster {
       held: "INTEGER NOT NULL DEFAULT 0",
       forked: "INTEGER NOT NULL DEFAULT 0",
       by_uid: "TEXT",
+      alone: "INTEGER NOT NULL DEFAULT 0",
+      held_why: "TEXT",
     });
     // A fork's view (FORKS) asks whether a turn still runs in its session, for every session every trace read.
     sql.exec("CREATE INDEX IF NOT EXISTS chat_agent_turns_by_session ON chat_agent_turns (session)");
@@ -550,10 +562,12 @@ export class ChatRoster {
   /**
    * A turn runs in a session of its own (a fork of its agent's): set before its input goes in. What the fork publishes
    * or saves is withheld from the chat's listings until its reply is posted (`forks`). `from`: the newest entry it
-   * inherited, after which its own start; `review`: its agent's owner reviews its reply before it is posted.
+   * inherited, after which its own start; `review`: its agent's owner reviews its reply before it is posted; `alone`:
+   * nobody but the chat's owner is in the chat now (AgentTurn.alone), kept in the same write.
    */
-  setFork(id: number, session: string, apart: { from?: number; review: boolean }): void {
-    if (this.#sql.exec("UPDATE chat_agent_turns SET session = ?, forked = 1 WHERE id = ? AND status = 'running'", session, id).rowsWritten) {
+  setFork(id: number, session: string, apart: { from?: number; review: boolean; alone?: boolean }): void {
+    const set = "UPDATE chat_agent_turns SET session = ?, forked = 1, alone = ? WHERE id = ? AND status = 'running'";
+    if (this.#sql.exec(set, session, apart.alone ? 1 : 0, id).rowsWritten) {
       this.#sql.exec(
         "INSERT INTO chat_agent_forks (session, from_entry, review, apart_turn) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
         session,
@@ -570,10 +584,12 @@ export class ChatRoster {
    * has a window of the session's entries (ApartWindow), from `from` (its newest entry now) on, which closes the one
    * before: what came before the first is the chat's, and each window is the chat's once its own reply is posted. So an
    * earlier turn held for review is posted as its own, and one discarded, failed or stopped stays withheld for good
-   * without holding back the turns after it. Given again (requeued), a turn keeps its window.
+   * without holding back the turns after it. Given again (requeued), a turn keeps its window. `alone`: as setFork's.
    */
-  setApart(session: string, review: boolean, from: number | undefined, turn: number): void {
+  setApart(session: string, review: boolean, from: number | undefined, turn: number, alone = false): void {
     const at = from ?? -1;
+    // Given again, it stays as it first went apart: someone who came in since does not make it alone.
+    if (alone) this.#sql.exec("UPDATE chat_agent_turns SET alone = 1 WHERE id = ?", turn);
     this.#sql.exec(
       `INSERT INTO chat_agent_forks (session, review, reused, from_entry, apart_turn) VALUES (?, ?, 1, ?, ?) ON CONFLICT (session) DO UPDATE SET
        posted = CASE WHEN apart_turn IS excluded.apart_turn THEN posted ELSE 0 END, review = excluded.review, apart_turn = excluded.apart_turn`,
@@ -825,12 +841,13 @@ export class ChatRoster {
   end(id: number, status: Exclude<AgentTurnStatus, "queued" | "running">, outbox?: Outbox): AgentTurn | null {
     const row = this.#sql
       .exec(
-        `UPDATE chat_agent_turns SET status = ?, ended_at = ?, reply = ?, to_pi = ?, held = ? WHERE id = ? AND ${OPEN} RETURNING *`,
+        `UPDATE chat_agent_turns SET status = ?, ended_at = ?, reply = ?, to_pi = ?, held = ?, held_why = ? WHERE id = ? AND ${OPEN} RETURNING *`,
         status,
         this.#now(),
         outbox ? JSON.stringify(outbox.reply) : null,
         outbox?.toPi ? 1 : 0,
         outbox?.held ? 1 : 0,
+        (outbox?.held && outbox.heldWhy) || null,
         id,
       )
       .toArray()[0] as TurnRow | undefined;
@@ -851,12 +868,17 @@ export class ChatRoster {
   held(ownerUid: string): AgentDraftView[] {
     const rows = this.#sql
       .exec(
-        `SELECT t.id, t.agent_id, t.reply FROM chat_agent_turns t JOIN chat_agents a ON a.agent_id = t.agent_id
+        `SELECT t.id, t.agent_id, t.reply, t.held_why FROM chat_agent_turns t JOIN chat_agents a ON a.agent_id = t.agent_id
          WHERE ${HELD} AND a.owner_uid = ? ORDER BY t.id`,
         ownerUid,
       )
-      .toArray() as { id: number; agent_id: string; reply: string }[];
-    return rows.map((row) => ({ turn: row.id, agentId: row.agent_id, reply: JSON.parse(row.reply) as ChatAgentReplyData }));
+      .toArray() as { id: number; agent_id: string; reply: string; held_why: string | null }[];
+    return rows.map((row) => ({
+      turn: row.id,
+      agentId: row.agent_id,
+      reply: JSON.parse(row.reply) as ChatAgentReplyData,
+      ...(row.held_why !== null && { why: row.held_why }),
+    }));
   }
 
   /**

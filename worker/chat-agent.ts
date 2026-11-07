@@ -120,11 +120,11 @@ import { literalPath } from "./storage/paths.ts";
 import { newestFirst, type FileEntry } from "./storage/user-files.ts";
 import { connectAs } from "./mcp-connect.ts";
 import { CallHeld, McpFailure, McpHub } from "./mcp/hub.ts";
-import { ChatActions, type NewAction } from "./agents/limits/actions.ts";
+import { apartOrigin, ChatActions, noteResult, shownToMembers, type NewAction } from "./agents/limits/actions.ts";
 import { WriteGate, type Caller, type GateCall, type GateContext, type GateHost } from "./agents/limits/gate.ts";
 import { approvalEnd } from "./agents/limits/feed.ts";
 import { toolInput } from "./agents/limits/tell.ts";
-import { inputLevel, lowestLevel, turnLevel } from "./agents/limits/levels.ts";
+import { inputLevel, lowestLevel, seatLevel, turnLevel } from "./agents/limits/levels.ts";
 import { APP_APPROVAL_KIND, callLine, CHAT_ACTION_KIND, valueAt, type ActionActor, type ChatActionData, type PendingActionView } from "../shared/limits.ts";
 import { instantOf, wallClock } from "./agents/runs/schedule.ts";
 import { mcpServers, oauthServerNames, sharesResults, watchableForAll, type McpServerConfig } from "./mcp/servers.ts";
@@ -193,6 +193,7 @@ import type { Value } from "../shared/conditions.ts";
 import { runRef, type AgentRunDetail, type AgentRunList, type RunDelivery, type RunRef } from "../shared/runs.ts";
 import type { RoomLink, RoomRef, SeatBatch, SeatLink, SeatResult, SeatTurn } from "./agents/seats/link.ts";
 import { memberAgentName, seatChatId } from "./agents/seats/names.ts";
+import { SeatActions } from "./agents/seats/actions.ts";
 import { addRefusal, mayRemove, mayShare, seatedEntry, type ChatRules } from "./agents/seats/rules.ts";
 import { AgentSeats, type SeatHost } from "./agents/seats/seat.ts";
 import { agentsExtension } from "./agents/tools.ts";
@@ -212,6 +213,7 @@ import {
   isPiConversation,
   piBusy,
   piLogEntry,
+  readsAlone,
   runTools,
   sharedServer,
   speakersFor,
@@ -558,6 +560,8 @@ export class ChatAgent extends DurableObject<Env> {
   readonly reactions = new ChatReactions(this.ctx.storage.sql);
   /** The calls that wait, or waited, for the owner: proposals and approvals (worker/agents/limits/). */
   readonly actions = new ChatActions(this.ctx.storage.sql, () => this.chatId);
+  /** The cards of the actions members' agents held in their seats for this chat (each only for its agent's owner). */
+  readonly seatActions = new SeatActions(this.ctx.storage.sql);
   readonly sockets = new ChatSockets({
     events: () => this.harness.session().events(),
     runStartedAt: (snapshot) => this.runStartedAt(snapshot),
@@ -580,7 +584,7 @@ export class ChatAgent extends DurableObject<Env> {
     auto: () => this.#auto(),
     reactions: () => this.reactions.all(),
     react: (by, entry, emoji, on) => this.react(by, entry, emoji, on),
-    actions: () => this.actions.list(),
+    actions: (uid) => this.#actionsFor(uid),
   });
   /** The runs of the agent whose home this chat is, its schedules and watches (worker/agents/runs/). */
   readonly runs = new AgentRuns(
@@ -2382,7 +2386,9 @@ export class ChatAgent extends DurableObject<Env> {
     this.#kindWrites = this.#kindWrites.then(() => {
       const kind = this.kinds.kind();
       const indexes = uid === undefined ? this.#everyonesIndexes() : this.#hasSidebar(uid) ? [this.#index(uid)] : [];
-      return settleLogged("chat kind", indexes.map((index) => index.setChatKind(this.chatId, this.uid, kind)));
+      // The members' agents seated here hear it too, in order with the sidebars: their memory notes go by it.
+      const seats = uid === undefined ? this.#seatsKind(kind) : [];
+      return settleLogged("chat kind", [...indexes.map((index) => index.setChatKind(this.chatId, this.uid, kind)), ...seats]);
     });
   }
 
@@ -3089,6 +3095,11 @@ export class ChatAgent extends DurableObject<Env> {
     this.roster.remove(entry.agentId);
     this.#broadcastAgents();
     this.#tellDrafts(entry.ownerUid);
+    if (entry.seat !== undefined) {
+      // Its cards here go with it: what it held ends in its owner's object, by its expiry.
+      this.seatActions.dropAgent(entry.agentId);
+      this.sockets.sendTo(entry.ownerUid, { type: "actions", actions: this.#actionsFor(entry.ownerUid) });
+    }
     await Promise.all([
       entry.seat !== undefined &&
         this.#seatLink(entry)
@@ -3698,7 +3709,9 @@ export class ChatAgent extends DurableObject<Env> {
         return uid();
       },
       definition: async (entry) => this.#inThisChat(await this.#index(entry.ownerUid).getAgent(entry.agentId)),
-      configure: (entry, agent, turn) => this.#configureAgent(sessionOf(entry, turn), agent, turn, this.#nameOf(entry.ownerUid)),
+      // Alone with the owner, a turn reads every server of its agent's only where nobody else will read it: apart.
+      configure: (entry, agent, turn) =>
+        this.#configureAgent(sessionOf(entry, turn), agent, { ...turn, alone: readsAlone(turn, !this.members.hasAny()) }, this.#nameOf(entry.ownerUid)),
       logSince: (after) => this.#log({ order: "descending", minEntryId: (after + 1) as EntryId }),
       write: (session, text, requestId) => this.#writeTo(session, text, requestId),
       submit: (session, input, operationId, data) => this.#submitTo(session, input, operationId, data),
@@ -3740,6 +3753,7 @@ export class ChatAgent extends DurableObject<Env> {
       waitUntil: (promise) => this.ctx.waitUntil(promise),
       fork: (session) => this.#fork(session),
       newest: (session) => this.#newestEntry(session),
+      alone: () => !this.members.hasAny(),
       sources: async (entry, entries) => {
         const agent = await this.#index(entry.ownerUid).getAgent(entry.agentId);
         return agent ? this.#sources(agent, entries) : { items: [], sources: [] };
@@ -3769,8 +3783,33 @@ export class ChatAgent extends DurableObject<Env> {
       give: (batch, turn) => seat.seatGive(room, entry.agentId, { ...turn, ownerName: this.#nameOf(entry.ownerUid), kind: this.kinds.kind() }, batch),
       abort: (turn) => seat.seatAbort(room, turn),
       wake: () => seat.seatWake(room),
+      kind: (kind) => seat.seatKind(room, kind),
+      decide: (id, decision) => seat.seatDecide(room, id, decision),
       drop: () => seat.seatDrop(room, entry.agentId),
     };
+  }
+
+  /**
+   * (RPC, from a seat) An action a member's agent held in its seat is new or changed: its card here, for that member's
+   * sockets alone (the call may carry what their private servers returned).
+   */
+  seatAction(uid: string, agentId: string, view: PendingActionView): void {
+    if (!this.#seated(uid, agentId) || !this.seatActions.put(this.chatId, uid, agentId, view)) return;
+    this.sockets.sendTo(uid, { type: "actions", actions: this.#actionsFor(uid) });
+  }
+
+  /**
+   * The chat's actions as `uid` sees them: all of them for the owner; for anyone else as shownToMembers has them, and
+   * the cards of their own agents' seats in full (theirs to decide).
+   */
+  #actionsFor(uid: string): PendingActionView[] {
+    if (uid === this.uid) return this.actions.list("owner");
+    return [...this.actions.list("member"), ...this.seatActions.of(uid)];
+  }
+
+  /** The room's kind changed: every member's agent seated here reads as the new one from now on (SeatLink.kind). */
+  #seatsKind(kind: ChatKind): Promise<void>[] {
+    return this.roster.list().flatMap((entry) => (entry.seat === undefined ? [] : [this.#seatLink(entry).kind(kind)]));
   }
 
   /**
@@ -3813,6 +3852,7 @@ export class ChatAgent extends DurableObject<Env> {
       return {
         log: (after, turn) => chat.seatLog(this.uid, agentId, after, turn),
         ended: (turn, result) => chat.seatEnded(this.uid, agentId, turn, result),
+        action: (view) => chat.seatAction(this.uid, agentId, view),
       };
     };
     const uid = () => this.uid;
@@ -3825,7 +3865,14 @@ export class ChatAgent extends DurableObject<Env> {
       create: async () => (await this.harness.sessions.create()).id,
       fork: async (session) => (await this.#fork(session)).session,
       write: (session, text, requestId) => this.#writeTo(session, text, requestId),
-      configure: (session, agent, turn) => this.#configureAgent(session, agent, { ask: turn.input, byOwner: turn.byOwner, calledBy: turn.calledBy, alone: false }, turn.ownerName),
+      // Tools that change data only as far as the write gate lets the turn's calls through (seatLevel, as seatCaller).
+      configure: (session, agent, turn) =>
+        this.#configureAgent(
+          session,
+          agent,
+          { ask: turn.input, byOwner: turn.byOwner, calledBy: turn.calledBy, alone: false, writes: seatLevel(turn).level === 4 },
+          turn.ownerName,
+        ),
       submit: (session, input, operationId, data) => this.#submitTo(session, input, operationId, data),
       // With what the turn's model calls came to here: its room's budget counts them too (this object pays for them).
       wait: async (session, operationId) => {
@@ -3860,9 +3907,41 @@ export class ChatAgent extends DurableObject<Env> {
     this.seats.wake(room);
   }
 
+  /** (RPC, from a room) The room's kind changed: its seats' turns read as the new one (memory notes, what leaves it). */
+  seatKind(room: RoomRef, kind: ChatKind): void {
+    this.seats.setKind(room, kind);
+  }
+
+  /**
+   * (RPC, from a room) This user decided, in the room, an action one of their agents held in its seat for it: run here,
+   * as them, exactly as it was held. Only an action of that room's.
+   */
+  async seatDecide(room: RoomRef, id: string, decision: "approve" | "decline"): Promise<PendingActionView | ChatRefusal> {
+    const seat = this.actions.origin(id)?.seat;
+    if (seat?.ownerUid !== room.ownerUid || seat.chatId !== room.chatId) return refuse(404, "No such action.");
+    return this.decideAction(this.uid, id, decision);
+  }
+
+  /** An action one of this user's agents held in a seat is new or changed: its card in the room goes with it. */
+  #tellSeatRoom(view: PendingActionView): void {
+    const seat = this.actions.origin(view.id)?.seat;
+    if (!seat) return;
+    const told = this.#seatHost().room(seat, seat.agentId).action(view);
+    this.ctx.waitUntil(told.catch((error: unknown) => console.error("agent seat, action:", errorMessage(error))));
+  }
+
   /** (RPC, from a room) An agent of this user's left the room: its seat there goes. */
   async seatDrop(room: RoomRef, agentId: string): Promise<void> {
     await this.seats.drop(room, agentId);
+    // What it held there waits no more: nobody can decide it in a room it left (expired, never run).
+    const held = this.actions.list().filter((view) => {
+      const seat = view.status === "pending" ? this.actions.origin(view.id)?.seat : undefined;
+      return seat?.ownerUid === room.ownerUid && seat.chatId === room.chatId && seat.agentId === agentId;
+    });
+    for (const view of held) {
+      await this.#cancelExpiry(view.id);
+      await this.#expireAction(view.id);
+    }
   }
 
   /** A passive write into a session: context its next turn reads, with no model call. Placed once per `requestId`. */
@@ -3940,7 +4019,7 @@ export class ChatAgent extends DurableObject<Env> {
   async #configureAgent(
     session: string,
     agent: AgentDefinition,
-    turn: { ask: string; byOwner: boolean; calledBy?: AgentTurn["calledBy"]; alone?: boolean },
+    turn: { ask: string; byOwner: boolean; calledBy?: AgentTurn["calledBy"]; alone?: boolean; writes?: boolean },
     ownerName: string,
   ): Promise<void> {
     // The memory notes of the session the turn runs in: its agent's, or its own (a reply to a run's report).
@@ -3950,6 +4029,8 @@ export class ChatAgent extends DurableObject<Env> {
     // Only a turn that runs (turnLevel: its owner's own message that named it) gets tools that change data: one the
     // router picked it for, or took on its own, only reads, as any turn its owner did not ask of it. With nobody but
     // the owner in the chat, it reads every server of the agent's (those that sign in each user too), as a run does.
+    // `writes`: the caller says it, as the write gate will (a seat's turn: seatLevel).
+    const writes = turn.writes ?? (turn.calledBy ? turnLevel({ byOwner: turn.byOwner, calledBy: turn.calledBy }).level === 4 : turn.byOwner);
     const allowed = (installed: readonly string[]) =>
       turn.calledBy?.drafts
         ? draftTools(installed, this.#mcpTools, agent)
@@ -3957,10 +4038,11 @@ export class ChatAgent extends DurableObject<Env> {
             installed,
             this.#mcpTools,
             agent,
-            turn.calledBy ? turnLevel({ byOwner: turn.byOwner, calledBy: turn.calledBy }).level === 4 : turn.byOwner,
+            writes,
             this.#signsIn,
-            // A seat's turn is never alone: its reply goes to a room with other people in it.
-            { unprompted: !!turn.calledBy?.unprompted, alone: turn.alone ?? !this.members.hasAny() },
+            // Alone only as the caller says (readsAlone, for a turn apart): a seat's turn never is, its reply goes to a
+            // room with other people in it.
+            { unprompted: !!turn.calledBy?.unprompted, alone: turn.alone === true },
           );
     await this.#configureSession(session, this.#agentChoice(agent), agentInstructions(agent, ownerName), allowed);
   }
@@ -4708,7 +4790,8 @@ export class ChatAgent extends DurableObject<Env> {
    * Who a call is from, and how far it may go (shared/limits.ts): pi and an agent on the owner's own message run within
    * the rules (an agent only when that message named it); on anyone else's turn, one nobody asked for, or the owner's
    * Yes to an offer they only propose (levels.ts); a run goes as far as its agent's autonomy; a page runs as its
-   * author's. A session with no turn going (a run's work step, a page rebuild) may change nothing.
+   * author's; a seat's turn (this user's agent in someone else's chat) as seatCaller says, only its owner's own going
+   * further than reading. A session with no turn going (a run's work step, a page rebuild) may change nothing.
    */
   async #callerOf(context: GateContext, call: Pick<GateCall, "server">): Promise<Caller> {
     if (context.kind === "page") {
@@ -4729,7 +4812,12 @@ export class ChatAgent extends DurableObject<Env> {
     if (session === ROOT_SESSION) return this.#piCaller();
     const running = this.roster.runningSessions().find((one) => one.session === session);
     const turn = running && this.roster.turn(running.turn);
-    if (!turn) throw new Error("this session has no turn that may change anything.");
+    if (!turn) {
+      // A seat's turn in this object (one of this user's agents in someone else's chat): as it was given and checked.
+      const seated = await this.seats.caller(session, call, (agentId) => this.#directory.getAgent(agentId));
+      if (seated) return seated;
+      throw new Error("this session has no turn that may change anything.");
+    }
     const entry = this.roster.get(turn.agentId);
     const agent = entry?.ownerUid === this.uid ? await this.#directory.getAgent(turn.agentId) : null;
     if (!agent) throw new Error(`@${entry?.name ?? "this agent"} is not one of the owner's agents.`);
@@ -4753,7 +4841,16 @@ export class ChatAgent extends DurableObject<Env> {
   }
 
   /** Hold a call for the owner: kept with its expiry alarm, its card in the chat's log, and in their feed's Needs you. */
-  async #holdAction(action: NewAction): Promise<PendingActionView> {
+  async #holdAction(held: NewAction): Promise<PendingActionView> {
+    // Made apart from the chat (a turn's fork, a run), it may carry what the owner's private servers returned: anyone
+    // else sees only who asks for which tool, in its card and in the list (shownToMembers). Pi's and an agent's own
+    // sessions are the chat's.
+    const shared = (session: string) =>
+      session === ROOT_SESSION || this.roster.list().some((entry) => entry.seat === undefined && entry.session === session);
+    // A seat's (this user's agent in someone else's chat) is always apart: its card is in that room, for this user alone.
+    const seat = held.origin.seat;
+    const apart = seat !== undefined || apartOrigin(held.origin, shared);
+    const action: NewAction = apart ? { ...held, origin: { ...held.origin, apart: true } } : held;
     const view = this.actions.add(action);
     // A run's item waits at its step from now (in the same turn of the object as the action is kept): a restart before
     // the run hears it was held finds it waiting there, never going on past an action still pending.
@@ -4765,24 +4862,30 @@ export class ChatAgent extends DurableObject<Env> {
       // The feed's Needs you drops it once its time is past; the card says it waits until someone decides.
       console.error("action expiry:", errorMessage(error));
     }
-    // Its card, in the log everyone in the chat sees (placed at once, even mid-run: a write with no model message).
-    // A card that cannot be written leaves the action held all the same: the owner decides it from Needs you.
-    const data: ChatActionData = { action: view };
-    try {
-      await (await this.#root()).submit(
-        { type: "write", requestId: `action:${view.id}`, entry: { kind: CHAT_ACTION_KIND, data: data as unknown as JsonObject } },
-        BACKGROUND_CONTEXT,
-      );
-    } catch (error) {
-      console.error("action card:", errorMessage(error));
+    // Its card, in the log everyone in the chat sees (placed at once, even mid-run: a write with no model message); a
+    // seat's in its room, for this user's sockets alone (nobody views this object's own log). A card that cannot be
+    // written leaves the action held all the same: the owner decides it from Needs you.
+    if (seat) this.#tellSeatRoom(view);
+    else {
+      const data: ChatActionData = { action: shownToMembers(view, apart) };
+      try {
+        await (await this.#root()).submit(
+          { type: "write", requestId: `action:${view.id}`, entry: { kind: CHAT_ACTION_KIND, data: data as unknown as JsonObject } },
+          BACKGROUND_CONTEXT,
+        );
+      } catch (error) {
+        console.error("action card:", errorMessage(error));
+      }
     }
     this.#actionsChanged();
-    this.ctx.waitUntil(this.#directory.addNeedsYou(view, this.kinds.kind()).catch((error: unknown) => console.error("needs you:", errorMessage(error))));
+    // In Needs you as the chat its card is in: a seat's as its room (its kind decides whether the feed may have it).
+    const kind = seat ? this.seats.roomKind(seat) : this.kinds.kind();
+    this.ctx.waitUntil(this.#directory.addNeedsYou(view, kind).catch((error: unknown) => console.error("needs you:", errorMessage(error))));
     return view;
   }
 
   #actionsChanged(): void {
-    this.sockets.broadcast({ type: "actions", actions: this.actions.list() });
+    this.sockets.broadcastActions();
   }
 
   /**
@@ -4792,8 +4895,10 @@ export class ChatAgent extends DurableObject<Env> {
    */
   async decideAction(uid: string, id: string, decision: unknown): Promise<PendingActionView | ChatRefusal> {
     if (this.#gone) return refuse(404, DELETED);
-    if (uid !== this.uid) return refuse(403, "Only the chat's owner decides what its agents change.");
     if (decision !== "approve" && decision !== "decline") return refuse(400, 'Expected {decision: "approve" | "decline"}.');
+    // Someone else decides only what their own agent held in its seat here: in their object, as them.
+    if (uid !== this.uid && !this.actions.get(id)) return this.#decideSeatAction(uid, id, decision);
+    if (uid !== this.uid) return refuse(403, "Only the chat's owner decides what its agents change.");
     const found = this.actions.get(id);
     if (!found) return refuse(404, "No such action.");
     // Its time is past, though its expiry alarm has not ended it (late, or never set): expired now, never run.
@@ -4813,6 +4918,7 @@ export class ChatAgent extends DurableObject<Env> {
     if (!moved) return found;
     await this.#cancelExpiry(id);
     this.#actionsChanged();
+    this.#tellSeatRoom(moved);
     let ended: PendingActionView | null;
     // The call's whole result, for a run that waited at it (the action keeps its start).
     let value: unknown;
@@ -4827,6 +4933,18 @@ export class ChatAgent extends DurableObject<Env> {
     const view = ended ?? this.actions.get(id)!;
     await this.#actionEnded(view, value);
     return view;
+  }
+
+  /**
+   * A member decides an action their agent held in its seat here (its card is theirs alone): passed to their object,
+   * which runs it as them, exactly as it was held. Refused for anyone else, the chat's owner included.
+   */
+  async #decideSeatAction(uid: string, id: string, decision: "approve" | "decline"): Promise<PendingActionView | ChatRefusal> {
+    const entry = this.seatActions.decider(this.#rules, (agentId) => this.roster.get(agentId), uid, id);
+    if ("error" in entry) return refuse(entry.status, entry.error);
+    const after = await this.#seatLink(entry).decide(id, decision);
+    if (!("error" in after)) this.seatAction(uid, entry.agentId, after);
+    return after;
   }
 
   /** An action's wait is over: expired, unless someone decided first. */
@@ -4874,14 +4992,19 @@ export class ChatAgent extends DurableObject<Env> {
    */
   async #actionEnded(view: PendingActionView, value?: unknown): Promise<void> {
     this.#actionsChanged();
+    this.#tellSeatRoom(view);
+    // As it was added: under the chat its card is in (a seat's room).
     this.ctx.waitUntil(
-      this.#directory.removeNeedsYou(this.chatId, view.id, approvalEnd(view)).catch((error: unknown) => console.error("needs you:", errorMessage(error))),
+      this.#directory.removeNeedsYou(view.chatId, view.id, approvalEnd(view)).catch((error: unknown) => console.error("needs you:", errorMessage(error))),
     );
     const origin = this.actions.origin(view.id);
     const session = origin?.session ?? (origin?.run && this.runs.item(origin.run.agentId, origin.run.dueAt, origin.run.item)?.session);
     try {
       const conversation = session ? await this.harness.conversation(session) : undefined;
-      const message: UserMessage = { role: "user", content: approvalNote(view), timestamp: Date.now() };
+      // An agent's own session hears what came of the call only from a server the agent shares (noteResult).
+      const shares = origin && !origin.apart && origin.session !== ROOT_SESSION ? await this.#sharesIn(origin.session) : null;
+      const told = origin ? { ...view, result: noteResult(view, origin, ROOT_SESSION, shares) } : view;
+      const message: UserMessage = { role: "user", content: approvalNote(told), timestamp: Date.now() };
       await conversation?.submit({ type: "write", requestId: `approval:${view.id}`, entry: { kind: APP_APPROVAL_KIND, model: [message] } }, BACKGROUND_CONTEXT);
     } catch (error) {
       // A note that cannot be written never keeps a run's item waiting: nothing would decide it again.
@@ -4891,6 +5014,16 @@ export class ChatAgent extends DurableObject<Env> {
     const run = origin?.run;
     const acted = run ? actedOf(view, value) : null;
     if (run && acted) this.ctx.waitUntil(this.runner.decided(run, acted).catch((error: unknown) => console.error("run:", errorMessage(error))));
+  }
+
+  /**
+   * Which servers the agent whose own session `session` is shares in this chat (sharedServer); null for any other
+   * session, or when its agent cannot be read.
+   */
+  async #sharesIn(session: string | undefined): Promise<((server: string) => boolean) | null> {
+    const entry = session === undefined ? undefined : this.roster.list().find((each) => each.session === session && each.seat === undefined);
+    const agent = entry && (await this.#directory.getAgent(entry.agentId).catch(() => null));
+    return agent ? sharedServer(agent, this.#signsIn) : null;
   }
 
   /**
@@ -5136,8 +5269,8 @@ interface ChatSession {
   /** Whether the chat is on Auto. */
   auto(): boolean;
   reactions(): Reactions;
-  /** The chat's actions that wait, or waited, for its owner, newest first (shared/limits.ts). */
-  actions(): PendingActionView[];
+  /** The chat's actions that wait, or waited, for its owner, newest first (shared/limits.ts), as `uid` may see them. */
+  actions(uid: string): PendingActionView[];
   react(by: Person, entry: unknown, emoji: unknown, on: boolean): Promise<void>;
 }
 
@@ -5228,6 +5361,18 @@ class ChatSockets extends LifecycleCapability implements DurableObjectCapability
   /** Tell one person's open sockets something only they see. */
   sendTo(uid: string, message: ChatServerMessage): void {
     for (const ws of this.lifecycle.sockets.get(SOCKET_TAG)) if (this.#person(ws)?.uid === uid) send(ws, message);
+  }
+
+  /** Tell every open socket the chat's actions as its person may see them (ChatSession.actions): one view per person. */
+  broadcastActions(): void {
+    const views = new Map<string, PendingActionView[]>();
+    for (const ws of this.lifecycle.sockets.get(SOCKET_TAG)) {
+      const person = this.#person(ws);
+      if (!person) continue;
+      let actions = views.get(person.uid);
+      if (!actions) views.set(person.uid, (actions = this.#chat.actions(person.uid)));
+      send(ws, { type: "actions", actions });
+    }
   }
 
   /** Tell every open socket the same thing: an entry's reactions changed, or someone turned Auto on or off. */
@@ -5354,7 +5499,7 @@ class ChatSockets extends LifecycleCapability implements DurableObjectCapability
       send(ws, { type: "agents", agents: this.#chat.agents() });
       // Also when none: a reconnecting app may still show drafts posted or discarded from another window meanwhile.
       send(ws, { type: "agentDrafts", drafts: this.#chat.drafts(attachment.person.uid) });
-      send(ws, { type: "actions", actions: this.#chat.actions() });
+      send(ws, { type: "actions", actions: this.#chat.actions(attachment.person.uid) });
       send(ws, { type: "agentSettings", settings: this.#chat.agentSettings() });
       this.#followAgents(ws);
       // Timed only once it is to be sent: a wake attaches every socket again, and most find their snapshot already sent.

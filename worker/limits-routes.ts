@@ -11,7 +11,8 @@ import type { UserDirectory } from "./users.ts";
 
 /**
  * A verified user's limits on what their agents change (shared/limits.ts; `uid`, and `directory` their UserDirectory):
- *   POST /api/needs-you/:chatId/:id      {decision: "approve" | "decline"}: the action after (PendingActionView)
+ *   POST /api/needs-you/:chatId/:id      {decision: "approve" | "decline"}: the action after (PendingActionView); in a
+ *                                        chat shared with them, one their own agent held in its seat there
  *   GET  /api/limits/rules               their rules for all their agents, pi and pages
  *   PUT  /api/limits/rules               {rules}: replace them
  *   GET  /api/limits/calls?agent=&limit= their log of calls that change data, newest first (of one agent, by id)
@@ -30,11 +31,13 @@ export async function limitsRoute(
   const decide = path.match(/^\/api\/needs-you\/([a-z0-9]+)\/([a-f0-9]{16})$/);
   if (decide && method === "POST") {
     const [, chatId, id] = decide;
-    if (!ID_PATTERN.test(chatId) || !(await directory.hasChat(chatId))) return json({ error: "No such chat." }, 404);
+    const ownerUid = ID_PATTERN.test(chatId) ? await directory.chatOwner(chatId) : null;
+    if (!ownerUid) return json({ error: "No such chat." }, 404);
     const body = await readJson<{ decision?: unknown }>(request);
     if (!body) return json({ error: 'Expected {decision: "approve" | "decline"} as JSON.' }, 400);
-    // The chat object is named after this user: only their own chats' actions can be reached, and it checks again.
-    const answer = await exports.ChatAgent.getByName(chatAgentName(uid, chatId)).decideAction(uid, id, body.decision);
+    // Only the user's own chats and those shared with them can be reached. The chat checks again: its owner decides its
+    // actions, and a member only what their own agent held in its seat there.
+    const answer = await exports.ChatAgent.getByName(chatAgentName(ownerUid, chatId)).decideAction(uid, id, body.decision);
     return answerJson(answer);
   }
   if (path === "/api/limits/rules" && method === "GET") return json(await directory.guardrails());

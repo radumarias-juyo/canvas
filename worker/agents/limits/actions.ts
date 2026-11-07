@@ -11,12 +11,59 @@ import type { Sql } from "../../members.ts";
 /**
  * Where an action came from, so its outcome goes back there: the pi session whose tool call it was (told by a passive
  * write), or the run and step that made it. `level`: the level of the caller, kept so nothing it leads to goes above it.
+ * `apart`: made apart from the chat (apartOrigin), so only the owner sees what it calls with and what came of it.
+ * `seat`: the session is a seat's (a member's agent in someone else's chat): its card is in that room, for this
+ * object's owner alone, and its view names the room's chat. Always apart.
  */
 export interface ActionOrigin {
   session?: string;
   run?: RunRef & { agentId: string; item: string; step: string };
+  seat?: SeatOrigin;
   level: AutonomyLevel;
+  apart?: true;
 }
+
+/**
+ * Whether an action was made apart from the chat: by a run (it reads as its owner, their private servers too), or in a
+ * session that is not one the chat shares (`shared`: pi's own, an agent's own), such as a turn's fork. Its input, why
+ * and result may hold what the owner's private servers returned.
+ */
+export function apartOrigin(origin: Pick<ActionOrigin, "session" | "run">, shared: (session: string) => boolean): boolean {
+  return origin.run !== undefined || origin.session === undefined || !shared(origin.session);
+}
+
+/**
+ * What the note telling a session how its action ended says came of it: the call's result for pi's own session (`root`)
+ * and one apart from the chat (a fork, a run's: only the owner reads those); for an agent's own session, which members'
+ * turns read, only from a server the agent shares (`shares`; null when its agent cannot be read), as a turn there reads
+ * only those: a server that signs in each user returned the owner's data.
+ */
+export function noteResult(
+  view: Pick<PendingActionView, "server" | "result">,
+  origin: Pick<ActionOrigin, "apart" | "session">,
+  root: string,
+  shares: ((server: string) => boolean) | null,
+): string | undefined {
+  if (view.result === undefined || origin.apart || origin.session === root || shares?.(view.server)) return view.result;
+  return `(not told here: ${view.server} is not shared in this chat)`;
+}
+
+/** What anyone but the owner reads of an action made apart from the chat, in place of its call. */
+const HIDDEN_WHY = "It came from a turn apart from the chat: only the chat's owner sees the call.";
+
+/**
+ * What someone other than the chat's owner sees of an action: who asks for which tool and how it stands, never what came
+ * of it (a result from the owner's servers); of one made apart from the chat, not what it calls with or why either.
+ */
+export function shownToMembers(view: PendingActionView, apart: boolean): PendingActionView {
+  const { result: _result, ...rest } = view;
+  if (!apart) return rest;
+  const { warnings: _warnings, ...kept } = rest;
+  return { ...kept, input: {}, why: HIDDEN_WHY };
+}
+
+/** The room a seat's action was made for (its chat's owner and id), and the agent seated there. */
+export type SeatOrigin = { ownerUid: string; chatId: string; agentId: string };
 
 /** A new action, as the gate holds a call. */
 export interface NewAction {
@@ -81,7 +128,8 @@ export class ChatActions {
     const origin = JSON.parse(row.origin) as ActionOrigin;
     return {
       id: row.id,
-      chatId: this.#chatId(),
+      chatId: origin.seat?.chatId ?? this.#chatId(),
+      ...(origin.seat && { seat: true as const }),
       kind: row.kind,
       actor: JSON.parse(row.actor) as ActionActor,
       server: row.server,
@@ -135,9 +183,12 @@ export class ChatActions {
   /**
    * Every action kept (the waiting and running ones, and the KEPT_ENDED newest that ended), newest first: what the
    * chat's cards show. All of them, so no card of one that ended falls back to how it was made (waiting, with buttons).
+   * Anyone but the owner (`member`) gets each as shownToMembers has it.
    */
-  list(): PendingActionView[] {
-    return (this.#sql.exec("SELECT * FROM pending_actions ORDER BY created_at DESC").toArray() as ActionRow[]).map((row) => this.#view(row));
+  list(viewer: "owner" | "member" = "owner"): PendingActionView[] {
+    const rows = this.#sql.exec("SELECT * FROM pending_actions ORDER BY created_at DESC").toArray() as ActionRow[];
+    if (viewer === "owner") return rows.map((row) => this.#view(row));
+    return rows.map((row) => shownToMembers(this.#view(row), (JSON.parse(row.origin) as ActionOrigin).apart === true));
   }
 
   setAlarm(id: string, alarm: string): void {

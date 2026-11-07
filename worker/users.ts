@@ -958,7 +958,9 @@ export class UserDirectory extends DurableObject<Env> {
    * chat off the record: that one only in its chat), and a push when no app is open.
    */
   async addNeedsYou(view: PendingActionView, chatKind: ChatKind): Promise<void> {
-    const chatTitle = this.chatTitle(view.chatId) ?? "a chat";
+    // A seat's action names the chat shared with this user that its card is in.
+    const shared = this.ctx.storage.sql.exec<{ title: string }>("SELECT title FROM shared_chats WHERE id = ?", view.chatId).toArray()[0];
+    const chatTitle = this.chatTitle(view.chatId) ?? shared?.title ?? "a chat";
     this.#dropExpiredNeedsYou();
     // The feed refuses it from a chat off the record: then only its card there asks, and the push says not even whose or where.
     const offRecord = this.#addFeed(approvalFeed(view, chatTitle, chatKind)) === "refused";

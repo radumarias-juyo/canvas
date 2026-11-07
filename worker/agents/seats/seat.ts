@@ -5,12 +5,14 @@
 
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import type { AgentDefinition, ChatTurnData } from "../../../shared/agents.ts";
-import { isChatKind } from "../../../shared/chat-kinds.ts";
+import { isChatKind, type ChatKind } from "../../../shared/chat-kinds.ts";
 import { errorMessage } from "../../../shared/util.ts";
 import { addColumns, type Sql } from "../../members.ts";
 import type { MemoryAgent } from "../../memory/chat.ts";
 import { NO_OUTPUTS, operationId, outputsOf, unreadOutputs, type Outputs, type TurnResult } from "../controller.ts";
-import { askedApart } from "../turns.ts";
+import { askedApart, runsApart } from "../turns.ts";
+import type { Caller, GateCall } from "../limits/gate.ts";
+import { seatCaller } from "../limits/levels.ts";
 import type { RoomLink, RoomRef, SeatBatch, SeatResult, SeatTurn } from "./link.ts";
 import { chatAgentName } from "../../chat-name.ts";
 
@@ -45,7 +47,14 @@ export interface SeatHost {
   later(ms: number): void;
 }
 
-type SeatRow = { room_owner: string; room_chat: string; agent_id: string; session: string; delivered: number };
+type SeatRow = { room_owner: string; room_chat: string; agent_id: string; session: string; delivered: number; kind: string | null };
+
+/** A seat's turn running in a session, as it was given and checked here (`byOwner` only for its owner, directly). */
+export interface SeatTurnIn {
+  room: RoomRef;
+  agentId: string;
+  turn: SeatTurn;
+}
 type SeatTurnRow = {
   room_owner: string;
   room_chat: string;
@@ -75,6 +84,16 @@ const REPORT_LATER = 5 * 60_000;
 const TAKEN_KEEP = 24 * 60 * 60_000;
 
 const refOf = (row: Pick<SeatRow, "room_owner" | "room_chat">): RoomRef => ({ ownerUid: row.room_owner, chatId: row.room_chat });
+
+/** Whether a turn as given and checked (SeatTurnRow.given) is its owner's; a row from before it was kept had only theirs forked. */
+function checkedByOwner(given: string | null): boolean {
+  if (given === null) return true;
+  try {
+    return (JSON.parse(given) as Partial<SeatTurn>).byOwner === true;
+  } catch {
+    return false;
+  }
+}
 const turnKey = (ref: RoomRef, turn: number) => `${ref.ownerUid}:${ref.chatId}:${turn}`;
 
 /**
@@ -112,6 +131,8 @@ export class AgentSeats {
       given: "TEXT",
       taken_at: "INTEGER",
     });
+    // The room's kind as it last said it (a give, or a change of it: setKind).
+    addColumns(sql, "agent_seats", { kind: "TEXT" });
     // memoryAgent looks a session up on every model request of every conversation in this object.
     sql.exec(`
       CREATE INDEX IF NOT EXISTS agent_seats_session ON agent_seats (session);
@@ -128,10 +149,10 @@ export class AgentSeats {
   memoryAgent(session: string): MemoryAgent | undefined {
     const [turn] = this.#sql
       .exec(
-        "SELECT agent_id, room_owner, room_chat, status, forked, kind, name FROM agent_seat_turns WHERE session = ? ORDER BY status = 'running' DESC, turn DESC LIMIT 1",
+        "SELECT agent_id, room_owner, room_chat, status, forked, kind, name, given FROM agent_seat_turns WHERE session = ? ORDER BY status = 'running' DESC, turn DESC LIMIT 1",
         session,
       )
-      .toArray() as Pick<SeatTurnRow, "agent_id" | "room_owner" | "room_chat" | "status" | "forked" | "kind" | "name">[];
+      .toArray() as Pick<SeatTurnRow, "agent_id" | "room_owner" | "room_chat" | "status" | "forked" | "kind" | "name" | "given">[];
     const running = turn?.status === "running";
     const seat =
       turn ??
@@ -143,11 +164,65 @@ export class AgentSeats {
       agentId: seat.agent_id,
       ownerUid: this.#host.uid,
       name: turn?.name ?? "agent",
-      byOwner: running && turn.forked === 1,
+      // A fork is not always its owner's (someone else's Yes to an offer runs in one too): the turn as checked says.
+      byOwner: running && turn.forked === 1 && checkedByOwner(turn.given),
       // The room by its object's name (its owner and chat), never a bare chat id: one of this user's own chats could
       // have the same id (an imported one keeps its id), and would lend the seat its notes.
       room: { chatId: chatAgentName(seat.room_owner, seat.room_chat), kind: running && isChatKind(turn.kind) ? turn.kind : null },
     };
+  }
+
+  /**
+   * The seat's turn running in `session`, as it was given and checked: who the write gate takes its calls for
+   * (seatCaller). Null when none runs there (between turns, or a session no seat has), which the gate refuses. A seat's
+   * own session can have a stale turn still running beside the new one: each is someone else's, so either reads the same.
+   */
+  turnIn(session: string): SeatTurnIn | null {
+    const [row] = this.#sql
+      .exec(
+        "SELECT room_owner, room_chat, agent_id, given FROM agent_seat_turns WHERE session = ? AND status = 'running' AND given IS NOT NULL ORDER BY turn DESC LIMIT 1",
+        session,
+      )
+      .toArray() as Pick<SeatTurnRow, "room_owner" | "room_chat" | "agent_id" | "given">[];
+    if (!row?.given) return null;
+    try {
+      return { room: refOf(row), agentId: row.agent_id, turn: JSON.parse(row.given) as SeatTurn };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Who a call from `session` is, for the write gate in this object (ChatAgent's GateHost.caller): the seat's turn
+   * running there, at its level, with its agent's rules (seatCaller, its agent read by `agent`). Null when no seat's turn
+   * runs there; throws, so the call is refused, for an agent that is gone or off or a server it may not use.
+   */
+  async caller(session: string, call: Pick<GateCall, "server">, agent: (agentId: string) => Promise<AgentDefinition | null>): Promise<Caller | null> {
+    const found = this.turnIn(session);
+    return found && seatCaller(found, await agent(found.agentId), call, session);
+  }
+
+  /**
+   * The room's kind changed: its seats' turns read as the new one from now on (memory notes: an off-the-record room
+   * keeps everything they say there). For every agent of this object's seated in it.
+   */
+  setKind(ref: RoomRef, kind: ChatKind): void {
+    if (!isChatKind(kind)) return;
+    this.#sql.exec("UPDATE agent_seats SET kind = ? WHERE room_owner = ? AND room_chat = ?", kind, ref.ownerUid, ref.chatId);
+    this.#sql.exec(
+      "UPDATE agent_seat_turns SET kind = ? WHERE room_owner = ? AND room_chat = ? AND status = 'running'",
+      kind,
+      ref.ownerUid,
+      ref.chatId,
+    );
+  }
+
+  /** The room's kind as it last said it; off the record when it never did (nothing then leaves the seat for it). */
+  roomKind(ref: RoomRef): ChatKind {
+    const [row] = this.#sql
+      .exec("SELECT kind FROM agent_seats WHERE room_owner = ? AND room_chat = ? AND kind IS NOT NULL LIMIT 1", ref.ownerUid, ref.chatId)
+      .toArray() as Pick<SeatRow, "kind">[];
+    return isChatKind(row?.kind) ? row.kind : "off_record";
   }
 
   #seat(ref: RoomRef, agentId: string): SeatRow | undefined {
@@ -227,6 +302,7 @@ export class AgentSeats {
     this.#prune();
     const agent = await this.#agent(agentId);
     const seat = await this.#ensure(ref, agentId, true);
+    if (isChatKind(turn.kind)) this.setKind(ref, turn.kind);
     // The room gives an agent one turn at a time: one still running here is one the room ended (a give it thought
     // failed), and it stops before this turn sets the session up for someone else's tools. First: a stop also drops
     // what waits in the session's inbox, the batch among it.
@@ -241,8 +317,10 @@ export class AgentSeats {
     const delivered = batch ? await this.deliver(ref, agentId, batch) : seat.delivered;
     const byOwner = turn.byOwner && !turn.unattended && turn.hop === 0 && turn.calledBy.uid === this.#host.uid && !turn.calledBy.agentId;
     const checked: SeatTurn = { ...turn, byOwner };
-    // Its owner's turn has all of their tools, so it runs apart, in a fork of the seat's session.
-    const forked = checked.byOwner;
+    // A turn that may read its owner's private servers runs apart, in a fork of the seat's session: their own (all of
+    // their tools), and anyone's Yes to an offer (draftTools reads every server of the agent's). Only its posted reply
+    // reaches the seat's session, which everyone else's turns read. A seat is never alone with its owner.
+    const forked = runsApart(checked, false);
     const session = forked ? await this.#host.fork(seat.session) : seat.session;
     // Given meanwhile by a retry: that one runs.
     if (this.#turn(ref, turn.turn)) return delivered;

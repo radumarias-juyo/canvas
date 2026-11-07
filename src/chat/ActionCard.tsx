@@ -86,11 +86,13 @@ const TONES: Partial<Record<PendingActionView["status"], string>> = { done: "don
 /**
  * A held call's card in the chat (a `chat.action` entry): who made it and that it proposes it (level 2) or asks to make
  * it (an approval), the exact call with its input, why it waits, the rules that warned, when it expires, and how it
- * ended. Its state is the chat's, live; the entry's own is how it was made. Only the chat's owner gets the buttons.
+ * ended. Its state is the chat's, live; the entry's own is how it was made. Only the chat's owner gets the buttons, but
+ * for one a member's agent held in its seat (`seat`): only that member gets its card at all, and decides it.
  */
 export function ActionCard({ action: made }: { action: PendingActionView }) {
-  const { actions, isOwner, ownerName } = useContext(ChatActions);
+  const { actions, isOwner: owner, ownerName } = useContext(ChatActions);
   const live = actions.get(made.id) ?? made;
+  const isOwner = owner || live.seat === true;
   const { view, busy, error, decide } = useDecision(live);
   const waiting = view.status === "pending";
   const now = useClock(waiting);

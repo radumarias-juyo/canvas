@@ -347,6 +347,8 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
   const waiting = useMemo(() => queueLines(agents), [agents]);
   // The held calls' cards: their live state, and whether the viewer decides them.
   const chatActions = useMemo(() => ({ actions, isOwner, ownerName: people?.owner.name }), [actions, isOwner, people]);
+  // What the viewer's own agents held in their seats here: their cards, which no one else gets, under the transcript.
+  const seatActions = useMemo(() => [...actions.values()].filter((action) => action.seat).sort((a, b) => a.createdAt - b.createdAt), [actions]);
   return (
     <ChatActions.Provider value={chatActions}>
     <SharedChat.Provider value={group}>
@@ -437,6 +439,9 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
                     ))}
                     {drafts.map((draft) => (
                       <AgentDraft key={draft.turn} chatId={chatId} draft={draft} onDone={setDrafts} />
+                    ))}
+                    {seatActions.map((action) => (
+                      <ActionCard key={action.id} action={action} />
                     ))}
                     <Queue queued={state.queued} incoming={state.incoming} uid={uid} />
                   </div>
