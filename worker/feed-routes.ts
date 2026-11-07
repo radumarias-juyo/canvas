@@ -49,14 +49,11 @@ export async function feedRoute(request: Request, uid: string, directory: Durabl
       title: target.title,
       ...(target.chat && { chatOwner: target.chat.ownerUid, chatId: target.chat.id }),
     });
-    if ("error" in followed) return json(followed, 409);
-    return json(await directory.listFollows(), 201);
+    return "error" in followed ? json(followed, 409) : json(followed, 201);
   }
   const one = path.match(/^\/api\/follows\/([a-z]+)\/([a-z0-9]+)$/);
   if (one && method === "DELETE" && isFollowKind(one[1])) {
-    const chatId = url.searchParams.get("chat") ?? undefined;
-    await directory.unfollow(one[1], one[2], chatId);
-    return json(await directory.listFollows());
+    return json(await directory.unfollow(one[1], one[2], url.searchParams.get("chat") ?? undefined));
   }
   return null;
 }

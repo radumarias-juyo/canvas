@@ -103,8 +103,8 @@ describe("feed: keeping items", () => {
   it("lets a chat, or a page or agent, take its items along when it goes", () => {
     const feed = new FeedStore(memorySql());
     feed.add(tag(1, { id: "c1", kind: "group" }));
-    feed.add({ kind: "page_version", ref: "version:p1:2", at: T0, title: "Weekly has version 2", open: { to: "page", artifactId: "p1" } }, null, aboutOf("page", "p1"));
-    expect(feed.forgetAbout(aboutOf("page", "p1"))).toBe(1);
+    feed.add({ kind: "page_version", ref: "version:p1:2", at: T0, title: "Weekly has version 2", open: { to: "page", artifactId: "p1" } }, null, aboutOf("page", "p1", "ann"));
+    expect(feed.forgetAbout(aboutOf("page", "p1", "ann"))).toBe(1);
     expect(feed.forgetChat("c1")).toBe(1);
     expect(feed.list().items).toEqual([]);
   });
@@ -143,9 +143,9 @@ describe("follows: both sides", () => {
       { kind: "agent", id: "a1", title: "@signups", chatId: "c1", at: T0 + 1 },
       { kind: "page", id: "p1", title: "Weekly", at: T0 },
     ]);
-    expect(follows.follows("page", "p1", "ann")).toBe(true);
+    expect(follows.get("page", "p1", "ann")).not.toBeNull();
     // An item that says it is from someone else's target of that id is not this follow's.
-    expect(follows.follows("page", "p1", "cai")).toBe(false);
+    expect(follows.get("page", "p1", "cai")).toBeNull();
     expect(follows.retitle("page", "p1", "ann", "Weekly signups")).toBe(true);
     expect(follows.retitle("page", "p1", "ann", "Weekly signups")).toBe(false);
     expect(follows.get("page", "p1", "ann")?.title).toBe("Weekly signups");
@@ -162,9 +162,8 @@ describe("follows: both sides", () => {
     expect(follows.find("agent", "a1", "c2")?.ownerUid).toBe("eve");
     expect(follows.through("dan", "c2").map((follow) => follow.ownerUid)).toEqual(["eve"]);
     expect(follows.unfollow("agent", "a1", "ann")).not.toBeNull();
-    expect(follows.follows("agent", "a1", "eve")).toBe(true);
+    expect(follows.get("agent", "a1", "eve")).not.toBeNull();
     expect(aboutOf("agent", "a1", "ann")).not.toBe(aboutOf("agent", "a1", "eve"));
-    expect(aboutOf("agent", "a1", "ann")).not.toBe(aboutOf("agent", "a1"));
   });
 
   it("refuses past MAX_FOLLOWS and MAX_FOLLOWERS, but following again is not counted twice", () => {

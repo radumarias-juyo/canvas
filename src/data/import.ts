@@ -1,7 +1,7 @@
 import { ARCHIVE, checkManifest, MAX_IMPORT_FILE_BYTES, type ExportedArtifact, type ExportedChat } from "../../shared/data-export.ts";
 import type { ArtifactMeta } from "../../shared/protocol.ts";
 import { readZipFile, storedRange, zipDirectory, type ZipItem, type ZipSource } from "../../shared/unzip.ts";
-import { errorMessage, formatBytes, mapLimit, toBase64 } from "../../shared/util.ts";
+import { errorMessage, formatBytes, isObject, mapLimit, toBase64 } from "../../shared/util.ts";
 import { api, dataApi, type DraftJson } from "../api.ts";
 import type { Progress } from "./export.ts";
 
@@ -55,10 +55,11 @@ export async function importData(zip: Blob, onProgress: (progress: Progress) => 
   const report: ImportReport = { imported: counts(), skipped: counts(), failed: [], settings: [] };
   const fileItems = [...items.values()].filter((item) => item.name.startsWith(FILES));
   // A damaged entry is left out, as checkManifest checks only that there is a list.
-  const agents = (manifest.account.agents ?? []).filter((agent) => typeof agent === "object" && agent !== null);
+  const agents = (manifest.account.agents ?? []).filter(isObject);
+  const follows = (manifest.account.follows ?? []).filter(isObject);
   const steps = {
     done: 0,
-    total: 2 + manifest.account.skills.length + agents.length + fileItems.length + manifest.chats.length + manifest.artifacts.length,
+    total: 2 + manifest.account.skills.length + agents.length + fileItems.length + manifest.chats.length + manifest.artifacts.length + follows.length,
   };
   const step = (now: string) => onProgress({ ...steps, now });
   /** Run one step: its failure is reported under `what`, and the import goes on. Whether it went in. */
@@ -180,25 +181,25 @@ export async function importData(zip: Blob, onProgress: (progress: Progress) => 
     if (values.length) await dataApi.importPageValues(values);
   });
 
-  // Last, as following by hand does: only what the importer may open here (the same deployment) is followed again.
-  const follows = (manifest.account.follows ?? []).filter((follow) => typeof follow === "object" && follow !== null);
-  if (follows.length) {
-    const have = new Set((await api.follows().catch(() => [])).map((follow) => `${follow.kind}:${follow.id}:${follow.chatId ?? ""}`));
-    for (const follow of follows) {
-      if (have.has(`${follow.kind}:${follow.id}:${follow.chatId ?? ""}`)) {
+  // Last, as following by hand checks: only what the importer may open here (the same deployment) is followed again.
+  const keyOf = (follow: { kind: string; id: string; chatId?: string }) => `${follow.kind}:${follow.id}:${follow.chatId ?? ""}`;
+  const have = new Set(follows.length ? (await api.follows().catch(() => [])).map(keyOf) : []);
+  await mapLimit(follows, PARALLEL, (follow) =>
+    attempt(`Follow of ${follow.kind} ${follow.id}`, async () => {
+      if (have.has(keyOf(follow))) {
         report.skipped.follows++;
-        continue;
+        return;
       }
       try {
         await api.follow(follow.kind, follow.id, follow.chatId);
         report.imported.follows++;
       } catch (e) {
         // Not here, or not theirs to open here: what an export from another deployment follows is skipped.
-        if ([400, 403, 404].includes((e as { status?: number }).status ?? 0)) report.skipped.follows++;
-        else report.failed.push(`Follow of ${follow.kind} ${follow.id}: ${errorMessage(e)}`);
+        if (![400, 403, 404].includes((e as { status?: number }).status ?? 0)) throw e;
+        report.skipped.follows++;
       }
-    }
-  }
+    }),
+  );
   onProgress({ ...steps, now: "Done" });
   return report;
 }

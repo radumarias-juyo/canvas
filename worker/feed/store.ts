@@ -9,7 +9,7 @@ import {
   MAX_FEED_TITLE,
   MAX_FOLLOWERS,
   MAX_FOLLOWS,
-  NEEDS_YOU_KINDS,
+  NEEDS_YOU,
   type FeedInput,
   type FeedItem,
   type FeedKind,
@@ -26,11 +26,11 @@ type FeedRow = { id: number; kind: FeedKind; at: number; read: number; needs: nu
 type FeedData = Pick<FeedItem, "title" | "text" | "from" | "open" | "status">;
 
 /**
- * What `about` names an item by, so a page or agent that is gone takes its items with it: a followed one with its owner
- * (agent ids are unique only per person, and an import keeps them), the person's own agent without.
+ * What `about` names an item by, so a page or agent that is gone takes its items with it: with its owner, since agent
+ * ids are unique only per person (and an import keeps them).
  */
-export function aboutOf(kind: FollowKind, id: string, ownerUid?: string): string {
-  return ownerUid ? `${kind}:${ownerUid}:${id}` : `${kind}:${id}`;
+export function aboutOf(kind: FollowKind, id: string, ownerUid: string): string {
+  return `${kind}:${ownerUid}:${id}`;
 }
 
 /** The `needs` column: nothing waits, it waits until resolved by ref, or until the person writes in its chat. */
@@ -75,7 +75,7 @@ export class FeedStore {
       ...(input.status && { status: input.status }),
     };
     const json = JSON.stringify(data);
-    const waits = input.needsYou || (NEEDS_YOU_KINDS.includes(input.kind) && (input.kind === "question" ? "reply" : true));
+    const waits = input.needsYou ?? NEEDS_YOU[input.kind];
     const needs = waits === "reply" ? NEEDS.reply : waits ? NEEDS.resolve : NEEDS.none;
     const read = input.quiet ? 1 : 0;
     const chatId = input.chat?.id ?? (input.open.to === "chat" ? input.open.chatId : null);
@@ -236,11 +236,6 @@ export class FollowStore {
     return this.#sql.exec("SELECT * FROM follows WHERE chat_owner = ? AND chat_id = ?", chatOwner, chatId).toArray().map(followOf);
   }
 
-  /** Whether this person follows `owner`'s target: what an item from a follow is checked against when it comes in. */
-  follows(kind: FollowKind, id: string, ownerUid: string): boolean {
-    return this.#sql.exec("SELECT 1 FROM follows WHERE kind = ? AND target_id = ? AND owner_uid = ?", kind, id, ownerUid).toArray().length > 0;
-  }
-
   /** What this person follows, newest first, as the app lists it (never whose it is). */
   list(): FollowView[] {
     return this.#sql
@@ -346,7 +341,7 @@ export interface FanOutHost {
   deliver(uid: string): Promise<boolean>;
   /** Forget a follower who no longer follows it. */
   forget(uid: string): void;
-  /** A follower who may no longer open it (out of the chat they followed it from, or it is not shared there now): forget them, and tell them. */
+  /** A follower who may no longer open it (out of the chat they followed it from, or not shared there now): forget them, and tell them. */
   lost(uid: string): void;
 }
 
@@ -362,10 +357,11 @@ export async function fanOut(kind: FollowKind, followers: readonly Follower[], h
       ? followers.map((follower) => follower.uid)
       : (
           await mapLimit(byChat(followers), limit, async ({ via, uids }) => {
-            const still = via ? await host.stillIn(via, uids).catch(() => null) : [];
-            if (!still) return [];
-            for (const uid of uids) if (!still.includes(uid)) host.lost(uid);
-            return uids.filter((uid) => still.includes(uid));
+            const answer = via ? await host.stillIn(via, uids).catch(() => null) : [];
+            if (!answer) return [];
+            const still = new Set(answer);
+            for (const uid of uids) if (!still.has(uid)) host.lost(uid);
+            return uids.filter((uid) => still.has(uid));
           })
         ).flat();
   const delivered = await mapLimit(allowed, limit, async (uid) => {

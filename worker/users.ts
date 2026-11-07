@@ -20,7 +20,7 @@ import { AgentStore, type AgentSave } from "./agents/store.ts";
 import { ChatRows } from "./chat-rows.ts";
 import { addColumns } from "./members.ts";
 import { mayLeave, type ChatKind } from "../shared/chat-kinds.ts";
-import { agentFrom, NEEDS_YOU_KINDS, RUN_FEED_TEXT, type FeedInput, type FeedList, type FeedOpen, type FollowKind, type FollowView } from "../shared/feed.ts";
+import { agentFrom, NEEDS_YOU, RUN_FEED_TEXT, type FeedInput, type FeedList, type FeedOpen, type FollowKind, type FollowView } from "../shared/feed.ts";
 import type { RunStatus } from "../shared/runs.ts";
 import { aboutOf, FAN_OUT, fanOut, FeedStore, FollowStore, postsReachFollowers, type Follower, type FollowRecord } from "./feed/store.ts";
 import { mcpServers } from "./mcp/servers.ts";
@@ -272,21 +272,21 @@ export class UserDirectory extends DurableObject<Env> {
    * owner forgets them. An item from an off-the-record chat is refused here, whoever sends it.
    */
   addFeed(input: FeedInput, follow?: { kind: FollowKind; id: string; ownerUid: string; title?: string }): boolean {
-    if (follow && !this.#follows.follows(follow.kind, follow.id, follow.ownerUid)) return false;
+    const followed = follow ? this.#follows.get(follow.kind, follow.id, follow.ownerUid) : null;
+    if (follow && !followed) return false;
     if (follow?.title && this.#follows.retitle(follow.kind, follow.id, follow.ownerUid, follow.title)) this.#changed("follows");
     // An agent opens for a follower only from the chat that shares it with them: the one they followed it from.
     if (follow?.kind === "agent" && input.open.to === "agent" && !input.open.chatId) {
-      const chatId = this.#follows.get("agent", follow.id, follow.ownerUid)?.chatId;
-      if (chatId) input = { ...input, open: { ...input.open, chatId } };
+      if (followed?.chatId) input = { ...input, open: { ...input.open, chatId: followed.chatId } };
     }
     const known = input.chat ? this.#rows.kindOf(input.chat.id) : null;
     // What it is about goes with it: a page or agent unfollowed or gone, or one of this user's agents deleted.
-    const about = follow ? aboutOf(follow.kind, follow.id, follow.ownerUid) : input.aboutAgent && aboutOf("agent", input.aboutAgent);
+    const about = follow ? aboutOf(follow.kind, follow.id, follow.ownerUid) : input.aboutAgent && aboutOf("agent", input.aboutAgent, this.ctx.id.name!);
     const added = this.#feed.add(input, known, about);
     if (added === "same" || added === "refused") return true;
     this.#changed("feed");
     // A tag pushes on its own (#touch), and a run waiting for a sign-in did already (McpSignIns.needed).
-    if (!input.quiet && (follow || NEEDS_YOU_KINDS.includes(input.kind))) {
+    if (!input.quiet && (follow || NEEDS_YOU[input.kind])) {
       this.ctx.waitUntil(this.push({ title: "New in your feed", body: "Something new arrived in your feed.", url: "/feed", tag: `feed:${input.kind}` }));
     }
     return true;
@@ -309,11 +309,6 @@ export class UserDirectory extends DurableObject<Env> {
     if (this.#feed.resolve(ref)) this.#changed("feed");
   }
 
-  /** This user wrote in chat `chatId`: what waited there for their reply (an agent's question) is answered. */
-  repliedIn(chatId: string): void {
-    if (this.#feed.resolveReplies(chatId)) this.#changed("feed");
-  }
-
   /** Mark feed items read (or unread again): by id, or all. */
   markFeed(ids: readonly number[] | "all", read: boolean): Pick<FeedList, "unread" | "needsYou"> {
     if (this.#feed.mark(ids, read)) this.#changed("feed");
@@ -328,9 +323,9 @@ export class UserDirectory extends DurableObject<Env> {
   /**
    * Follow someone else's page or agent (the Worker checked this user may open it). This side is written first, then
    * its owner's (addFollower): a post fanned out in between finds them followed here and is kept. Refused by the owner
-   * (too many followers), this side is taken back.
+   * (too many followers), this side is taken back. Returns what this user follows now.
    */
-  async follow(record: Omit<FollowRecord, "at">): Promise<{ ok: true } | { error: string }> {
+  async follow(record: Omit<FollowRecord, "at">): Promise<FollowView[] | { error: string }> {
     const had = this.#follows.get(record.kind, record.id, record.ownerUid);
     const result = this.#follows.follow(record);
     if ("error" in result) return result;
@@ -344,19 +339,20 @@ export class UserDirectory extends DurableObject<Env> {
       return counted;
     }
     this.#changed("follows");
-    return result;
+    return this.#follows.list();
   }
 
   /**
    * Stop following what the app names (kind, id, and for an agent the chat it was followed from): its owner forgets
-   * this user, and its items leave the feed. False when there was no such follow.
+   * this user, and its items leave the feed. Returns what this user follows now.
    */
-  async unfollow(kind: FollowKind, id: string, chatId?: string): Promise<boolean> {
+  async unfollow(kind: FollowKind, id: string, chatId?: string): Promise<FollowView[]> {
     const had = this.#follows.find(kind, id, chatId);
-    if (!had) return false;
-    this.#dropFollow(had);
-    await exports.UserDirectory.getByName(had.ownerUid).removeFollower(kind, id, this.ctx.id.name!);
-    return true;
+    if (had) {
+      this.#dropFollow(had);
+      await exports.UserDirectory.getByName(had.ownerUid).removeFollower(kind, id, this.ctx.id.name!);
+    }
+    return this.#follows.list();
   }
 
   /** `ownerUid`'s page or agent this user follows is gone, or they may no longer open it: the follow and its items go. */
@@ -544,7 +540,8 @@ export class UserDirectory extends DurableObject<Env> {
     const sql = own
       ? this.ctx.storage.sql.exec("UPDATE chats SET kind = ? WHERE id = ? AND kind IS NOT ?", kind, id, kind)
       : this.ctx.storage.sql.exec("UPDATE shared_chats SET kind = ? WHERE id = ? AND owner_uid = ? AND kind IS NOT ?", kind, id, ownerUid, kind);
-    if (sql.rowsWritten) this.#changed("chats");
+    if (!sql.rowsWritten) return;
+    this.#changed("chats");
     // Off the record now: what the feed kept of it leaves too.
     if (!mayLeave({ what: "feed" }, kind) && this.#feed.forgetChat(id)) this.#changed("feed");
   }
@@ -746,7 +743,10 @@ export class UserDirectory extends DurableObject<Env> {
     // put activity_at back behind a later write. The notice keeps the tag's time, which windows share.
     const now = Date.now();
     const set = "title = ?, updated_at = ?, activity_at = CASE WHEN ? THEN ? ELSE activity_at END, mentioned_at = CASE WHEN ? THEN ? ELSE mentioned_at END";
-    if (!this.#updateChat(id, ownerUid, set, title, now, byOther ? 1 : 0, now, tag ? 1 : 0, now) || !tag) return;
+    const listed = this.#updateChat(id, ownerUid, set, title, now, byOther ? 1 : 0, now, tag ? 1 : 0, now);
+    // This user wrote in it: what waited there for their reply (an agent's question, a report that asks) is answered.
+    if (listed && !byOther && this.#feed.resolveReplies(id)) this.#changed("feed");
+    if (!listed || !tag) return;
     // A tag opens the chat again for someone who closed it.
     this.#rows.reopen(id);
     const { key, kind, run, ...notice } = tag;
@@ -1067,7 +1067,7 @@ export class UserDirectory extends DurableObject<Env> {
     this.#agentChanged(id);
     // Its followers stop following it, and its items (runs, guesses to confirm) leave this user's feed.
     this.#targetGone("agent", id);
-    if (this.#feed.forgetAbout(aboutOf("agent", id))) this.#changed("feed");
+    if (this.#feed.forgetAbout(aboutOf("agent", id, this.ctx.id.name!))) this.#changed("feed");
     return null;
   }
 

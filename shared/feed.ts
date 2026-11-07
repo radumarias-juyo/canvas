@@ -85,7 +85,7 @@ export interface FeedInput {
   /**
    * It waits on the person: an answer, an approval, a sign-in. "Needs you" lists it until it is resolved, read or not:
    * true until the code that added it resolves it (UserDirectory.resolveFeed), "reply" until the person next writes in
-   * its chat (a question is answered so). The kinds in NEEDS_YOU_KINDS wait without saying so.
+   * its chat (a question is answered so). The kinds in NEEDS_YOU wait so without saying it.
    */
   needsYou?: boolean | "reply";
   /** A run's item: how the run ended. */
@@ -121,7 +121,7 @@ export interface FeedList {
  * The kinds that always wait on the person, beside items marked so (a run waiting for a sign-in): a question until they
  * write in its chat again, the others until what they ask is done (an approval decided, an agent's guesses confirmed).
  */
-export const NEEDS_YOU_KINDS: readonly FeedKind[] = ["approval", "assumption", "question"];
+export const NEEDS_YOU: Partial<Record<FeedKind, true | "reply">> = { approval: true, assumption: true, question: "reply" };
 
 /** The most items one feed keeps; the oldest go first, read ones before unread. */
 export const MAX_FEED_ITEMS = 500;

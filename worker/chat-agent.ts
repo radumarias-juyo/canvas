@@ -253,8 +253,6 @@ const SHOWN_SKILLS_KEY = "skillsShown";
 const BROUGHT_IN_KEY = "broughtIn";
 /** The settings of a chat its export carries, beside its tables (worker/chat-dump.ts), its own system prompt among them. */
 const EXPORTED_KV = [AUTO_KEY, SHOWN_SKILLS_KEY, BROUGHT_IN_KEY, SYSTEM_PROMPT_KEY, ...KIND_KV];
-/** The accounts something in their feed waits on to reply here (an agent's question): their next message answers it. */
-const FEED_WAITING_KEY = "feedWaiting";
 /** Set once the sidebars of everyone in a chat shared before they remembered people have met (#meetOnce). */
 const PEOPLE_TOLD_KEY = "peopleTold";
 /** How much of a long chat a branch reads to copy, in pages of 200 entries, newest first. */
@@ -1483,7 +1481,6 @@ export class ChatAgent extends DurableObject<Env> {
     // Only a tag whose "@name" is in the text: one sent without it would notify someone of nothing they can see.
     const tags = taggedPeople(keptMentions(text, mentions));
     void this.#touchIndexes(title, author, tags, text, `${author.uid}:${sentAt}`).catch((error) => console.error("chat index:", errorMessage(error)));
-    this.#replied(author.uid);
     return true;
   }
 
@@ -2699,7 +2696,6 @@ export class ChatAgent extends DurableObject<Env> {
     if (reply.run || reply.failed || !asker || reply.calledBy.agentId || !asksUser(reply.text) || !this.isInChat(asker)) return;
     // The owner's second seat has no feed of its own: the owner's has it. Refused there when the chat is off the record.
     const account = this.#account(asker);
-    this.#waitsOnReply(account);
     const added = this.#index(account).addFeed({
       kind: "question",
       ref: `question:${this.chatId}:${requestId}`,
@@ -2712,21 +2708,6 @@ export class ChatAgent extends DurableObject<Env> {
     });
     this.ctx.waitUntil(added.catch((error: unknown) => console.error("feed:", errorMessage(error))));
   }
-  /** Something in `account`'s feed waits for their reply in this chat (a question, a run's report that asks). */
-  #waitsOnReply(account: string): void {
-    const waiting = this.ctx.storage.kv.get<string[]>(FEED_WAITING_KEY) ?? [];
-    if (!waiting.includes(account)) this.ctx.storage.kv.put(FEED_WAITING_KEY, [...waiting, account]);
-  }
-
-  /** `uid` wrote here: what their feed waited on them to answer in this chat is answered (UserDirectory.repliedIn). */
-  #replied(uid: string): void {
-    const account = this.#account(uid);
-    const waiting = this.ctx.storage.kv.get<string[]>(FEED_WAITING_KEY) ?? [];
-    if (!waiting.includes(account)) return;
-    this.ctx.storage.kv.put(FEED_WAITING_KEY, waiting.filter((one) => one !== account));
-    this.ctx.waitUntil(this.#index(account).repliedIn(this.chatId).catch((error: unknown) => console.error("feed:", errorMessage(error))));
-  }
-
 
   /**
    * Of `uids`, those who still follow `ownerUid`'s agent `agentId` from here: in this chat, with the agent on its roster
@@ -3156,7 +3137,6 @@ export class ChatAgent extends DurableObject<Env> {
       chatKind: this.kinds.kind(),
       ...(posted?.text && { post: posted.text, ...(asksUser(posted.text) && { asks: true }) }),
     });
-    if (posted?.text && asksUser(posted.text)) this.#waitsOnReply(this.uid);
     this.ctx.waitUntil(ended.catch((error: unknown) => console.error("feed:", errorMessage(error))));
   }
 
