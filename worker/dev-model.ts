@@ -53,7 +53,7 @@ export const scriptEmbedder: Embedder = {
   embed: async (texts) => texts.map(wordVector),
 };
 
-export function wordVector(text: string): number[] {
+function wordVector(text: string): number[] {
   const vector = new Array<number>(WORD_DIMS).fill(0);
   for (const [word] of text.toLowerCase().matchAll(/\p{L}{4,}/gu)) {
     // FNV-1a.
