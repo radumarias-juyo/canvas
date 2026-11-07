@@ -871,6 +871,9 @@ describe("what someone other than the owner sees of a chat's events", () => {
     expect(shown).toContain('"toolCallId":"c1"');
     const appended = withoutNoteResults({ type: "entry_appended", entry: result(MEMORY_RECALL_TOOL, "My salary is private.") });
     expect(JSON.stringify(appended)).not.toContain("salary");
+    // Worded for the people, not the model, and true in a chat that was always shared too.
+    expect(JSON.stringify(appended)).toContain("shown only to the chat's owner");
+    expect(shown).not.toContain("more people read this chat");
     const update = { type: "tool_execution_update", toolCallId: "c5", toolName: MEMORY_RECALL_TOOL, output: { set: "My salary" } } as AgentEvent;
     expect(JSON.stringify(withoutNoteResults(update))).not.toContain("salary");
   });
@@ -910,6 +913,8 @@ describe("what someone other than the owner sees of a chat's events", () => {
     expect(JSON.stringify(started)).not.toContain("salary");
     const shown = withoutNoteResults({ type: "message_end", entry: summary });
     expect(JSON.stringify(shown)).not.toContain("salary");
+    expect(JSON.stringify([started, shown])).not.toContain("more people read this chat");
+    expect(JSON.stringify(shown)).toContain("shown only to the chat's owner");
     expect(shown).toMatchObject({ entry: { id: 7, kind: "pi.compaction" } });
   });
 });

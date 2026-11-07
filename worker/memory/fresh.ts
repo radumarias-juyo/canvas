@@ -19,16 +19,28 @@ import { MEMORY_FORGET_TOOL, MEMORY_RECALL_TOOL } from "../../shared/memory.ts";
 /** The entry that leaves a conversation's earlier prompts out of its context (see freshPrompt). */
 const MEMORY_FRESH_KIND = "chat.memory-fresh";
 
-/** What a memory_recall or memory_forget result says once it is left out (the latter quoted the note it forgot). */
-const LEFT_OUT: Readonly<Record<string, string>> = {
-  [MEMORY_RECALL_TOOL]: "(The notes this call found are left out: more people read this chat now. Call it again for those you may read.)",
-  [MEMORY_FORGET_TOOL]: "(What this call said is left out: more people read this chat now.)",
+/** Who a left-out text is for: the model (its context once the chat has more readers), or the people's sockets. */
+type Audience = "model" | "shown";
+
+/**
+ * What a memory_recall or memory_forget result says once it is left out (the latter quoted the note it forgot): to the
+ * model, why and what to do; on others' screens, only who sees it (in a chat that was always shared too).
+ */
+const LEFT_OUT: Readonly<Record<string, Readonly<Record<Audience, string>>>> = {
+  [MEMORY_RECALL_TOOL]: {
+    model: "(The notes this call found are left out: more people read this chat now. Call it again for those you may read.)",
+    shown: "(Notes this call found are shown only to the chat's owner.)",
+  },
+  [MEMORY_FORGET_TOOL]: {
+    model: "(What this call said is left out: more people read this chat now.)",
+    shown: "(What this call said is shown only to the chat's owner.)",
+  },
 };
 
 /** `message` with what it says put in place of one that says it is left out, if it is a memory_recall or memory_forget result. */
-function leftOutResult(message: Message | undefined): ToolResultMessage | undefined {
+function leftOutResult(message: Message | undefined, audience: Audience): ToolResultMessage | undefined {
   if (message?.role !== "toolResult") return undefined;
-  const leftOut = LEFT_OUT[message.toolName];
+  const leftOut = LEFT_OUT[message.toolName]?.[audience];
   return leftOut ? { ...message, content: [{ type: "text", text: leftOut }], details: undefined } : undefined;
 }
 
@@ -37,10 +49,9 @@ function leftOutResult(message: Message | undefined): ToolResultMessage | undefi
  * the notes); the same entry when it holds neither.
  */
 function withoutNoteResult(entry: EntryRecord): EntryRecord {
-  if (CompactionEntry.is(entry) && entry.model?.length)
-    return { ...entry, model: [{ role: "user", content: SUMMARY_LEFT_OUT, timestamp: entry.model[0]?.timestamp ?? 0 }] };
+  if (CompactionEntry.is(entry) && entry.model?.length) return { ...entry, model: [leftOutSummary(entry.model[0]!, "shown")] };
   const [first, ...rest] = entry.model ?? [];
-  const result = leftOutResult(first);
+  const result = leftOutResult(first, "shown");
   return result ? { ...entry, model: [result, ...rest] } : entry;
 }
 
@@ -71,7 +82,7 @@ export function withoutNoteResults(event: AgentEvent): AgentEvent {
     }
     // An entry's message starts whole, before its entry lands: a result's, and a compaction's summary.
     case "message_start": {
-      const message = isSummary(event.message) ? leftOutSummary(event.message) : leftOutResult(event.message);
+      const message = isSummary(event.message) ? leftOutSummary(event.message, "shown") : leftOutResult(event.message, "shown");
       return message ? { ...event, message } : event;
     }
     case "message_end":
@@ -113,8 +124,11 @@ export function withoutNoteResults(event: AgentEvent): AgentEvent {
 /** How a compaction's summary is asked to be placed: its write's request id starts with it. */
 const SUMMARY_REQUEST = "compaction:";
 
-/** What a summary of the conversation says once it is left out. */
-const SUMMARY_LEFT_OUT = "(A summary of the earlier conversation is left out here: more people read this chat now.)";
+/** What a summary of the conversation says once it is left out, as LEFT_OUT. */
+const SUMMARY_LEFT_OUT: Readonly<Record<Audience, string>> = {
+  model: "(A summary of the earlier conversation is left out here: more people read this chat now.)",
+  shown: "(A summary of the earlier conversation is shown only to the chat's owner.)",
+};
 
 /** How a compaction's summary starts in the model's context (pi-durable's CompactionTask; test/memory-prompt.test.ts checks it). */
 const SUMMARY_START = "The conversation history before this point was compacted into the following summary:";
@@ -127,11 +141,15 @@ function isSummary(message: Message): boolean {
 }
 
 /** A compaction's summary put in place of one that says it is left out. */
-const leftOutSummary = (message: Message): Message => ({ role: "user", content: SUMMARY_LEFT_OUT, timestamp: message.timestamp });
+const leftOutSummary = (message: Pick<Message, "timestamp">, audience: Audience): Message => ({
+  role: "user",
+  content: SUMMARY_LEFT_OUT[audience],
+  timestamp: message.timestamp,
+});
 
 /** `messages` with every compaction summary among them put in place of one that says it is left out. */
 export function withoutSummaries(messages: readonly Message[]): Message[] {
-  return messages.map((message) => (isSummary(message) ? leftOutSummary(message) : message));
+  return messages.map((message) => (isSummary(message) ? leftOutSummary(message, "model") : message));
 }
 
 /**
@@ -143,8 +161,8 @@ function leaveOutNotes(entries: readonly EntryRecord[]): ContextEdit[] {
   return entries.flatMap((entry): ContextEdit[] => {
     if (SystemEntry.is(entry)) return [{ target: entry.id, action: "omit" }];
     if (CompactionEntry.is(entry) && entry.model?.length)
-      return [{ target: entry.id, action: "replace", messages: [{ role: "user", content: SUMMARY_LEFT_OUT, timestamp: Date.now() }] }];
-    const result = ToolResultEntry.is(entry) ? leftOutResult(entry.model?.[0]) : undefined;
+      return [{ target: entry.id, action: "replace", messages: [leftOutSummary({ timestamp: Date.now() }, "model")] }];
+    const result = ToolResultEntry.is(entry) ? leftOutResult(entry.model?.[0], "model") : undefined;
     return result ? [{ target: entry.id, action: "replace", messages: [result] }] : [];
   });
 }
