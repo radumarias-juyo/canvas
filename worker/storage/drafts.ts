@@ -1,5 +1,5 @@
 import { canonicalJson } from "../../shared/canonical.ts";
-import { ID_PATTERN, type ArtifactManifest } from "../../shared/protocol.ts";
+import { ID_PATTERN, SEAT_CHAT_PATTERN, type ArtifactManifest } from "../../shared/protocol.ts";
 import { sha256Hex } from "../../shared/util.ts";
 import { deletePrefix } from "./r2.ts";
 
@@ -72,7 +72,8 @@ export class ChatDrafts {
 
   /** Use `Storage.chatDrafts(uid, chatId)`; the uid must come from a verified identity. */
   constructor(bucket: R2Bucket, uid: string, chatId: string, key: ArrayBuffer) {
-    if (!ID_PATTERN.test(chatId)) throw new Error("Invalid chat id.");
+    // A seat's chat too: a member's agent drafts its pages for one room there.
+    if (!ID_PATTERN.test(chatId) && !SEAT_CHAT_PATTERN.test(chatId)) throw new Error("Invalid chat id.");
     this.#bucket = bucket;
     this.#prefix = `users/${uid}/drafts/${chatId}/`;
     this.#key = key;

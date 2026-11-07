@@ -1,12 +1,21 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   chatAllowsServer,
+  DEFAULT_MESSAGE_TOKENS,
   MAX_DAILY_TOKENS,
   MIN_DAILY_TOKENS,
   type ChatAgentSettings,
   type ChatAgentSettingsView,
 } from "../../shared/agent-settings.ts";
 import type { ChatAgentView } from "../../shared/agents.ts";
+import {
+  SPEAK_UP_BOUNDS,
+  SPEAK_UP_DEFAULTS,
+  SPEAK_UP_FIELDS,
+  SPEAK_UP_LABELS,
+  type SpeakUpLimitField,
+  type SpeakUpLimits,
+} from "../../shared/speak-up.ts";
 import { errorMessage } from "../../shared/util.ts";
 import { api } from "../api.ts";
 
@@ -15,10 +24,76 @@ type SettingsChange = { [K in keyof ChatAgentSettings]?: ChatAgentSettings[K] | 
 
 const tokens = (n: number) => n.toLocaleString("en");
 
+/** Speaking-up limits with one changed (null: back to the default), or null when none is left set. */
+export function limitsWith(limits: SpeakUpLimits | undefined, field: SpeakUpLimitField, value: number | null): SpeakUpLimits | null {
+  const { [field]: _, ...rest } = limits ?? {};
+  const next: SpeakUpLimits = value === null ? rest : { ...rest, [field]: value };
+  return Object.keys(next).length ? next : null;
+}
+
+/**
+ * A whole number the owner sets, saved by its own Save: empty clears it (back to `unset`, the placeholder). The
+ * stored value (`value`) wins whenever it changes.
+ */
+export function NumberSetting({
+  id,
+  label,
+  hint,
+  value,
+  min,
+  max,
+  unset,
+  disabled,
+  onSave,
+}: {
+  id: string;
+  label: string;
+  hint?: ReactNode;
+  value: number | undefined;
+  min: number;
+  max: number;
+  unset: string;
+  disabled: boolean;
+  onSave: (value: number | null) => void;
+}) {
+  const [text, setText] = useState(value === undefined ? "" : String(value));
+  useEffect(() => setText(value === undefined ? "" : String(value)), [value]);
+  const number = Number(text.replace(/[,_\s]/g, ""));
+  const empty = text.trim() === "";
+  const valid = empty || (Number.isInteger(number) && number >= min && number <= max);
+  const changed = (empty ? undefined : number) !== value;
+  return (
+    <form
+      className="agent-budget"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (valid && changed) onSave(empty ? null : number);
+      }}
+    >
+      <label htmlFor={id}>
+        {label}
+        {hint && <small>{hint}</small>}
+      </label>
+      <div className="agent-budget-row">
+        <input id={id} inputMode="numeric" placeholder={unset} value={text} aria-invalid={!valid} onChange={(e) => setText(e.target.value)} />
+        <button type="submit" disabled={disabled || !valid || !changed}>
+          Save
+        </button>
+      </div>
+      {!valid && (
+        <small className="form-error">
+          A whole number from {tokens(min)} to {tokens(max)}, or empty for {unset.toLowerCase()}.
+        </small>
+      )}
+    </form>
+  );
+}
+
 /**
  * The chat's agent settings, for its owner, under the list of agents to add: whether a router picks agents for a
  * message that names nobody, whether agents may speak up unprompted, which servers they may use here, a daily token
- * budget for every model call of the chat, today's use, and the agents muted here. Each change is saved at once.
+ * budget for every model call of the chat, today's use, a budget per message for its agents' turns, and the agents
+ * muted here. Each change is saved at once.
  */
 export function AgentSettingsPanel({
   chatId,
@@ -34,8 +109,6 @@ export function AgentSettingsPanel({
   const [saving, setSaving] = useState(false);
   // The socket's word wins: it is what the chat holds now.
   useEffect(() => setShown(view), [view]);
-  const [budget, setBudget] = useState(() => (view?.settings.dailyTokens ? String(view.settings.dailyTokens) : ""));
-  useEffect(() => setBudget(view?.settings.dailyTokens ? String(view.settings.dailyTokens) : ""), [view?.settings.dailyTokens]);
   if (!shown) return <p className="agent-menu-empty">Loading settings…</p>;
   const { settings, available, today } = shown;
 
@@ -63,9 +136,6 @@ export function AgentSettingsPanel({
     const list = shown.servers.filter((name) => (name === server ? on : allowed(name)));
     void save({ servers: list.length === shown.servers.length ? null : list });
   };
-  const budgetValue = Number(budget.replace(/[,_\s]/g, ""));
-  const budgetValid = budget.trim() === "" || (Number.isInteger(budgetValue) && budgetValue >= MIN_DAILY_TOKENS && budgetValue <= MAX_DAILY_TOKENS);
-  const budgetChanged = (budget.trim() === "" ? undefined : budgetValue) !== settings.dailyTokens;
   const muted = agents.filter((agent) => agent.muted);
 
   return (
@@ -99,6 +169,30 @@ export function AgentSettingsPanel({
           </small>
         </span>
       </label>
+      {(settings.speakUp || shown.router) && (
+        <fieldset className="agent-servers-here">
+          <legend>
+            How often agents speak up here
+            <small>
+              Each agent's owner may set stricter limits for it; the stricter of the two holds. With others in the chat, an agent the chat
+              picks answers at most one of so many messages too.
+            </small>
+          </legend>
+          {SPEAK_UP_FIELDS.map((field) => (
+            <NumberSetting
+              key={field}
+              id={`${field}-${chatId}`}
+              label={SPEAK_UP_LABELS[field]}
+              value={settings.speakUpLimits?.[field]}
+              min={SPEAK_UP_BOUNDS[field][0]}
+              max={SPEAK_UP_BOUNDS[field][1]}
+              unset={`Default (${SPEAK_UP_DEFAULTS[field]})`}
+              disabled={saving}
+              onSave={(value) => void save({ speakUpLimits: limitsWith(settings.speakUpLimits, field, value) })}
+            />
+          ))}
+        </fieldset>
+      )}
       {muted.length > 0 && (
         <ul className="agent-runs">
           {muted.map((agent) => (
@@ -111,38 +205,32 @@ export function AgentSettingsPanel({
           ))}
         </ul>
       )}
-      <form
-        className="agent-budget"
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (budgetValid && budgetChanged) void save({ dailyTokens: budget.trim() === "" ? null : budgetValue });
-        }}
-      >
-        <label htmlFor={`budget-${chatId}`}>
-          Daily token budget
-          <small>
+      <NumberSetting
+        id={`budget-${chatId}`}
+        label="Daily token budget"
+        hint={
+          <>
             Every model call of this chat counts: {tokens(today.tokens)} tokens{today.costUsd > 0 && ` ($${today.costUsd.toFixed(2)})`} today (UTC).
-          </small>
-        </label>
-        <div className="agent-budget-row">
-          <input
-            id={`budget-${chatId}`}
-            inputMode="numeric"
-            placeholder="No budget"
-            value={budget}
-            aria-invalid={!budgetValid}
-            onChange={(e) => setBudget(e.target.value)}
-          />
-          <button type="submit" disabled={saving || !budgetValid || !budgetChanged}>
-            Save
-          </button>
-        </div>
-        {!budgetValid && (
-          <small className="form-error">
-            A whole number from {tokens(MIN_DAILY_TOKENS)} to {tokens(MAX_DAILY_TOKENS)}, or empty for none.
-          </small>
-        )}
-      </form>
+          </>
+        }
+        value={settings.dailyTokens}
+        min={MIN_DAILY_TOKENS}
+        max={MAX_DAILY_TOKENS}
+        unset="No budget"
+        disabled={saving}
+        onSave={(value) => void save({ dailyTokens: value })}
+      />
+      <NumberSetting
+        id={`message-budget-${chatId}`}
+        label="Token budget per message"
+        hint="What the agents a message calls, and their hand-offs, may use together; past it, the rest of them do not run."
+        value={settings.messageTokens}
+        min={MIN_DAILY_TOKENS}
+        max={MAX_DAILY_TOKENS}
+        unset={`Default (${tokens(DEFAULT_MESSAGE_TOKENS)})`}
+        disabled={saving}
+        onSave={(value) => void save({ messageTokens: value })}
+      />
       {shown.servers.length > 0 && (
         <fieldset className="agent-servers-here">
           <legend>

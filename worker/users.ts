@@ -1386,15 +1386,9 @@ export class UserDirectory extends DurableObject<Env> {
   /** The chats an agent of the user's is in, by title, with whether it is shared there: theirs, and others' they are in. */
   agentChats(agentId: string): AgentChatUse[] {
     return this.#agents.chatsOf(agentId).flatMap(({ chatId, shared, ownerUid }) => {
-      const title = ownerUid === undefined ? this.chatTitle(chatId) : this.#sharedChatTitle(chatId, ownerUid);
+      const title = this.#rows.shownTitle(chatId, ownerUid);
       return title === null ? [] : [{ chatId, title, shared, ...(ownerUid !== undefined && { ownerUid }) }];
     });
-  }
-
-  /** The title of a chat of `ownerUid`'s the user is in; null when they are not. */
-  #sharedChatTitle(id: string, ownerUid: string): string | null {
-    const [row] = this.ctx.storage.sql.exec<{ title: string }>("SELECT title FROM shared_chats WHERE id = ? AND owner_uid = ?", id, ownerUid).toArray();
-    return row?.title ?? null;
   }
 
   /** Delete one of the user's skills. Built-in ones can only be turned off. */

@@ -186,6 +186,13 @@ describe("checkAgent: nothing hidden", () => {
 });
 
 describe("checkAgent: optional fields", () => {
+  it("keeps its owner's limits on speaking up, whole numbers in range, and leaves out none", () => {
+    expect(agent({ speakUpLimits: { perMessages: 4, gapMinutes: 90 } }).speakUpLimits).toEqual({ perMessages: 4, gapMinutes: 90 });
+    for (const speakUpLimits of [undefined, null, {}, { perDay: null }]) expect(agent({ speakUpLimits })).not.toHaveProperty("speakUpLimits");
+    expect(refusal({ speakUpLimits: { perDay: 99 } })).toContain("limits on speaking up: Posts a day is a whole number from 1 to 50");
+    expect(refusal({ speakUpLimits: "often" })).toContain("limits on speaking up");
+  });
+
   it("keeps an avatar of up to three characters, trimmed, and leaves out an empty one", () => {
     expect(agent({ avatar: "R2" }).avatar).toBe("R2");
     expect(agent({ avatar: " abc " }).avatar).toBe("abc");

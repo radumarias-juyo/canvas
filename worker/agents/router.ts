@@ -71,6 +71,28 @@ export async function routableAgents<E extends { agentId: string; ownerUid: stri
   return on.filter((_, i) => may[i]);
 }
 
+/**
+ * Of the agents the router may pick, those within their frequency limit: one routed answer per `perMessages` of the
+ * people's messages (the stricter of the chat's and the agent's: strictestLimits), this one counted, so a routed agent
+ * cannot answer every message. One the router never picked here, or whose limit cannot be read in time, is in.
+ */
+export async function withinRouteLimits<E extends { agentId: string }>(
+  agents: readonly E[],
+  lastRouted: (agentId: string) => number | undefined,
+  perMessages: (entry: E) => Promise<number>,
+  messagesSince: (at: number, max: number) => Promise<number>,
+): Promise<E[]> {
+  const within = await Promise.all(
+    agents.map(async (entry) => {
+      const last = lastRouted(entry.agentId);
+      if (last === undefined) return true;
+      const every = await perMessages(entry).catch(() => 1);
+      return every <= 1 || (await messagesSince(last, every - 1).catch(() => every - 1)) + 1 >= every;
+    }),
+  );
+  return agents.filter((_, i) => within[i]);
+}
+
 /** An agent of the chat's roster, as the router reads it. */
 export interface RoutableAgent {
   id: string;
