@@ -608,6 +608,7 @@ button.reaction:hover { border-color: var(--muted); }
 .agent-menu > button:not(.danger):not(.icon-button) { align-self: flex-start; }
 /* The chat's agent settings, under the owner's list of agents to add. */
 .agent-settings { display: flex; flex-direction: column; gap: 10px; padding-top: 6px; border-top: 1px solid var(--border); }
+.agent-settings .section-head { margin: 0; padding: 0; }
 .agent-settings .skill-toggle { align-items: flex-start; }
 .agent-settings .skill-toggle > span, .agent-budget label, .agent-servers-here legend { display: flex; flex-direction: column; gap: 2px; }
 .agent-settings small { color: var(--muted); font-size: 12px; }
