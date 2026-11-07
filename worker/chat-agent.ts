@@ -2706,6 +2706,9 @@ class ChatSockets extends LifecycleCapability implements DurableObjectCapability
    * whose agent left, stops; one that ends by itself is let go, and the next change of the roster follows it again.
    */
   #followAgents(ws: WebSocket, runs = this.#chat.runningAgents()): void {
+    // A socket detached while its attach was opening (it closed, or was removed) follows nothing: #detach has already
+    // let go of its streams, and none started now would ever be stopped.
+    if (!this.#streams.has(ws)) return;
     const following = this.#agentStreams.get(ws) ?? new Map<string, AgentFollow>();
     this.#agentStreams.set(ws, following);
     const running = new Map(runs.map((run) => [run.agentId, run]));
@@ -2752,7 +2755,11 @@ class ChatSockets extends LifecycleCapability implements DurableObjectCapability
     send(ws, { ...message(filter.pass([events.snapshot])), toolsElapsedMs });
     events.start(async (batch) => {
       const passed = filter.pass(batch);
-      if (passed.length && current()) send(ws, message(passed));
+      // A socket that cannot be sent to is gone: stop following for it, as its pi stream does.
+      if (passed.length && current() && !send(ws, message(passed))) {
+        letGo();
+        await events.stop();
+      }
     });
     void events.closed.then(letGo);
     return events;

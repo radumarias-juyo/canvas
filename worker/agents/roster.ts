@@ -427,7 +427,11 @@ export class ChatRoster {
   views(ownerName: (uid: string) => string): ChatAgentView[] {
     // The turns not ended, oldest first: few, so one read serves every agent.
     const open = new Map<string, AgentTurn[]>();
-    for (const turn of this.#turns(`${OPEN} ORDER BY id`)) open.set(turn.agentId, [...(open.get(turn.agentId) ?? []), turn]);
+    for (const turn of this.#turns(`${OPEN} ORDER BY id`)) {
+      const mine = open.get(turn.agentId);
+      if (mine) mine.push(turn);
+      else open.set(turn.agentId, [turn]);
+    }
     const now = this.#now();
     return this.list().map((entry) => {
       const mine = open.get(entry.agentId) ?? [];

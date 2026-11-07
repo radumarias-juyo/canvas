@@ -163,7 +163,8 @@ function AgentMenu({ chatId, agent, uid, isOwner, onClose }: { chatId: string; a
       </div>
       <p className="agent-menu-job">{agent.job}</p>
       <p className="agent-menu-state">
-        {agent.running ? <Working running={agent.running} /> : agentState(agent)}
+        {/* Keyed by its turn: a new turn counts from its own start, not the one before's. */}
+        {agent.running ? <Working key={agent.running.turn} running={agent.running} /> : agentState(agent)}
       </p>
       <div className="section-head">Runs</div>
       {turns === null && !error && <p className="agent-menu-empty">Loading…</p>}

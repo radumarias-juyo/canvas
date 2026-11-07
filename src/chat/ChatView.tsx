@@ -270,7 +270,8 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
   const thinking = state.runStartedAt !== undefined && waitingOnModel(state);
   const phrase = useMemo(() => (thinking ? workingPhrase(state.entries, state.partial, stepLabel) : undefined), [thinking, state.entries, state.partial]);
   // pi's replies' item chips: the records its tool results held, under the reply built on them.
-  const items = useMemo(() => replyItems(state.entries), [state.entries]);
+  const itemsBefore = useRef<ReadonlyMap<number, ItemRef[]>>(undefined);
+  const items = useMemo(() => (itemsBefore.current = replyItems(state.entries, itemsBefore.current)), [state.entries]);
   // The agents working now, each with its live steps, its time and its own Stop; then who waits for a turn.
   const liveTurns = useMemo(() => shownLive(live, agents, state.entries), [live, agents, state.entries]);
   const waiting = useMemo(() => queueLines(agents), [agents]);

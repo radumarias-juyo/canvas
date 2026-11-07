@@ -25,6 +25,8 @@ describe("item chips from tool results", () => {
     const many = Array.from({ length: 50 }, (_, i) => ({ id: `r${i}`, name: `Row ${i}` }));
     expect(itemsOf("db", many, 3).map((item) => item.id)).toEqual(["r0", "r1", "r2"]);
     expect(itemsOf("db", { a: { b: { c: { d: [{ id: "deep", title: "Too deep" }] } } } })).toEqual([]);
+    // A list in an object in a list is as deep as records are looked for.
+    expect(itemsOf("db", { results: [{ issues: [{ id: "A-1", title: "Nested" }] }] })).toEqual([{ server: "db", id: "A-1", title: "Nested" }]);
     // One record a result names twice shows once; a link with a password never shows.
     expect(itemsOf("db", [{ id: 1, title: "A", url: "https://u:p@x.example/" }, { id: 1, title: "A again" }])).toEqual([{ server: "db", id: "1", title: "A" }]);
   });

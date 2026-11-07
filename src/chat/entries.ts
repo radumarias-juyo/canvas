@@ -91,13 +91,15 @@ export function startsRun(entry: Pick<EntryRecord, "kind" | "data">): boolean {
  * MCP results held (shared/items.ts), from the tool results' details, never from its text. A reply ends where the
  * next run starts (startsRun).
  */
-export function replyItems(entries: readonly EntryRecord[]): ReadonlyMap<number, ItemRef[]> {
+export function replyItems(entries: readonly EntryRecord[], previous?: ReadonlyMap<number, ItemRef[]>): ReadonlyMap<number, ItemRef[]> {
   const byEntry = new Map<number, ItemRef[]>();
   let found: ItemRef[][] = [];
   let lastText: number | undefined;
   const flush = () => {
     const items = lastText === undefined ? [] : mergeItems(found);
-    if (items.length) byEntry.set(lastText!, items);
+    // The same chips as `previous` gave keep its array, so a memoized reply does not draw again for each new entry.
+    const known = lastText === undefined ? undefined : previous?.get(lastText);
+    if (items.length) byEntry.set(lastText!, known && sameItems(known, items) ? known : items);
     found = [];
     lastText = undefined;
   };
@@ -110,4 +112,8 @@ export function replyItems(entries: readonly EntryRecord[]): ReadonlyMap<number,
   }
   flush();
   return byEntry;
+}
+
+function sameItems(a: readonly ItemRef[], b: readonly ItemRef[]): boolean {
+  return a.length === b.length && a.every((item, i) => item.server === b[i].server && item.id === b[i].id && item.title === b[i].title && item.url === b[i].url);
 }

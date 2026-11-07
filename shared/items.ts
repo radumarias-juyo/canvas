@@ -16,8 +16,11 @@ const MAX_RESULT_ITEMS = 8;
 export const MAX_REPLY_ITEMS = 6;
 const MAX_TITLE = 120;
 const MAX_ID = 80;
-/** How deep in a result records are looked for: a list in an object in a list (`{ results: [{ issues: [...] }] }`). */
-const MAX_DEPTH = 3;
+/**
+ * How deep in a result records are looked for, counting each object and list on the way: a list in an object in a list
+ * (`{ results: [{ issues: [...] }] }`, whose records are four levels down).
+ */
+const MAX_DEPTH = 4;
 /** How many values are looked at in one result, so a result of thousands of rows costs little. */
 const MAX_VISITED = 2_000;
 
