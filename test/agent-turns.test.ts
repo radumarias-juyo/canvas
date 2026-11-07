@@ -12,6 +12,7 @@ import {
   askOf,
   assistantText,
   allowedTools,
+  draftTools,
   runTools,
   CatchUp,
   handOffs,
@@ -487,6 +488,12 @@ describe("allowedTools", () => {
     // Speaking up, it may still PASS: then nothing of it may show.
     expect(allowedTools([...tools, "checklist"], mcp, agent, false, signsIn, true)).toEqual(allowedTools(tools, mcp, agent, false, signsIn));
     expect(runTools([...tools, "checklist"], mcp, agent)).not.toContain("checklist");
+  });
+
+  it("gives the turn a Yes to an offer starts only reading tools and the one that drafts a routine", () => {
+    const all = [...tools, "checklist", "files_write"];
+    expect(draftTools(all, mcp, agent)).toEqual(["agent_propose", ...reads, "crm__list_deals", "mail__search"]);
+    expect(draftTools(all, mcp, {})).toEqual(["agent_propose", ...reads, "crm__list_deals", "mail__search", "vault__read"]);
   });
 
   it("gives anyone else's turn only the app's read tools and read tools of servers that do not sign in each user", () => {

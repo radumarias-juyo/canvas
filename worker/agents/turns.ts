@@ -5,6 +5,7 @@ import type { AssistantMessage, UserMessage } from "@earendil-works/pi-ai";
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { TOOL_SEARCH_TOOL_NAME } from "@earendil-works/pi-durable/tool-search";
 import {
+  AGENT_PROPOSE_TOOL,
   CHAT_AGENT_KIND,
   CHAT_TURN_KIND,
   MAX_HOPS,
@@ -305,6 +306,16 @@ export function runTools(tools: readonly string[], mcp: ReadonlyMap<string, McpT
     const info = mcp.get(name);
     return info ? info.readOnly && mayUseServer(agent, info.server) : READ_TOOLS.includes(name);
   });
+}
+
+/**
+ * The tools of the turn its owner's Yes to an offer starts (shared/offers.ts, OFFER_YES), for pi and for a roster
+ * agent: reading, as a run does (runTools), and drafting the routine (AGENT_PROPOSE_TOOL, saved off). Nothing else, so
+ * an offer can only ever lead to a draft its owner looks over, whatever its words say.
+ */
+export function draftTools(tools: readonly string[], mcp: ReadonlyMap<string, McpToolInfo>, agent: Pick<AgentDefinition, "servers">): string[] {
+  const reading = new Set(runTools(tools, mcp, agent));
+  return tools.filter((name) => reading.has(name) || name === AGENT_PROPOSE_TOOL);
 }
 
 /**

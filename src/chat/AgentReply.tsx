@@ -49,7 +49,7 @@ export function AgentReply({
   /** Its entry in the transcript, which the answer to its offered next step is remembered by. */
   entry?: number;
   /** On the chat's latest offer, for its owner: what Yes does (OfferRow). */
-  onOfferYes?: (offer: string) => boolean;
+  onOfferYes?: () => boolean;
 }) {
   const content = useRef<HTMLDivElement>(null);
   const people = useSharedChat();

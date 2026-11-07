@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { MAX_TOOL_RESULTS, TOOL_RESULT_MS, TOOL_RESULTS, ToolResults } from "../worker/storage/tool-results.ts";
+import { checkFolders, FileRefError } from "../worker/agent/file-refs.ts";
+import { isToolResult, MAX_TOOL_RESULTS, TOOL_RESULT_MS, TOOL_RESULTS, ToolResults } from "../worker/storage/tool-results.ts";
 import { UserFiles } from "../worker/storage/user-files.ts";
 import { FakeBucket } from "./fakes.ts";
 
@@ -62,5 +63,39 @@ describe("ToolResults", () => {
     await new ToolResults(bucket.r2, "olga", "chat2", KEY).put("tool", "b");
     await results.deleteAll();
     expect([...bucket.objects.keys()].map((key) => key.split("/")[3])).toEqual(["chat2"]);
+  });
+
+  it("serves no result past TOOL_RESULT_MS, even before the next one is saved, and drops it", async () => {
+    const { bucket, clock, results } = setup();
+    const path = await results.put("tool", "old");
+    clock.now += TOOL_RESULT_MS + 1;
+    expect(await text(results, path)).toBeNull();
+    expect(bucket.objects.size).toBe(0);
+  });
+
+  it("names only what put gives as a saved result: any other path under the folder is one of the user's files", async () => {
+    const { results } = setup();
+    expect(isToolResult(await results.put("crm/list", "x"))).toBe(true);
+    expect(isToolResult(`${TOOL_RESULTS}summary.md`)).toBe(false);
+    expect(isToolResult(`${TOOL_RESULTS}notes/crm-0123456789abcdef.txt`)).toBe(false);
+    expect(isToolResult("uploads/crm-0123456789abcdef.txt")).toBe(false);
+  });
+});
+
+describe("checkFolders", () => {
+  it("refuses a file where a saved result needs a folder", () => {
+    const layout = new Map([
+      ["tool-results", "tool-results"],
+      ["tool-results/crm-0123456789abcdef.txt", "tool-results/crm-0123456789abcdef.txt"],
+    ]);
+    expect(() => checkFolders(layout)).toThrow(FileRefError);
+    expect(() =>
+      checkFolders(
+        new Map([
+          ["a/b.txt", "a/b.txt"],
+          ["a/c.txt", "a/c.txt"],
+        ]),
+      ),
+    ).not.toThrow();
   });
 });

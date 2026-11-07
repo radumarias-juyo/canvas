@@ -589,6 +589,9 @@ export type ChatClientMessage =
   // `mentions` are the files, artifacts and people picked with "@" whose text is still in `text`.
   // `replyTo` is the transcript entry of the message it answers: a person's message, or one of the agent's replies.
   | { type: "prompt"; text: string; attachments?: AttachmentInput[]; mentions?: MentionInput[]; replyTo?: number }
+  // The owner's Yes to the next step that the reply `entry` offers (shared/offers.ts): the chat writes the reply, and
+  // the turn it starts may only read and draft the routine.
+  | { type: "offer_yes"; entry: number }
   // Stop the chat: pi and every agent, with what waits for them; with `agent`, only that agent of the roster.
   | { type: "abort"; agent?: string }
   // Add (`on`) or take back a reaction (shared/reactions.ts) to a transcript entry: a person's message or the agent's reply.

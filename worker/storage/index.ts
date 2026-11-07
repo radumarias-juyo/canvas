@@ -12,7 +12,7 @@ export { ArtifactImportError, type ArtifactStore } from "./artifacts.ts";
 export { draftId, MAX_DRAFTS, passed, type ChatDrafts, type Draft, type DraftSummary, type SkillSets } from "./drafts.ts";
 export type { FileEntry, UserFiles } from "./user-files.ts";
 export type { SkillFiles } from "./skill-files.ts";
-export { TOOL_RESULTS, type ToolResults } from "./tool-results.ts";
+export { isToolResult, TOOL_RESULTS, type ToolResults } from "./tool-results.ts";
 export { literalPath, normalisePath, PathError } from "./paths.ts";
 
 /**

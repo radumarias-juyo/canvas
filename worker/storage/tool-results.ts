@@ -11,6 +11,11 @@ export const TOOL_RESULT_MS = 2 * 86_400_000;
 /** A saved result's name: the tool's (to read by) and the start of its content's hash (one file for a result read again). */
 const NAME = /^[A-Za-z0-9_-]{1,60}-[0-9a-f]{16}\.txt$/;
 
+/** Whether `path` names a saved result (TOOL_RESULTS and a name put gives): any other path is one of the user's files. */
+export function isToolResult(path: string): boolean {
+  return path.startsWith(TOOL_RESULTS) && NAME.test(path.slice(TOOL_RESULTS.length));
+}
+
 /**
  * The MCP results too long for a turn of one chat (worker/agent/mcp.ts spills them), kept whole for the agent to read
  * on: in the owner's folder but outside their files (`users/<uid>/tool-results/<chatId>/`), so they never show in a
@@ -39,10 +44,14 @@ export class ToolResults {
     return TOOL_RESULTS + name;
   }
 
-  /** The result saved at `path` (as put returned it); null for a path that names none, or one gone. */
+  /** The result saved at `path` (as put returned it); null for a path that names none, or one gone (past TOOL_RESULT_MS too). */
   async get(path: string): Promise<R2ObjectBody | null> {
-    const name = path.slice(TOOL_RESULTS.length);
-    return path.startsWith(TOOL_RESULTS) && NAME.test(name) ? this.#bucket.get(this.#prefix + name, { ssecKey: this.#key }) : null;
+    if (!isToolResult(path)) return null;
+    const key = this.#prefix + path.slice(TOOL_RESULTS.length);
+    const object = await this.#bucket.get(key, { ssecKey: this.#key });
+    if (!object || this.#now() - +object.uploaded <= TOOL_RESULT_MS) return object;
+    await this.#bucket.delete(key);
+    return null;
   }
 
   /** Drop every result of the chat. */

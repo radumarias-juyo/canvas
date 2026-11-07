@@ -15,13 +15,17 @@ export const OFFER_PREFIX = "Next step:";
 export const MAX_OFFER = 200;
 
 /**
- * What Yes sends, as a reply to the message that made the offer (a reply calls the agent that wrote it): the offer as
- * the owner read it, and that it is a routine to draft (AGENT_PROPOSE_TOOL, saved off for the owner to turn on), not
- * work to do now.
+ * What the chat writes for its owner's Yes, as a reply to the message that made the offer (a reply calls the agent that
+ * wrote it). It names the offer only by that reply, never copies it as the owner's words, and the turn it starts may
+ * only read and draft (worker/agents/turns.ts, draftTools): a routine (AGENT_PROPOSE_TOOL, saved off for the owner to
+ * turn on), not work to do now.
  */
-export function offerYes(offer: string): string {
-  return `Yes to "${offer}": draft it as a routine with ${AGENT_PROPOSE_TOOL} for me to look over and turn on. Don't do anything else for it now.`;
-}
+export const OFFER_YES =
+  `Yes to the next step your message offers: draft it as a routine with ${AGENT_PROPOSE_TOOL} for me to look over and turn on. ` +
+  "Don't do anything else for it now.";
+
+/** Characters a browser draws as nothing (format characters such as zero-width, bidi controls and tags, private and unassigned code points). */
+const UNSEEN = /[\p{Cf}\p{Co}\p{Cn}]/gu;
 
 /** The rule in the agents' instructions (pi's and the roster's) for when and how to offer a next step. */
 export const OFFER_RULE =
@@ -52,7 +56,8 @@ export function offerOf(text: string): { body: string; offer: string } | null {
   const match = OFFER_LINE.exec(trimmed.slice(start));
   if (!match) return null;
   const body = trimmed.slice(0, start).trim();
-  const offer = match[1].replace(/^[\s*_]+|[\s*_]+$/g, "").replace(/\s+/g, " ");
+  // Only what the owner sees: nothing hidden rides along with the offer.
+  const offer = match[1].replace(UNSEEN, "").replace(/^[\s*_]+|[\s*_]+$/g, "").replace(/\s+/g, " ");
   if (!body || !offer || offer.length > MAX_OFFER) return null;
   return { body, offer };
 }

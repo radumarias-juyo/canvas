@@ -573,9 +573,10 @@ export type ChatAgentReplyData = {
    * Who gave it this turn: a person, another agent (a hand-off), or its schedule. `routed`: the person named nobody, and
    * the chat's router picked this agent. `unprompted`: nobody did: the agent spoke up after a pause in a conversation
    * close to its job ("speak-up"), or offers to pick up a question nobody answered ("follow-up"); `name` is then the
-   * person whose message it answers.
+   * person whose message it answers. `drafts`: its owner said Yes to the next step its reply offered, and the turn
+   * may only read and draft the routine (worker/agents/turns.ts, draftTools).
    */
-  calledBy: { name: string; uid?: string; agentId?: string; schedule?: true; routed?: true; unprompted?: UnpromptedKind };
+  calledBy: { name: string; uid?: string; agentId?: string; schedule?: true; routed?: true; unprompted?: UnpromptedKind; drafts?: true };
   /** The turn's id in the chat's turn table. */
   turn: number;
   /** How many hand-offs led to this turn: 0 when a person called it. */

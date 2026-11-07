@@ -67,7 +67,6 @@ import { Thinking } from "./Thinking.tsx";
 import { useRevealedText } from "./reveal.ts";
 import { assistantOffer, blocks, firstNew, inReply, isAgent, liveOffer, openHints, published, replyItems, sentAt, shown, showsAsCard, userText } from "./entries.ts";
 import { OfferRow } from "./Offer.tsx";
-import { offerYes } from "../../shared/offers.ts";
 import {
   answersEveryMessage,
   CHAT_BUDGET_KIND,
@@ -105,7 +104,8 @@ const GROWS_ITSELF = CSS.supports("field-sizing", "content");
 const atBottom = (el: HTMLElement) => el.scrollHeight - el.scrollTop - el.clientHeight < 80;
 
 export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity, onLeft, onMenu, onOpenChat }: Props) {
-  const { state, connected, people, online, prompt, abort, setModel, auto, reactions, react, hints, dropHint, agents, agentSettings, live } = useChat(chatId);
+  const { state, connected, people, online, prompt, takeOffer: sendYes, abort, setModel, auto, reactions, react, hints, dropHint, agents, agentSettings, live } =
+    useChat(chatId);
   // pi, or an agent of the chat, is working or has turns waiting: Stop stops them all.
   const working = state.busy || agents.some((agent) => agent.busy || agent.queued);
   const chatReactions = useMemo(() => ({ uid, react }), [uid, react]);
@@ -154,12 +154,12 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
   // message, which calls the agent that wrote it, asking it to set the step up.
   const offered = useMemo(() => (isOwner ? liveOffer(state.entries) : undefined), [isOwner, state.entries]);
   const takeOffer = useCallback(
-    (entry: number, offer: string) => {
-      if (!prompt(offerYes(offer), undefined, undefined, entry)) return false;
+    (entry: number) => {
+      if (!sendYes(entry)) return false;
       following.current = true;
       return true;
     },
-    [prompt],
+    [sendYes],
   );
   // Branch off a new chat from a message, and go to it.
   // One branch at a time: a second click while one is made does nothing.
@@ -637,10 +637,10 @@ const Entry = memo(function Entry({
   /** For the entry a checklist was first posted at: its latest state (the same object until it changes). */
   checklist?: ChatChecklistData;
   /** Set on the reply with the chat's latest offer, for its owner: Yes under it replies to it (false when not sent). */
-  onOffer?: (entry: number, offer: string) => boolean;
+  onOffer?: (entry: number) => boolean;
 }) {
   const people = useSharedChat();
-  const offerYes = onOffer && ((offer: string) => onOffer(entry.id as number, offer));
+  const offerYes = onOffer && (() => onOffer(entry.id as number));
   const reactions = useMessageReactions(isReactable(entry) ? entry.id : undefined, byEmoji);
   const message = entry.model?.[0];
   // What a reply to it quotes: none for a message from before replies (pi.user).
@@ -1088,7 +1088,7 @@ function Assistant({
   /** Its entry in the transcript, which the answer to its offered next step is remembered by. */
   entry?: number;
   /** On the chat's latest offer, for its owner: what Yes does (OfferRow). */
-  onOfferYes?: (offer: string) => boolean;
+  onOfferYes?: () => boolean;
 }) {
   const content = useRef<HTMLDivElement>(null);
   // What a copy pastes as plain text: its Markdown. Not while it streams, when it has no actions.

@@ -497,6 +497,7 @@ export function useChat(chatId: string) {
   // Stable, so the memoized model picker skips the re-render on every streamed token.
   const setModel = useCallback((model: string, thinkingLevel?: ModelThinkingLevel) => send({ type: "model", model, thinkingLevel }), [send]);
   const react = useCallback((entry: number, emoji: Reaction, on: boolean) => send({ type: "react", entry, emoji, on }), [send]);
+  const takeOffer = useCallback((entry: number) => send({ type: "offer_yes", entry }), [send]);
   const dropHint = useCallback(
     (entry: number) =>
       setHints((known) => {
@@ -515,6 +516,7 @@ export function useChat(chatId: string) {
     /** Who has the chat open right now, and in how many windows. */
     online,
     prompt,
+    takeOffer,
     /** Stop pi and every agent's turn, or with `agent` only that agent's. */
     abort: (agent?: string) => send(agent ? { type: "abort", agent } : { type: "abort" }),
     /** The chat's agents besides pi (its roster), as the chat last said. */
