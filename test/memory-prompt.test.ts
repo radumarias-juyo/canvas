@@ -1,25 +1,36 @@
 import { describe, expect, it } from "vitest";
-import { fauxAssistantMessage, fauxProvider, type Message } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxProvider, fauxToolCall, Type, type AssistantMessage, type Message } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { createRegistry, defineExtension, Harness, MemoryStorage, section } from "@earendil-works/pi-durable";
+import { createRegistry, defineExtension, defineTool, Harness, MemoryStorage, section } from "@earendil-works/pi-durable";
+import { MEMORY_RECALL_TOOL } from "../shared/memory.ts";
+import { text } from "../worker/agent/output.ts";
 import { freshPrompt } from "../worker/memory/fresh.ts";
 
-/** pi over a faux model with one `memory` section whose text the test sets, and the messages each request carried. */
-async function piWithMemory() {
+/**
+ * pi over a faux model with one `memory` section whose text the test sets and a memory_recall that finds the owner's
+ * note, the messages each request carried, and the replies to give (`replies`, else "ok").
+ */
+async function piWithMemory(replies: AssistantMessage[] = []) {
   const faux = fauxProvider({ models: [{ id: "m" }] });
   const models = createModels();
   models.setProvider(faux.provider);
   const requests: Message[][] = [];
   faux.setResponses(
-    Array.from({ length: 4 }, () => (context: { messages: Message[] }) => {
+    Array.from({ length: 6 }, (_, n) => (context: { messages: Message[] }) => {
       requests.push(structuredClone(context.messages));
-      return fauxAssistantMessage("ok");
+      return replies[n] ?? fauxAssistantMessage("ok");
     }),
   );
   const notes = { text: "" };
   const registry = createRegistry();
-  registry.install(defineExtension({ name: "memory", sections: [section("memory", () => notes.text)] }));
+  const recall = defineTool({
+    name: MEMORY_RECALL_TOOL,
+    description: "Look through the memory notes.",
+    parameters: Type.Object({}),
+    execute: async () => ({ output: text("- [a2] (just me) My bonus is private too.") }),
+  });
+  registry.install(defineExtension({ name: "memory", sections: [section("memory", () => notes.text)], tools: [recall] }));
   const pi = await Harness.open(new MemoryStorage(), { models, registry }, BACKGROUND_CONTEXT);
   const root = await pi.root(BACKGROUND_CONTEXT);
   await root.configure({ model: { provider: faux.provider.id, modelId: "m" } }, BACKGROUND_CONTEXT);
@@ -42,6 +53,25 @@ describe("a prompt that held the owner's own notes", () => {
       expect(next).not.toContain("salary");
       expect(next).toContain("No notes yet.");
       expect(next).toContain("hello");
+    } finally {
+      await pi.close(BACKGROUND_CONTEXT);
+    }
+  });
+
+  it("leaves out what memory_recall found, keeping the call answered", async () => {
+    const { pi, root, notes, ask, requests } = await piWithMemory([
+      fauxAssistantMessage(fauxToolCall(MEMORY_RECALL_TOOL, {}, { id: "c1" }), { stopReason: "toolUse" }),
+    ]);
+    try {
+      notes.text = "No notes yet.";
+      await ask("what do you know?");
+      expect(JSON.stringify(requests.at(-1))).toContain("bonus");
+      await freshPrompt(root);
+      await ask("and now?");
+      const next = JSON.stringify(requests.at(-1));
+      expect(next).not.toContain("bonus");
+      expect(next).toContain("left out");
+      expect(next).toContain("c1");
     } finally {
       await pi.close(BACKGROUND_CONTEXT);
     }

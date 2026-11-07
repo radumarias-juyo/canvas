@@ -2,6 +2,7 @@ import {
   MAX_NOTES,
   NOTE_ID_PATTERN,
   MAX_UNCONFIRMED,
+  MAX_UNCONFIRMED_ALL,
   confirmsKept,
   reads,
   type MemoryKind,
@@ -128,8 +129,8 @@ export class MemoryStore {
 
   /**
    * Keep a note. One with the same text for the same reader (scope, agent, chat) that is in use is not kept twice:
-   * it is returned (`existed`), confirmed when the new save confirms it (confirmsKept). Within MAX_NOTES, and
-   * MAX_UNCONFIRMED waiting at once in the chat it was learned in, so nobody in one chat fills another's.
+   * it is returned (`existed`), confirmed when the new save confirms it (confirmsKept). Within MAX_NOTES; waiting at
+   * once, MAX_UNCONFIRMED in the chat it was learned in (so nobody in one chat fills another's), MAX_UNCONFIRMED_ALL in all.
    */
   add(fields: NoteFields): NoteAdded {
     const same = this.#same(fields);
@@ -138,8 +139,12 @@ export class MemoryStore {
       return { note: this.get(same.id)!, existed: true };
     }
     if (this.#count() >= MAX_NOTES) return { error: `There are ${MAX_NOTES} memory notes, the most there can be; the owner deletes some first.` };
-    if (!fields.confirmed && this.#count("WHERE confirmed = 0 AND forgotten_at IS NULL AND chat_id IS ?", fields.chatId ?? null) >= MAX_UNCONFIRMED) {
-      return { error: `${MAX_UNCONFIRMED} notes from this chat already wait for the owner to confirm them; ask them to look at Memory first.` };
+    if (!fields.confirmed) {
+      const waiting = "WHERE confirmed = 0 AND forgotten_at IS NULL";
+      if (this.#count(`${waiting} AND chat_id IS ?`, fields.chatId ?? null) >= MAX_UNCONFIRMED)
+        return { error: `${MAX_UNCONFIRMED} notes from this chat already wait for the owner to confirm them; ask them to look at Memory first.` };
+      if (this.#count(waiting) >= MAX_UNCONFIRMED_ALL)
+        return { error: `${MAX_UNCONFIRMED_ALL} notes already wait for the owner to confirm them; ask them to look at Memory first.` };
     }
     const now = this.#now();
     const note: MemoryNote = { ...fields, id: randomHex(6), uses: 0, pinned: fields.pinned === true, createdAt: now, updatedAt: now };

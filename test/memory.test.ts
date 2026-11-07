@@ -516,7 +516,13 @@ describe("ChatMemory", () => {
     expect(handed.note.confirmed).toBe(false);
     const kept = saved(owner.memory.add({ text: "Use euros.", scope: "user" }));
     expect(await host.forget("root", kept.id)).toHaveProperty("error");
+    // A hand-off still going: even the owner's own turn saves only what waits.
+    let done = () => {};
+    memory.handOff(new Promise<void>((resolve) => (done = resolve)));
     await memory.refresh(undefined, { byOwner: true });
+    expect(saved(await host.note("root", { text: "Long answers.", scope: "user", kind: "preference" })).note.confirmed).toBe(false);
+    done();
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(saved(await host.note("root", { text: "Short answers.", scope: "user", kind: "preference" })).note.confirmed).toBe(true);
   });
 

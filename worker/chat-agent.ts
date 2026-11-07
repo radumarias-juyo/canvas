@@ -550,7 +550,8 @@ export class ChatAgent extends DurableObject<Env> {
       const entry = entries.find((known) => known.agentId === each.agentId);
       return !!entry && sessionOf(entry, each) === conversation;
     });
-    // Asked only when neither knows it: it looks through the runs' rows.
+    // Asked only when neither knows it, or for a turn in a session of its own (a reply's, which may be a run's): it
+    // looks through the runs' rows.
     const known = turn?.agentId ?? entries.find((each) => each.session === conversation)?.agentId;
     const ran = known === undefined || turn?.session !== undefined ? this.runs.agentOfSession(conversation) : null;
     const agentId = known ?? ran ?? undefined;
@@ -2696,7 +2697,9 @@ export class ChatAgent extends DurableObject<Env> {
         // The handing turn names the input: handed again after a restart, it is placed once. Its entry says which chain
         // pi's answer is in (#piScan).
         try {
-          await this.harness.submit(input, { operationId: `pi-turn:${data.turn}`, whenBusy: "followUp", entry: { kind: CHAT_TURN_KIND, data } });
+          const operationId = `pi-turn:${data.turn}`;
+          await this.harness.submit(input, { operationId, whenBusy: "followUp", entry: { kind: CHAT_TURN_KIND, data } });
+          this.memory.handOff(this.harness.wait(operationId));
         } catch (error) {
           this.#resumeSettle();
           throw error;

@@ -81,6 +81,10 @@ export class ChatMemory {
   readonly #sections = new Map<string, { audience: string; section: Promise<Section> }>();
   /** pi's turn now answers the owner's own message (refresh): not after a restart, nor in a hand-off's turn. */
   #piByOwner = false;
+  /** Hand-offs to pi not done yet (handOff): while any is, whichever turn pi is in saves nothing as the owner. */
+  #handOffs = 0;
+  /** The conversations whose prompt is being started afresh now (#forgetOwn). */
+  readonly #freshening = new Map<string, Promise<void>>();
 
   constructor(deps: ChatMemoryDeps) {
     this.#deps = deps;
@@ -107,7 +111,7 @@ export class ChatMemory {
 
   #writer(agent: MemoryAgent | null): MemoryWriter {
     const reader = this.#reader(agent);
-    const byOwner = agent ? agent.byOwner : reader.alone && this.#piByOwner;
+    const byOwner = agent ? agent.byOwner : reader.alone && this.#piByOwner && this.#handOffs === 0;
     return { ...reader, byOwner, learnedBy: agent ? agent.name : AGENT_NAME };
   }
 
@@ -132,11 +136,20 @@ export class ChatMemory {
     );
   }
 
-  /** Start afresh the prompt of conversation `key` when it held the owner's own notes, which `reader` does not read. */
-  async #forgetOwn(key: string, reader: MemoryReader): Promise<void> {
-    if (readsOwnNotes(reader) || !this.#own().includes(key)) return;
-    await this.#deps.freshPrompt(key === PI ? undefined : key);
-    this.#clearOwn(key);
+  /**
+   * Start afresh the prompt of conversation `key` when it held the owner's own notes, which `reader` does not read. One
+   * at a time for each conversation: a refresh and audienceChanged at once write one fresh start, not two.
+   */
+  #forgetOwn(key: string, reader: MemoryReader): Promise<void> {
+    if (readsOwnNotes(reader) || !this.#own().includes(key)) return Promise.resolve();
+    const going = this.#freshening.get(key);
+    if (going) return going;
+    const fresh = this.#deps
+      .freshPrompt(key === PI ? undefined : key)
+      .then(() => this.#clearOwn(key))
+      .finally(() => this.#freshening.delete(key));
+    this.#freshening.set(key, fresh);
+    return fresh;
   }
 
   /**
@@ -160,6 +173,15 @@ export class ChatMemory {
   }
 
   /**
+   * An agent handed pi a turn, which ends when `done` settles: until then pi saves nothing as the owner, even in a turn
+   * of the owner's own that it queues behind or that comes in while it runs.
+   */
+  handOff(done: Promise<unknown>): void {
+    this.#handOffs++;
+    void done.catch(() => {}).finally(() => this.#handOffs--);
+  }
+
+  /**
    * The chat was shared, or changed its kind: every conversation whose prompt held the owner's own notes starts it
    * afresh at its next request, a turn already going included. Never rejects: a failure is logged, and the
    * conversation's next turn tries again (refresh).
@@ -167,11 +189,9 @@ export class ChatMemory {
   async audienceChanged(): Promise<void> {
     const reader = this.#reader(null);
     if (readsOwnNotes(reader)) return;
+    // Their kept sections are read again anyway (#section): they were read for another audience.
     await Promise.all(
-      this.#own().map((key) => {
-        this.#sections.delete(key);
-        return this.#forgetOwn(key, reader).catch((error: unknown) => console.error("memory prompt:", errorMessage(error)));
-      }),
+      this.#own().map((key) => this.#forgetOwn(key, reader).catch((error: unknown) => console.error("memory prompt:", errorMessage(error)))),
     );
   }
 
@@ -218,7 +238,10 @@ export class ChatMemory {
       recall: async (conversation, query) => {
         const who = this.#who(conversation);
         const { ids } = await this.#section(who);
-        return this.#directory(who.agent).recallNotes(this.#reader(who.agent), query, ids);
+        const found = await this.#directory(who.agent).recallNotes(this.#reader(who.agent), query, ids);
+        // Now in the transcript too: left out once the chat has more readers (freshPrompt).
+        if (found.some((note) => note.scope === "user")) this.#markOwn(who.key);
+        return found;
       },
       forget: async (conversation, id) => {
         const { agent } = this.#who(conversation);

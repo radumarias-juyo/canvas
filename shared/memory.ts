@@ -26,6 +26,8 @@ export const MAX_NOTE_CHARS = 500;
 export const MAX_NOTES = 500;
 /** How many notes learned in conversations may wait to be confirmed at once. */
 export const MAX_UNCONFIRMED = 20;
+/** And in all the owner's chats together, so the waiting ones never crowd out the owner's own notes (MAX_NOTES). */
+export const MAX_UNCONFIRMED_ALL = 100;
 /** How much of a prompt the notes take at most: the rest are found with memory_recall. */
 export const PROMPT_NOTES_CHARS = 4_000;
 /** How many notes memory_recall returns at most. */
