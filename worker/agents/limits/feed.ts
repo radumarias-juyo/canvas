@@ -21,7 +21,9 @@ export function approvalFeed(view: PendingActionView, chatTitle: string, chatKin
     title: view.kind === "proposal" ? `${who} proposes a change in ${chatTitle}` : `${who} needs your approval in ${chatTitle}`,
     text: excerpt(`${callLine(view)}: ${view.why}`, MAX_FEED_TEXT),
     from:
-      actor.agentId && actor.avatar && actor.color ? agentFrom({ id: actor.agentId, name: actor.name, avatar: actor.avatar, color: actor.color }) : { name: who },
+      actor.agentId && actor.avatar && actor.color
+        ? agentFrom({ id: actor.agentId, name: actor.name, avatar: actor.avatar, color: actor.color })
+        : { name: who },
     open: { to: "chat", chatId: view.chatId },
     chat: { id: view.chatId, kind: chatKind },
     needsYou: true,
