@@ -18,9 +18,10 @@ import { STEP_LABELS, stepSummary } from "../../shared/runs.ts";
 import { errorMessage, isObject } from "../../shared/util.ts";
 import { api } from "../api.ts";
 import type { AgentTabProps } from "./AgentPage.tsx";
-import { DAY_NAMES, runsLabel } from "./glance.ts";
-import { putAgent } from "./store.ts";
-import { moveItem, newStep, withKeys, withoutKeys, type Keyed } from "./workflow.ts";
+import { AssumedBadge } from "./AssumedBadge.tsx";
+import { ASSUMED_FIELDS, CONFLICT_NOTICE, DAY_NAMES, isAssumed, isConflict, runsLabel, SAVE_FIRST, withoutAssumed } from "./glance.ts";
+import { putAgent, reloadAgents } from "./store.ts";
+import { assumedAfter, moveItem, newStep, withKeys, withoutKeys, type Keyed, type WorkflowPart } from "./workflow.ts";
 
 const VIEWER_ZONE = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
@@ -42,8 +43,8 @@ interface Form {
 
 const EMPTY_LOOK = newStep("look") as LookStep;
 
-/** The fields this tab edits; the page's save keeps the rest. */
-type WorkflowFields = Pick<AgentInput, "trigger" | "scope" | "workflow">;
+/** The fields this tab edits (and what of them the model guessed); the page's save keeps the rest. */
+type WorkflowFields = Pick<AgentInput, "trigger" | "scope" | "workflow" | "assumed">;
 
 function formOf(agent: WorkflowFields): Form {
   const schedule = agent.trigger?.kind === "schedule" ? agent.trigger : undefined;
@@ -66,6 +67,15 @@ function triggerOf(form: Form): AgentTrigger | undefined {
   if (form.when === "schedule") return { kind: "schedule", at: form.at, tz: form.tz, ...(form.days.length < 7 && { days: form.days }) };
   if (form.when === "watch") return { kind: "watch", step: form.watch, everyMinutes: form.everyMinutes, when: form.condition };
   return undefined;
+}
+
+/** What a save of `form` sends for the parts this tab edits. */
+function partsOf(form: Form): Pick<AgentInput, "trigger" | "scope" | "workflow"> {
+  return {
+    trigger: triggerOf(form),
+    scope: form.each ? { list: form.list, each: true } : undefined,
+    workflow: form.steps.length ? withoutKeys(form.steps) : undefined,
+  };
 }
 
 /**
@@ -99,6 +109,8 @@ function WorkflowForm({
 } & Pick<AgentTabProps, "notice" | "onDirty">) {
   const readOnly = !save;
   const [form, setForm] = useState(() => formOf(agent));
+  // What the model guessed and the user has not changed or confirmed yet (shown as Assumed, as on the Setup tab).
+  const [assumed, setAssumed] = useState<string[]>(() => agent.assumed ?? []);
   // The version the form started from: what a save changes (a change made since is refused, not undone).
   const [version, setVersion] = useState(agent.version);
   const [dirty, setDirty] = useState(false);
@@ -109,12 +121,24 @@ function WorkflowForm({
   const [round, setRound] = useState(0);
   useEffect(() => onDirty?.(dirty), [dirty, onDirty]);
   useEffect(() => () => onDirty?.(false), [onDirty]);
-  // A newer version (saved here, or changed elsewhere) shows at once while the form has no changes of its own.
-  if (agent.version !== version && !dirty) {
+  /** The form as the agent has it now, with no changes of the user's: on Undo, a refused save, or a newer version. */
+  const startOver = () => {
     setVersion(agent.version);
     setForm(formOf(agent));
+    setAssumed(agent.assumed ?? []);
+    setInvalid(new Set());
+    setDirty(false);
     setRound((n) => n + 1);
-  }
+  };
+  // A newer version (saved here, or changed elsewhere) shows at once while the form has no changes of its own.
+  if (agent.version !== version && !dirty) startOver();
+  const looksRight = (part: WorkflowPart) => {
+    setAssumed((current) => withoutAssumed(current, ASSUMED_FIELDS[part]));
+    setDirty(true);
+  };
+  const assumedBadge = (part: WorkflowPart) =>
+    !readOnly &&
+    isAssumed(assumed, ASSUMED_FIELDS[part]) && <AssumedBadge onConfirm={() => looksRight(part)} />;
   const change = (next: Partial<Form>) => {
     setForm((current) => ({ ...current, ...next }));
     setDirty(true);
@@ -139,19 +163,26 @@ function WorkflowForm({
     setSaving(true);
     setError(null);
     try {
-      const saved = await save(
-        {
-          trigger: triggerOf(form),
-          scope: form.each ? { list: form.list, each: true } : undefined,
-          workflow: form.steps.length ? withoutKeys(form.steps) : undefined,
-        },
-        version,
-      );
+      const fields = partsOf(form);
+      // A part the user changed is theirs now: no longer Assumed. Compared as the form would save the agent unchanged,
+      // so what the form only writes differently (all seven days, say) is no change.
+      const left = assumedAfter(assumed, partsOf(formOf(agent)), fields);
+      const saved = await save({ ...fields, assumed: left.length ? left : undefined }, version);
       setVersion(saved.version);
+      // The form goes on from what was saved: a part saved as the user's shows as Assumed no more.
+      setAssumed(saved.assumed ?? []);
       setDirty(false);
       notice({ agentId: agent.id, text: "Saved its workflow." });
     } catch (e) {
-      setError(errorMessage(e));
+      const message = errorMessage(e);
+      if (isConflict(e)) {
+        // A newer version came meanwhile (the home chat compiles steps after a save, or another editor): the form starts
+        // again from it, as the Setup tab does, and the user makes their change again on it. Reset here, so a reload
+        // that fails leaves the version read before, not the user's edits marked as saved.
+        startOver();
+        notice({ agentId: agent.id, text: CONFLICT_NOTICE, error: true });
+        await reloadAgents();
+      } else setError(message);
     } finally {
       setSaving(false);
     }
@@ -173,7 +204,7 @@ function WorkflowForm({
   return (
     <form key={round} className="agent-form workflow-form" onSubmit={submit} onInvalidCapture={openAround}>
       <fieldset className="workflow-section" disabled={readOnly}>
-        <legend className="agent-label">When it runs on its own</legend>
+        <legend className="agent-label">When it runs on its own {assumedBadge("runs")}</legend>
         <div className="workflow-when" role="radiogroup" aria-label="When it runs">
           {(
             [
@@ -245,7 +276,7 @@ function WorkflowForm({
       </fieldset>
 
       <fieldset className="workflow-section" disabled={readOnly}>
-        <legend className="agent-label">For each</legend>
+        <legend className="agent-label">For each {assumedBadge("scope")}</legend>
         <label className="workflow-choice">
           <input type="checkbox" checked={form.each} onChange={(e) => change({ each: e.target.checked })} />
           Run once for each item of a list (each region, each client), each in a session of its own
@@ -255,7 +286,7 @@ function WorkflowForm({
 
       <fieldset className="workflow-section" disabled={readOnly}>
         <legend className="agent-label">
-          Steps
+          Steps {assumedBadge("tells")}
           <small>The app runs them in order. Only “Work out” calls the model; a condition that does not hold ends the run for today, at no cost.</small>
         </legend>
         <StepList steps={form.steps} onChange={(steps) => change({ steps })} markInvalid={markInvalid} readOnly={readOnly} />
@@ -272,17 +303,12 @@ function WorkflowForm({
             <button
               type="button"
               disabled={saving}
-              onClick={() => {
-                setForm(formOf(agent));
-                setInvalid(new Set());
-                setDirty(false);
-                setRound((n) => n + 1);
-              }}
+              onClick={startOver}
             >
               Undo changes
             </button>
           )}
-          <button type="button" disabled={saving || dirty} title={dirty ? "Save or undo your changes first" : undefined} onClick={() => void compile()}>
+          <button type="button" disabled={saving || dirty} title={dirty ? SAVE_FIRST : undefined} onClick={() => void compile()}>
             Make the steps again from its instructions
           </button>
         </div>
