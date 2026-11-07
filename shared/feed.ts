@@ -5,6 +5,7 @@
 // reach it (mayLeave in shared/chat-kinds.ts).
 
 import type { ChatAgentView } from "./agents.ts";
+import type { PendingActionView } from "./limits.ts";
 import type { EndedRunStatus, RunStatus } from "./runs.ts";
 
 /** One follow among a person's, as the app names it: two people's agents can share an id, followed from different chats. */
@@ -97,6 +98,8 @@ export interface FeedInput {
   quiet?: boolean;
   /** The receiver's own agent it is about (its run, its draft): deleting that agent takes the item along. */
   aboutAgent?: string;
+  /** An approval's action, as it was held: the feed decides it from there (Approve, Decline). */
+  action?: PendingActionView;
 }
 
 /** An item in the feed, as the app lists it. */
@@ -111,6 +114,8 @@ export interface FeedItem {
   status?: RunStatus;
   read?: true;
   needsYou?: true;
+  /** An approval's action, as it was held: while the item needs the person, they decide it in the feed. */
+  action?: PendingActionView;
 }
 
 /** GET /api/feed: the newest items (filtered as asked), how many are unread, and how many still wait on the person. */
@@ -148,6 +153,9 @@ export function feedPath(open: FeedOpen): string {
     }
   }
 }
+
+/** A run's item in its owner's feed: one per run, its newer state replacing the older. */
+export const runFeedRef = (agentId: string, dueAt: number) => `run:${agentId}:${dueAt}`;
 
 /** A run's end in words, after the agent's name: what its feed item says. */
 export const RUN_FEED_TEXT: Record<EndedRunStatus, string> = {

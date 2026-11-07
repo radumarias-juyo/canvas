@@ -27,8 +27,6 @@ import { AgentPage } from "./agents/AgentPage.tsx";
 import { AgentsNav } from "./agents/AgentsNav.tsx";
 import { agentPlace, type AgentPlace } from "./agents/nav.ts";
 import { reloadAgents } from "./agents/store.ts";
-import { NeedsYou } from "./NeedsYou.tsx";
-import type { NeedsYouItem } from "../shared/limits.ts";
 import { MemoryView } from "./memory/MemoryView.tsx";
 import { reloadMemory, toConfirm, useMemory } from "./memory/store.ts";
 import { FeedNav } from "./feed/FeedNav.tsx";
@@ -288,8 +286,6 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, showFe
   // user (a run waiting, or a sign-in about to run out).
   const [signIns, loadSignIns, setSignIns] = useLatest<McpSignInView[]>(api.signIns, []);
   const onSignIn = useSignInAlerts(loadSignIns);
-  // The actions that wait for the user across their chats: read again whenever one is made or ends.
-  const [needsYou, loadNeedsYou] = useLatest<NeedsYouItem[]>(api.needsYou, []);
   useSidebarSocket(
     {
       chats: loadChats,
@@ -297,7 +293,6 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, showFe
       skills: loadSkills,
       "sign-ins": loadSignIns,
       agents: reloadAgents,
-      "needs-you": loadNeedsYou,
       feed: reloadFeed,
       follows: reloadFollows,
       memory: reloadMemory,
@@ -448,7 +443,6 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, showFe
             )}
           </div>
           <SignInNotices list={signIns} onChange={(list) => setSignIns(() => list)} />
-          <NeedsYou items={needsYou} navigate={navigate} />
           <FeedNav active={showFeed} navigate={navigate} />
           {/* Chats scroll here; artifacts, skills and the files panel stay below them. */}
           <div className="sidebar-scroll">

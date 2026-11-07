@@ -19,13 +19,13 @@ import type { McpSignInView, SignInNotice } from "../shared/sign-ins.ts";
 import { AgentStore, type AgentSave } from "./agents/store.ts";
 import { LimitsDirectory, type CallEntry } from "./agents/limits/directory.ts";
 import { approvalAsk, approvalFeed, approvalRef } from "./agents/limits/feed.ts";
-import { actorName, LIMIT_FIELDS, type CallLogView, type GuardrailRule, type NeedsYouItem, type PendingActionView } from "../shared/limits.ts";
+import { actorName, LIMIT_FIELDS, type CallLogView, type GuardrailRule, type PendingActionView } from "../shared/limits.ts";
 import { UserMemory, type Learned, type LearnedNote } from "./memory/memory.ts";
 import type { Forgot, MemoryNote, MemoryNoteView, MemoryReader, MemoryWriter, Recalled, ServerCoverage } from "../shared/memory.ts";
 import { ChatRows } from "./chat-rows.ts";
 import { addColumns } from "./members.ts";
 import { mayLeave, type ChatKind } from "../shared/chat-kinds.ts";
-import { agentFrom, NEEDS_YOU, RUN_FEED_TEXT, type FeedInput, type FeedList, type FeedOpen, type FollowKind, type FollowView } from "../shared/feed.ts";
+import { agentFrom, NEEDS_YOU, RUN_FEED_TEXT, runFeedRef, type FeedInput, type FeedList, type FeedOpen, type FollowKind, type FollowView } from "../shared/feed.ts";
 import type { EndedRunStatus, RunStatus } from "../shared/runs.ts";
 import { aboutOf, FAN_OUT, fanOut, FeedStore, FollowStore, postsReachFollowers, type Follower, type FollowRecord } from "./feed/store.ts";
 import { mcpServers } from "./mcp/servers.ts";
@@ -328,10 +328,7 @@ export class UserDirectory extends DurableObject<Env> {
 
   /** Approvals whose time is past though their chat never said they ended: their feed items wait no more either. */
   #dropExpiredNeedsYou(): void {
-    const expired = this.#limits.dropExpired();
-    if (!expired.length) return;
-    this.#changed("needs-you");
-    for (const { chatId, id } of expired) this.resolveFeed(approvalRef(chatId, id));
+    for (const { chatId, id } of this.#limits.dropExpired()) this.resolveFeed(approvalRef(chatId, id));
   }
 
   /**
@@ -476,7 +473,7 @@ export class UserDirectory extends DurableObject<Env> {
     const open: FeedOpen = { to: "agent", agentId: agent.id, tab: "runs" };
     this.addFeed({
       kind: "run",
-      ref: `run:${agent.id}:${run.dueAt}`,
+      ref: runFeedRef(agent.id, run.dueAt),
       // When it asked, if it did: an answer written since, while the run went on, answers it (FeedStore.add).
       at: (run.asks && run.sentAt) || Date.now(),
       title: `@${agent.name} ${run.asks ? "asks you something" : RUN_FEED_TEXT[run.status]}`,
@@ -903,7 +900,7 @@ export class UserDirectory extends DurableObject<Env> {
     const home = this.ctx.storage.sql.exec<{ agent_id: string | null }>("SELECT agent_id FROM chats WHERE id = ?", id).toArray()[0]?.agent_id;
     this.#signIns.forgetChat(id);
     this.#agents.forgetChat(id);
-    if (this.#limits.forgetChat(id)) this.#changed("needs-you");
+    this.#limits.forgetChat(id);
     this.#memory.forgetChat(id);
     // The values its pages saved for this user, which were everyone's defaults.
     this.ctx.storage.sql.exec("DELETE FROM page_values WHERE artifact_id IN (SELECT id FROM artifacts WHERE chat_id = ?)", id);
@@ -943,31 +940,28 @@ export class UserDirectory extends DurableObject<Env> {
     return this.#limits.calls(agentId, limit);
   }
 
-  /** An action of one of the user's chats waits for them: listed, the sidebars told, and a push when no app is open. */
+  /**
+   * An action of one of the user's chats waits for them: in their feed's Needs you, where they decide it (not from a
+   * chat off the record: that one only in its chat), and a push when no app is open.
+   */
   async addNeedsYou(view: PendingActionView, chatKind: ChatKind): Promise<void> {
     const chatTitle = this.chatTitle(view.chatId) ?? "a chat";
     this.#dropExpiredNeedsYou();
-    this.#limits.addNeedsYou({ ...view, chatTitle });
-    this.#changed("needs-you");
-    // In the feed's Needs you too (not from a chat off the record), until it is decided or expires.
+    this.#limits.addNeedsYou(view);
     this.addFeed(approvalFeed(view, chatTitle, chatKind));
-    // Only that something waits: the call itself stays in the app.
-    await this.push({
-      title: approvalAsk(view),
-      body: excerpt(`In “${chatTitle}”`, 120),
-      url: `/c/${view.chatId}`,
-      tag: approvalRef(view.chatId, view.id),
-    }).catch((error: unknown) => console.error("push:", errorMessage(error)));
+    // Only that something waits: the call itself stays in the app. From a chat off the record, not even whose or where.
+    const offRecord = !mayLeave({ what: "feed" }, chatKind, this.#rows.kindOf(view.chatId));
+    await this.push(
+      offRecord
+        ? { title: "Something needs your approval", body: "Open the app to see it.", url: `/c/${view.chatId}`, tag: approvalRef(view.chatId, view.id) }
+        : { title: approvalAsk(view), body: excerpt(`In “${chatTitle}”`, 120), url: `/c/${view.chatId}`, tag: approvalRef(view.chatId, view.id) },
+    ).catch((error: unknown) => console.error("push:", errorMessage(error)));
   }
 
-  /** An action ended (approved, declined, expired): off the list, and its feed item waits no more. */
+  /** An action ended (approved, declined, expired): its feed item waits no more. */
   removeNeedsYou(chatId: string, id: string): void {
-    if (this.#limits.removeNeedsYou(chatId, id)) this.#changed("needs-you");
+    this.#limits.removeNeedsYou(chatId, id);
     this.resolveFeed(approvalRef(chatId, id));
-  }
-
-  needsYou(): NeedsYouItem[] {
-    return this.#limits.needsYou();
   }
 
   listArtifacts(): ArtifactSummary[] {

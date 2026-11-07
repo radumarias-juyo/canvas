@@ -1550,26 +1550,15 @@ a.mention-chip:hover { text-decoration: underline; }
 .action-buttons button { padding: 5px 14px; }
 .action-card > .form-error { margin: 0; font-size: 13px; }
 
-/* The sidebar's "Needs you" (src/NeedsYou.tsx), above the chats: what waits for the user, with its buttons. */
-.needs-you { flex: none; display: flex; flex-direction: column; }
-.needs-you .section-head small { display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; background: var(--accent); color: var(--accent-text); font-size: 11px; font-weight: 700; }
-.needs-you-list { list-style: none; margin: 0 -14px; padding: 2px 14px 4px; display: flex; flex-direction: column; gap: 6px; max-height: min(36vh, 320px); overflow-y: auto; }
-.needs-you-item { flex: none; display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); font-size: 13px; }
-.needs-you-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.needs-you-head .avatar { --size: 20px; }
-.needs-you-head > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.needs-you-call { font-size: 12px; overflow-wrap: anywhere; }
-.needs-you-where { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.needs-you-where a { color: var(--text); }
-.needs-you-ended { color: var(--muted); }
-.needs-you-buttons { display: flex; gap: 6px; margin-top: 2px; }
-.needs-you-buttons button { padding: 3px 10px; font-size: 13px; }
-@media (max-width: 900px) {
-  /* In the slide-in menu the sidebar scrolls as a whole, so the list takes the room it needs. */
-  .sidebar.drawer .needs-you-list { max-height: none; overflow: visible; }
-}
+/* An approval in the feed (src/feed/FeedView.tsx): its call, Approve and Decline (Run and Dismiss for a proposal), when it expires. */
+.feed-decision { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 6px; }
+.feed-decision-buttons { display: flex; gap: 6px; }
+.feed-decision-buttons button { padding: 3px 12px; font-size: 13px; }
+.feed-decision small { color: var(--muted); font-size: 12.5px; }
+.feed-decision small.form-error { color: var(--error); }
 @media (pointer: coarse) {
-  .needs-you-buttons button { padding: 7px 14px; }
+  .feed-decision-buttons button { padding: 7px 14px; }
+}
 /* The feed (src/feed/): its sidebar entry, its page, and Follow on pages and shared agents. */
 .feed-nav { margin: 2px 0 6px; }
 .sidebar nav a.feed-link svg { flex: none; color: var(--muted); }

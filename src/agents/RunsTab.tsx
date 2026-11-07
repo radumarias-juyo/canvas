@@ -217,7 +217,7 @@ function RunPage({ agent, dueAt, chat, navigate }: { agent: AgentDefinition; due
       )}
       {run.status === "waiting" && (
         <p className="skills-note">
-          {run.summary ?? "It waits for you to approve a call."} Approve or decline it in Needs you or in the run's chat: approved, the run goes on
+          {run.summary ?? "It waits for you to approve a call."} Approve or decline it in the feed's Needs you or in the run's chat: approved, the run goes on
           from there; declined or expired, that item stops.
         </p>
       )}

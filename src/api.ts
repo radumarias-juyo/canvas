@@ -19,7 +19,7 @@ import { DICTATION_ROUTE, DICTATION_TYPE } from "../shared/dictation.ts";
 import type { AgentRunDetail, AgentRunList } from "../shared/runs.ts";
 import type { MentionOptions } from "../shared/mentions.ts";
 import type { ChatKind } from "../shared/chat-kinds.ts";
-import type { CallLogView, GuardrailRule, NeedsYouItem, PendingActionView } from "../shared/limits.ts";
+import type { CallLogView, GuardrailRule, PendingActionView } from "../shared/limits.ts";
 import type { FeedList, FollowKind, FollowView } from "../shared/feed.ts";
 import type { ModelCatalog } from "../shared/models.ts";
 import type { McpSignInView } from "../shared/sign-ins.ts";
@@ -274,7 +274,6 @@ export const api = {
   /** The user's own copy of an agent shared in a chat, with their changes: saved off, with where it came from. */
   copyAgent: (chatId: string, agentId: string, changes: AgentChanges & { version: number }) => request<AgentDefinition>(chatPath(chatId, `/agents/${agentId}/copy`), post(changes)),
   /** The actions that wait for this user across their chats, oldest first. */
-  needsYou: () => request<NeedsYouItem[]>("/api/needs-you"),
   /** (the chat's owner) Run or approve an action, or decline it: the action after, as it ended (or as it already had). */
   decideAction: (chatId: string, id: string, decision: "approve" | "decline") =>
     request<PendingActionView>(`/api/needs-you/${chatId}/${encodeURIComponent(id)}`, post({ decision })),

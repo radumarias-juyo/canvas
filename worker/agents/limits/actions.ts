@@ -1,6 +1,6 @@
 // The actions of one chat that wait, or waited, for its owner: proposals and approvals, each with the exact call it
 // runs when approved. They live in the chat object that made the call, which holds the hub that runs it (and its
-// owner's sign-ins); the owner's directory keeps an index of the pending ones for the "Needs you" list.
+// owner's sign-ins); the owner's directory keeps an index of the pending ones, and their feed has them in "Needs you".
 
 import type { AutonomyLevel, StepInput } from "../../../shared/agents.ts";
 import type { ActionActor, ActionKind, ActionStatus, PendingActionView } from "../../../shared/limits.ts";

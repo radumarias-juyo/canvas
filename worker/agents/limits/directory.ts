@@ -1,8 +1,8 @@
 // What a user's directory keeps of their limits: their rules for all agents, the log of calls that change data, and the
-// index of actions waiting for them across their chats (the "Needs you" list). The actions themselves stay in the chat
-// objects that made them, which run them.
+// index of actions waiting for them across their chats (their feed's Needs you items for them expire by it). The
+// actions themselves stay in the chat objects that made them, which run them.
 
-import { checkRules, GuardrailError, type CallLogView, type CallOutcome, type GuardrailRule, type NeedsYouItem } from "../../../shared/limits.ts";
+import { checkRules, GuardrailError, type CallLogView, type CallOutcome, type GuardrailRule, type PendingActionView } from "../../../shared/limits.ts";
 import type { Sql } from "../../members.ts";
 
 /** How long the log keeps a call: longer than any day a callsPerDay rule counts, and enough to look back on a week. */
@@ -133,7 +133,8 @@ export class LimitsDirectory {
     }));
   }
 
-  addNeedsYou(item: NeedsYouItem): void {
+  /** An action waits for the user (shown in their feed): kept until its chat says it ended, or its time is past. */
+  addNeedsYou(item: PendingActionView): void {
     this.dropExpired();
     this.#sql.exec(
       "INSERT OR REPLACE INTO needs_you (chat_id, id, item, expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -155,13 +156,6 @@ export class LimitsDirectory {
   /** Whether it was there. */
   removeNeedsYou(chatId: string, id: string): boolean {
     return this.#sql.exec("DELETE FROM needs_you WHERE chat_id = ? AND id = ?", chatId, id).rowsWritten > 0;
-  }
-
-  /** The actions waiting, oldest first; not one whose time is past (its chat may not have said it expired). */
-  needsYou(): NeedsYouItem[] {
-    return (this.#sql.exec("SELECT item FROM needs_you WHERE expires_at >= ? ORDER BY created_at", this.#now()).toArray() as { item: string }[]).map(
-      (row) => JSON.parse(row.item) as NeedsYouItem,
-    );
   }
 
   /** A chat that is deleted takes its waiting actions with it. */

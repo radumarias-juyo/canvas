@@ -1,6 +1,6 @@
-// An action waiting for its owner, as their feed has it (shared/feed.ts): one item per action, in "Needs you" (as every
-// approval is, NEEDS_YOU) until it is decided or expires (UserDirectory.removeNeedsYou resolves it, or its time passing,
-// dropExpired), opening the chat where its card is.
+// An action waiting for its owner, as their feed has it (shared/feed.ts): one item per action, carrying it, in "Needs
+// you" (as every approval is, NEEDS_YOU) where they approve or decline it, until it is decided or expires
+// (UserDirectory.removeNeedsYou resolves it, or its time passing, dropExpired). It opens the chat where its card is.
 
 import type { ChatKind } from "../../../shared/chat-kinds.ts";
 import { agentFrom, MAX_FEED_TEXT, type FeedInput } from "../../../shared/feed.ts";
@@ -27,6 +27,7 @@ export function approvalFeed(view: PendingActionView, chatTitle: string, chatKin
     at: view.createdAt,
     title: `${approvalAsk(view)} in ${chatTitle}`,
     text: excerpt(`${callLine(view)}: ${view.why}`, MAX_FEED_TEXT),
+    action: view,
     from:
       actor.agentId && actor.avatar && actor.color
         ? agentFrom({ id: actor.agentId, name: actor.name, avatar: actor.avatar, color: actor.color })

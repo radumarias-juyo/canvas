@@ -75,7 +75,7 @@ import { filesIndex } from "./agent/file-refs.ts";
 import { resolveMentions } from "./agent/mentions.ts";
 import { AGENT_REACTOR, isReactable, isReaction, type Reaction, type Reactions } from "../shared/reactions.ts";
 import { excerpt, replyLine, replyQuote } from "../shared/replies.ts";
-import { agentFrom, MAX_FEED_TEXT } from "../shared/feed.ts";
+import { agentFrom, MAX_FEED_TEXT, runFeedRef } from "../shared/feed.ts";
 import { followersAllowed } from "./feed/store.ts";
 import { peopleExtension, promptExtension, systemPromptExtension, withoutSystemPrompt, type UserPrompts } from "./agent/prompt.ts";
 import { skillClassifier, skillMessage, type SkillChoice, type SkillClassifier } from "./agent/skill-pick.ts";
@@ -444,7 +444,12 @@ export class ChatAgent extends DurableObject<Env> {
     actions: () => this.actions.list(),
   });
   /** The runs of the agent whose home this chat is, its schedules and watches (worker/agents/runs/). */
-  readonly runs = new AgentRuns(this.ctx.storage.sql, Date.now, (run) => this.#runEnded(run));
+  readonly runs = new AgentRuns(
+    this.ctx.storage.sql,
+    Date.now,
+    (run) => this.#runEnded(run),
+    (agentId, dueAt) => this.ctx.waitUntil(this.#directory.resolveFeed(runFeedRef(agentId, dueAt)).catch((error: unknown) => console.error("feed:", errorMessage(error)))),
+  );
   readonly runner = new AgentRunner(this.#runnerHost(), this.ctx.storage.sql);
   /** Shares the object's alarm with pi: runs at local times, watches on intervals. */
   readonly scheduler = new Scheduler({

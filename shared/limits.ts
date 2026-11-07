@@ -457,9 +457,6 @@ export interface PendingActionView {
   run?: RunRef;
 }
 
-/** An action in the owner's "Needs you" list, across their chats. */
-export type NeedsYouItem = PendingActionView & { chatTitle: string };
-
 /**
  * The entry a held call is placed as in the log of the chat it came from (a passive write): its card. The card's state
  * comes live from the chat (the `actions` socket message); `action` is how it was made.

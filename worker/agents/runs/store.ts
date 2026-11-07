@@ -167,11 +167,17 @@ export class AgentRuns {
 
   /** Hears each run that ends (or waits for a sign-in), as its row then says; never a test's. */
   readonly #onEnded: ((run: EndedRun) => void) | undefined;
+  readonly #onResumed: ((agentId: string, dueAt: number) => void) | undefined;
 
-  constructor(sql: Sql, now: () => number = Date.now, onEnded?: (run: EndedRun) => void) {
+  /**
+   * `onEnded` hears every run end (its owner's feed: worker/users.ts runEnded); `onResumed`, a run that waited for a
+   * sign-in going on (what the feed asked of its owner is done then, not at its end).
+   */
+  constructor(sql: Sql, now: () => number = Date.now, onEnded?: (run: EndedRun) => void, onResumed?: (agentId: string, dueAt: number) => void) {
     this.#sql = sql;
     this.#now = now;
     this.#onEnded = onEnded;
+    this.#onResumed = onResumed;
     sql.exec(`
       CREATE TABLE IF NOT EXISTS agent_runs (
         agent_id TEXT NOT NULL, due_at INTEGER NOT NULL, item TEXT NOT NULL, why TEXT NOT NULL, status TEXT NOT NULL,
@@ -240,6 +246,7 @@ export class AgentRuns {
       agentId,
       dueAt,
     );
+    if (!run.test) this.#onResumed?.(agentId, dueAt);
   }
 
   /** Keep what a do step came to, by `<item>:<step key>` (undefined forgets it). */

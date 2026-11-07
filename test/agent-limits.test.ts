@@ -18,6 +18,7 @@ import { LimitsDirectory } from "../worker/agents/limits/directory.ts";
 import { approvalFeed, approvalRef } from "../worker/agents/limits/feed.ts";
 import { AgentRuns } from "../worker/agents/runs/store.ts";
 import { FeedStore } from "../worker/feed/store.ts";
+import { runFeedRef } from "../shared/feed.ts";
 import { WriteGate, type Caller, type GateContext, type GateHost } from "../worker/agents/limits/gate.ts";
 import { inputLevel, lowestLevel, turnLevel } from "../worker/agents/limits/levels.ts";
 import { toolInput } from "../worker/agents/limits/tell.ts";
@@ -481,6 +482,8 @@ describe("approvals in the feed", () => {
     expect(item).toMatchObject({ kind: "approval", needsYou: true, title: "@deals needs your approval in Deals", open: { to: "chat", chatId: "chat-1" } });
     expect(item.text).toContain("crm.update_deal");
     expect(item.from?.agent?.id).toBe("a".repeat(16));
+    // It carries the action as held, which the feed decides it from (Approve, Decline).
+    expect(item.action).toMatchObject({ id: view.id, chatId: "chat-1", kind: "approval", status: "pending", expiresAt: view.expiresAt });
     // Added again (a retry): one item.
     expect(feed.add(approvalFeed(view, "Deals", "group"))).toBe("same");
     expect(approvalFeed(held({ kind: "proposal", actor: { name: "pi" } }), "Deals", "group")).toMatchObject({ title: "pi proposes a change in Deals", from: { name: "pi" } });
@@ -500,6 +503,17 @@ describe("approvals in the feed", () => {
   it("never reaches the feed from a chat off the record", () => {
     const feed = new FeedStore(memorySql());
     expect(feed.add(approvalFeed(held(), "Secret", "off_record"))).toBe("refused");
+  });
+
+  it("a run that waited for a sign-in going on asks no more, not only at its end (which may wait at a held call)", () => {
+    const feed = new FeedStore(memorySql());
+    const runs = new AgentRuns(memorySql(), () => T0, undefined, (agentId, dueAt) => feed.resolve(runFeedRef(agentId, dueAt)));
+    runs.begin("a1", T0, "schedule", false);
+    runs.update("a1", T0, { status: "needs_sign_in" });
+    feed.add({ kind: "run", ref: runFeedRef("a1", T0), at: T0, title: "@a is waiting for you to sign in", needsYou: true, status: "needs_sign_in", open: { to: "agent", agentId: "a1" } });
+    expect(feed.counts().needsYou).toBe(1);
+    runs.restart("a1", T0);
+    expect(feed.counts().needsYou).toBe(0);
   });
 
   it("a run waiting for a held call has not ended: no run item until it does", () => {
@@ -543,13 +557,12 @@ describe("the owner's directory of limits", () => {
     expect(limits.calls("a1")).toMatchObject([{ actor: "@deals", outcome: "ran" }]);
   });
 
-  it("lists what waits, and drops what its chat never said expired", () => {
+  it("keeps what waits, and drops what its chat never said expired, naming it", () => {
     let now = T0;
     const limits = new LimitsDirectory(memorySql(), kv(), () => now);
     const item = {
       id: "b".repeat(16),
       chatId: "c1",
-      chatTitle: "Deals",
       kind: "approval",
       actor: { name: "pi" },
       server: "crm",
@@ -561,11 +574,15 @@ describe("the owner's directory of limits", () => {
       status: "pending",
     } as const;
     limits.addNeedsYou(item);
-    expect(limits.needsYou()).toHaveLength(1);
+    expect(limits.dropExpired()).toEqual([]);
     now += 11;
-    expect(limits.needsYou()).toHaveLength(0);
     // Dropped, they are named, so the feed's items for them wait no more either (UserDirectory).
     expect(limits.dropExpired()).toEqual([{ chatId: "c1", id: "b".repeat(16) }]);
+    expect(limits.dropExpired()).toEqual([]);
+    // One its chat said ended is gone too.
+    limits.addNeedsYou({ ...item, expiresAt: now + 10 });
+    expect(limits.removeNeedsYou("c1", item.id)).toBe(true);
+    now += 11;
     expect(limits.dropExpired()).toEqual([]);
   });
 });

@@ -23,7 +23,7 @@ import { addColumns, type Sql } from "../members.ts";
 type FeedRow = { id: number; kind: FeedKind; at: number; read: number; needs: number; data: string };
 
 /** What a feed row keeps as JSON: the item's fields that are not columns. */
-type FeedData = Pick<FeedItem, "title" | "text" | "from" | "open" | "status">;
+type FeedData = Pick<FeedItem, "title" | "text" | "from" | "open" | "status" | "action">;
 
 /**
  * What `about` names an item by, so a page or agent that is gone takes its items with it: with its owner, since agent
@@ -83,6 +83,7 @@ export class FeedStore {
       ...(input.from && { from: input.from }),
       open: input.open,
       ...(input.status && { status: input.status }),
+      ...(input.action && { action: input.action }),
     };
     const json = JSON.stringify(data);
     const waits = input.needsYou ?? NEEDS_YOU[input.kind];

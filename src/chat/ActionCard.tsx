@@ -55,7 +55,7 @@ export function useDecision(action: PendingActionView) {
   return { view, busy, error, decide };
 }
 
-/** Approve and Decline (Run and Dismiss for a proposal), as the card and the Needs you list show them. */
+/** Approve and Decline (Run and Dismiss for a proposal), as the card and the feed show them. */
 export function DecisionButtons({
   kind,
   busy,
@@ -149,6 +149,30 @@ export function CallInput({ input }: { input: unknown }) {
           {open ? "Show less" : `Show all ${lines.length} lines`}
         </button>
       )}
+    </div>
+  );
+}
+
+/**
+ * An approval's Approve and Decline in the feed (Run and Dismiss for a proposal), while it waits, with when it expires; once decided
+ * here, what came of it. One decided elsewhere (its card in the chat) or expired waits no more, and shows nothing.
+ */
+export function ActionDecision({ action, waiting }: { action: PendingActionView; waiting: boolean }) {
+  const { view, busy, error, decide } = useDecision(action);
+  const now = useClock(view.status === "pending");
+  if (!waiting && view === action) return null;
+  const ended = endedText(view, now);
+  return (
+    <div className="feed-decision">
+      {ended !== null ? (
+        <small>{ended}</small>
+      ) : (
+        <>
+          <DecisionButtons className="feed-decision-buttons" kind={view.kind} busy={busy} decide={(decision) => void decide(decision)} />
+          <small>{expiresText(view.expiresAt, now)}</small>
+        </>
+      )}
+      {error && <small className="form-error">{error}</small>}
     </div>
   );
 }

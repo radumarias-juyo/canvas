@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { GuardrailRule, PendingActionView } from "../shared/limits.ts";
 import { blankDraft, draftOf, endedText, expiresText, newRuleId, ruleLine, ruleOf, type RuleDraft } from "../src/agents/limits/rules.ts";
-import { ActionCard, ChatActions } from "../src/chat/ActionCard.tsx";
+import { ActionCard, ActionDecision, ChatActions } from "../src/chat/ActionCard.tsx";
 
 const HOUR = 3_600_000;
 
@@ -132,5 +132,18 @@ describe("waiting actions", () => {
     expect(card(false)).not.toContain(">Approve<");
     expect(card(false)).toContain("Waits for ada to approve it.");
     expect(card(true, { ...action, status: "done", result: "updated" })).toContain("Ran · updated");
+  });
+
+  it("are decided in the feed while they wait, and show nothing there once they wait no more", () => {
+    const later = { ...action, expiresAt: Date.now() + 11 * HOUR };
+    const waiting = renderToStaticMarkup(<ActionDecision action={later} waiting />);
+    expect(waiting).toContain(">Approve<");
+    expect(waiting).toContain(">Decline<");
+    expect(waiting).toContain("expires in 11 h");
+    expect(renderToStaticMarkup(<ActionDecision action={{ ...later, kind: "proposal" }} waiting />)).toContain(">Run<");
+    // Decided from its card in the chat, or expired: the feed item is resolved, and has no buttons.
+    expect(renderToStaticMarkup(<ActionDecision action={later} waiting={false} />)).toBe("");
+    // Still waiting in the feed, but past its time (the chat did not say yet): no buttons either.
+    expect(renderToStaticMarkup(<ActionDecision action={{ ...later, expiresAt: Date.now() - HOUR }} waiting />)).toContain("Expired");
   });
 });

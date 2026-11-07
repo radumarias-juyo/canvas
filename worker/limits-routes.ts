@@ -11,7 +11,6 @@ import type { UserDirectory } from "./users.ts";
 
 /**
  * A verified user's limits on what their agents change (shared/limits.ts; `uid`, and `directory` their UserDirectory):
- *   GET  /api/needs-you                  the actions waiting for them across their chats ([NeedsYouItem]), oldest first
  *   POST /api/needs-you/:chatId/:id      {decision: "approve" | "decline"}: the action after (PendingActionView)
  *   GET  /api/limits/rules               their rules for all their agents, pi and pages
  *   PUT  /api/limits/rules               {rules}: replace them
@@ -28,7 +27,6 @@ export async function limitsRoute(
   const url = new URL(request.url);
   const path = url.pathname;
   const method = request.method;
-  if (path === "/api/needs-you" && method === "GET") return json(await directory.needsYou());
   const decide = path.match(/^\/api\/needs-you\/([a-z0-9]+)\/([a-f0-9]{16})$/);
   if (decide && method === "POST") {
     const [, chatId, id] = decide;
