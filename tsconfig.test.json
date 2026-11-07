@@ -134,6 +134,7 @@
     "src/agents/workflow.ts",
     "src/agents/limits/rules.ts",
     "src/chat/ActionCard.tsx",
+    "src/chat/AgentWindow.tsx",
     "src/chat/AgentDraft.tsx",
     "src/chat/people.tsx",
     "src/SignIns.tsx",
