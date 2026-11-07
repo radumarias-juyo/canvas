@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { GuardrailRule, PendingActionView } from "../shared/limits.ts";
-import { blankDraft, draftOf, endedText, expiresText, newRuleId, ruleLine, ruleOf, type RuleDraft } from "../src/agents/limits/rules.ts";
+import { blankDraft, draftOf, endedText, expiresText, newRuleId, ruleLine, ruleOf, ruleWarning, type RuleDraft } from "../src/agents/limits/rules.ts";
 import { ActionCard, ActionDecision, ChatActions } from "../src/chat/ActionCard.tsx";
 
 const HOUR = 3_600_000;
@@ -18,6 +18,26 @@ describe("rule lines", () => {
       "crm (any change) — At most 20 calls a day (Europe/Bucharest) — Warns",
     );
     expect(ruleLine({ ...quiet, value: [{ from: "2027-01-02", to: "2027-01-04" }] })).toBe("Quiet dates 2 Jan 2027–4 Jan 2027 — Blocks it");
+  });
+
+  it("warn when the server no longer lists a rule's tool, or its tool the rule's argument", () => {
+    const tools = [
+      {
+        name: "update_deal",
+        description: "",
+        inputSchema: { type: "object", properties: { discount_pct: { type: "number" } }, additionalProperties: false },
+      },
+    ];
+    const rule = { server: "crm", tool: "update_deal", arg: "discount_pct" };
+    expect(ruleWarning(rule, tools)).toBeNull();
+    expect(ruleWarning(rule, null)).toBeNull();
+    expect(ruleWarning({ ...rule, tool: "*" }, tools)).toBeNull();
+    expect(ruleWarning({ ...rule, tool: "change_deal" }, tools)).toBe(
+      "crm lists no tool change_deal now, so this rule checks no call. If it was renamed, pick its new name.",
+    );
+    expect(ruleWarning({ ...rule, arg: "discount" }, tools)).toBe(
+      "update_deal has no argument discount now, so this rule fires on every call to it.",
+    );
   });
 
   it("make new ids that checkRule takes, and none already in the list", () => {
@@ -151,5 +171,14 @@ describe("waiting actions", () => {
     expect(renderToStaticMarkup(<ActionDecision action={later} waiting={false} />)).toBe("");
     // Still waiting in the feed, but past its time (the chat did not say yet): no buttons either.
     expect(renderToStaticMarkup(<ActionDecision action={{ ...later, expiresAt: Date.now() - HOUR }} waiting />)).toContain("Expired");
+  });
+
+  it("say how they ended on a resolved feed item, as it kept it, after the feed reloads", () => {
+    const failed = renderToStaticMarkup(<ActionDecision action={{ ...action, status: "failed", result: "deal 5 is closed" }} waiting={false} />);
+    expect(failed).toContain("Failed · deal 5 is closed");
+    expect(failed).not.toContain(">Approve<");
+    expect(renderToStaticMarkup(<ActionDecision action={{ ...action, status: "done" }} waiting={false} />)).toContain("Ran");
+    expect(renderToStaticMarkup(<ActionDecision action={{ ...action, status: "declined" }} waiting={false} />)).toContain("Declined");
+    expect(renderToStaticMarkup(<ActionDecision action={{ ...action, status: "expired" }} waiting={false} />)).toContain("Expired");
   });
 });

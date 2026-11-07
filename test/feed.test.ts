@@ -56,6 +56,23 @@ describe("feed: keeping items", () => {
     expect(feed.counts()).toEqual({ unread: 1, needsYou: 1 });
   });
 
+  it("does not wait again for a question delivered again after it was answered (a restart before it was marked delivered)", () => {
+    const feed = new FeedStore(memorySql());
+    const question: FeedInput = {
+      kind: "question",
+      ref: "question:c1:1",
+      at: T0,
+      title: "@brief asks you something",
+      from: agentFrom({ id: "b1", name: "brief", avatar: "br", color: "teal" }),
+      open: { to: "chat", chatId: "c1" },
+      chat: { id: "c1", kind: "group" },
+    };
+    feed.add(question);
+    expect(feed.resolve("question:c1:1")).toBe(1);
+    expect(feed.add(question)).toBe("same");
+    expect(feed.counts()).toEqual({ unread: 0, needsYou: 0 });
+  });
+
   it("refuses an item from an off-the-record chat, as the sender or this person's own row says", () => {
     const feed = new FeedStore(memorySql());
     expect(feed.add(tag(1, { id: "secret", kind: "off_record" }))).toBe("refused");

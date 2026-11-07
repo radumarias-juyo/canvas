@@ -114,10 +114,17 @@ export interface FeedInput {
 }
 
 /**
- * An approval's action as its feed item keeps it: what deciding it there takes. Not its call's input, which can be
- * large and stays in the chat (the item's text has the call in one line).
+ * An approval's action as its feed item keeps it: what deciding it there takes, and once decided how it ended (its
+ * result's start), so the resolved item still says so. Not its call's input, which can be large and stays in the chat
+ * (the item's text has the call in one line).
  */
-export type FeedAction = Pick<PendingActionView, "id" | "chatId" | "kind" | "status" | "expiresAt">;
+export type FeedAction = Pick<PendingActionView, "id" | "chatId" | "kind" | "status" | "expiresAt" | "result" | "decidedAt">;
+
+/** How an approval's action ended, as its feed item keeps it. */
+export type FeedActionEnd = Pick<FeedAction, "status" | "result" | "decidedAt">;
+
+/** How much of an ended action's result its feed item keeps. */
+export const MAX_FEED_RESULT = 300;
 
 /** An item in the feed, as the app lists it. */
 export interface FeedItem {

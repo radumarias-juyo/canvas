@@ -25,7 +25,16 @@ import type { Forgot, MemoryNote, MemoryNoteView, MemoryReader, MemoryWriter, Re
 import { ChatRows } from "./chat-rows.ts";
 import { addColumns } from "./members.ts";
 import { mayLeave, type ChatKind, type ChatRef } from "../shared/chat-kinds.ts";
-import { agentFrom, NEEDS_YOU, runFeedRef, type FeedInput, type FeedList, type FollowKind, type FollowView } from "../shared/feed.ts";
+import {
+  agentFrom,
+  NEEDS_YOU,
+  runFeedRef,
+  type FeedActionEnd,
+  type FeedInput,
+  type FeedList,
+  type FollowKind,
+  type FollowView,
+} from "../shared/feed.ts";
 import {
   aboutOf,
   FAN_OUT,
@@ -332,7 +341,7 @@ export class UserDirectory extends DurableObject<Env> {
 
   /** Approvals whose time is past though their chat never said they ended: their feed items wait no more either. */
   #dropExpiredNeedsYou(): void {
-    for (const { chatId, id } of this.#limits.dropExpired()) this.resolveFeed(approvalRef(chatId, id));
+    for (const { chatId, id } of this.#limits.dropExpired()) this.#endApproval(chatId, id, { status: "expired" });
   }
 
   /**
@@ -962,10 +971,16 @@ export class UserDirectory extends DurableObject<Env> {
     );
   }
 
-  /** An action ended (approved, declined, expired): its feed item waits no more. */
-  removeNeedsYou(chatId: string, id: string): void {
+  /** An action ended (approved, declined, expired): its feed item waits no more, and keeps how it ended. */
+  removeNeedsYou(chatId: string, id: string, ended: FeedActionEnd = { status: "expired" }): void {
     this.#limits.removeNeedsYou(chatId, id);
-    this.resolveFeed(approvalRef(chatId, id));
+    this.#endApproval(chatId, id, ended);
+  }
+
+  #endApproval(chatId: string, id: string, ended: FeedActionEnd): void {
+    const ref = approvalRef(chatId, id);
+    if (this.#feed.endAction(ref, ended)) this.#changed("feed");
+    else this.resolveFeed(ref);
   }
 
   listArtifacts(): ArtifactSummary[] {

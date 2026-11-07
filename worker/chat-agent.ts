@@ -119,6 +119,7 @@ import { connectAs } from "./mcp-connect.ts";
 import { CallHeld, McpFailure, McpHub } from "./mcp/hub.ts";
 import { ChatActions, type NewAction } from "./agents/limits/actions.ts";
 import { WriteGate, type Caller, type GateCall, type GateContext, type GateHost } from "./agents/limits/gate.ts";
+import { approvalEnd } from "./agents/limits/feed.ts";
 import { toolInput } from "./agents/limits/tell.ts";
 import { inputLevel, lowestLevel, turnLevel } from "./agents/limits/levels.ts";
 import { APP_APPROVAL_KIND, callLine, CHAT_ACTION_KIND, valueAt, type ActionActor, type ChatActionData, type PendingActionView } from "../shared/limits.ts";
@@ -165,7 +166,7 @@ import {
 import { AgentTurns, sessionOf, type TurnHost } from "./agents/controller.ts";
 import { isTurnEntry, TurnFilter } from "./agents/live.ts";
 import { ChatRoster, type AgentTurn, type RosterEntry } from "./agents/roster.ts";
-import { actedOf, jsonOf, reportOf, SignInNeeded, whenOf, type ActContext, type ActResult, type DeliveryRequest } from "./agents/runs/executor.ts";
+import { actedOf, jsonOf, missedDecisions, reportOf, SignInNeeded, whenOf, type ActContext, type ActResult, type DeliveryRequest } from "./agents/runs/executor.ts";
 import { AgentRunner, type RunAlarm, type RunnerHost, type WatchAlarm } from "./agents/runs/runner.ts";
 import { actedMark, AgentRuns, type EndedRun, type RunRecord } from "./agents/runs/store.ts";
 import { answeredIn, reportContext, runInstructions, RUN_STEP_KIND, workSpend, type RunStepData } from "./agents/runs/report.ts";
@@ -641,6 +642,7 @@ export class ChatAgent extends DurableObject<Env> {
     if (this.#gone) return;
     // An approved call cut off by a restart may or may not have reached its server: never run again on its own.
     this.#endInterruptedActions();
+    this.#tellRunsDecided();
     // The agents' turns that were running, or waiting, go on: cheap when there are none. So do runs cut off.
     this.turns.resume();
     this.runner.resume();
@@ -3725,6 +3727,20 @@ export class ChatAgent extends DurableObject<Env> {
     if (alarm) await this.scheduler.cancel(alarm).catch((error: unknown) => console.error("action expiry:", errorMessage(error)));
   }
 
+  /**
+   * Actions that ended while a run's item waited at their step, though the run never heard (a restart came between the
+   * end and AgentRunner.decided): it hears now, so the run does not wait for good. An approved call's result is then
+   * only its start (actedOf), so a later step that reads it stops, saying why.
+   */
+  #tellRunsDecided(): void {
+    // Cheap on a wake with no run waiting.
+    if (!this.runs.anyWaiting()) return;
+    const actions = this.actions.list().map((view) => ({ view, run: this.actions.origin(view.id)?.run }));
+    for (const { ref, acted } of missedDecisions(this.runs, actions)) {
+      this.ctx.waitUntil(this.runner.decided(ref, acted).catch((error: unknown) => console.error("run:", errorMessage(error))));
+    }
+  }
+
   /** Approved calls a restart cut off: failed, with a word to check, as they may have reached their server. */
   #endInterruptedActions(): void {
     for (const action of this.actions.interrupted()) {
@@ -3739,7 +3755,9 @@ export class ChatAgent extends DurableObject<Env> {
    */
   async #actionEnded(view: PendingActionView, value?: unknown): Promise<void> {
     this.#actionsChanged();
-    this.ctx.waitUntil(this.#directory.removeNeedsYou(this.chatId, view.id).catch((error: unknown) => console.error("needs you:", errorMessage(error))));
+    this.ctx.waitUntil(
+      this.#directory.removeNeedsYou(this.chatId, view.id, approvalEnd(view)).catch((error: unknown) => console.error("needs you:", errorMessage(error))),
+    );
     const origin = this.actions.origin(view.id);
     const session = origin?.session ?? (origin?.run && this.runs.item(origin.run.agentId, origin.run.dueAt, origin.run.item)?.session);
     try {

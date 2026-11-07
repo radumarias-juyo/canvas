@@ -16,7 +16,7 @@ import {
 import { CHAT_MESSAGE_KIND } from "../shared/protocol.ts";
 import { ChatActions, type NewAction } from "../worker/agents/limits/actions.ts";
 import { LimitsDirectory } from "../worker/agents/limits/directory.ts";
-import { approvalFeed, approvalRef } from "../worker/agents/limits/feed.ts";
+import { approvalEnd, approvalFeed, approvalRef } from "../worker/agents/limits/feed.ts";
 import { AgentRuns } from "../worker/agents/runs/store.ts";
 import { FeedStore } from "../worker/feed/store.ts";
 import { runFeedRef } from "../shared/feed.ts";
@@ -100,6 +100,16 @@ describe("guardrail rules", () => {
     );
   });
 
+  it("never checks the values inside objects and lists, and fails closed past what it reads", () => {
+    const to = rule({ kind: "never", arg: "to", value: ["*@rival.example"] });
+    expect(violation(to, call({ to: [{ email: "ok@fine.com" }, { email: "ceo@rival.example", name: "C" }] }))).toMatch(/"ceo@rival.example", which is never allowed/);
+    expect(violation(to, call({ to: { primary: { email: "Sam <sam@rival.example>" } } }))).toMatch(/never allowed/);
+    expect(violation(to, call({ to: [{ email: "ok@fine.com" }] }))).toBeNull();
+    let deep: unknown = "ceo@rival.example";
+    for (let i = 0; i < 8; i++) deep = { next: deep };
+    expect(violation(to, call({ to: deep as StepInput[string] }))).toMatch(/nested too deep for a never rule to check/);
+  });
+
   it("never matches a boolean as true or false, and each recipient of a joined list", () => {
     const permanent = rule({ kind: "never", tool: "delete_deal", arg: "permanent", value: ["true"] });
     expect(violation(permanent, { ...call({ permanent: true }), tool: "delete_deal" })).toMatch(/never allowed/);
@@ -124,6 +134,33 @@ describe("guardrail rules", () => {
     expect(schemaHasPath(schema, "to.0.email")).toBe(true);
     expect(schemaHasPath(schema, "gone")).toBe(false);
     expect(schemaHasPath({ anyOf: [{ type: "object", properties: { a: {} } }, { type: "object", properties: { b: {} } }] }, "c")).toBe(false);
+  });
+
+  it("finds no argument under a plain type, so a field renamed under a nullable object or a union counts as gone", () => {
+    const schema = {
+      type: "object",
+      properties: {
+        deal: { anyOf: [{ type: "null" }, { type: "object", properties: { discount_pct: { type: "number" } }, additionalProperties: false }] },
+        to: { oneOf: [{ type: "string" }, { type: "object", properties: { email: { type: "string" } }, additionalProperties: false }] },
+        note: { type: ["string", "null"] },
+      },
+      additionalProperties: false,
+    };
+    expect(schemaHasPath(schema, "deal.discount")).toBe(false);
+    expect(schemaHasPath(schema, "deal.discount_pct")).toBe(true);
+    expect(schemaHasPath(schema, "to.name")).toBe(false);
+    expect(schemaHasPath(schema, "note.text")).toBe(false);
+    // A node that names no type still says nothing.
+    expect(schemaHasPath({ type: "object", properties: { any: {} } }, "any.thing")).toBeUndefined();
+  });
+
+  it("never matches the recipient forms mail libraries take: a group, (comments) and spaces around the @", () => {
+    expect(matchesValue("leak@blocked.com", "team:leak@blocked.com;")).toBe(true);
+    expect(matchesValue("leak@blocked.com", "team: boss@ok.com, leak@blocked.com;")).toBe(true);
+    expect(matchesValue("leak@blocked.com", "leak @ blocked.com (x)")).toBe(true);
+    expect(matchesValue("*@blocked.com", "Sam <leak (work) @ blocked.com>")).toBe(true);
+    expect(matchesValue("leak@blocked.com", "(a, b) leak@blocked.com")).toBe(true);
+    expect(matchesValue("leak@blocked.com", "team: boss@ok.com;")).toBe(false);
   });
 
   it("never matches a recipient written as Name <address>, by its address or its name", () => {
@@ -541,6 +578,24 @@ describe("approvals in the feed", () => {
     expect(feed.list().items[0]).toMatchObject({ kind: "approval", read: true });
     // Ended twice (a press and its expiry): nothing more.
     expect(feed.resolve(approvalRef("chat-1", view.id))).toBe(0);
+  });
+
+  it("keeps how its action ended on the item, so a resolved row still says Ran, Failed, Declined or Expired", () => {
+    const feed = new FeedStore(memorySql());
+    const view = held();
+    feed.add(approvalFeed(view, "Deals", "group"));
+    const ref = approvalRef("chat-1", view.id);
+    const ended = approvalEnd({ status: "failed", result: `deal 5 is closed ${"x".repeat(500)}`, decidedAt: T0 + 5 });
+    expect(ended.result!.length).toBeLessThanOrEqual(300);
+    expect(feed.endAction(ref, ended)).toBe(1);
+    expect(feed.counts()).toEqual({ unread: 0, needsYou: 0 });
+    const [item] = feed.list().items;
+    expect(item.action).toMatchObject({ id: view.id, chatId: "chat-1", kind: "approval", status: "failed", decidedAt: T0 + 5, expiresAt: view.expiresAt });
+    expect(item.action?.result).toMatch(/^deal 5 is closed/);
+    // An item that carries no action is not changed (the caller resolves it then).
+    feed.add({ kind: "assumption", ref: "assumption:a1", at: T0, title: "Confirm", open: { to: "agent", agentId: "a1" } });
+    expect(feed.endAction("assumption:a1", { status: "expired" })).toBe(0);
+    expect(feed.endAction("action:none:1", { status: "expired" })).toBe(0);
   });
 
   it("never reaches the feed from a chat off the record", () => {

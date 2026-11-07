@@ -249,6 +249,8 @@ function hasPath(schema: unknown, parts: readonly string[]): boolean | undefined
   if (!isObject(node)) return undefined;
   const choices = [node.anyOf, node.oneOf, node.allOf].flatMap((list) => (Array.isArray(list) ? list : []));
   let own: boolean | undefined;
+  // A node of plain types only (text, numbers, yes or no, null) has nothing under it.
+  if (!isObject(node.properties) && !choices.length && plainTypes(node)) return false;
   if (isObject(node.properties)) {
     if (Object.hasOwn(node.properties, part)) own = hasPath(node.properties[part], rest);
     else own = node.additionalProperties === true || isObject(node.additionalProperties) ? undefined : false;
@@ -261,6 +263,14 @@ function hasPath(schema: unknown, parts: readonly string[]): boolean | undefined
     if (found === undefined) unknown = true;
   }
   return unknown ? undefined : false;
+}
+
+const PLAIN_TYPES = new Set(["string", "number", "integer", "boolean", "null"]);
+
+/** Whether a schema node names its types and each is a plain one. */
+function plainTypes(node: Record<string, unknown>): boolean {
+  const types = Array.isArray(node.type) ? node.type : [node.type];
+  return types.length > 0 && types.every((type) => typeof type === "string" && PLAIN_TYPES.has(type));
 }
 
 /** A number, or a string that is one; undefined otherwise. */
@@ -292,10 +302,24 @@ export function matchesValue(pattern: string | number, value: unknown): boolean 
   const matches = (one: string) => (regex ? regex.test(one) : one === wanted);
   if (matches(text)) return true;
   if (typeof value !== "string") return false;
+  const entries = [...text.split(LIST_SPLIT), ...normalAddresses(text).split(LIST_SPLIT)];
+  return entries.flatMap((entry) => [...namesOf(entry), ...namesOf(normalAddresses(entry))]).some(matches);
+}
+
+/** What joins the entries of a list of recipients. */
+const LIST_SPLIT = /[,;\n]+/;
+
+/**
+ * Text as mail libraries read an address in it: without (comments), no spaces around the @, without a group's name
+ * before it ("team: a@b.example;") or a trailing ";".
+ */
+function normalAddresses(text: string): string {
   return text
-    .split(/[,;\n]+/)
-    .flatMap(namesOf)
-    .some(matches);
+    .replace(/\([^()]*\)/g, " ")
+    .replace(/\s*@\s*/g, "@")
+    .replace(/^[^"<>@:,;]*:/, "")
+    .replace(/;\s*$/, "")
+    .trim();
 }
 
 /**
@@ -311,6 +335,29 @@ function namesOf(entry: string): string[] {
   const name = bracketed.length ? trimmed.replace(/<[^<>]*>\s*$/, "").trim().replace(/^"(.*)"$/, "$1").trim() : "";
   const words = trimmed.split(/\s+/).map((word) => word.replace(/^[<"'(]+|[>"'),]+$/g, ""));
   return [trimmed, ...bracketed, last, name, ...words].filter(Boolean);
+}
+
+/** How deep a never rule reads into an object or a list. */
+const NEVER_DEPTH = 6;
+
+/** The text, number and yes-or-no values in a value (itself, when it is one), or null when they lie deeper than NEVER_DEPTH. */
+function leavesOf(value: unknown, depth = 0): unknown[] | null {
+  if (value === null || value === undefined) return [];
+  if (typeof value !== "object") return [value];
+  if (depth >= NEVER_DEPTH) return null;
+  const leaves: unknown[] = [];
+  for (const each of Array.isArray(value) ? value : Object.values(value)) {
+    const found = leavesOf(each, depth + 1);
+    if (found === null) return null;
+    leaves.push(...found);
+  }
+  return leaves;
+}
+
+/** A value as JSON in a rule's words: its start when long. */
+function excerptJson(value: unknown): string {
+  const json = JSON.stringify(value) ?? String(value);
+  return json.length > 120 ? `${json.slice(0, 119)}…` : json;
 }
 
 /** The day `at` falls on in `tz`, as "YYYY-MM-DD". */
@@ -362,10 +409,15 @@ export function violation(rule: GuardrailRule, call: GuardedCall, facts: RuleFac
       return null;
     }
     case "never": {
-      const values = argValues(call.input, rule.arg!);
-      for (const value of values) {
-        const hit = (rule.value as (string | number)[]).find((pattern) => matchesValue(pattern, value));
-        if (hit !== undefined) return `${where} is ${JSON.stringify(value)}, which is never allowed`;
+      // An object or a list (a recipient as {email}, a field a server turned from text into objects) is checked by
+      // each text, number and yes-or-no in it; one nested too deep to read through fails closed.
+      for (const value of argValues(call.input, rule.arg!)) {
+        const leaves = leavesOf(value);
+        if (leaves === null) return `${where} is ${excerptJson(value)}, nested too deep for a never rule to check`;
+        for (const leaf of leaves) {
+          const hit = (rule.value as (string | number)[]).find((pattern) => matchesValue(pattern, leaf));
+          if (hit !== undefined) return `${where} is ${excerptJson(leaf)}, which is never allowed`;
+        }
       }
       return null;
     }

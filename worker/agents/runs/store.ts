@@ -113,6 +113,20 @@ interface ItemDetail {
   looked?: Record<string, unknown>;
   /** How its conditions (if, only if) came out, by step key: going through again, it takes the same way. */
   conditions?: Record<string, boolean>;
+  /**
+   * Its element of the scope's list, when the run could not keep the whole list (RunDetail.elements) and this one is
+   * small enough: a run going on goes over the items it has, never a list read again.
+   */
+  element?: { value: unknown };
+}
+
+/** An item of a run as a run going on goes over it again: its element, unless it was too large to keep. */
+export interface KeptElement {
+  key: string;
+  label: string;
+  value?: unknown;
+  /** Its element was not kept: it cannot go on. */
+  missing?: true;
 }
 
 /** What an item keeps for going through again the way it went (ItemDetail). */
@@ -377,7 +391,14 @@ export class AgentRuns {
   }
 
   /** Start an item of a run in its session, or find it: an item that ended is not run again. */
-  async beginItem(agentId: string, dueAt: number, item: string, label: string, session: () => Promise<string>): Promise<{ view: RunItemView; started: boolean }> {
+  async beginItem(
+    agentId: string,
+    dueAt: number,
+    item: string,
+    label: string,
+    session: () => Promise<string>,
+    element?: ItemDetail["element"],
+  ): Promise<{ view: RunItemView; started: boolean }> {
     const found = this.item(agentId, dueAt, item);
     if (found && found.session) return { view: found, started: false };
     const id = await session();
@@ -392,11 +413,20 @@ export class AgentRuns {
       label,
       id,
       this.#now(),
-      JSON.stringify({ steps: [] } satisfies ItemDetail),
+      JSON.stringify({ steps: [], ...(element && { element }) } satisfies ItemDetail),
       agentId,
       dueAt,
     );
     return { view: this.item(agentId, dueAt, item)!, started: true };
+  }
+
+  /** The items a run has, in the order they started, each with the element it kept (ItemDetail.element). */
+  keptElements(agentId: string, dueAt: number): KeptElement[] {
+    return this.#rows("agent_id = ? AND due_at = ? AND item != '' ORDER BY started_at, item", agentId, dueAt).map((row) => {
+      const { element } = parse<ItemDetail>(row.detail, { steps: [] });
+      const key = row.item === "*" ? "" : row.item;
+      return { key, label: row.label ?? key, ...(element ? { value: element.value } : { missing: true as const }) };
+    });
   }
 
   /** An item of a run; "" names the item of a run with no scope. */
@@ -445,8 +475,8 @@ export class AgentRuns {
   endItem(agentId: string, dueAt: number, item: string, end: { status: RunItemStatus; cost: number } & ItemDetail): void {
     const { status, cost, ...rest } = end;
     // Undefined ones are left out of the JSON.
-    const { looked, conditions } = this.#itemDetail(agentId, dueAt, item);
-    const detail: ItemDetail = { ...rest, looked, conditions };
+    const { looked, conditions, element } = this.#itemDetail(agentId, dueAt, item);
+    const detail: ItemDetail = { ...rest, looked, conditions, element };
     this.#sql.exec(
       "UPDATE agent_runs SET status = ?, ended_at = ?, cost = ?, detail = ? WHERE agent_id = ? AND due_at = ? AND item = ?",
       status,
@@ -504,6 +534,11 @@ export class AgentRuns {
   }
 
   /** The runs that did not end: cut off by a restart, or waiting for a sign-in. */
+  /** Whether any run waits for its owner to decide a held call. */
+  anyWaiting(): boolean {
+    return this.#sql.exec("SELECT 1 FROM agent_runs WHERE item = '' AND status = 'waiting' LIMIT 1").toArray().length > 0;
+  }
+
   unfinished(): RunRecord[] {
     return this.#rows("item = '' AND status IN ('running', 'needs_sign_in') ORDER BY due_at").map(recordOf);
   }

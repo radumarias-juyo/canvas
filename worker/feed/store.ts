@@ -15,6 +15,7 @@ import {
   RUN_FEED_TEXT,
   runFeedRef,
   agentFrom,
+  type FeedActionEnd,
   type FeedInput,
   type FeedItem,
   type FeedKind,
@@ -99,9 +100,9 @@ export class FeedStore {
     // Asked before, answered since (a run's report, added when the run ends): it waits on nothing.
     const answered = waitsOn !== null && this.#answeredAt(chatId!, waitsOn) >= input.at;
     const needs = answered ? NEEDS.none : waitsOn !== null ? NEEDS.reply : waits ? NEEDS.resolve : NEEDS.none;
-    // The same again changes nothing, unless it waits again after it was resolved (a run that went on after a sign-in,
-    // runResumed, and waits for the same one again).
-    if (before?.data === json && (before.needs > 0 || needs === NEEDS.none)) return "same";
+    // The same again changes nothing, unless a resolve wait comes again after it was resolved (a run that went on after
+    // a sign-in, runResumed, and waits for the same one again). A reply wait answered stays answered.
+    if (before?.data === json && (before.needs > 0 || needs !== NEEDS.resolve)) return "same";
     const read = input.quiet || answered ? 1 : 0;
     this.#sql.exec(
       `INSERT INTO feed (kind, ref, at, read, needs, chat_id, about, waits_on, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -119,6 +120,16 @@ export class FeedStore {
     );
     if (!before) this.#prune();
     return before ? "updated" : "added";
+  }
+
+  /**
+   * An approval's action ended: its item keeps how (FeedActionEnd), so a resolved row still says Ran, Failed, Declined
+   * or Expired, and waits no more and is read, as `resolve` leaves it. Returns how many changed (0 for no such item).
+   */
+  endAction(ref: string, ended: FeedActionEnd): number {
+    const sql = `UPDATE feed SET data = json_set(data, '$.action', json_patch(json_extract(data, '$.action'), ?)), needs = 0, read = 1
+       WHERE ref = ? AND json_type(data, '$.action') = 'object'`;
+    return this.#sql.exec(sql, JSON.stringify(ended), ref).rowsWritten;
   }
 
   /** The newest items, only the unread ones or only those needing the person when asked, and the counts. */

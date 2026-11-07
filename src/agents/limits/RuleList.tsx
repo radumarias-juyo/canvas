@@ -9,7 +9,6 @@ import {
   MAX_GUARDRAILS,
   MAX_QUIET_RANGES,
   PLAIN_KINDS,
-  schemaHasPath,
   toolArgs,
   type GuardrailEffect,
   type GuardrailKind,
@@ -19,7 +18,7 @@ import {
 import { isReadOnly, type ToolInfo } from "../../../shared/protocol.ts";
 import { errorMessage } from "../../../shared/util.ts";
 import { api } from "../../api.ts";
-import { blankDraft, blankRange, draftOf, ruleLine, ruleOf, type RangeDraft, type RuleDraft } from "./rules.ts";
+import { blankDraft, blankRange, draftOf, ruleLine, ruleOf, ruleWarning, type RangeDraft, type RuleDraft } from "./rules.ts";
 
 /** A draft's kind when it is one on the call itself (it stays as the server or tool changes), else none. */
 const plainKind = (draft: RuleDraft) => (draft.kind && PLAIN_KINDS.includes(draft.kind) ? draft.kind : "");
@@ -109,6 +108,7 @@ export function RuleList({
                 <span className="limit-rule-text">
                   <span>{ruleLine(rule)}</span>
                   {rule.note && <small>{rule.note}</small>}
+                  <RuleLineWarning rule={rule} />
                 </span>
                 <span className="limit-rule-actions">
                   <button type="button" disabled={editing !== null} onClick={() => setEditing({ index, draft: draftOf(rule) })}>
@@ -137,6 +137,13 @@ export function RuleList({
       )}
     </div>
   );
+}
+
+/** A saved rule's warning on its line, by its server's tools as listed now. */
+function RuleLineWarning({ rule }: { rule: GuardrailRule }) {
+  const { tools } = useServerTools(rule.tool === "*" ? "" : rule.server);
+  const warning = ruleWarning(rule, tools);
+  return warning ? <small className="rule-warn">{warning}</small> : null;
 }
 
 /** The argument a rule reads, as its tool's schema has it. */
@@ -176,8 +183,7 @@ function RuleEditor({
   const tool = draft.tool && draft.tool !== "*" ? tools?.find((each) => each.name === draft.tool) : undefined;
   const args = tool ? toolArgs(tool.inputSchema).filter((arg) => kindsFor(arg.type).length > 0) : [];
   const arg = draft.arg ? argOf(args, draft.arg) : undefined;
-  // As the gate reads it (hitsFor): a rule on an argument its tool no longer has fires on every call.
-  const gone = Boolean(draft.arg && tool && schemaHasPath(tool.inputSchema, draft.arg) === false);
+  const warning = ruleWarning(draft, tools);
   const onArg = draft.server !== "*" && draft.tool !== "*" && draft.tool !== "";
   // A saved rule on an argument its tool no longer lists (or before the tools are read) keeps the kinds it had.
   const kinds: readonly GuardrailKind[] = draft.arg ? (arg ? kindsFor(arg.type) : draft.kind ? [draft.kind] : ARG_KINDS) : PLAIN_KINDS;
@@ -245,7 +251,11 @@ function RuleEditor({
             </select>
             {toolsError && <small className="form-error">Could not read its tools: {toolsError}</small>}
             {tools && !writes.length && <small>It has no tools that change data.</small>}
-            {tool?.description && <small className="rule-hint">{tool.description}</small>}
+            {tools && !tool && warning ? (
+              <small className="rule-hint rule-warn">{warning}</small>
+            ) : (
+              tool?.description && <small className="rule-hint">{tool.description}</small>
+            )}
           </label>
         )}
         {onArg && (
@@ -265,10 +275,8 @@ function RuleEditor({
                 );
               })}
             </select>
-            {gone ? (
-              <small className="rule-hint rule-warn">
-                {draft.tool} has no argument {draft.arg} now, so this rule fires on every call to it.
-              </small>
+            {tool && warning ? (
+              <small className="rule-hint rule-warn">{warning}</small>
             ) : (
               arg?.description && <small className="rule-hint">{arg.description}</small>
             )}
@@ -382,6 +390,11 @@ function KindFields({
               value={draft.number}
               onChange={(e) => set({ number: e.target.value })}
             />
+            {draft.kind === "callsPerDay" && (
+              <small className="rule-hint">
+                Counted over every chat, but exact only within one: two chats calling at the same moment can both take the last call left.
+              </small>
+            )}
           </label>
           {draft.kind === "callsPerDay" && zone}
         </div>

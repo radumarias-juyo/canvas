@@ -162,8 +162,9 @@ export function ActionDecision({ action, waiting }: { action: FeedAction; waitin
   const { view, busy, error, decide } = useDecision(action);
   const decidedHere = view !== action;
   const now = useClock(view.status === "pending" && (waiting || decidedHere));
-  if (!waiting && !decidedHere) return null;
   const ended = endedText(view, now);
+  // A resolved item says how its action ended, as it kept it; one resolved without saying (an older item) says nothing.
+  if (!waiting && !decidedHere && (view.status === "pending" || ended === null)) return null;
   return (
     <div className="feed-decision">
       {ended !== null ? (

@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AgentDefinition, AgentStep, LookStep, StepInput } from "../shared/agents.ts";
 import type { Value } from "../shared/conditions.ts";
+import type { PendingActionView } from "../shared/limits.ts";
 import type { ArtifactMeta } from "../shared/protocol.ts";
 import { KEPT_RUNS, type RunDelivery } from "../shared/runs.ts";
-import { actedOf, fillInput, itemKey, itemsOf, reportOf, SignInNeeded, type ActContext, type ActResult, type DeliveryRequest, type WorkResult } from "../worker/agents/runs/executor.ts";
+import { actedOf, fillInput, missedDecisions, itemKey, itemsOf, reportOf, SignInNeeded, type ActContext, type ActResult, type DeliveryRequest, type WorkResult } from "../worker/agents/runs/executor.ts";
 import { publishedAlready, publishFindings, publishRebuilt, readOnlyDeclaration, runMark } from "../worker/agents/runs/page.ts";
 import { answeredIn, findingsEdit, FINDINGS_END, FINDINGS_START, reportHtml, workSpend } from "../worker/agents/runs/report.ts";
 import { AgentRunner, type RunAlarm, type RunnerHost, type WatchAlarm } from "../worker/agents/runs/runner.ts";
@@ -690,6 +691,66 @@ describe("scheduled runs", () => {
       expect(host.delivered).toHaveLength(0);
     });
 
+    describe("a scope list too large to keep", () => {
+      // Rows with no id or name: their keys are their places in the list (#1, #2, #3). Over what a run keeps of a list.
+      // Each small enough for its item to keep (64K), five of them too large for the run to keep the list (256K).
+      const row = (to: string, size = 60_000) => ({ to, pad: "p".repeat(size) });
+      const listed = ["o1", "o2", "o3", "o4", "o5"].map((to) => row(to));
+      const scoped = agent({
+        workflow: [
+          { kind: "do", server: "crm", tool: "update", input: { to: "{{item.to}}" } },
+          { kind: "do", server: "crm", tool: "mail", input: { to: "{{item.to}}" } },
+        ],
+        scope: { list: { kind: "look", server: "crm", tool: "rows", input: {} }, each: true },
+        autonomy: 3,
+      });
+      async function heldAtSecond(list = listed) {
+        const setup = home(scoped);
+        setup.host.values.set("crm.rows", list);
+        setup.host.actAnswer = (call, input) => (call === "crm.update" && input.to === "o2" ? HELD : { status: "ran", value: "ok" });
+        await setup.runner.now(scoped.id, false);
+        await setup.host.settled();
+        expect(setup.host.runs.items(scoped.id, T0).map((item) => item.status)).toEqual(["acted", "waiting", "acted", "acted", "acted"]);
+        return setup;
+      }
+      const approveSecond = async ({ host, runner }: ReturnType<typeof home>) => {
+        await runner.decided({ agentId: scoped.id, dueAt: T0, item: "#2", step: "0" }, actedOf({ status: "done", result: "ok" }, "ok")!);
+        await host.settled();
+      };
+
+      it("goes on over its own element, though a row before it left the list", async () => {
+        const setup = await heldAtSecond();
+        setup.host.values.set("crm.rows", listed.slice(1));
+        await approveSecond(setup);
+        // #2 mails o2 (its own element), not o3 (what is #2 in the list now).
+        expect(setup.host.acts.filter((act) => act.call === "crm.mail").map((act) => act.input.to)).toEqual(["o1", "o3", "o4", "o5", "o2"]);
+        expect(setup.host.reads.filter((read) => read.call === "crm.rows")).toHaveLength(1);
+      });
+
+      it("goes on with a held item whose row left the list, and ends with it", async () => {
+        const setup = await heldAtSecond();
+        setup.host.values.set("crm.rows", listed.filter((one) => one.to !== "o2"));
+        await approveSecond(setup);
+        expect(setup.host.runs.items(scoped.id, T0).map((item) => item.status)).toEqual(["acted", "acted", "acted", "acted", "acted"]);
+        expect(setup.host.runs.list(scoped.id)[0].status).toBe("sent");
+      });
+
+      it("runs no row added since its due time", async () => {
+        const setup = await heldAtSecond();
+        setup.host.values.set("crm.rows", [...listed, row("o6")]);
+        await approveSecond(setup);
+        expect(setup.host.runs.items(scoped.id, T0).map((item) => item.item)).toEqual(["#1", "#2", "#3", "#4", "#5"]);
+        expect(setup.host.acts.some((act) => act.input.to === "o6")).toBe(false);
+      });
+
+      it("stops an item whose own element was too large to keep, saying why", async () => {
+        const setup = await heldAtSecond(listed.map((one) => (one.to === "o2" ? row("o2", 70_000) : one)));
+        await approveSecond(setup);
+        expect(setup.host.runs.items(scoped.id, T0)[1]).toMatchObject({ status: "failed", reason: expect.stringMatching(/too large to keep/) });
+        expect(setup.host.acts.filter((act) => act.call === "crm.mail").map((act) => act.input.to)).toEqual(["o1", "o3", "o4", "o5"]);
+      });
+    });
+
     it("reads an approved call's whole result in the steps after it, past what the action keeps", async () => {
       const after: AgentStep[] = [
         sales,
@@ -863,6 +924,51 @@ describe("scheduled runs", () => {
       expect(host.delivered).toHaveLength(1);
       expect(host.delivered[0].text).toContain("North done.");
       expect(host.runs.list(definition.id)[0].status).toBe("sent");
+    });
+
+    it("does not take an item decided during a pass on once its agent was turned off meanwhile", async () => {
+      const scoped = agent({
+        workflow: [
+          { kind: "do", server: "crm", tool: "update", input: { region: "{{item.name}}" } },
+          { kind: "work", prompt: "Report on {{item.name}}." },
+          { kind: "tell", to: ["owner"], via: "chat" },
+        ],
+        scope: { list: { kind: "look", server: "crm", tool: "regions", input: {} }, each: true },
+        autonomy: 3,
+      });
+      const { host, runner, definition } = home(scoped);
+      host.values.set("crm.regions", [{ name: "north" }, { name: "south" }]);
+      host.actAnswer = (_call, input) => (input.region === "north" ? HELD : { status: "ran", value: "ok" });
+      let release!: () => void;
+      const later = new Promise<void>((resolve) => (release = resolve));
+      host.answer = async (prompt) => {
+        if (prompt.includes("Report on south")) await later;
+        return { status: "done", text: "Done.", cost: 0 };
+      };
+      void runner.now(definition.id, false);
+      for (let i = 0; i < 10; i++) await tick();
+      // Turned off, then north approved while south's pass still goes.
+      host.definitions.set(definition.id, { ...definition, enabled: false });
+      const decided = runner.decided({ agentId: definition.id, dueAt: T0, item: "north", step: "0" }, actedOf({ status: "done", result: "ok" }, "ok")!);
+      for (let i = 0; i < 5; i++) await tick();
+      release();
+      await decided;
+      await host.settled();
+      expect(host.works.map((work) => work.prompt.includes("north"))).toEqual([false]);
+      expect(host.delivered).toHaveLength(0);
+      expect(host.runs.list(definition.id)[0]).toMatchObject({ status: "not_today", summary: expect.stringMatching(/was turned off/) });
+    });
+
+    it("finds the decisions a run missed when a restart came between an action's end and the run", async () => {
+      const { host, runner, definition } = await held();
+      const view = { id: "act1", status: "declined" } as PendingActionView;
+      const missed = missedDecisions(host.runs, [{ view, run: ref(definition) }, { view: { ...view, id: "act2", status: "pending" } as PendingActionView, run: ref(definition) }]);
+      expect(missed).toEqual([{ ref: ref(definition), acted: { ok: false, end: "stopped", detail: "you declined it" } }]);
+      await runner.decided(missed[0].ref, missed[0].acted);
+      await host.settled();
+      expect(host.runs.list(definition.id)[0].status).toBe("not_today");
+      // Told once: the step waits no more.
+      expect(missedDecisions(host.runs, [{ view, run: ref(definition) }])).toEqual([]);
     });
   });
 

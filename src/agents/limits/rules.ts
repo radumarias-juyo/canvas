@@ -11,7 +11,9 @@ import {
   type GuardrailRule,
   type PendingActionView,
   type QuietRange,
+  schemaHasPath,
 } from "../../../shared/limits.ts";
+import type { ToolInfo } from "../../../shared/protocol.ts";
 import { errorMessage, listSome, plural, randomHex } from "../../../shared/util.ts";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -60,6 +62,20 @@ export function targetText(rule: Pick<GuardrailRule, "server" | "tool" | "arg">)
 /** A rule in one line, as the list shows it: "crm.update_deal · discount — At most 10 — Needs approval". */
 export function ruleLine(rule: GuardrailRule): string {
   return [targetText(rule), limitText(rule), EFFECT_LABELS[rule.effect]].filter(Boolean).join(" — ");
+}
+
+/**
+ * What is wrong with a rule by its server's tools as listed now (null before they are read): the gate matches a rule
+ * by its tool's name, so one on a tool the server no longer lists checks no call, and (as `hitsFor` reads it) one on an
+ * argument its tool no longer has fires on every call to it. Null when nothing is.
+ */
+export function ruleWarning(rule: Pick<GuardrailRule, "server" | "tool" | "arg">, tools: readonly ToolInfo[] | null): string | null {
+  if (!tools || rule.server === "*" || !rule.tool || rule.tool === "*") return null;
+  const tool = tools.find((each) => each.name === rule.tool);
+  if (!tool) return `${rule.server} lists no tool ${rule.tool} now, so this rule checks no call. If it was renamed, pick its new name.`;
+  if (rule.arg && schemaHasPath(tool.inputSchema, rule.arg) === false)
+    return `${rule.tool} has no argument ${rule.arg} now, so this rule fires on every call to it.`;
+  return null;
 }
 
 /** A new rule's id: 8 random lowercase hex characters, new among `taken`. */

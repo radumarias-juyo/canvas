@@ -1,9 +1,10 @@
 // An action waiting for its owner, as their feed has it (shared/feed.ts): one item per action, carrying it, in "Needs
 // you" (as every approval is, NEEDS_YOU) where they approve or decline it, until it is decided or expires
-// (UserDirectory.removeNeedsYou resolves it, or its time passing, dropExpired). It opens the chat where its card is.
+// (UserDirectory.removeNeedsYou resolves it, keeping how it ended, or its time passing, dropExpired). It opens the chat
+// where its card is.
 
 import type { ChatKind } from "../../../shared/chat-kinds.ts";
-import { agentFrom, MAX_FEED_TEXT, type FeedInput } from "../../../shared/feed.ts";
+import { agentFrom, MAX_FEED_RESULT, MAX_FEED_TEXT, type FeedActionEnd, type FeedInput } from "../../../shared/feed.ts";
 import { actorName, callLine, type PendingActionView } from "../../../shared/limits.ts";
 import { excerpt } from "../../../shared/replies.ts";
 
@@ -35,5 +36,14 @@ export function approvalFeed(view: PendingActionView, chatTitle: string, chatKin
     open: { to: "chat", chatId: view.chatId },
     chat: { id: view.chatId, kind: chatKind },
     ...(actor.agentId && { aboutAgent: actor.agentId }),
+  };
+}
+
+/** How an action ended, as its feed item keeps it: its status, when, and its result's start. */
+export function approvalEnd(view: Pick<PendingActionView, "status" | "result" | "decidedAt">): FeedActionEnd {
+  return {
+    status: view.status,
+    ...(view.result && { result: excerpt(view.result, MAX_FEED_RESULT) }),
+    ...(view.decidedAt !== undefined && { decidedAt: view.decidedAt }),
   };
 }
