@@ -13,6 +13,9 @@ with `@cloudflare/vite-plugin`, pnpm; configured and deployed with the `cf` CLI 
 - `pnpm test` (hub, broker, Access tokens, storage rules; `LIVE=1` also hits CoinGecko), `pnpm typecheck`,
   `AUTH_MODE=demo pnpm dev`. Without a Cloudflare login or Docker: `AUTH_MODE=demo PI_OFFLINE=1 PI_NO_DOCKER=1 pnpm dev`. Everything but the model and the sandbox (`run_python`, `run_bash`) then works, and
   `POST /api/dev/chats/:id/publish` (with `DEV_TOOLS=true` in the environment) publishes a page without the model.
+  `DEV_MODEL=script` with it puts a scripted model in (`worker/dev-model.ts`: `/say`, `/tool` lines; nothing in
+  production reads it unset). `pnpm e2e` (not in `pnpm test`) drives the agents feature in Playwright on that model
+  against stand-in MCP servers (`e2e/`); keep its flows passing when changing what they click.
 - Pages also get `pi.use("storage")` (values per viewer, the author's as defaults, in `UserDirectory`; it replaces the
   frame's missing `localStorage`) and `pi.use("ai")` (one model answer, no tools, paid from the typing viewer's daily
   allowance): `worker/artifacts/page-routes.ts`, `page-features.ts`. Both run as the viewer, never the author.
