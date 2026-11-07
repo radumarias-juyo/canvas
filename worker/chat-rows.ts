@@ -146,7 +146,8 @@ export class ChatRows {
   /** A deleted chat no longer discusses any page, nobody is known through it, and its branches count for nothing. */
   forgetChat(chatId: string): void {
     this.#sql.exec("DELETE FROM page_chats WHERE chat_id = ?", chatId);
-    this.#sql.exec("DELETE FROM branch_counts WHERE root = ?", chatId);
+    // Its branches may outlive it: their count stays until the last of them is deleted (returnBranch).
+    this.#sql.exec("DELETE FROM branch_counts WHERE root = ? AND n <= 0", chatId);
     this.forgetPeople(chatId);
   }
 
@@ -164,6 +165,7 @@ export class ChatRows {
   /** A branch counted against `root` was deleted, or never made: its place is free again. */
   returnBranch(root: string): void {
     this.#sql.exec("UPDATE branch_counts SET n = n - 1 WHERE root = ? AND n > 0", root);
+    this.#sql.exec("DELETE FROM branch_counts WHERE root = ? AND n <= 0", root);
   }
 
   /**

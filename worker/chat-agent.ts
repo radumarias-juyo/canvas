@@ -1889,20 +1889,22 @@ export class ChatAgent extends DurableObject<Env> {
   async removeMember(by: Person, uid: string): Promise<ChatRefusal | null> {
     if (by.uid !== this.uid && by.uid !== uid) return refuse(403, "Only the chat's owner can remove people.");
     if (!this.members.has(uid)) return refuse(404, "No such member.");
-    await this.#drop([uid], by.uid === uid ? "left" : "removed");
+    const left = by.uid === uid;
+    // Only the owner's removal keeps them out: someone who left, or lost access by a change of kind, may come back.
+    if (!left) this.kinds.shutOut(uid);
+    await this.#drop([uid], left ? "left" : "removed");
     return null;
   }
 
   /**
    * Take members out of the chat: their open sockets close at once, their waiting requests are withdrawn, and the chat
-   * leaves their sidebars. Nobody knows anybody through it any more (ChatRows.knowPeople), and they come back only by an
-   * invite: neither the owner adding them (addMember) nor opening the page it is on (joinPage) lets them in.
+   * leaves their sidebars. Nobody knows anybody through it any more (ChatRows.knowPeople). Those the owner removed come
+   * back only by an invite (removeMember, ChatKinds.shutOut).
    */
   async #drop(uids: readonly string[], event: "left" | "removed", notice = true): Promise<void> {
     const gone = uids.map((uid) => this.members.remove(uid)).filter((member) => member !== undefined);
     if (!gone.length) return;
     for (const member of gone) {
-      this.kinds.shutOut(member.uid);
       this.sockets.disconnect(member.uid);
       if (notice) this.#notePeople(member, event);
     }
@@ -1933,7 +1935,7 @@ export class ChatAgent extends DurableObject<Env> {
     if (this.#gone) return refuse(404, DELETED);
     if (typeof uid !== "string" || uid === this.uid || isSecondSeatUid(uid)) return refuse(400, "Pick someone to add.");
     if (this.members.has(uid)) return this.peopleFor(by.uid);
-    if (this.kinds.isShutOut(uid)) return refuse(403, "They left this chat or were removed from it: only an invite link brings them back.");
+    if (this.kinds.isShutOut(uid)) return refuse(403, "You removed them from this chat: only an invite link brings them back.");
     const person = await this.#directory.knownPerson(uid);
     if (!person) return refuse(404, "You can add only people you share another chat with. Send anyone else an invite link.");
     const title = (await this.#directory.chatTitle(this.chatId)) ?? "";
@@ -2086,7 +2088,9 @@ export class ChatAgent extends DurableObject<Env> {
         await this.#directory.returnBranch(root);
         return now;
       }
-      const member = by.uid === this.uid ? undefined : this.members.listVia().find((other) => other.uid === by.uid);
+      // The owner's second seat is the owner: their branch is theirs alone.
+      const asOwner = by.uid === this.uid || isSecondSeatUid(by.uid);
+      const member = asOwner ? undefined : this.members.listVia().find((other) => other.uid === by.uid);
       const kind = branchKind(this.kinds.kind(), member !== undefined);
       const page = this.kinds.knownPage();
       const from: BranchedFrom = { chatId: this.chatId, title, entry: at.id as number, root };
@@ -2107,7 +2111,8 @@ export class ChatAgent extends DurableObject<Env> {
         await branch
           .deleteChat(owner, { files: [] })
           .then(() => this.#directory.forgetChat(chatId))
-          .then(() => branch.resetDeleted())
+          // A reset ends the call that asked for it: it always fails (chat-routes.ts does the same).
+          .then(() => branch.resetDeleted().catch(() => {}))
           .catch((cleanup: unknown) => console.error("branch cleanup:", errorMessage(cleanup)));
       }
       throw error;
@@ -2127,7 +2132,7 @@ export class ChatAgent extends DurableObject<Env> {
   startBranch(made: { owner: Person; from: BranchedFrom; kind: ChatKind; page?: ChatPage }): void {
     this.members.setOwnerName(made.owner);
     this.kinds.setKind(made.kind);
-    this.kinds.setBranchedFrom(made.from);
+    this.kinds.setBranchedFrom(made.from, true);
     if (made.page) {
       // Not on the page: the page's chat is the one its author started. Its agents know of it, and may read it.
       this.kinds.setContextPage(made.page);
@@ -2149,7 +2154,7 @@ export class ChatAgent extends DurableObject<Env> {
     if (made.member) {
       const { via, ...person } = made.member;
       this.members.add(person, via === "invite" ? "added" : via);
-      await this.#index(person.uid).addSharedChat(this.#sharedRow(made.title));
+      if (this.#hasSidebar(person.uid)) await this.#index(person.uid).addSharedChat(this.#sharedRow(made.title));
       this.#tellShared();
       this.#meet([person]);
     }
@@ -2216,14 +2221,14 @@ export class ChatAgent extends DurableObject<Env> {
         this.scope.drafts().then((drafts) => drafts.deleteAll()),
         this.env.SANDBOX_ENABLED === "true" && exports.Sandbox.getByName(sandboxName(this.uid, this.chatId)).destroy(),
       ]);
-      // A branch's place among its conversation's MAX_BRANCHES is free again.
-      const from = this.kinds.branchedFrom();
+      // A branch's place among its conversation's MAX_BRANCHES is free again (an imported one took none).
+      const root = this.kinds.countedRoot();
       await this.lifecycle.disableAlarms();
       await this.lifecycle.dispose();
       disposed = true;
       await this.ctx.storage.deleteAll();
       this.ctx.storage.kv.put(GONE_KEY, true);
-      if (from) await this.#directory.returnBranch(from.root).catch((error: unknown) => console.error("branch count:", errorMessage(error)));
+      if (root) await this.#directory.returnBranch(root).catch((error: unknown) => console.error("branch count:", errorMessage(error)));
     } catch (error) {
       this.#gone = false;
       if (!disposed && this.#status() === "running") void this.#watchRuns().catch((e: unknown) => console.error("chat status:", errorMessage(e)));

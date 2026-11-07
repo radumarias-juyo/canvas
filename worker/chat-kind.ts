@@ -24,6 +24,8 @@ const BRANCHED_FROM_KEY = "branchedFrom";
 const CONTEXT_PAGE_KEY = "contextPage";
 /** Not exported: the people of a chat stay behind with it. */
 const SHUT_OUT_KEY = "shutOut";
+/** Not exported: this branch took a place among its conversation's MAX_BRANCHES (an imported one took none). */
+const COUNTED_KEY = "branchCounted";
 
 /** The chat storage keys an export carries (with the chat's other settings, worker/chat-dump.ts). */
 export const KIND_KV = [KIND_KEY, PAGE_KEY, BRANCHED_FROM_KEY, CONTEXT_PAGE_KEY];
@@ -74,8 +76,10 @@ export class ChatKindState {
     return this.#kv.get<BranchedFrom>(BRANCHED_FROM_KEY);
   }
 
-  setBranchedFrom(from: BranchedFrom): void {
+  /** Set by branchOff, which took the branch's place: `counted` says deleting it gives the place back. */
+  setBranchedFrom(from: BranchedFrom, counted = false): void {
     this.#kv.put(BRANCHED_FROM_KEY, from);
+    if (counted) this.#kv.put(COUNTED_KEY, true);
   }
 
   /**
@@ -90,7 +94,7 @@ export class ChatKindState {
   }
 
   /**
-   * `uid` left the chat or was removed: neither the owner adding them (addMember) nor opening the page it discusses
+   * The owner removed `uid` from the chat: neither the owner adding them (addMember) nor opening the page it discusses
    * (joinPage) lets them back in; an invite does (letBackIn). The newest MAX_SHUT_OUT are kept.
    */
   shutOut(uid: string): void {
@@ -110,10 +114,14 @@ export class ChatKindState {
     return this.#kv.get<string[]>(SHUT_OUT_KEY) ?? [];
   }
 
-  /** How many chats branched off from this one. */
   /** The page this chat's agents should know of: the one it is on, or (a branch of a chat on one) the one it came from. */
   knownPage(): ChatPage | undefined {
     return this.page() ?? this.#kv.get<ChatPage>(CONTEXT_PAGE_KEY);
+  }
+
+  /** The root a deleted branch gives its place back to: only one branchOff counted, never an imported one. */
+  countedRoot(): string | undefined {
+    return this.#kv.get<boolean>(COUNTED_KEY) === true ? this.branchedFrom()?.root : undefined;
   }
 
   setContextPage(page: ChatPage): void {

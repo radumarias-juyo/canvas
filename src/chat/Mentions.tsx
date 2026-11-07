@@ -227,7 +227,10 @@ export function useMentions(
 
   /** The picks still named in `text`, to send with it; the list starts empty for the next message. */
   const take = (text: string): MentionInput[] => keptMentions(text, picked);
-  const clear = () => setPicked([]);
+  const clear = () => {
+    setPicked([]);
+    setInvited([]);
+  };
   /**
    * A message brought back to send again (`text`, with the caret at its end): what it named counts as picked again, so
    * it goes with the text as before, and an "@" at its end that named nothing does not open the list.

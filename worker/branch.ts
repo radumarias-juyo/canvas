@@ -2,7 +2,7 @@ import type { Api, Model, Models, UserMessage } from "@earendil-works/pi-ai";
 import type { EntryRecord, JsonObject } from "@earendil-works/pi-durable";
 import { CHAT_AGENT_KIND } from "../shared/agents.ts";
 import { textOf } from "../shared/canonical.ts";
-import { CHAT_COPY_KIND, type ChatCopyData } from "../shared/chat-kinds.ts";
+import { CHAT_CONTEXT_KIND, CHAT_COPY_KIND, type ChatCopyData } from "../shared/chat-kinds.ts";
 import { CHAT_MESSAGE_KIND, publishedBy, type ChatMessageData, type Person } from "../shared/protocol.ts";
 import { askLine, assistantText, userText } from "./agents/turns.ts";
 
@@ -54,7 +54,7 @@ export function branchCopies(entries: readonly EntryRecord[], owner: Person): Co
 
 /**
  * What the branch's agent reads of the conversation it carries, as one passive write: each message as a labelled line
- * ("[Ana · person]: …"), as an agent's catch-up reads them, with `ownerUid`'s lines marked as the owner's. Past
+ * ("[Ana · person]: …"), as an agent's catch-up reads them (without the chat's own context notes), with `ownerUid`'s lines marked as the owner's. Past
  * BRANCH_CONTEXT_CHARS the newest lines stay word for word and the older ones are `summarize`d (a small model), or left
  * out with a note when it fails or there is none.
  */
@@ -64,7 +64,11 @@ export async function branchContext(
   title: string,
   summarize?: (older: string) => Promise<string | undefined>,
 ): Promise<string> {
-  const lines = entries.map((entry) => askLine(entry, "", ownerUid)).filter((line): line is string => Boolean(line));
+  // Not what the chat's own agents were told of it (a branch's context, its page): the copies it carries say it again.
+  const lines = entries
+    .filter((entry) => entry.kind !== CHAT_CONTEXT_KIND)
+    .map((entry) => askLine(entry, "", ownerUid))
+    .filter((line): line is string => Boolean(line));
   const kept: string[] = [];
   let size = 0;
   let cut = lines.length;

@@ -326,9 +326,24 @@ describe("ChatRows: page chats and people", () => {
     expect(rows.takeBranch("other", MAX_BRANCHES)).toBe(true);
     rows.returnBranch("root");
     expect(rows.takeBranch("root", MAX_BRANCHES)).toBe(true);
+    // Deleting the first chat keeps the count while its branches are there.
     rows.forgetChat("root");
+    expect(rows.takeBranch("root", MAX_BRANCHES)).toBe(false);
+    for (let i = 0; i < MAX_BRANCHES; i++) rows.returnBranch("root");
     rows.returnBranch("root");
+    rows.forgetChat("root");
     expect(rows.takeBranch("root", 1)).toBe(true);
+    expect(rows.takeBranch("root", 1)).toBe(false);
+  });
+
+  it("gives a place back only for a branch branchOff counted, not an imported one", () => {
+    const from = { chatId: "c1", title: "t", entry: 3, root: "c0" };
+    const made = new ChatKindState(memoryKv(), () => false);
+    made.setBranchedFrom(from, true);
+    expect(made.countedRoot()).toBe("c0");
+    const imported = new ChatKindState(memoryKv(), () => false);
+    imported.setBranchedFrom(from);
+    expect(imported.countedRoot()).toBeUndefined();
   });
 
   it("keeps at most MAX_KNOWN_PAIRS pairs, newest kept", () => {
@@ -388,6 +403,16 @@ describe("branching off", () => {
     expect(text).toContain("[pi · agent]: Signups are up 12%.");
     expect(text).toContain("[research · agent]: Mostly from the new form.");
     expect(text).not.toContain("bea: …");
+  });
+
+  it("leaves out the chat's own context notes, so a branch of a branch does not carry the conversation twice", async () => {
+    const nested = [
+      entry(1, CHAT_CONTEXT_KIND, { about: "branch" }, [{ role: "user", content: "[bea · person]: said before", timestamp: T0 }]),
+      said(2, bea, "Carried on"),
+    ];
+    const text = await branchContext(nested, owner.uid, "Branch");
+    expect(text).toContain("Carried on");
+    expect(text).not.toContain("said before");
   });
 
   it("summarizes the older part of a long conversation, or leaves it out with a note when the summary fails", async () => {
