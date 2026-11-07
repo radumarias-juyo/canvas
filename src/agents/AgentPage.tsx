@@ -19,6 +19,7 @@ import { SetupTab } from "./SetupTab.tsx";
 import { KnowsTab } from "../memory/KnowsTab.tsx";
 import { WorkflowTab } from "./WorkflowTab.tsx";
 import { dropAgent, putAgent, reloadAgents, useAgents } from "./store.ts";
+import { FollowButton } from "../feed/FeedNav.tsx";
 
 /**
  * What the page shows: one of the user's own agents, a new one being made, or someone else's that a chat shares with
@@ -301,7 +302,13 @@ function AgentHeader({
             </button>
           </>
         ) : (
-          subject.kind === "shared" && <span className="pill agent-state off">{subject.agent.ownerName}’s · read-only</span>
+          subject.kind === "shared" && (
+            <>
+              <span className="pill agent-state off">{subject.agent.ownerName}’s · read-only</span>
+              {/* Its posts reach the follower's feed while its owner shares it in this chat, and they are in it. */}
+              <FollowButton kind="agent" id={subject.agent.id} chatId={subject.chatId} />
+            </>
+          )
         )}
       </div>
       {error && <p className="form-error agent-head-note">{error}</p>}

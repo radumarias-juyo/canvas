@@ -21,6 +21,8 @@ import { skillsRoute } from "./skills-routes.ts";
 import { agentsRoute } from "./agents-routes.ts";
 import { memoryRoute } from "./memory-routes.ts";
 import { runsRoute } from "./runs-routes.ts";
+import { feedRoute } from "./feed-routes.ts";
+import type { FeedInput } from "../shared/feed.ts";
 import { chatAgentName } from "./chat-agent.ts";
 import { newId, PathError, Storage } from "./storage/index.ts";
 
@@ -210,6 +212,9 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (agents) return agents;
   const runs = await runsRoute(request, uid, directory, env.DEV_TOOLS === "true");
   if (runs) return runs;
+  // The feed, and follows of others' pages and agents (worker/feed-routes.ts).
+  const feed = await feedRoute(request, uid, directory, storage);
+  if (feed) return feed;
 
   const memory = await memoryRoute(request, directory);
   if (memory) return memory;
@@ -237,6 +242,14 @@ async function route(request: Request, env: Env): Promise<Response> {
 
   // Save notes as agents learn them in a chat, and what servers cover, to try the Memory view without the model. Needs DEV_TOOLS=true.
   if (path === "/api/dev/memory" && method === "POST" && env.DEV_TOOLS === "true") return devMemory(request, directory);
+  // Add an item to the caller's own feed, to try the feed without runs or a model. Needs DEV_TOOLS=true.
+  if (path === "/api/dev/feed" && method === "POST" && env.DEV_TOOLS === "true") {
+    const item = await readJson<FeedInput>(request);
+    if (!item || typeof item.ref !== "string" || typeof item.title !== "string" || !item.open) {
+      return json({ error: "Expected a feed item (shared/feed.ts)." }, 400);
+    }
+    return json({ kept: await directory.addFeed({ ...item, ref: `dev:${item.ref}`, at: item.at || Date.now() }) });
+  }
 
   const files = await filesRoute(request, () => storage.userFiles(uid));
   if (files) return files;

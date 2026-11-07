@@ -29,6 +29,9 @@ import { agentPlace, type AgentPlace } from "./agents/nav.ts";
 import { reloadAgents } from "./agents/store.ts";
 import { MemoryView } from "./memory/MemoryView.tsx";
 import { reloadMemory, toConfirm, useMemory } from "./memory/store.ts";
+import { FeedNav } from "./feed/FeedNav.tsx";
+import { FeedView } from "./feed/FeedView.tsx";
+import { reloadFeed, reloadFollows } from "./feed/store.ts";
 
 /** The app's location, path and query, and a way to go elsewhere in it without loading the page again. */
 function usePath(): [URL, (path: string) => void] {
@@ -89,6 +92,7 @@ export function App() {
       opening={chatId && opening && ID_PATTERN.test(opening) ? opening : undefined}
       showSkills={path === "/skills"}
       showMemory={path === "/memory"}
+      showFeed={path === "/feed"}
       agentPage={agentPlace(url) ?? undefined}
       navigate={navigate}
       onSignOut={async () => {
@@ -205,6 +209,8 @@ interface WorkspaceProps {
   showSkills: boolean;
   /** The memory page in place of a chat. */
   showMemory: boolean;
+  /** The feed in place of a chat. */
+  showFeed: boolean;
   /** An agent's page in place of a chat. */
   agentPage: AgentPlace | undefined;
   navigate: (path: string) => void;
@@ -229,7 +235,7 @@ const PREVIEW_MIN = 360;
 /** Phones and narrow windows: one column, the sidebar a menu that slides in over it (styles.css, the same width). */
 const NARROW = "(max-width: 900px)";
 
-function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, showMemory, agentPage, navigate, onSignOut }: WorkspaceProps) {
+function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, showFeed, showMemory, agentPage, navigate, onSignOut }: WorkspaceProps) {
   const { chats, load: loadChats, newSince } = useChatList(chatId);
   const [artifacts, loadArtifacts] = useLatest<ArtifactSummary[]>(api.artifacts, []);
   const [files, loadFiles] = useLatest<FileInfo[]>(api.files, []);
@@ -280,7 +286,20 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, showMe
   // user (a run waiting, or a sign-in about to run out).
   const [signIns, loadSignIns, setSignIns] = useLatest<McpSignInView[]>(api.signIns, []);
   const onSignIn = useSignInAlerts(loadSignIns);
-  useSidebarSocket({ chats: loadChats, artifacts: loadArtifacts, skills: loadSkills, "sign-ins": loadSignIns, agents: reloadAgents, memory: reloadMemory }, notices.onMention, onSignIn);
+  useSidebarSocket(
+    {
+      chats: loadChats,
+      artifacts: loadArtifacts,
+      skills: loadSkills,
+      "sign-ins": loadSignIns,
+      agents: reloadAgents,
+      feed: reloadFeed,
+      follows: reloadFollows,
+      memory: reloadMemory,
+    },
+    notices.onMention,
+    onSignIn,
+  );
   // Pushes reach this browser for the user signed in here, and no one else.
   useEffect(() => setPushUser(uid), [uid]);
   // Another chat shows its own artifacts: the one asked for at once, else the newest it published once it loads.
@@ -303,7 +322,7 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, showMe
 
   // The menu closes once the user picked something in it: a chat, the skills, a file or an artifact to preview; and when
   // the window widens past NARROW, so it does not open again by itself when it narrows.
-  useEffect(() => setMenuOpen(false), [chatId, showSkills, showMemory, agentPage?.id, preview, narrow]);
+  useEffect(() => setMenuOpen(false), [chatId, showSkills, showFeed, showMemory, agentPage?.id, preview, narrow]);
   useEffect(() => {
     if (!menuOpen) return;
     const onKey = (event: KeyboardEvent) => event.key === "Escape" && setMenuOpen(false);
@@ -424,6 +443,7 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, showMe
             )}
           </div>
           <SignInNotices list={signIns} onChange={(list) => setSignIns(() => list)} />
+          <FeedNav active={showFeed} navigate={navigate} />
           {/* Chats scroll here; artifacts, skills and the files panel stay below them. */}
           <div className="sidebar-scroll">
             <ChatsHeading order={chatOrder} />
@@ -515,7 +535,7 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, showMe
       {narrow && menuOpen && <div className="drawer-backdrop" onClick={() => setMenuOpen(false)} aria-hidden="true" />}
       <main className="main" ref={chatRef}>
         {/* A chat has its own header, with the menu button in it. */}
-        {narrow && (showSkills || !chatId) && !showMemory && !agentPage && (
+        {narrow && (showSkills || !chatId) && !agentPage && !showFeed && !showMemory && (
           <header className="chat-header">
             <MenuButton onClick={openMenu} />
             <h1 className="chat-title">{showSkills ? "Skills" : "Chats"}</h1>
@@ -525,6 +545,10 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, showMe
           // One page for every agent, so a notice of a save that made another (a new agent, a copy) shows on that one.
           <ErrorBoundary key="agent" what="this agent">
             <AgentPage place={agentPage} chats={chats} navigate={navigate} onMenu={narrow ? openMenu : undefined} />
+          </ErrorBoundary>
+        ) : showFeed ? (
+          <ErrorBoundary key="feed" what="the feed">
+            <FeedView navigate={navigate} onMenu={narrow ? openMenu : undefined} />
           </ErrorBoundary>
         ) : showMemory ? (
           <ErrorBoundary what="memory">
