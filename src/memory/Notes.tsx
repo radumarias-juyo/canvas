@@ -244,8 +244,13 @@ function NoteRow({ note, targets }: { note: MemoryNoteView; targets: NoteTargets
                   Move to just me
                 </button>
               )}
-              <button type="button" disabled={busy} onClick={() => void run(() => api.forgetNote(note.id))}>
-                Forget
+              <button
+                type="button"
+                disabled={busy}
+                title={waitsForConfirm(note) && note.source === "learned" ? "Not kept: nothing read it yet" : "Read no more, until you bring it back"}
+                onClick={() => void run(() => api.forgetNote(note.id))}
+              >
+                {waitsForConfirm(note) && note.source === "learned" ? "Dismiss" : "Forget"}
               </button>
             </>
           )}

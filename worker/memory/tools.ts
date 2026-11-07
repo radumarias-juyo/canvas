@@ -2,6 +2,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, section, type Extension } from "@earendil-works/pi-durable";
 import {
   MAX_NOTE_CHARS,
+  MAX_RECALLED,
   MEMORY_FORGET_TOOL,
   MEMORY_NOTE_TOOL,
   MEMORY_RECALL_TOOL,
@@ -70,8 +71,7 @@ export function memoryExtension(host: MemoryHost): Extension {
       }),
       defineTool({
         name: MEMORY_RECALL_TOOL,
-        description:
-          "Look through the memory notes this conversation may read, beyond those in your instructions: those holding every word of query, or all of them for an empty one.",
+        description: `Look through the memory notes this conversation may read: those holding every word of query (any, for an empty one), up to ${MAX_RECALLED}, the ones not in your instructions first.`,
         parameters: Type.Object({ query: Type.Optional(Type.String({ description: "Words to look for." })) }),
         execute: async (args, api) => {
           const found = await host.recall(String(api.conversationId), args.query ?? "");

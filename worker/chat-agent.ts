@@ -157,6 +157,7 @@ import type { Value } from "../shared/conditions.ts";
 import { runRef, type AgentRunDetail, type AgentRunView, type RunDelivery, type RunRef } from "../shared/runs.ts";
 import { agentsExtension } from "./agents/tools.ts";
 import { ChatMemory, type MemoryAgent } from "./memory/chat.ts";
+import { freshPrompt } from "./memory/fresh.ts";
 import { memoryExtension } from "./memory/tools.ts";
 import { coverageOf } from "./memory/coverage.ts";
 import { agentInstructions, allowedTools, askOf, assistantText, attachedNote, MAX_ASK_CHARS, messageAskKey, runTools, speakersFor } from "./agents/turns.ts";
@@ -387,11 +388,11 @@ export class ChatAgent extends DurableObject<Env> {
     kind: () => this.kinds.kind(),
     alone: () => !this.members.hasAny(),
     agentFor: (conversation) => this.#memoryAgent(conversation),
+    piByOwner: () => this.#piByOwner(),
+    freshPrompt: async (session) => freshPrompt(session === undefined ? await this.#root() : await this.#conversation(session)),
     directory: (uid) => this.#index(uid),
     kv: this.ctx.storage.kv,
   });
-  /** The memory tools and section: kept the last extension (#install), so a note added between turns changes only the end of the prompt. */
-  readonly #memoryExtension = memoryExtension(this.memory.host());
   readonly reactions = new ChatReactions(this.ctx.storage.sql);
   readonly sockets = new ChatSockets({
     events: () => this.harness.session().events(),
@@ -535,17 +536,7 @@ export class ChatAgent extends DurableObject<Env> {
     this.registry.install(agentsExtension(scope));
     if (env.SANDBOX_ENABLED === "true") this.registry.install(sandboxExtension(scope));
     this.registry.install(systemPromptExtension(() => this.#systemPrompts()));
-    // Last: a note added between turns then changes only the end of the prompt (#install keeps it so).
-    this.registry.install(this.#memoryExtension);
-  }
-
-  /** Install `extension`; one installed for the first time goes before the memory section, which stays last. */
-  #install(extension: Extension): void {
-    const fresh = this.registry.snapshot().extension(extension.name) === undefined;
-    this.registry.install(extension);
-    if (!fresh) return;
-    this.registry.uninstall(this.#memoryExtension);
-    this.registry.install(this.#memoryExtension);
+    this.registry.install(memoryExtension(this.memory.host()));
   }
 
   /**
@@ -560,12 +551,24 @@ export class ChatAgent extends DurableObject<Env> {
       const entry = entries.find((known) => known.agentId === each.agentId);
       return !!entry && sessionOf(entry, each) === conversation;
     });
-    const agentId =
-      turn?.agentId ?? entries.find((each) => each.session === conversation)?.agentId ?? this.runs.agentOfSession(conversation) ?? undefined;
+    const ran = this.runs.agentOfSession(conversation);
+    const agentId = turn?.agentId ?? entries.find((each) => each.session === conversation)?.agentId ?? ran ?? undefined;
     if (agentId === undefined) return null;
     // A run's agent is on its home roster; one taken off it still reads only its own notes, never pi's.
     const entry = entries.find((each) => each.agentId === agentId);
-    return { agentId, ownerUid: entry?.ownerUid ?? this.uid, name: entry?.name ?? "agent", byOwner: turn?.byOwner === true };
+    return { agentId, ownerUid: entry?.ownerUid ?? this.uid, name: entry?.name ?? "agent", byOwner: turn?.byOwner === true, ...(ran && { run: true }) };
+  }
+
+  /**
+   * pi's turn answers the owner's own message: the newest of pi's inputs in the log is one of theirs, not an agent's
+   * hand-off (CHAT_TURN_KIND), which nobody may have asked for. Owner's second seat included: it is the owner.
+   */
+  async #piByOwner(): Promise<boolean> {
+    for await (const page of this.#log({ order: "descending" }, 100, 5)) {
+      const input = page.find((entry) => (entry.kind === CHAT_MESSAGE_KIND && !(entry.data as ChatMessageData | undefined)?.aside) || entry.kind === CHAT_TURN_KIND);
+      if (input) return input.kind === CHAT_MESSAGE_KIND && (input.data as ChatMessageData | undefined)?.uid === this.uid;
+    }
+    return false;
   }
 
   /** The uid is this object's name, which the Worker sets from a verified identity. */
@@ -966,7 +969,7 @@ export class ChatAgent extends DurableObject<Env> {
         sandbox: this.env.SANDBOX_ENABLED === "true",
       });
       if (source.fingerprint === this.#skillsInstalled) return;
-      this.#install(await skills([source]));
+      this.registry.install(await skills([source]));
       this.#skillsInstalled = source.fingerprint;
     } catch (error) {
       console.error("skills:", errorMessage(error));
@@ -1163,7 +1166,7 @@ export class ChatAgent extends DurableObject<Env> {
         outFolder: chatOutFolder(this.chatId),
       });
       if (index === this.#filesInstalled) return;
-      this.#install(filesIndexExtension(index));
+      this.registry.install(filesIndexExtension(index));
       this.#filesInstalled = index;
     } catch (error) {
       console.error("files:", errorMessage(error));
@@ -1217,9 +1220,9 @@ export class ChatAgent extends DurableObject<Env> {
     const installed = JSON.stringify([deferred, [...catalog], [...unavailable]]);
     if (installed !== this.#mcp.key) {
       const { extension, listing, toolInfo } = mcpExtension(this.hub, catalog, unavailable, () => this.discoverMcp(), { deferred });
-      this.#install(extension);
+      this.registry.install(extension);
       this.#mcpTools = toolInfo;
-      if (deferred) this.#install(this.#toolSearch);
+      if (deferred) this.registry.install(this.#toolSearch);
       else this.registry.uninstall(this.#toolSearch);
       const deferring = deferred && !this.#mcp.deferred;
       this.#mcp = { key: installed, listing, generation, deferred };
@@ -1926,6 +1929,12 @@ export class ChatAgent extends DurableObject<Env> {
     else this.#tellKind(person.uid);
     this.#tellShared();
     this.#meet([person]);
+    this.#audienceChanged();
+  }
+
+  /** More people may read the chat now: no conversation's prompt keeps the owner's own notes (ChatMemory). */
+  #audienceChanged(): void {
+    this.ctx.waitUntil(this.memory.audienceChanged());
   }
 
   /**
@@ -2076,6 +2085,7 @@ export class ChatAgent extends DurableObject<Env> {
     const to = kind as ChatKind;
     if (to === from) return this.peopleFor(by.uid);
     this.kinds.setKind(to);
+    this.#audienceChanged();
     // "Only you": a link sent before must not let anyone in, which would make it a group again (#joined).
     if (to === "private") this.members.revokeInvites();
     const removed = plan.removed.map(personOf);
@@ -2104,6 +2114,7 @@ export class ChatAgent extends DurableObject<Env> {
     this.members.setOwnerName(by);
     this.kinds.setKind("page");
     this.kinds.setPage(page);
+    this.#audienceChanged();
     this.#bringIn([page.id]);
     await this.#contextWrite("page", pageNote(page, "discusses"));
     return null;

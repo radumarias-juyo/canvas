@@ -842,8 +842,8 @@ export class UserDirectory extends DurableObject<Env> {
     this.#memory.use(ids);
   }
 
-  recallNotes(reader: MemoryReader, query: string): MemoryNote[] {
-    return this.#memory.recall(reader, query);
+  recallNotes(reader: MemoryReader, query: string, shown: readonly string[] = []): MemoryNote[] {
+    return this.#memory.recall(reader, query, shown);
   }
 
   /** The model forgets a note in a conversation (UserMemory.forgetFor). */

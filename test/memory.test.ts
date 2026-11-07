@@ -6,6 +6,7 @@ import {
   checkNoteInput,
   MAX_NOTE_CHARS,
   MAX_UNCONFIRMED,
+  MAX_UNCONFIRMED_PER_CHAT,
   MEMORY_FORGET_TOOL,
   MEMORY_NOTE_TOOL,
   MEMORY_RECALL_TOOL,
@@ -250,6 +251,26 @@ describe("UserMemory", () => {
     const second = saved(memory.learn(writer(GROUP, "group", false, true), { text: "standup is at nine.", scope: "chat", kind: "preference" }));
     expect(second).toMatchObject({ existed: true, note: { id: first.note.id, confirmed: true } });
     expect(memory.store.list()).toHaveLength(1);
+    // A fact waits for the owner's own confirm: said again in a turn, it still waits.
+    const fact = saved(memory.learn(writer(PRIVATE, "private", true, true), { text: "The target is 40.", scope: "user", kind: "fact" }));
+    expect(
+      saved(memory.learn(writer(PRIVATE, "private", true, true), { text: "The target is 40.", scope: "user", kind: "fact" })).note.confirmed,
+    ).toBe(false);
+    expect(saved(memory.add({ text: "The target is 40.", scope: "user" })).id).toBe(fact.note.id);
+    expect(memory.store.get(fact.note.id)?.confirmed).toBe(true);
+  });
+
+  it("lets turns the owner did not ask for fill only their own chat's waiting notes, and dismisses one by deleting it", () => {
+    const { memory } = directory();
+    for (let i = 0; i < MAX_UNCONFIRMED_PER_CHAT; i++)
+      saved(memory.learn(writer(GROUP, "group", false, false), { text: `Ana says ${i}.`, scope: "chat", kind: "preference" }));
+    const refused = memory.learn(writer(GROUP, "group", false, false), { text: "One more.", scope: "chat", kind: "preference" });
+    expect(refused).toHaveProperty("error");
+    // The owner's own turns still save what waits for their confirm.
+    const fact = saved(memory.learn(writer(PRIVATE, "private", true, true), { text: "The target is 40.", scope: "user", kind: "fact" }));
+    expect(fact.note.confirmed).toBe(false);
+    saved(memory.forget(fact.note.id));
+    expect(memory.store.get(fact.note.id)).toBeNull();
   });
 
   it("holds at most MAX_UNCONFIRMED notes waiting for a confirm", () => {
@@ -352,14 +373,29 @@ describe("UserMemory", () => {
 });
 
 describe("the prompt's notes", () => {
-  it("keeps pinned and most used notes within the budget, in the order they were made", () => {
+  it("keeps pinned and the newest notes within the budget, in the order they were made", () => {
     const notes = [
-      note({ id: "000000000001", text: "a".repeat(40), createdAt: 1 }),
-      note({ id: "000000000002", text: "b".repeat(40), createdAt: 2, uses: 9 }),
-      note({ id: "000000000003", text: "c".repeat(40), createdAt: 3, pinned: true }),
+      note({ id: "000000000001", text: "a".repeat(40), createdAt: 1, updatedAt: 1, uses: 9 }),
+      note({ id: "000000000002", text: "b".repeat(40), createdAt: 2, updatedAt: 2 }),
+      note({ id: "000000000003", text: "c".repeat(40), createdAt: 3, updatedAt: 3, pinned: true }),
     ];
     expect(promptNotes(notes, 160).map((each) => each.id)).toEqual(["000000000002", "000000000003"]);
     expect(promptNotes(notes).map((each) => each.id)).toEqual(["000000000001", "000000000002", "000000000003"]);
+  });
+
+  it("lets a new note in when the budget is full, whatever the older ones' uses", () => {
+    const { memory } = directory();
+    const old = saved(memory.add({ text: `Report in USD. ${"x".repeat(150)}`, scope: "user" }));
+    memory.use([old.id, old.id, old.id]);
+    for (let n = 0; n < 25; n++) {
+      const each = saved(memory.add({ text: `Older note ${n}. ${"y".repeat(150)}`, scope: "user" }));
+      memory.use([each.id]);
+    }
+    const fresh = saved(memory.add({ text: "Report in EUR.", scope: "user" }));
+    const { notes, more } = memory.read(reader(PRIVATE, "private", true));
+    expect(more).toBeGreaterThan(0);
+    expect(notes.map((each) => each.id)).toContain(fresh.id);
+    expect(notes.map((each) => each.id)).not.toContain(old.id);
   });
 
   it("always says something, and nothing of notes off the record", () => {
@@ -372,30 +408,37 @@ describe("the prompt's notes", () => {
 });
 
 describe("ChatMemory", () => {
-  /** A chat of the owner's: its kind, who is in it, and the agent each session is. */
+  /**
+   * A chat of the owner's: its kind, who is in it (both may change: `state`), the agent each session is, whether pi's
+   * turn answers the owner, and the conversations whose prompt was started afresh.
+   */
   function chat(chatId: string, kind: ChatKind, alone: boolean, owner = directory()) {
+    const state = { kind, alone, piByOwner: true };
     const sessions = new Map<string, MemoryAgent>();
     const kv = new Map<string, unknown>();
+    const fresh: (string | undefined)[] = [];
     let used: string[] = [];
     const memory = new ChatMemory({
       ownerUid: "owner",
       chatId,
-      kind: () => kind,
-      alone: () => alone,
+      kind: () => state.kind,
+      alone: () => state.alone,
       agentFor: (conversation) => sessions.get(conversation) ?? null,
+      piByOwner: async () => state.piByOwner,
+      freshPrompt: async (conversation) => void fresh.push(conversation),
       directory: () => ({
         readNotes: (reader) => owner.memory.read(reader),
         useNotes: (ids) => {
           used = [...used, ...ids];
           owner.memory.use(ids);
         },
-        recallNotes: (reader, query) => owner.memory.recall(reader, query),
+        recallNotes: (reader, query, shown) => owner.memory.recall(reader, query, shown),
         learnNote: (writer, input) => owner.memory.learn(writer, input),
         forgetNoteFor: (writer, id) => owner.memory.forgetFor(writer, id),
       }),
       kv: { get: <T>(key: string) => kv.get(key) as T | undefined, put: (key: string, value: unknown) => void kv.set(key, value) },
     });
-    return { memory, host: memory.host(), sessions, owner, used: () => used };
+    return { memory, host: memory.host(), sessions, owner, state, fresh, used: () => used };
   }
 
   it("gives pi in a shared chat only the chat's notes, and saves what it learns there for the owner to confirm", async () => {
@@ -442,25 +485,63 @@ describe("ChatMemory", () => {
   it("reads the section again once the chat is shared, never keeping the owner's own notes in it", async () => {
     const owner = directory();
     saved(owner.memory.add({ text: "My salary is private.", scope: "user" }));
-    let alone = true;
-    const memory = new ChatMemory({
-      ownerUid: "owner",
-      chatId: PRIVATE,
-      kind: () => (alone ? "private" : "group"),
-      alone: () => alone,
-      agentFor: () => null,
-      directory: () => ({
-        readNotes: (reader) => owner.memory.read(reader),
-        useNotes: () => {},
-        recallNotes: (reader, query) => owner.memory.recall(reader, query),
-        learnNote: (writer, input) => owner.memory.learn(writer, input),
-        forgetNoteFor: (writer, id) => owner.memory.forgetFor(writer, id),
-      }),
-      kv: { get: () => undefined, put: () => {} },
-    });
+    const { memory, host, state, fresh, sessions } = chat(PRIVATE, "private", true, owner);
+    sessions.set("s1", { agentId: RESEARCH, ownerUid: "owner", name: "research", byOwner: true });
     expect(await memory.refresh()).toContain("salary");
-    alone = false;
-    expect(await memory.host().section("root")).not.toContain("salary");
+    expect(await memory.refresh("s1")).toContain("salary");
+    state.alone = false;
+    state.kind = "group";
+    expect(await host.section("root")).not.toContain("salary");
+    // Every conversation whose prompt held them starts it afresh, and only once.
+    await memory.audienceChanged();
+    expect(fresh).toEqual([undefined, "s1"]);
+    await memory.refresh();
+    await memory.audienceChanged();
+    expect(fresh).toHaveLength(2);
+  });
+
+  it("starts a prompt afresh at the next turn when the audience changed while nobody was told", async () => {
+    const owner = directory();
+    saved(owner.memory.add({ text: "My salary is private.", scope: "user" }));
+    const { memory, state, fresh } = chat(PRIVATE, "private", true, owner);
+    await memory.refresh();
+    state.kind = "group";
+    expect(await memory.refresh()).not.toContain("salary");
+    expect(fresh).toEqual([undefined]);
+  });
+
+  it("lets pi save as the owner only in a turn that answers the owner's own message", async () => {
+    const owner = directory();
+    const { host, state } = chat(PRIVATE, "private", true, owner);
+    state.piByOwner = false;
+    const handed = saved(await host.note("root", { text: "Use dollars.", scope: "user", kind: "preference" }));
+    expect(handed.note.confirmed).toBe(false);
+    const kept = saved(owner.memory.add({ text: "Use euros.", scope: "user" }));
+    expect(await host.forget("root", kept.id)).toHaveProperty("error");
+    state.piByOwner = true;
+    expect(saved(await host.note("root", { text: "Short answers.", scope: "user", kind: "preference" })).note.confirmed).toBe(true);
+  });
+
+  it("never gives a run's sessions the owner's own notes, as their reports reach other chats", async () => {
+    const owner = directory();
+    saved(owner.memory.add({ text: "My salary is private.", scope: "user" }));
+    saved(owner.memory.add({ text: "Cite sources.", scope: "agent", agentId: RESEARCH }));
+    const { memory, sessions } = chat(PRIVATE, "private", true, owner);
+    sessions.set("run", { agentId: RESEARCH, ownerUid: "owner", name: "research", byOwner: false, run: true });
+    const section = await memory.refresh("run");
+    expect(section).toContain("Cite sources.");
+    expect(section).not.toContain("salary");
+  });
+
+  it("recalls first the notes the prompt does not hold", async () => {
+    const owner = directory();
+    for (let n = 0; n < 30; n++) saved(owner.memory.add({ text: `Note number ${n} ${"x".repeat(150)}.`, scope: "user" }));
+    const { memory, host } = chat(PRIVATE, "private", true, owner);
+    const section = await memory.refresh();
+    const notShown = owner.memory.list().filter((note) => !section.includes(note.text)).length;
+    expect(notShown).toBeGreaterThan(0);
+    const found = await host.recall("root", "");
+    expect(found.slice(0, notShown).every((note) => !section.includes(note.text))).toBe(true);
   });
 
   it("says nothing is read or saved where the owner's directory refuses, as the tools do", async () => {

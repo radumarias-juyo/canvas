@@ -26,6 +26,8 @@ export const MAX_NOTE_CHARS = 500;
 export const MAX_NOTES = 500;
 /** How many notes learned in conversations may wait to be confirmed at once. */
 export const MAX_UNCONFIRMED = 30;
+/** How many notes saved in turns the owner did not ask for wait in one chat at once: others cannot fill the owner's. */
+export const MAX_UNCONFIRMED_PER_CHAT = 10;
 /** How much of a prompt the notes take at most: the rest are found with memory_recall. */
 export const PROMPT_NOTES_CHARS = 4_000;
 /** How many notes memory_recall returns at most. */
@@ -98,6 +100,11 @@ export function reads(reader: MemoryReader, note: Pick<MemoryNote, "scope" | "ag
   return note.chatId === reader.chatId;
 }
 
+/** Whether `reader` reads the owner's own ("just me") notes: only in a private chat with nobody else in it. */
+export function readsOwnNotes(reader: MemoryReader): boolean {
+  return reads(reader, { scope: "user", confirmed: true });
+}
+
 /** Where a note the model asks to save goes, and whether it waits for its owner's confirm; or why it is not saved. */
 export type NotePlace = { scope: MemoryScope; agentId?: string; chatId: string; confirmed: boolean; narrowed?: true } | { error: string };
 
@@ -129,9 +136,15 @@ export function checkNoteText(value: unknown): string | { error: string } {
   return text;
 }
 
-/** Pinned notes first, then the most used, then the newest: how the prompt and memory_recall pick among notes. */
-export function byRank(a: Pick<MemoryNote, "pinned" | "uses" | "createdAt">, b: Pick<MemoryNote, "pinned" | "uses" | "createdAt">): number {
-  return Number(b.pinned) - Number(a.pinned) || b.uses - a.uses || b.createdAt - a.createdAt;
+type Ranked = Pick<MemoryNote, "pinned" | "uses" | "createdAt" | "updatedAt">;
+
+/**
+ * Pinned notes first, then the newest (last written, edited or confirmed), then the most used: how the prompt and
+ * memory_recall pick among notes. Not by uses first: the prompt counts them, so the notes it holds would keep their
+ * place and a new one (which may replace an old one) would never get in.
+ */
+export function byRank(a: Ranked, b: Ranked): number {
+  return Number(b.pinned) - Number(a.pinned) || b.updatedAt - a.updatedAt || b.createdAt - a.createdAt || b.uses - a.uses;
 }
 
 /** A note no agent reads yet: learned, not confirmed, and not forgotten. */
@@ -149,7 +162,7 @@ export function inUse(note: Pick<MemoryNote, "forgottenAt">): boolean {
  * then the newest; then put back in the order they were made, so a new note adds to the end and the rest of the prompt
  * stays as it was.
  */
-export function promptNotes<T extends Pick<MemoryNote, "id" | "text" | "pinned" | "uses" | "createdAt">>(
+export function promptNotes<T extends Pick<MemoryNote, "id" | "text" | "pinned" | "uses" | "createdAt" | "updatedAt">>(
   notes: readonly T[],
   budget = PROMPT_NOTES_CHARS,
 ): T[] {
