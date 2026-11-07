@@ -456,6 +456,8 @@ export interface ChatMessageData extends Person {
   auto?: AutoPick;
   /** Which MCP tools were offered to answer it, when the chat has enough of them to pick (worker/agent/tool-pick.ts). */
   tools?: ToolPickNote;
+  /** The owner's Yes to an offered next step (`offer_yes`): its run only reads and drafts, and the agents it names never hand pi a turn. */
+  drafts?: true;
 }
 
 /**

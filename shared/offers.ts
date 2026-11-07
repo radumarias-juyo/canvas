@@ -3,7 +3,9 @@
 // Yes and No thanks for the chat's owner, and Yes replies to that message asking its agent to set it up (for something
 // to repeat, a routine: a draft agent with a schedule, saved off until its owner turns it on).
 
-import { AGENT_PROPOSE_TOOL } from "./agents.ts";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
+import type { EntryRecord } from "@earendil-works/pi-durable";
+import { AGENT_PROPOSE_TOOL, CHAT_AGENT_KIND, type ChatAgentReplyData } from "./agents.ts";
 
 /** What starts the line an answer offers its next step on. */
 export const OFFER_PREFIX = "Next step:";
@@ -24,8 +26,11 @@ export const OFFER_YES =
   `Yes to the next step your message offers: draft it as a routine with ${AGENT_PROPOSE_TOOL} for me to look over and turn on. ` +
   "Don't do anything else for it now.";
 
-/** Characters a browser draws as nothing (format characters such as zero-width, bidi controls and tags, private and unassigned code points). */
-const UNSEEN = /[\p{Cf}\p{Co}\p{Cn}]/gu;
+/**
+ * Characters a browser draws as nothing (format characters such as zero-width, bidi controls and tags, private and
+ * unassigned code points), but the zero-width joiner, which joins emoji into one ("👩‍💻") and hides nothing alone.
+ */
+const UNSEEN = /(?!\u200d)[\p{Cf}\p{Co}\p{Cn}]/gu;
 
 /** The rule in the agents' instructions (pi's and the roster's) for when and how to offer a next step. */
 export const OFFER_RULE =
@@ -60,4 +65,29 @@ export function offerOf(text: string): { body: string; offer: string } | null {
   const offer = match[1].replace(UNSEEN, "").replace(/^[\s*_]+|[\s*_]+$/g, "").replace(/\s+/g, " ");
   if (!body || !offer || offer.length > MAX_OFFER) return null;
   return { body, offer };
+}
+
+/**
+ * The next step one of pi's messages offers (shared/offers.ts), in its last text: only when nothing but its thoughts
+ * come after that text, since a message that goes on to call a tool is not the answer yet. `block` is the text's place
+ * in the message, where the answer shows without the offer's line.
+ */
+export function assistantOffer(content: AssistantMessage["content"]): { block: number; body: string; offer: string } | null {
+  for (let i = content.length - 1; i >= 0; i--) {
+    const block = content[i];
+    if (!block || block.type === "thinking") continue;
+    if (block.type !== "text") return null;
+    if (!block.text.trim()) continue;
+    const found = offerOf(block.text);
+    return found && { block: i, ...found };
+  }
+  return null;
+}
+
+/** The next step an entry offers: in one of pi's replies, or in another agent's (a `chat.agent` entry). */
+export function entryOffer(entry: EntryRecord): string | undefined {
+  if (entry.kind === CHAT_AGENT_KIND) return offerOf((entry.data as unknown as ChatAgentReplyData).text ?? "")?.offer;
+  const message = entry.model?.[0];
+  if (entry.kind === "pi.assistant" && message?.role === "assistant") return assistantOffer(message.content)?.offer;
+  return undefined;
 }

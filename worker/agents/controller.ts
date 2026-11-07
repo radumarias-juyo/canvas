@@ -326,9 +326,10 @@ export class AgentTurns {
 
   /**
    * pi replied (entry `entry` of the log, `text`): the agents it names get turns, as hand-offs within the chain pi's turn
-   * was in (`root` and `hop` when another agent handed pi that turn; none when a person asked it).
+   * was in (`root` and `hop` when another agent handed pi that turn; none when a person asked it). `unattended`: a chain
+   * that may never hand pi a turn (a Yes's run).
    */
-  fromPi(text: string, entry: number, chain: { hop: number; root?: number } = { hop: 0 }): void {
+  fromPi(text: string, entry: number, chain: { hop: number; root?: number; unattended?: true } = { hop: 0 }): void {
     const roster = this.#host.roster;
     const left = chain.root === undefined ? MAX_HOPS : MAX_HOPS - roster.handOffsFrom(chain.root);
     const agents = left > 0 ? handOffs(text, AGENT_NAME, chain.hop, roster.list()).slice(0, left) : [];
@@ -340,6 +341,7 @@ export class AgentTurns {
       byOwner: false,
       hop: chain.hop + 1,
       ...(chain.root !== undefined && { root: chain.root }),
+      ...(chain.unattended && { unattended: true as const }),
     });
   }
 }

@@ -176,7 +176,7 @@ import {
   runTools,
   speakersFor,
 } from "./agents/turns.ts";
-import { OFFER_YES, offerOf } from "../shared/offers.ts";
+import { entryOffer, OFFER_YES } from "../shared/offers.ts";
 import {
   answersEveryMessage,
   CHAT_BUDGET_KIND,
@@ -279,6 +279,8 @@ const PROGRESS = { partialIntervalMs: STREAM_STEP_MS, outputIntervalMs: STREAM_S
 const STATUS_KEY = "status";
 /** Set while pi's tools are only those of a Yes to an offer (draftTools), until its run is over (#piTools). */
 const DRAFTING_KEY = "drafting";
+/** Why a Yes to pi's offer is refused while pi works: its tools change for the whole run (#piTools). */
+const PI_BUSY_FOR_YES = "pi is still working: say yes once it is done.";
 /** Set once the owner's sidebar heard whether this chat has members: chats shared before it kept that tell it once. */
 const SHARED_TOLD_KEY = "sharedTold";
 /** Set while the chat is on Auto: a router picks the model and effort for each message that starts a run. */
@@ -331,7 +333,7 @@ const IMPORTED_KEY = "imported";
  * within the chain's cap. Set when the first agent joins, so pi's earlier answers start nothing.
  */
 const PI_SCAN_KEY = "piScan";
-type PiScan = { through: number; chain?: { hop: number; root: number } };
+type PiScan = { through: number; chain?: { hop: number; root?: number; unattended?: true } };
 /**
  * Set on an agent's home conversation: the agent whose own chat this is (the owner's directory marks the chat with
  * it too). There the agent is on the roster and answers every message that calls nobody else; its runs run here.
@@ -1466,30 +1468,29 @@ export class ChatAgent extends DurableObject<Env> {
   /**
    * The owner's Yes to the next step the reply `entryId` offers (shared/offers.ts): a reply to it the chat writes
    * (OFFER_YES, never the offer's words as the owner's), whose turn may only read and draft the routine (draftTools).
-   * pi's tools change for its whole run, so not while it works on another.
+   * pi's tools change for its whole run, so not while it works on another (checked again as it goes in, #piTools).
    */
   async takeOffer(author: Person, entryId: unknown): Promise<void> {
     if (author.uid !== this.uid) throw new Error("Only the chat's owner answers an offer.");
     const entry = await this.#entryAt(entryId);
-    if (!entry || this.#offerIn(entry) === undefined) throw new Error("That message offers no next step.");
-    if (entry.kind !== CHAT_AGENT_KIND && this.#piWorking()) throw new Error("pi is still working: say yes once it is done.");
+    // The offer as the app shows it (entryOffer), so Yes is taken only where it is offered.
+    if (!entry || entryOffer(entry) === undefined) throw new Error("That message offers no next step.");
+    if (entry.kind !== CHAT_AGENT_KIND && (await this.#replying())) throw new Error(PI_BUSY_FOR_YES);
     await this.prompt(OFFER_YES, author, [], [], entry.id, true);
-  }
-
-  /** The next step a reply offers: pi's (its last text) or a roster agent's. */
-  #offerIn(entry: EntryRecord): string | undefined {
-    if (entry.kind === CHAT_AGENT_KIND) return offerOf((entry.data as unknown as ChatAgentReplyData).text ?? "")?.offer;
-    const message = entry.model?.[0];
-    return entry.kind === "pi.assistant" && message?.role === "assistant" ? offerOf(assistantText(message))?.offer : undefined;
   }
 
   /**
    * pi's tools for the run a message starts: only reading and drafting for a Yes to its offer (draftTools), else all of
-   * them again. A message that joins a Yes's run gets what that run has: the tools come back once it is over.
+   * them again. A message that joins a Yes's run gets what that run has: the tools come back once it is over. Called
+   * only inside #place, and only between runs (#replying, never the lagging run watch): a Yes refused while pi works.
    */
   async #piTools(drafts: boolean): Promise<void> {
     const drafting = this.ctx.storage.kv.get<boolean>(DRAFTING_KEY) === true;
-    if (drafts === drafting || (!drafts && this.#piWorking())) return;
+    if (drafts === drafting) return;
+    if (await this.#replying()) {
+      if (drafts) throw new Error(PI_BUSY_FOR_YES);
+      return;
+    }
     const root = await this.#root();
     if (!drafts) {
       await root.configure({ tools: null }, BACKGROUND_CONTEXT);
@@ -1504,11 +1505,6 @@ export class ChatAgent extends DurableObject<Env> {
       .map(({ tool }) => tool);
     const keep = new Set(draftTools(installed.map((tool) => tool.name), this.#mcpTools, {}));
     await root.configure({ tools: installed.filter((tool) => keep.has(tool.name)) }, BACKGROUND_CONTEXT);
-  }
-
-  /** Whether pi is in a run now: as the run watch sees it while there is one (the sidebars' status lags it by SETTLE_MS). */
-  #piWorking(): boolean {
-    return (this.#runWatch ? this.#watched : this.#status()) === "running";
   }
 
   /** The messages the chat is getting ready to put in, oldest first (see IncomingMessage). */
@@ -1670,6 +1666,7 @@ export class ChatAgent extends DurableObject<Env> {
         sentAt,
         ...(auto && { auto }),
         ...(tools && { tools }),
+        ...(drafts && { drafts: true as const }),
       }) satisfies ChatMessageData;
     const summon = (data: ReturnType<typeof dataWith>) =>
       this.#summon(content, !everyMessage || speakers.length ? ({ ...data, summoned: true } satisfies ChatMessageData) : data);
@@ -1678,8 +1675,9 @@ export class ChatAgent extends DurableObject<Env> {
       await this.#place(async () => {
         const now = memoAsync(() => this.#now());
         const auto = routing && (await this.#applyPick(await routing, now));
-        // A Yes to pi's offer only reads and drafts; any other message gets pi all its tools back.
-        await this.#piTools(drafts && repliesToAgent);
+        // A Yes only reads and drafts, also one pi answers in place of an agent no longer on the roster; any other
+        // message gets pi all its tools back.
+        await this.#piTools(drafts);
         await summon(dataWith(auto, await this.#applyTools(await tooling, now)));
       });
     } else {
@@ -1702,6 +1700,8 @@ export class ChatAgent extends DurableObject<Env> {
         byOwner && repliesTo && speakers.includes(repliesTo) ? await this.#continuedRun(replied).catch(() => undefined) : undefined;
       const caller = {
         calledBy: { name: author.name, uid: author.uid, ...(routed && { routed: true as const }), ...(drafts && { drafts: true as const }) },
+        // A Yes's chain never hands pi a turn: pi would run it with the owner's full tools.
+        ...(drafts && { unattended: true as const }),
         // The catch-up leaves the message out (askKey), so the input carries all of it a hand-off would.
         ask: `${askOf({ name: author.name, kind: "person", owner: byOwner }, written, MAX_ASK_CHARS)}${files}`,
         askKey: messageAskKey({ uid: author.uid, sentAt }),
@@ -1978,8 +1978,8 @@ export class ChatAgent extends DurableObject<Env> {
       this.#unwatchRuns();
       this.#publishStatus(status);
       this.#quietFrom(Date.now());
-      // A Yes's run is over: pi gets all its tools back.
-      void this.#piTools(false).catch((error: unknown) => console.error("pi tools:", errorMessage(error)));
+      // A Yes's run is over: pi gets all its tools back, in turn with the messages going in (a Yes's among them).
+      void this.#place(() => this.#piTools(false)).catch((error: unknown) => console.error("pi tools:", errorMessage(error)));
     }, SETTLE_MS);
   }
 
@@ -3222,6 +3222,9 @@ export class ChatAgent extends DurableObject<Env> {
         } else if (seen.input === "handOff") {
           const { data } = seen;
           chain = typeof data?.hop === "number" && typeof data.root === "number" ? { hop: data.hop, root: data.root } : undefined;
+        } else if (seen.input === "message" && seen.drafts) {
+          // A Yes's run: the agents its answer names never hand pi a turn (unattended), which would have its full tools again.
+          chain = { hop: 0, unattended: true };
         } else chain = undefined;
       }
       if (this.#gone) return;

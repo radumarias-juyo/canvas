@@ -72,7 +72,7 @@ export function handOffs(text: string, from: string, hop: number, roster: readon
  */
 export type PiLogEntry =
   | { input: "handOff"; data: Partial<ChatTurnData> | undefined }
-  | { input: "message"; uid: string | undefined }
+  | { input: "message"; uid: string | undefined; drafts?: true }
   | { input: "other" }
   | { reply: AssistantMessage };
 
@@ -81,7 +81,7 @@ export function piLogEntry(entry: Pick<EntryRecord, "kind" | "data" | "model">):
   if (entry.kind === "pi.user") return { input: "other" };
   if (entry.kind === CHAT_MESSAGE_KIND) {
     const data = entry.data as Partial<ChatMessageData> | undefined;
-    return data?.aside ? undefined : { input: "message", uid: data?.uid };
+    return data?.aside ? undefined : { input: "message", uid: data?.uid, ...(data?.drafts && { drafts: true as const }) };
   }
   const reply = entry.kind === "pi.assistant" ? entry.model?.[0] : undefined;
   return reply?.role === "assistant" ? { reply } : undefined;

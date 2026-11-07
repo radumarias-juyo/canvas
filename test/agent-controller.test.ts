@@ -1187,6 +1187,18 @@ describe("AgentTurns: pi's replies", () => {
     expect(chat.roster.allRunning().map((turn) => turn.agentId)).toEqual([idOf(A), idOf(B), idOf(C)]);
   });
 
+  it("never hands pi a turn from the agents a Yes's run of pi names (unattended)", async () => {
+    const chat = new FakeChat([A]);
+    const text = "Drafted. @atlas have a look.";
+    chat.turns.fromPi(text, chat.piSays(text), { hop: 0, unattended: true });
+    await chat.flush();
+    const ta = chat.latest(A);
+    expect(ta).toMatchObject({ unattended: true, byOwner: false });
+    chat.finish(ta.id, done("@pi now send it"));
+    await chat.flush();
+    expect(chat.toPi).toEqual([]);
+  });
+
   it("carries on the chain an agent handed pi, up to MAX_HOPS hops", async () => {
     const { chat, turn } = await called([A, B]);
     chat.finish(turn.id, done("@pi can you look?"));

@@ -50,8 +50,8 @@ export interface AgentTurn extends AgentTurnView {
   /** The run its reply carries, so a reply to that continues the run too. */
   run?: RunRef;
   /**
-   * In a chain no person started (a run's hand-over): it and its hand-offs never hand pi a turn, which would run with
-   * the owner's full tools; pi only reads their replies.
+   * In a chain no person started (a run's hand-over), or one a Yes to an offer started (it may only draft): it and its
+   * hand-offs never hand pi a turn, which would run with the owner's full tools; pi only reads their replies.
    */
   unattended?: true;
 }
