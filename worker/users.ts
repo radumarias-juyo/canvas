@@ -1,6 +1,6 @@
 import { DurableObject, exports } from "cloudflare:workers";
 import type { ModelSetting } from "../shared/models.ts";
-import { PAGE_STORAGE_LIMITS, SOCKET_PING, type ArtifactSummary, type ChatStatus, type ChatSummary, type MentionNotice, type SidebarList } from "../shared/protocol.ts";
+import { PAGE_STORAGE_LIMITS, SOCKET_PING, MAX_CHAT_TITLE, type ArtifactSummary, type ChatStatus, type ChatSummary, type ChatRowChange, type MentionNotice, type Person, type SidebarList } from "../shared/protocol.ts";
 import type { ExportedAgent, ExportedChat, ExportedPageValues, ExportedSkill, ExportStart, ImportedSettings } from "../shared/data-export.ts";
 import type { SkillFileInfo } from "../shared/skill-files.ts";
 import { checkSystemPrompt, type ChatSystemPrompt } from "../shared/system-prompt.ts";
@@ -10,6 +10,9 @@ import { titleFromMessage, UNNAMED_CHAT } from "./agent/title.ts";
 import { applyAuthChange, type McpAuthChange, type McpAuthRecord, type McpAuthStore } from "./mcp/oauth.ts";
 import { mcpServers } from "./mcp/servers.ts";
 import { AgentStore, type AgentSave } from "./agents/store.ts";
+import { ChatRows } from "./chat-rows.ts";
+import { addColumns } from "./members.ts";
+import type { ChatKind } from "../shared/chat-kinds.ts";
 import { withoutSignInShares, type AgentChanges, type AgentChatUse, type AgentDefinition, type AgentInput, type AgentOrigin, type AgentResult } from "../shared/agents.ts";
 
 /** One user's OAuth state for one MCP server. `uid` must come from a verified identity. */
@@ -35,8 +38,8 @@ export function saveSystemPrompt(kv: SyncKvStorage, value: unknown): { text: str
   return checked;
 }
 
-/** A message that tagged this user: who wrote it, its start, and when. */
-export type Tag = Pick<MentionNotice, "from" | "text" | "at">;
+/** A message that tagged this user: who wrote it, its start, and when; or (`added`) the owner adding them to the chat. */
+export type Tag = Pick<MentionNotice, "from" | "text" | "at" | "added">;
 
 type ArtifactRow = { id: string; title: string; chat_id: string; latest: number; updated_at: number; seen: number };
 
@@ -70,6 +73,8 @@ function exportedAgent({ version: _version, createdAt: _created, updatedAt: _upd
 export class UserDirectory extends DurableObject<Env> {
   /** The user's agents (worker/agents/store.ts). */
   readonly #agents: AgentStore;
+  /** What of each sidebar row is this user's alone (pinned, closed, their name for it), chats' kinds, page chats, people (worker/chat-rows.ts). */
+  readonly #rows: ChatRows;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -88,18 +93,16 @@ export class UserDirectory extends DurableObject<Env> {
     // Added later: what the chat's agent is doing (ChatStatus), when something last came in that this user did not
     // write, and when they last saw the chat. activity_at > seen_at is unread. Then: when someone last tagged them in
     // it; mentioned_at > seen_at is a tag they have not seen.
-    for (const table of ["chats", "shared_chats"]) {
-      this.#addColumn(table, "status", "TEXT");
-      this.#addColumn(table, "activity_at", "INTEGER NOT NULL DEFAULT 0");
-      this.#addColumn(table, "seen_at", "INTEGER NOT NULL DEFAULT 0");
-      this.#addColumn(table, "mentioned_at", "INTEGER NOT NULL DEFAULT 0");
-    }
-    // Whether this user's own chat has members: the chat tells (setChatShared) when that changes, and when it opens.
-    this.#addColumn("chats", "shared", "INTEGER NOT NULL DEFAULT 0");
+    const sql = ctx.storage.sql;
+    const read = { status: "TEXT", activity_at: "INTEGER NOT NULL DEFAULT 0", seen_at: "INTEGER NOT NULL DEFAULT 0", mentioned_at: "INTEGER NOT NULL DEFAULT 0" };
+    // With, in the user's own chats, whether the chat has members: it tells (setChatShared) when that changes, and when it opens.
+    addColumns(sql, "chats", { ...read, shared: "INTEGER NOT NULL DEFAULT 0" });
+    addColumns(sql, "shared_chats", read);
+    this.#rows = new ChatRows(ctx.storage.sql);
     // The files of a skill imported as a package (SkillPackageFiles as JSON).
-    this.#addColumn("skills", "files", "TEXT");
+    addColumns(sql, "skills", { files: "TEXT" });
     // The newest version of each artifact its owner opened. Artifacts from before count as seen.
-    if (this.#addColumn("artifacts", "seen", "INTEGER NOT NULL DEFAULT 0")) ctx.storage.sql.exec("UPDATE artifacts SET seen = latest");
+    if (addColumns(sql, "artifacts", { seen: "INTEGER NOT NULL DEFAULT 0" }).length) sql.exec("UPDATE artifacts SET seen = latest");
     // A sidebar's socket stays open for hours: answer its keep-alive pings without waking this object.
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair(SOCKET_PING.request, SOCKET_PING.response));
     // Forget sign-ins to servers this deployment no longer has, tokens included.
@@ -108,13 +111,6 @@ export class UserDirectory extends DurableObject<Env> {
     ctx.storage.sql.exec(`DELETE FROM mcp_auth${configured.length ? ` WHERE server NOT IN (${placeholders})` : ""}`, ...configured);
   }
 
-  /** Add a column a table made before it lacks; true when it was added. `table`, `column` and `type` are written here, never input. */
-  #addColumn(table: string, column: string, type: string): boolean {
-    const columns = this.ctx.storage.sql.exec<{ name: string }>(`SELECT name FROM pragma_table_info('${table}')`).toArray();
-    if (columns.some((row) => row.name === column)) return false;
-    this.ctx.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
-    return true;
-  }
 
   /** This user's OAuth state for one MCP server (worker/mcp/oauth.ts): registration, tokens, a sign-in in progress. */
   mcpAuth(server: string): McpAuthRecord {
@@ -176,33 +172,65 @@ export class UserDirectory extends DurableObject<Env> {
 
   /** The user's own chats and the ones shared with them, most recent first. */
   listChats(): ChatSummary[] {
-    return this.ctx.storage.sql
-      .exec<{
-        id: string;
-        title: string;
-        created_at: number;
-        updated_at: number;
-        shared_by: string | null;
-        shared: number;
-        status: ChatStatus;
-        unread: number;
-        mentioned: number;
-      }>(
-        `SELECT id, title, created_at, updated_at, NULL AS shared_by, shared, status, activity_at > seen_at AS unread, mentioned_at > seen_at AS mentioned FROM chats
-         UNION ALL SELECT id, title, joined_at, updated_at, owner_name, 0, status, activity_at > seen_at, mentioned_at > seen_at FROM shared_chats
-         ORDER BY updated_at DESC`,
-      )
-      .toArray()
-      .map((row) => ({
-        id: row.id,
-        title: row.title,
-        createdAt: row.created_at,
-        updatedAt: row.updated_at,
-        ...(row.shared_by !== null ? { sharedBy: row.shared_by } : row.shared === 1 && { shared: true as const }),
-        ...(row.status && { status: row.status }),
-        ...(row.unread === 1 && { unread: true as const }),
-        ...(row.mentioned === 1 && { mentioned: true as const }),
-      }));
+    return this.#rows.list();
+  }
+
+  /** Change what of chat `id`'s row is this user's alone: pinned, closed, marked unread, their own name for it. */
+  changeChatRow(id: string, change: ChatRowChange): boolean {
+    const changed = this.#rows.change(id, change);
+    if (changed) this.#changed("chats");
+    return changed;
+  }
+
+  /** The chat `id`'s kind, which its chat object told this sidebar (setChatKind); null for a chat it does not list. */
+  chatKind(id: string): ChatKind | null {
+    return this.#rows.kindOf(id);
+  }
+
+  /** The chat `ownerUid`'s chat `id` is now `kind`: told by the chat, to every sidebar that lists it. */
+  setChatKind(id: string, ownerUid: string, kind: ChatKind): void {
+    // Written, and the sidebars told, only on a change: the chat tells a member again each time they open it.
+    const own = ownerUid === this.ctx.id.name;
+    const sql = own
+      ? this.ctx.storage.sql.exec("UPDATE chats SET kind = ? WHERE id = ? AND kind IS NOT ?", kind, id, kind)
+      : this.ctx.storage.sql.exec("UPDATE shared_chats SET kind = ? WHERE id = ? AND owner_uid = ? AND kind IS NOT ?", kind, id, ownerUid, kind);
+    if (sql.rowsWritten) this.#changed("chats");
+  }
+
+  /** The chat that discusses one of this user's artifacts (Discuss on its page), or null. */
+  pageChat(artifactId: string): string | null {
+    return this.#rows.pageChat(artifactId);
+  }
+
+  linkPageChat(artifactId: string, chatId: string): void {
+    this.#rows.linkPage(artifactId, chatId);
+  }
+
+  /** People this user shares chat `chatId` with: what "@" offers to add to a chat (see ChatRows.knowPeople). */
+  knowPeople(chatId: string, people: readonly Person[]): void {
+    this.#rows.knowPeople(chatId, people, this.ctx.id.name!);
+  }
+
+  /** Count a branch of this user's conversation that started in chat `root`, unless it has `max` (ChatRows.takeBranch). */
+  takeBranch(root: string, max: number): boolean {
+    return this.#rows.takeBranch(root, max);
+  }
+
+  returnBranch(root: string): void {
+    this.#rows.returnBranch(root);
+  }
+
+  /** `uid` left chat `chatId`, or was removed from it: this user no longer knows them through it. */
+  forgetPerson(chatId: string, uid: string): void {
+    this.#rows.forgetPeople(chatId, uid);
+  }
+
+  knownPeople(): Person[] {
+    return this.#rows.people();
+  }
+
+  knownPerson(uid: string): Person | null {
+    return this.#rows.person(uid);
   }
 
   /**
@@ -240,16 +268,21 @@ export class UserDirectory extends DurableObject<Env> {
    * since, so the app can mark what is new; null when nothing was unread, or they never looked at the chat.
    */
   markSeen(id: string): number | null {
-    const unread = "WHERE id = ? AND activity_at > seen_at";
+    // Marked unread by hand (ChatRows.change) counts too, though nothing new came in.
+    const unread = "WHERE id = ? AND (activity_at > seen_at OR marked_unread = 1)";
     const before = this.ctx.storage.sql
-      .exec<{ seen_at: number }>(`SELECT seen_at FROM chats ${unread} UNION ALL SELECT seen_at FROM shared_chats ${unread}`, id, id)
+      .exec<{ seen_at: number; activity_at: number }>(
+        `SELECT seen_at, activity_at FROM chats ${unread} UNION ALL SELECT seen_at, activity_at FROM shared_chats ${unread}`,
+        id,
+        id,
+      )
       .toArray()[0];
     if (!before) return null;
     const now = Date.now();
-    this.ctx.storage.sql.exec(`UPDATE chats SET seen_at = ? ${unread}`, now, id);
-    this.ctx.storage.sql.exec(`UPDATE shared_chats SET seen_at = ? ${unread}`, now, id);
+    this.ctx.storage.sql.exec(`UPDATE chats SET seen_at = ?, marked_unread = 0 ${unread}`, now, id);
+    this.ctx.storage.sql.exec(`UPDATE shared_chats SET seen_at = ?, marked_unread = 0 ${unread}`, now, id);
     this.#changed("chats");
-    return before.seen_at > 0 ? before.seen_at : null;
+    return before.seen_at > 0 && before.activity_at > before.seen_at ? before.seen_at : null;
   }
 
   /**
@@ -271,12 +304,15 @@ export class UserDirectory extends DurableObject<Env> {
   }
 
   /** Index a chat this user joined by an invite. Chat ids are random, so one never names both an own and a shared chat. */
-  addSharedChat(chat: { id: string; ownerUid: string; ownerName: string; title: string; status: ChatStatus | null }): void {
+  addSharedChat(chat: { id: string; ownerUid: string; ownerName: string; title: string; status: ChatStatus | null; kind?: ChatKind }): void {
     if (this.hasChat(chat.id)) return;
     const now = Date.now();
+    // Joining again opens a chat this user had closed.
     this.ctx.storage.sql.exec(
-      `INSERT INTO shared_chats (id, owner_uid, owner_name, title, joined_at, updated_at, status) VALUES (?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET owner_name = excluded.owner_name, title = excluded.title, updated_at = excluded.updated_at, status = excluded.status`,
+      `INSERT INTO shared_chats (id, owner_uid, owner_name, title, joined_at, updated_at, status, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET owner_name = excluded.owner_name, title = excluded.title, updated_at = excluded.updated_at, status = excluded.status,
+         kind = COALESCE(excluded.kind, kind), closed_at = 0
+       WHERE owner_uid = excluded.owner_uid`,
       chat.id,
       chat.ownerUid,
       chat.ownerName,
@@ -284,6 +320,7 @@ export class UserDirectory extends DurableObject<Env> {
       now,
       now,
       chat.status,
+      chat.kind ?? null,
     );
     this.#changed("chats");
   }
@@ -306,18 +343,26 @@ export class UserDirectory extends DurableObject<Env> {
     const now = Date.now();
     const set = "title = ?, updated_at = ?, activity_at = CASE WHEN ? THEN ? ELSE activity_at END, mentioned_at = CASE WHEN ? THEN ? ELSE mentioned_at END";
     if (!this.#updateChat(id, ownerUid, set, title, now, byOther ? 1 : 0, now, tag ? 1 : 0, now) || !tag) return;
+    // A tag opens the chat again for someone who closed it.
+    this.#rows.reopen(id);
     this.#changed({ type: "mention", chatId: id, ...(!named && { title }), ...tag });
   }
 
   removeSharedChat(id: string, ownerUid: string): void {
-    if (this.ctx.storage.sql.exec("DELETE FROM shared_chats WHERE id = ? AND owner_uid = ?", id, ownerUid).rowsWritten) this.#changed("chats");
+    if (!this.ctx.storage.sql.exec("DELETE FROM shared_chats WHERE id = ? AND owner_uid = ?", id, ownerUid).rowsWritten) return;
+    // Out of the chat, this user shares it with nobody.
+    this.#rows.forgetPeople(id);
+    this.#changed("chats");
   }
 
-  createChat(id: string): ChatSummary {
+  /** A new chat of this user's: unnamed (named after its first message), or with `title` (a branch, a page's chat). */
+  createChat(id: string, made: { title?: string; kind?: ChatKind } = {}): ChatSummary {
     const now = Date.now();
-    this.ctx.storage.sql.exec("INSERT INTO chats (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)", id, UNNAMED_CHAT, now, now);
+    const title = made.title?.slice(0, MAX_CHAT_TITLE) || UNNAMED_CHAT;
+    const kind = made.kind ?? "private";
+    this.ctx.storage.sql.exec("INSERT INTO chats (id, title, created_at, updated_at, kind) VALUES (?, ?, ?, ?, ?)", id, title, now, now, kind);
     this.#changed("chats");
-    return { id, title: UNNAMED_CHAT, createdAt: now, updatedAt: now };
+    return { id, title, createdAt: now, updatedAt: now, kind };
   }
 
   hasChat(id: string): boolean {
@@ -351,6 +396,7 @@ export class UserDirectory extends DurableObject<Env> {
     // The values its pages saved for this user, which were everyone's defaults.
     this.ctx.storage.sql.exec("DELETE FROM page_values WHERE artifact_id IN (SELECT id FROM artifacts WHERE chat_id = ?)", id);
     if (this.ctx.storage.sql.exec("DELETE FROM artifacts WHERE chat_id = ?", id).rowsWritten) this.#changed("artifacts");
+    this.#rows.forgetChat(id);
     if (this.ctx.storage.sql.exec("DELETE FROM chats WHERE id = ?", id).rowsWritten) this.#changed("chats");
   }
 
@@ -726,15 +772,16 @@ export class UserDirectory extends DurableObject<Env> {
   }
 
   /** Add a chat an import filled (ChatAgent.importFinish) to this user's list, read: the import is the commit point. */
-  importChat(chat: Pick<ExportedChat, "id" | "title" | "createdAt" | "updatedAt">): void {
+  importChat(chat: Pick<ExportedChat, "id" | "title" | "createdAt" | "updatedAt">, kind: ChatKind = "private"): void {
     const now = Date.now();
     this.ctx.storage.sql.exec(
-      "INSERT OR IGNORE INTO chats (id, title, created_at, updated_at, seen_at) VALUES (?, ?, ?, ?, ?)",
+      "INSERT OR IGNORE INTO chats (id, title, created_at, updated_at, seen_at, kind) VALUES (?, ?, ?, ?, ?, ?)",
       chat.id,
-      chat.title.slice(0, 200) || UNNAMED_CHAT,
+      chat.title.slice(0, MAX_CHAT_TITLE) || UNNAMED_CHAT,
       chat.createdAt || now,
       chat.updatedAt || now,
       now,
+      kind,
     );
     this.#changed("chats");
   }
