@@ -7,6 +7,7 @@ import {
   inQuietRange,
   kindsFor,
   matchesValue,
+  schemaHasPath,
   toolArgs,
   violation,
   type GuardrailRule,
@@ -107,6 +108,29 @@ describe("guardrail rules", () => {
     expect(violation(to, call({ to: "boss@ok.com, leak@blocked.com" }))).toMatch(/never allowed/);
     expect(violation(to, call({ to: "boss@ok.com;x@rival.example" }))).toMatch(/never allowed/);
     expect(violation(to, call({ to: "boss@ok.com ana@ok.com" }))).toBeNull();
+  });
+
+  it("finds an argument under anyOf or oneOf in any of the choices", () => {
+    const schema = {
+      type: "object",
+      properties: {
+        deal: { anyOf: [{ type: "null" }, { type: "object", properties: { discount: { type: "number" } }, additionalProperties: false }] },
+        to: { oneOf: [{ type: "string" }, { type: "array", items: { type: "object", properties: { email: { type: "string" } } } }] },
+      },
+      additionalProperties: false,
+    };
+    expect(schemaHasPath(schema, "deal.discount")).toBe(true);
+    expect(schemaHasPath(schema, "to.email")).toBe(true);
+    expect(schemaHasPath(schema, "to.0.email")).toBe(true);
+    expect(schemaHasPath(schema, "gone")).toBe(false);
+    expect(schemaHasPath({ anyOf: [{ type: "object", properties: { a: {} } }, { type: "object", properties: { b: {} } }] }, "c")).toBe(false);
+  });
+
+  it("never matches a recipient written as Name <address>, by its address or its name", () => {
+    expect(matchesValue("*@rival.example", "Sam Lee <sam@rival.example>, boss@ok.com")).toBe(true);
+    expect(matchesValue("leak@blocked.com", '"Leak, Inc" <LEAK@blocked.com>')).toBe(true);
+    expect(matchesValue("sam lee", "Ana <ana@ok.com>; Sam Lee <sam@ok.com>")).toBe(true);
+    expect(matchesValue("*@rival.example", "Sam Lee <sam@ok.com>")).toBe(false);
   });
 
   it("reads a field of each object in a list", () => {
@@ -378,6 +402,20 @@ describe("the write gate", () => {
       ),
     );
     expect(outcomes).toEqual(["ran", "refused", "refused"]);
+    expect(chat.server.calls).toHaveLength(1);
+  });
+
+  it("callsPerDay does not count a call held for approval, or one refused, checked at the same time", async () => {
+    const chat = guarded({ three: { level: 3 }, one: { level: 1 }, four: { level: 4 } }, [rule({ kind: "callsPerDay", value: 1 })]);
+    const outcomes = await Promise.all(
+      (["three", "one", "four"] as const).map((who) =>
+        chat.write(who, { discount: 1 }).then(
+          () => "ran",
+          (error: unknown) => (error instanceof CallHeld ? error.verdict.outcome : "failed"),
+        ),
+      ),
+    );
+    expect(outcomes).toEqual(["held", "refused", "ran"]);
     expect(chat.server.calls).toHaveLength(1);
   });
 

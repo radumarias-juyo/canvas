@@ -157,7 +157,7 @@ import { isTurnEntry, TurnFilter } from "./agents/live.ts";
 import { ChatRoster, type AgentTurn, type RosterEntry } from "./agents/roster.ts";
 import { actedOf, jsonOf, reportOf, SignInNeeded, whenOf, type ActContext, type ActResult, type DeliveryRequest } from "./agents/runs/executor.ts";
 import { AgentRunner, type RunAlarm, type RunnerHost, type WatchAlarm } from "./agents/runs/runner.ts";
-import { AgentRuns, type EndedRun, type RunRecord } from "./agents/runs/store.ts";
+import { actedMark, AgentRuns, type EndedRun, type RunRecord } from "./agents/runs/store.ts";
 import { reportContext, runInstructions, RUN_STEP_KIND, workSpend, type RunStepData } from "./agents/runs/report.ts";
 import { publishedAlready, publishFindings, publishRebuilt, readOnlyDeclaration, runMark } from "./agents/runs/page.ts";
 import { compileWorkflow } from "./agents/runs/compile.ts";
@@ -3608,6 +3608,10 @@ export class ChatAgent extends DurableObject<Env> {
   /** Hold a call for the owner: kept with its expiry alarm, its card in the chat's log, and in their feed's Needs you. */
   async #holdAction(action: NewAction): Promise<PendingActionView> {
     const view = this.actions.add(action);
+    // A run's item waits at its step from now (in the same turn of the object as the action is kept): a restart before
+    // the run hears it was held finds it waiting there, never going on past an action still pending.
+    const run = action.origin.run;
+    if (run) this.runs.setActed(run.agentId, run.dueAt, actedMark(run.item, run.step), { ok: false, end: "waiting", detail: "held for your approval" });
     try {
       this.actions.setAlarm(view.id, (await this.scheduler.set(new Date(view.expiresAt), "expire", { id: view.id })).id);
     } catch (error) {
@@ -3663,15 +3667,18 @@ export class ChatAgent extends DurableObject<Env> {
     await this.#cancelExpiry(id);
     this.#actionsChanged();
     let ended: PendingActionView | null;
+    // The call's whole result, for a run that waited at it (the action keeps its start).
+    let value: unknown;
     try {
       const level = this.actions.origin(id)?.level ?? 2;
       const result = await this.hub.call(moved.server, moved.tool, moved.input, { kind: "approved", action: moved, level });
-      ended = this.actions.move(id, "running", "done", jsonOf(result.payload ?? result.content));
+      value = result.payload ?? result.content;
+      ended = this.actions.move(id, "running", "done", jsonOf(value));
     } catch (error) {
       ended = this.actions.move(id, "running", "failed", errorMessage(error));
     }
     const view = ended ?? this.actions.get(id)!;
-    await this.#actionEnded(view);
+    await this.#actionEnded(view, value);
     return view;
   }
 
@@ -3698,7 +3705,7 @@ export class ChatAgent extends DurableObject<Env> {
    * An action ended: out of the owner's feed's Needs you, its card updated, and the session that asked for it told how it
    * went (a passive write it reads at its next step or turn; a run's item session, where a reply to its report reads it).
    */
-  async #actionEnded(view: PendingActionView): Promise<void> {
+  async #actionEnded(view: PendingActionView, value?: unknown): Promise<void> {
     this.#actionsChanged();
     this.ctx.waitUntil(this.#directory.removeNeedsYou(this.chatId, view.id).catch((error: unknown) => console.error("needs you:", errorMessage(error))));
     const origin = this.actions.origin(view.id);
@@ -3713,7 +3720,7 @@ export class ChatAgent extends DurableObject<Env> {
     }
     // A run's item waited at this step: it goes on from there (after the note above, which its later steps read).
     const run = origin?.run;
-    const acted = run ? actedOf(view) : null;
+    const acted = run ? actedOf(view, value) : null;
     if (run && acted) this.ctx.waitUntil(this.runner.decided(run, acted).catch((error: unknown) => console.error("run:", errorMessage(error))));
   }
 

@@ -44,7 +44,13 @@ describe("the rule editor's form", () => {
   it("reads never values one a line, as numbers for a number argument", () => {
     const draft = form({ server: "crm", tool: "update", kind: "never", arg: "stage", values: "lost\n 3 \n\n" });
     expect(ruleOf(draft)).toMatchObject({ rule: { value: ["lost", "3"] } });
-    expect(ruleOf(draft, true)).toMatchObject({ rule: { value: ["lost", 3] } });
+    expect(ruleOf(draft, "number")).toMatchObject({ rule: { value: ["lost", 3] } });
+  });
+
+  it("takes only true or false for a yes-or-no argument", () => {
+    const typed = form({ server: "crm", tool: "update", kind: "never", arg: "archived", values: "yes" });
+    expect(ruleOf(typed, "boolean")).toEqual({ error: 'archived is yes or no: pick true or false, not "yes".' });
+    expect(ruleOf({ ...typed, values: "true" }, "boolean")).toMatchObject({ rule: { value: ["true"] } });
   });
 
   it("refuses a current value read whose input is not JSON", () => {
@@ -89,7 +95,7 @@ describe("the rule editor's form", () => {
       },
       { id: "r3", server: "mail", tool: "send", arg: "to", kind: "never", value: ["*@example.com", 7], effect: "warn" },
     ];
-    for (const rule of rules) expect(ruleOf(draftOf(rule), rule.kind === "never")).toEqual({ rule });
+    for (const rule of rules) expect(ruleOf(draftOf(rule), rule.kind === "never" ? "number" : undefined)).toEqual({ rule });
   });
 });
 

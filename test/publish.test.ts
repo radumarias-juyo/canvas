@@ -120,6 +120,12 @@ describe("a page's tools that change data", () => {
     const kept = withCrm(false, ["update_deal"]);
     await expect(publishDraft(kept.scope, { title: "Deals", draftId: await page(kept, ["update_deal"]), session: "0" })).rejects.toThrow(/only the owner's own message/);
     expect(kept.versions).toEqual([]);
+    // Nor take the owner's calls out of a page that has them: that changes what it does for them too.
+    const drops = withCrm(false, ["get_deal", "update_deal"]);
+    await expect(publishDraft(drops.scope, { title: "Deals", draftId: await page(drops, ["get_deal"]), session: "0" })).rejects.toThrow(
+      /crm.update_deal, which change data, so only the owner's own message can publish a version of it\. Tell the owner what you would change/,
+    );
+    expect(drops.versions).toEqual([]);
   });
 
   it("the owner's own turn can", async () => {

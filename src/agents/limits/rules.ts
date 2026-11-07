@@ -142,10 +142,12 @@ export function draftOf(rule: GuardrailRule): RuleDraft {
 const typedNumber = (text: string) => (text.trim() ? Number(text.trim()) : undefined);
 
 /**
- * The rule a form stands for, before checkRule: only the fields its kind reads. `numeric`: the argument is a number, so a
- * never rule's values that read as numbers are numbers. Throws with what to fix when its read input is not JSON.
+ * The rule a form stands for, before checkRule: only the fields its kind reads. `argType`: the argument's schema type.
+ * A number's never values that read as numbers are numbers, and a yes-or-no's are only true or false. Throws with what
+ * to fix when its read input is not JSON, or a yes-or-no value is neither.
  */
-export function ruleInput(draft: RuleDraft, numeric = false): Record<string, unknown> {
+export function ruleInput(draft: RuleDraft, argType?: string): Record<string, unknown> {
+  const numeric = argType === "number" || argType === "integer";
   const kind = draft.kind;
   const base: Record<string, unknown> = { id: draft.id, server: draft.server, tool: draft.tool, kind: kind || undefined, effect: draft.effect };
   if (draft.note.trim()) base.note = draft.note;
@@ -178,6 +180,8 @@ export function ruleInput(draft: RuleDraft, numeric = false): Record<string, unk
         .map((line) => line.trim())
         .filter(Boolean)
         .map((line) => (numeric && Number.isFinite(Number(line)) ? Number(line) : line));
+      const odd = argType === "boolean" ? values.find((value) => value !== "true" && value !== "false") : undefined;
+      if (odd !== undefined) throw new Error(`${draft.arg} is yes or no: pick true or false, not "${odd}".`);
       return { ...base, value: values };
     }
     case "quietDates":
@@ -188,9 +192,9 @@ export function ruleInput(draft: RuleDraft, numeric = false): Record<string, unk
 }
 
 /** The form's rule, checked: the rule, or what to fix. */
-export function ruleOf(draft: RuleDraft, numeric = false): { rule: GuardrailRule } | { error: string } {
+export function ruleOf(draft: RuleDraft, argType?: string): { rule: GuardrailRule } | { error: string } {
   try {
-    return { rule: checkRule(ruleInput(draft, numeric)) };
+    return { rule: checkRule(ruleInput(draft, argType)) };
   } catch (error) {
     return { error: errorMessage(error) };
   }

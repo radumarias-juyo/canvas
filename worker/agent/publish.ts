@@ -436,13 +436,16 @@ export async function publishDraft(scope: PublishScope, input: PublishInput, sig
   const { html } = await pageToRun(scope, draft, "Not published.");
   const target = await artifactFor(scope, input, draft.artifactId);
   // A turn that only proposes changes cannot publish a page that makes any: its calls run as the owner's when they
-  // open it, with whatever arguments this version's code passes (a tool the page had already, called anew, too).
+  // open it, with whatever arguments this version's code passes (a tool the page had already, called anew, too). Nor a
+  // new version of a page that makes them now: taking the owner's calls out of it is a change too.
   if (input.session !== undefined && scope.mayPublishWrites && !(await scope.mayPublishWrites(input.session))) {
-    const writes = await declaredWrites(scope.hub, draft.manifest);
+    const current = target.id === undefined ? null : await scope.artifacts.readMeta(target.id);
+    const before = current ? manifestOf(current, current.latest) : undefined;
+    const writes = [...new Set([...(await declaredWrites(scope.hub, draft.manifest)), ...(before ? await declaredWrites(scope.hub, before) : [])])];
     if (writes.length) {
       throw new Error(
-        `Not published: the page calls ${writes.join(", ")}, which change data, and only the owner's own message can publish a page that does. ` +
-          "Publish it without those calls, or the owner can ask for it.",
+        `Not published: the page calls ${writes.join(", ")}, which change data, so only the owner's own message can publish a version of it. ` +
+          "Tell the owner what you would change; they can ask for it.",
       );
     }
   }

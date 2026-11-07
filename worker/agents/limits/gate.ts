@@ -85,14 +85,19 @@ export interface GateHost {
   agent(agentId: string): Promise<Pick<AgentDefinition, "guardrails"> | null>;
 }
 
-/** How many calls a callsPerDay rule covers that are under way and not in the log yet (made before the one checked). */
-export type InFlight = (rule: Pick<GuardrailRule, "server" | "tool">) => number;
+/**
+ * How many calls a callsPerDay rule covers that were let through and are not in the log yet (made before the one
+ * checked): the checks before it settle first, so one held or refused never counts, and two in parallel never both pass.
+ */
+export type InFlight = (rule: Pick<GuardrailRule, "server" | "tool">) => number | Promise<number>;
 
 /** The values a rule needs that the call does not carry: the current value (maxChange), today's calls (callsPerDay). */
 async function factsFor(host: GateHost, rule: GuardrailRule, call: GateCall, at: number, inFlight: InFlight) {
   // The calls the rule is on: of every tool it covers ("*": any), not only the one called now; with the ones under way.
   if (rule.kind === "callsPerDay") {
-    return { callsToday: (await host.callsSince(rule.server, rule.tool, host.dayStart(at, rule.tz ?? "UTC"))) + inFlight(rule) };
+    // The ones under way first, then the log: one logged in between is counted twice at worst, never missed.
+    const going = await inFlight(rule);
+    return { callsToday: (await host.callsSince(rule.server, rule.tool, host.dayStart(at, rule.tz ?? "UTC"))) + going };
   }
   // Read only when the call sets the argument: a rule on it says nothing otherwise.
   if (rule.kind !== "maxChange" || !rule.current || !argValues(call.input, rule.arg!).length) return {};
@@ -141,29 +146,38 @@ export class WriteGate {
     this.#host = host;
   }
 
-  /** Calls checked and not yet in the log, by the order they came in: what a callsPerDay rule counts besides the log. */
-  readonly #inFlight = new Map<number, Pick<GateCall, "server" | "tool">>();
+  /**
+   * Calls being checked or let through and not yet in the log, by the order they came in: what a callsPerDay rule
+   * counts besides the log. `checked` settles once the check ended; only the ones let through stay.
+   */
+  readonly #inFlight = new Map<number, Pick<GateCall, "server" | "tool"> & { checked: Promise<void> }>();
   #order = 0;
 
   /**
-   * Whether a call that changes data may run now; when not, it is refused or held (see the file's head). The call is
-   * counted as under way from the start (calls in parallel see the ones before them) until its log entry is kept.
+   * Whether a call that changes data may run now; when not, it is refused or held (see the file's head). A callsPerDay
+   * rule waits for the checks of the calls before it and counts those let through (InFlight), until each is logged.
    */
   async check(call: GateCall, context: GateContext): Promise<GateVerdict> {
     const reservation = ++this.#order;
-    this.#inFlight.set(reservation, { server: call.server, tool: call.tool });
-    const inFlight: InFlight = (rule) => [...this.#inFlight].filter(([order, one]) => order < reservation && ruleApplies(rule, one)).length;
-    let verdict: GateVerdict;
+    let settle = () => {};
+    const checked = new Promise<void>((resolve) => (settle = resolve));
+    this.#inFlight.set(reservation, { server: call.server, tool: call.tool, checked });
+    const inFlight: InFlight = async (rule) => {
+      const before = [...this.#inFlight].filter(([order, one]) => order < reservation && ruleApplies(rule, one));
+      await Promise.all(before.map(([, one]) => one.checked));
+      return before.filter(([order]) => this.#inFlight.has(order)).length;
+    };
+    let verdict: GateVerdict | undefined;
     try {
       verdict =
         context.kind === "approved"
           ? await this.#approved(call, context.action, context.level, inFlight)
           : await this.#check(call, context, inFlight);
-    } catch (error) {
-      this.#inFlight.delete(reservation);
-      throw error;
+    } finally {
+      // Held, refused or failed: not counted, before the checks after it go on.
+      if (!verdict?.run) this.#inFlight.delete(reservation);
+      settle();
     }
-    if (!verdict.run) this.#inFlight.delete(reservation);
     return verdict.run ? { ...verdict, reservation } : verdict;
   }
 

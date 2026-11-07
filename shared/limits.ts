@@ -233,16 +233,28 @@ export function argValues(input: StepInput, path: string): unknown[] {
  * when the schema does not say (no properties listed, or it allows any others), so nothing can be told from it.
  */
 export function schemaHasPath(schema: unknown, path: string): boolean | undefined {
-  let node: unknown = schema;
-  for (const part of path.split(".")) {
-    // A list's elements: an index names one of them, and a field's name reads it of each.
-    while (isObject(node) && schemaType(node) === "array") node = node.items;
-    if (/^\d+$/.test(part)) continue;
-    if (!isObject(node) || !isObject(node.properties)) return undefined;
-    if (!Object.hasOwn(node.properties, part)) return node.additionalProperties === true || isObject(node.additionalProperties) ? undefined : false;
-    node = node.properties[part];
-  }
-  return true;
+  return hasPath(schema, path.split("."));
+}
+
+/**
+ * `parts` under a schema node: a list's elements stand for it (an index names one of them, a field's name reads it of
+ * each), and a node of choices (anyOf, oneOf, allOf) has a path when any of them has it.
+ */
+function hasPath(schema: unknown, parts: readonly string[]): boolean | undefined {
+  let node = schema;
+  while (isObject(node) && schemaType(node) === "array") node = node.items;
+  if (!parts.length) return true;
+  const [part, ...rest] = parts;
+  if (/^\d+$/.test(part)) return hasPath(node, rest);
+  if (!isObject(node)) return undefined;
+  const choices = [node.anyOf, node.oneOf, node.allOf].flatMap((list) => (Array.isArray(list) ? list : []));
+  let own: boolean | undefined;
+  if (isObject(node.properties)) {
+    if (Object.hasOwn(node.properties, part)) own = hasPath(node.properties[part], rest);
+    else own = node.additionalProperties === true || isObject(node.additionalProperties) ? undefined : false;
+  } else own = choices.length ? false : undefined;
+  const found = [own, ...choices.map((choice) => hasPath(choice, parts))];
+  return found.includes(true) ? true : found.includes(undefined) ? undefined : false;
 }
 
 /** A number, or a string that is one; undefined otherwise. */
@@ -254,8 +266,8 @@ export function asNumber(value: unknown): number | undefined {
 
 /**
  * Whether a value matches a never rule's value: the same, ignoring case, with * for any characters; a boolean as
- * "true" or "false". Text that lists several (joined by commas, semicolons or spaces, as recipients often are) matches
- * when any one of them does.
+ * "true" or "false". Text that lists several (joined by commas, semicolons or new lines, as recipients often are)
+ * matches when any one of them does; and one written "Name <address>" by its address or its name, and by each word.
  */
 export function matchesValue(pattern: string | number, value: unknown): boolean {
   if (typeof pattern === "number") return asNumber(value) === pattern;
@@ -274,8 +286,21 @@ export function matchesValue(pattern: string | number, value: unknown): boolean 
     return regex.test(one);
   };
   if (matches(text)) return true;
-  const parts = typeof value === "string" ? text.split(/[,;\s]+/).filter(Boolean) : [];
-  return parts.length > 1 && parts.some(matches);
+  if (typeof value !== "string") return false;
+  return text
+    .split(/[,;\n]+/)
+    .flatMap(namesOf)
+    .some(matches);
+}
+
+/** What one entry of a list may be matched by: itself, its <address> and the name before it, and each of its words. */
+function namesOf(entry: string): string[] {
+  const trimmed = entry.trim();
+  if (!trimmed) return [];
+  const address = /<([^<>]*)>/.exec(trimmed)?.[1]?.trim();
+  const name = address === undefined ? undefined : trimmed.replace(/<[^<>]*>/, "").trim().replace(/^"(.*)"$/, "$1").trim();
+  const words = trimmed.split(/\s+/).map((word) => word.replace(/^[<"'(]+|[>"'),]+$/g, ""));
+  return [trimmed, ...(address ? [address] : []), ...(name ? [name] : []), ...words].filter(Boolean);
 }
 
 /** The day `at` falls on in `tz`, as "YYYY-MM-DD". */

@@ -366,16 +366,25 @@ export class AgentRunner {
    * from that step with its outcome, and the run then sends what its items reached. Nothing when it no longer waited.
    */
   async decided(ref: { agentId: string; dueAt: number; item: string; step: string }, acted: ActedStep): Promise<void> {
-    if (!this.executor.decided(ref.agentId, ref.dueAt, ref.item, ref.step, acted)) return;
+    if (!(await this.executor.decided(ref.agentId, ref.dueAt, ref.item, ref.step, acted))) return;
     this.#host.changed(ref.agentId);
     await this.#goOn(this.#host.runs.get(ref.agentId, ref.dueAt)!, (start) => this.executor.again(start));
   }
 
-  /** A run that did not end goes on from where its rows say: failed instead when its agent was deleted. */
+  /**
+   * A run that did not end goes on from where its rows say: failed instead when its agent was deleted, and stopped
+   * when it was turned off (a test's apart). A call its owner approved ran all the same; nothing after it does.
+   */
   async #goOn(run: RunRecord, start: (start: RunStart) => Promise<RunEnd> = (one) => this.executor.start(one)): Promise<RunEnd | null> {
     const agent = await this.#host.definition(run.agentId);
     if (!agent) {
       this.#host.runs.update(run.agentId, run.dueAt, { status: "failed", summary: "Failed: the agent was deleted." });
+      return null;
+    }
+    if (!run.test && !agent.enabled) {
+      this.#host.runs.stopItems(run.agentId, run.dueAt, `@${agent.name} was turned off: it stopped there.`);
+      this.#host.runs.update(run.agentId, run.dueAt, { status: "not_today", summary: `Stopped: @${agent.name} was turned off, so it did nothing more and sent nothing.` });
+      this.#host.changed(run.agentId);
       return null;
     }
     return start(startOf(agent, run));

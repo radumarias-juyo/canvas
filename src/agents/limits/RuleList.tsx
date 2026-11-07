@@ -9,6 +9,7 @@ import {
   MAX_GUARDRAILS,
   MAX_QUIET_RANGES,
   PLAIN_KINDS,
+  schemaHasPath,
   toolArgs,
   type GuardrailEffect,
   type GuardrailKind,
@@ -175,10 +176,11 @@ function RuleEditor({
   const tool = draft.tool && draft.tool !== "*" ? tools?.find((each) => each.name === draft.tool) : undefined;
   const args = tool ? toolArgs(tool.inputSchema).filter((arg) => kindsFor(arg.type).length > 0) : [];
   const arg = draft.arg ? argOf(args, draft.arg) : undefined;
+  // As the gate reads it (hitsFor): a rule on an argument its tool no longer has fires on every call.
+  const gone = Boolean(draft.arg && tool && schemaHasPath(tool.inputSchema, draft.arg) === false);
   const onArg = draft.server !== "*" && draft.tool !== "*" && draft.tool !== "";
   // A saved rule on an argument its tool no longer lists (or before the tools are read) keeps the kinds it had.
   const kinds: readonly GuardrailKind[] = draft.arg ? (arg ? kindsFor(arg.type) : draft.kind ? [draft.kind] : ARG_KINDS) : PLAIN_KINDS;
-  const numeric = arg?.type === "number" || arg?.type === "integer";
 
   const pickServer = (server: string) =>
     set({
@@ -199,7 +201,7 @@ function RuleEditor({
     if (!draft.server) return setError("Pick a server.");
     if (!draft.tool) return setError("Pick a tool, or every tool that changes data.");
     if (!draft.kind) return setError("Pick what the rule checks.");
-    const checked = ruleOf(draft, numeric);
+    const checked = ruleOf(draft, arg?.type);
     if ("error" in checked) setError(checked.error);
     else onDone(checked.rule);
   };
@@ -263,7 +265,13 @@ function RuleEditor({
                 );
               })}
             </select>
-            {arg?.description && <small className="rule-hint">{arg.description}</small>}
+            {gone ? (
+              <small className="rule-hint rule-warn">
+                {draft.tool} has no argument {draft.arg} now, so this rule fires on every call to it.
+              </small>
+            ) : (
+              arg?.description && <small className="rule-hint">{arg.description}</small>
+            )}
           </label>
         )}
         {draft.tool && (
@@ -447,29 +455,37 @@ function KindFields({
   }
 }
 
-/** A never rule's values, one a line (* for any characters), with the argument's own choices to pick from when it has them. */
+/**
+ * A never rule's values, one a line (* for any characters), with the argument's own choices to pick from when it has
+ * them; a yes-or-no argument's only as its two choices (typed text would never match it).
+ */
 function NeverValues({ draft, set, arg }: { draft: RuleDraft; set: (change: Partial<RuleDraft>) => void; arg: ToolArg | undefined }) {
   const lines = draft.values
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
   const toggle = (value: string) => set({ values: (lines.includes(value) ? lines.filter((line) => line !== value) : [...lines, value]).join("\n") });
+  const yesNo = arg?.type === "boolean";
+  const choices = yesNo ? ["true", "false"] : arg?.values;
   return (
     <div className="rule-field">
-      <label className="rule-field">
-        <span>Never these values</span>
-        <textarea
-          rows={3}
-          value={draft.values}
-          onChange={(e) => set({ values: e.target.value })}
-          placeholder={"*@example.com\narchived"}
-          spellCheck={false}
-        />
-        <small>One a line; * stands for any characters. Text matches ignoring case.</small>
-      </label>
-      {arg?.values && (
+      {yesNo && <span>Never these values</span>}
+      {!yesNo && (
+        <label className="rule-field">
+          <span>Never these values</span>
+          <textarea
+            rows={3}
+            value={draft.values}
+            onChange={(e) => set({ values: e.target.value })}
+            placeholder={"*@example.com\narchived"}
+            spellCheck={false}
+          />
+          <small>One a line; * stands for any characters. Text matches ignoring case.</small>
+        </label>
+      )}
+      {choices && (
         <div className="chips rule-choices" role="group" aria-label="Its choices">
-          {arg.values.map((value) => (
+          {choices.map((value) => (
             <button
               key={String(value)}
               type="button"

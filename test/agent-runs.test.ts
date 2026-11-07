@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { AgentDefinition, AgentStep, LookStep, StepInput } from "../shared/agents.ts";
 import type { Value } from "../shared/conditions.ts";
 import type { ArtifactMeta } from "../shared/protocol.ts";
@@ -8,7 +8,7 @@ import { publishedAlready, publishFindings, publishRebuilt, readOnlyDeclaration,
 import { findingsEdit, FINDINGS_END, FINDINGS_START, reportHtml, workSpend } from "../worker/agents/runs/report.ts";
 import { AgentRunner, type RunAlarm, type RunnerHost, type WatchAlarm } from "../worker/agents/runs/runner.ts";
 import { sourceName, SourceCore, type Subscriber } from "../worker/agents/runs/source.ts";
-import { AgentRuns } from "../worker/agents/runs/store.ts";
+import { actedMark, AgentRuns } from "../worker/agents/runs/store.ts";
 import { writeDraft, type PublishScope } from "../worker/agent/publish.ts";
 import type { CheckReport } from "../worker/artifacts/check.ts";
 import type { McpHub } from "../worker/mcp/hub.ts";
@@ -432,7 +432,7 @@ describe("scheduled runs", () => {
     it("goes on from there once approved, with the call's result as done", async () => {
       const { host, runner, definition } = await held();
       host.answer = () => ({ status: "done", text: "Updated the total.", cost: 0.01 });
-      await runner.decided(ref(definition), actedOf({ status: "done", result: '{"updated":940}' })!);
+      await runner.decided(ref(definition), actedOf({ status: "done", result: '{"updated":940}' }, { updated: 940 })!);
       await host.settled();
       // The call is not made again: the approved call ran in the chat. The work and the tell after it go.
       expect(host.acts).toHaveLength(1);
@@ -485,14 +485,141 @@ describe("scheduled runs", () => {
       expect(host.delivered).toHaveLength(1);
     });
 
-    it("stops the item when its workflow changed while it waited", async () => {
+    it("stops the item when its workflow changed while it waited, running and sending nothing of the new one", async () => {
       const { host, runner, definition } = await held();
-      host.definitions.set(definition.id, { ...definition, version: 2, workflow: [sales, { kind: "work", prompt: "Only report." }] });
-      await runner.decided(ref(definition), actedOf({ status: "done", result: "ok" })!);
+      // The new workflow tells someone else and does more: none of it goes.
+      host.definitions.set(definition.id, {
+        ...definition,
+        version: 2,
+        workflow: [sales, { kind: "do", server: "crm", tool: "discount", input: {} }, { kind: "work", prompt: "Only report." }, { kind: "tell", to: ["sam"], via: "chat" }],
+      });
+      const reads = host.reads.length;
+      await runner.decided(ref(definition), actedOf({ status: "done", result: "ok" }, "ok")!);
       await host.settled();
       expect(host.runs.items(definition.id, T0)[0]).toMatchObject({ status: "not_today", reason: "Its workflow changed while it waited: it stopped there." });
       expect(host.works).toHaveLength(0);
-      expect(host.runs.list(definition.id)[0].status).toBe("not_today");
+      expect(host.acts).toHaveLength(1);
+      expect(host.reads).toHaveLength(reads);
+      expect(host.delivered).toHaveLength(0);
+      expect(host.runs.list(definition.id)[0]).toMatchObject({ status: "failed", summary: expect.stringMatching(/workflow changed while this run waited, so it did nothing more and sent nothing/) });
+    });
+
+    it("lists no new scope and runs no new item when the scope changed while it waited", async () => {
+      const scoped = agent({
+        workflow: [{ kind: "do", server: "crm", tool: "discount", input: { region: "{{item.name}}" } }, { kind: "tell", to: ["owner"], via: "chat" }],
+        scope: { list: { kind: "look", server: "crm", tool: "regions", input: {} }, each: true },
+        autonomy: 3,
+      });
+      const { host, runner, definition } = home(scoped);
+      host.values.set("crm.regions", [{ name: "north" }]);
+      host.actAnswer = () => HELD;
+      await runner.now(definition.id, false);
+      await host.settled();
+      host.values.set("crm.regions", [{ name: "north" }, { name: "south" }]);
+      host.definitions.set(definition.id, { ...definition, version: 2, scope: { list: { kind: "look", server: "crm", tool: "regions", input: { all: true } }, each: true } });
+      host.actAnswer = () => ({ status: "ran", value: "ok" });
+      await runner.decided({ ...ref(definition), item: "north", step: "0" }, actedOf({ status: "done", result: "ok" }, "ok")!);
+      await host.settled();
+      // Not crm.discount on south (nor again on north): the run ends over the items it had.
+      expect(host.acts.map((act) => act.input)).toEqual([{ region: "north" }]);
+      expect(host.reads.filter((read) => read.call === "crm.regions")).toHaveLength(1);
+      expect(host.runs.items(definition.id, T0).map((item) => item.item)).toEqual(["north"]);
+      expect(host.delivered).toHaveLength(0);
+    });
+
+    it("reads an approved call's whole result in the steps after it, past what the action keeps", async () => {
+      const after: AgentStep[] = [
+        sales,
+        { kind: "do", server: "crm", tool: "create", input: {} },
+        { kind: "do", server: "crm", tool: "attach", input: { to: "{{done.id}}" } },
+      ];
+      const { host, runner, definition } = await held(agent({ workflow: after, autonomy: 3 }));
+      host.actAnswer = () => ({ status: "ran", value: "ok" });
+      const long = { notes: "x".repeat(5_000), id: "deal-7" };
+      // The action keeps a short start of the result; the run gets the call's own.
+      await runner.decided(ref(definition), actedOf({ status: "done", result: JSON.stringify(long).slice(0, 2_000) }, long)!);
+      await host.settled();
+      expect(host.acts.map((act) => act.input)).toEqual([{}, { to: "deal-7" }]);
+      expect([...host.writes.values()].some((write) => write.text.startsWith("Result of the call you approved (done):") && write.text.includes("deal-7"))).toBe(true);
+    });
+
+    it("stops the item, saying why, when a step after the approval needs a result too large to keep", async () => {
+      const after: AgentStep[] = [
+        sales,
+        { kind: "do", server: "crm", tool: "charge", input: {} },
+        {
+          kind: "if",
+          condition: "done.ok",
+          then: [{ kind: "tell", to: ["owner"], via: "chat" }],
+          else: [{ kind: "do", server: "mail", tool: "send", input: { text: "Charge failed" } }],
+        },
+      ];
+      const { host, runner, definition } = await held(agent({ workflow: after, autonomy: 3 }));
+      host.actAnswer = () => ({ status: "ran", value: "sent" });
+      // Over what a run keeps of a do result: the condition after it cannot read it, so it stops rather than read null.
+      await runner.decided(ref(definition), actedOf({ status: "done", result: "{" }, { ok: true, receipt: "r".repeat(20_000) })!);
+      await host.settled();
+      expect(host.acts.map((act) => act.call)).toEqual(["crm.charge"]);
+      expect(host.delivered).toHaveLength(0);
+      expect(host.runs.items(definition.id, T0)[0]).toMatchObject({ status: "failed", reason: expect.stringMatching(/crm\.charge was too large to keep/) });
+    });
+
+    it("takes the same way at a condition when it goes on, though its read was too large to keep", async () => {
+      let flagged = true;
+      const after: AgentStep[] = [
+        { kind: "look", server: "crm", tool: "accounts", input: {}, as: "accounts" },
+        {
+          kind: "if",
+          condition: "accounts.flagged",
+          then: [{ kind: "do", server: "crm", tool: "hold", input: {} }, { kind: "tell", to: ["owner"], via: "chat" }],
+          else: [{ kind: "do", server: "crm", tool: "release", input: {} }],
+        },
+      ];
+      const definition = agent({ workflow: after, autonomy: 3 });
+      const setup = home(definition);
+      setup.host.values.set("crm.accounts", () => ({ flagged, rows: "a".repeat(70_000) }));
+      setup.host.actAnswer = () => HELD;
+      await setup.runner.now(definition.id, false);
+      await setup.host.settled();
+      // Read again when it goes on (too large to keep): it says otherwise now, but the item goes the way it went.
+      flagged = false;
+      setup.host.actAnswer = () => ({ status: "ran", value: "ok" });
+      await setup.runner.decided({ ...ref(definition), step: "1.then.0" }, actedOf({ status: "done", result: "ok" }, "ok")!);
+      await setup.host.settled();
+      expect(setup.host.acts.map((act) => act.call)).toEqual(["crm.hold"]);
+      expect(setup.host.delivered).toHaveLength(1);
+    });
+
+    it("does nothing more once approved when its agent was turned off meanwhile", async () => {
+      const { host, runner, definition } = await held();
+      host.definitions.set(definition.id, { ...definition, enabled: false });
+      await runner.decided(ref(definition), actedOf({ status: "done", result: "ok" }, "ok")!);
+      await host.settled();
+      expect(host.works).toHaveLength(0);
+      expect(host.delivered).toHaveLength(0);
+      expect(host.runs.list(definition.id)[0]).toMatchObject({ status: "not_today", summary: expect.stringMatching(/was turned off, so it did nothing more/) });
+      expect(host.runs.items(definition.id, T0)[0]).toMatchObject({ status: "not_today", reason: expect.stringMatching(/turned off/) });
+    });
+
+    it("waits at a step the chat marked held, when a restart cut the run off before it heard", async () => {
+      const definition = agent({ workflow, autonomy: 3 });
+      const { host, runner } = home(definition);
+      let asked = false;
+      // The gate holds it (the chat marks the step waiting as it keeps the action), and then the object restarts.
+      host.actAnswer = () => {
+        host.runs.setActed(definition.id, T0, actedMark("", "1"), { ok: false, end: "waiting", detail: "held for your approval" });
+        asked = true;
+        return new Promise<never>(() => {}) as never;
+      };
+      void runner.now(definition.id, false);
+      await vi.waitFor(() => expect(asked).toBe(true));
+      host.pending.splice(0);
+      new AgentRunner(host, host.sql).resume();
+      await host.settled();
+      expect(host.acts).toHaveLength(1);
+      expect(host.works).toHaveLength(0);
+      expect(host.runs.items(definition.id, T0)[0].status).toBe("waiting");
+      expect(host.runs.list(definition.id)[0].status).toBe("waiting");
     });
 
     it("ends the item once it expired, and the run with it", async () => {

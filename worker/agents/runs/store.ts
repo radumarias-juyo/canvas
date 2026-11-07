@@ -78,6 +78,13 @@ export interface ActedStep {
    * `stopped` once they declined it or it expired (as at a condition that did not hold).
    */
   end?: "waiting" | "stopped";
+  /** It ran, but its result was too large to keep: an item going through again cannot read it (`done` is missing). */
+  cut?: true;
+}
+
+/** Where a do step's outcome is kept in its run (RunDetail.acted): by item and step. */
+export function actedMark(item: string, step: string): string {
+  return `${item}:${step}`;
 }
 
 /** What an item's row keeps: its steps, its part of the report and why it stopped. */
@@ -94,7 +101,12 @@ interface ItemDetail {
    * restart, or once its owner decided a held call) sees the same results and takes the same way to where it stopped.
    */
   looked?: Record<string, unknown>;
+  /** How its conditions (if, only if) came out, by step key: going through again, it takes the same way. */
+  conditions?: Record<string, boolean>;
 }
+
+/** What an item keeps for going through again the way it went (ItemDetail). */
+export type ItemKept = Required<Pick<ItemDetail, "looked" | "conditions">>;
 
 /** A run that ended, as AgentRuns tells its owner's feed. */
 export type EndedRun = RunRecord & { status: EndedRunStatus };
@@ -334,15 +346,16 @@ export class AgentRuns {
     return parse<ItemDetail>(row?.detail ?? null, { steps: [] });
   }
 
-  /** What an item's look steps read before, by step key (see ItemDetail.looked). */
-  looked(agentId: string, dueAt: number, item: string): Record<string, unknown> {
-    return this.#itemDetail(agentId, dueAt, item).looked ?? {};
+  /** What an item's look steps read and how its conditions came out before, by step key (ItemDetail). */
+  kept(agentId: string, dueAt: number, item: string): ItemKept {
+    const { looked = {}, conditions = {} } = this.#itemDetail(agentId, dueAt, item);
+    return { looked, conditions };
   }
 
-  /** Keep what an item's look step read. */
-  setLooked(agentId: string, dueAt: number, item: string, key: string, value: unknown): void {
+  /** Keep what an item's look step read, or how one of its conditions came out. */
+  keep<K extends keyof ItemKept>(agentId: string, dueAt: number, item: string, what: K, key: string, value: ItemKept[K][string]): void {
     const detail = this.#itemDetail(agentId, dueAt, item);
-    detail.looked = { ...detail.looked, [key]: value };
+    detail[what] = { ...detail[what], [key]: value } as ItemDetail[K];
     this.#sql.exec("UPDATE agent_runs SET detail = ? WHERE agent_id = ? AND due_at = ? AND item = ?", JSON.stringify(detail), agentId, dueAt, rowKey(item));
   }
 
@@ -358,11 +371,11 @@ export class AgentRuns {
     );
   }
 
-  /** An item ended: its status, steps, part of the report and cost (what its look steps read is kept). */
+  /** An item ended: its status, steps, part of the report and cost (what it kept for going through again stays). */
   endItem(agentId: string, dueAt: number, item: string, end: { status: RunItemStatus; cost: number } & ItemDetail): void {
     const { status, cost, ...rest } = end;
-    const { looked } = this.#itemDetail(agentId, dueAt, item);
-    const detail: ItemDetail = { ...rest, ...(looked && { looked }) };
+    const { looked, conditions } = this.#itemDetail(agentId, dueAt, item);
+    const detail: ItemDetail = { ...rest, ...(looked && { looked }), ...(conditions && { conditions }) };
     this.#sql.exec(
       "UPDATE agent_runs SET status = ?, ended_at = ?, cost = ?, detail = ? WHERE agent_id = ? AND due_at = ? AND item = ?",
       status,
