@@ -114,6 +114,11 @@ export interface AgentInput {
   autonomy?: AutonomyLevel;
   /** The fields the model guessed, shown as "Assumed" until a person confirms them. */
   assumed?: string[];
+  /**
+   * It may post in a chat unasked, when the chat allows it too: after a pause in a conversation close to its job, or to
+   * offer to pick up a question nobody answered (worker/agents/funnel.ts). Off when absent.
+   */
+  speaksUp?: boolean;
 }
 
 /** Who made an agent: its owner, or the model in a chat (saved off until the owner turns it on, as skills are). */
@@ -376,6 +381,8 @@ export function checkAgent(input: unknown): AgentInput {
     if (outside) fail(`A step names ${outside}, which is not one of the agent's servers: add it to its servers, or change the step.`);
   }
   const assumed = names(input.assumed, "assumed fields");
+  const speaksUp = input.speaksUp ?? undefined;
+  if (speaksUp !== undefined && typeof speaksUp !== "boolean") fail("An agent's speaksUp is true or false.");
   return {
     name,
     ...(avatar && { avatar }),
@@ -391,6 +398,7 @@ export function checkAgent(input: unknown): AgentInput {
     ...(workflow && { workflow }),
     ...(autonomy !== undefined && { autonomy: autonomy as AutonomyLevel }),
     ...(assumed?.length && { assumed }),
+    ...(speaksUp && { speaksUp: true }),
   };
 }
 
@@ -474,6 +482,7 @@ export const COPIED_FIELDS = [
   "trigger",
   "scope",
   "workflow",
+  "speaksUp",
 ] as const satisfies readonly (keyof AgentInput)[];
 export type CopiedField = (typeof COPIED_FIELDS)[number];
 
@@ -534,8 +543,13 @@ export type ChatAgentReplyData = {
   ownerUid: string;
   /** The reply's text, as its session's final answer gave it; empty when it ended without one. */
   text: string;
-  /** Who gave it this turn: a person, another agent (a hand-off), or its schedule. */
-  calledBy: { name: string; uid?: string; agentId?: string; schedule?: true };
+  /**
+   * Who gave it this turn: a person, another agent (a hand-off), or its schedule. `routed`: the person named nobody, and
+   * the chat's router picked this agent. `unprompted`: nobody did: the agent spoke up after a pause in a conversation
+   * close to its job ("speak-up"), or offers to pick up a question nobody answered ("follow-up"); `name` is then the
+   * person whose message it answers.
+   */
+  calledBy: { name: string; uid?: string; agentId?: string; schedule?: true; routed?: true; unprompted?: UnpromptedKind };
   /** The turn's id in the chat's turn table. */
   turn: number;
   /** How many hand-offs led to this turn: 0 when a person called it. */
@@ -553,6 +567,9 @@ export type ChatAgentReplyData = {
 };
 
 export type AgentTurnStatus = "queued" | "running" | "done" | "failed" | "stopped";
+
+/** Why an agent posts unasked: after a pause in a conversation close to its job, or to pick up an unanswered question. */
+export type UnpromptedKind = "speak-up" | "follow-up";
 
 /** One turn an agent of a chat was given, as the people in the chat see it (its runs). */
 export interface AgentTurnView {

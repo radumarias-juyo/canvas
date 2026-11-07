@@ -3,6 +3,7 @@ import { MAX_HOPS, type AgentDefinition, type ChatAgentReplyData, type ChatTurnD
 import { AGENT_NAME } from "../../shared/mentions.ts";
 import { errorMessage, serial } from "../../shared/util.ts";
 import type { AgentTurn, ChatRoster, RosterEntry, TurnRequest } from "./roster.ts";
+import { isPass } from "./funnel.ts";
 import { askOf, CatchUp, entryAskKey, handOffs, itemsIn, MAX_ASK_CHARS, publishedIn, turnAskKey, turnInput } from "./turns.ts";
 
 /** What a turn left in its session for its reply to show. */
@@ -45,6 +46,18 @@ export interface TurnHost {
   changed(): void;
   /** Keep the object alive for work that outlives the call that started it. */
   waitUntil(promise: Promise<unknown>): void;
+  /** Why no turn may start now (the chat's daily budget is used up), as the turn's reply says it; undefined when one may. */
+  refusal?(turn: AgentTurn): string | undefined;
+  /** A turn ended: how, and whether a reply was posted for it (an unprompted turn that passed posts none). For the metrics. */
+  ended?(turn: AgentTurn, outcome: TurnOutcome): void;
+}
+
+/** How a turn ended, as the metrics count it. */
+export interface TurnOutcome {
+  status: "done" | "failed" | "passed";
+  text: string;
+  startedAt: number;
+  endedAt: number;
 }
 
 /** Who gives agents turns, as `call` takes it: their request, less the agent; `hop` is 0 unless said. */
@@ -122,6 +135,11 @@ export class AgentTurns {
         await this.#ended(entry, turn, { status: "unanswered", reason: `its owner turned @${entry.name} off` });
         return;
       }
+      const refused = this.#host.refusal?.(turn);
+      if (refused) {
+        await this.#ended(entry, turn, { status: "unanswered", reason: refused });
+        return;
+      }
       // A turn in a session of its own reads that session, not the chat: it catches up on nothing.
       await Promise.all([turn.session ? undefined : this.#catchUp(entry, turn.id), this.#host.configure(entry, agent, turn)]);
       if (!live()) return;
@@ -183,6 +201,16 @@ export class AgentTurns {
     if (now?.status === "running" || now?.status === "queued") {
       const done = result.status === "done";
       const text = (result.text ?? "").trim();
+      // A turn nobody asked for posts only an answer worth posting: none when it passed, or failed (nobody is waiting
+      // for it), and it hands nothing on.
+      if (turn.calledBy.unprompted && (!done || !text || isPass(text))) {
+        if (roster.end(turn.id, done ? "done" : "failed")) {
+          this.#host.ended?.(turn, { status: done ? "passed" : "failed", text, startedAt: now.startedAt ?? now.createdAt, endedAt: roster.now() });
+        }
+        this.#host.changed();
+        this.pump(entry.agentId);
+        return;
+      }
       // Only a turn whose input went in has outputs in its session.
       const { published, items } = now.submitted ? await this.#outputs(sessionOf(entry, turn), turn.id) : NO_OUTPUTS;
       const current = roster.get(entry.agentId) ?? entry;
@@ -205,9 +233,10 @@ export class AgentTurns {
       };
       // Who it hands work to, within what the chain may still make.
       const left = MAX_HOPS - roster.handOffsFrom(turn.root);
-      const next = done && left > 0 ? handOffs(text, entry.agentId, turn.hop, roster.list()).slice(0, left) : [];
+      const next = done && left > 0 && !turn.calledBy.unprompted ? handOffs(text, entry.agentId, turn.hop, roster.list()).slice(0, left) : [];
       // A chain no person started never hands pi a turn: pi has the owner's full tools. It reads the reply instead.
       if (roster.end(turn.id, done ? "done" : "failed", { reply, toPi: !turn.unattended && next.includes(AGENT_NAME) })) {
+        this.#host.ended?.(turn, { status: done ? "done" : "failed", text, startedAt: reply.startedAt, endedAt: reply.endedAt });
         const agents = next.filter((id) => id !== AGENT_NAME);
         // A hand-off can only read, whoever started the chain: agents cannot give each other permission.
         const ask = askOf({ name: current.name, kind: "agent" }, text, MAX_ASK_CHARS);

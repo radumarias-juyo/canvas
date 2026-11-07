@@ -459,6 +459,26 @@ export class ChatRoster {
     return rows.map(turnOf);
   }
 
+  /**
+   * An agent's turns nobody asked for (calledBy.unprompted) since `since`, those it passed included: how many, and when
+   * the last one was queued. What the funnel's daily cap and cooldown read (worker/agents/funnel.ts).
+   */
+  unpromptedSince(agentId: string, since: number): { count: number; lastAt?: number } {
+    const row = this.#sql
+      .exec(
+        "SELECT COUNT(*) AS n, MAX(created_at) AS last FROM chat_agent_turns WHERE agent_id = ? AND created_at >= ? AND json_extract(called_by, '$.unprompted') IS NOT NULL",
+        agentId,
+        since,
+      )
+      .toArray()[0] as { n: number; last: number | null };
+    return { count: row.n, ...(row.last !== null && { lastAt: row.last }) };
+  }
+
+  /** Whether an agent has a turn waiting or running. */
+  isBusy(agentId: string): boolean {
+    return this.#sql.exec(`SELECT 1 FROM chat_agent_turns WHERE agent_id = ? AND ${OPEN} LIMIT 1`, agentId).toArray().length > 0;
+  }
+
   /** The newest turns, for a runs list. */
   recentTurns(agentId: string, limit = 20): AgentTurn[] {
     return this.#turns("agent_id = ? ORDER BY id DESC LIMIT ?", agentId, limit);
