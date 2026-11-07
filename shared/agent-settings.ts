@@ -69,7 +69,9 @@ export function checkAgentSettings(input: unknown, current: ChatAgentSettings): 
     const tokens = input.dailyTokens;
     if (tokens === null) delete next.dailyTokens;
     else if (typeof tokens !== "number" || !Number.isInteger(tokens) || tokens < MIN_DAILY_TOKENS || tokens > MAX_DAILY_TOKENS)
-      throw new AgentSettingsError(`A daily budget is a whole number of tokens from ${MIN_DAILY_TOKENS.toLocaleString("en")} to ${MAX_DAILY_TOKENS.toLocaleString("en")}, or null for none.`);
+      throw new AgentSettingsError(
+        `A daily budget is a whole number of tokens from ${MIN_DAILY_TOKENS.toLocaleString("en")} to ${MAX_DAILY_TOKENS.toLocaleString("en")}, or null for none.`,
+      );
     else next.dailyTokens = tokens;
   }
   return next;

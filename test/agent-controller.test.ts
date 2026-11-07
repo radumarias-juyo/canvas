@@ -1245,3 +1245,69 @@ describe("AgentTurns: pi's replies", () => {
     expect(chat.roster.allRunning().map((running) => running.agentId)).toEqual([idOf(B), idOf(C)]);
   });
 });
+
+/** A chat with a daily budget that may be used up, which counts how each turn ended. */
+class MeteredChat extends FakeChat {
+  refused: string | undefined;
+  readonly outcomes: { turn: number; status: string; text: string }[] = [];
+
+  refusal(): string | undefined {
+    return this.refused;
+  }
+
+  ended(turn: AgentTurn, outcome: { status: string; text: string }): void {
+    this.outcomes.push({ turn: turn.id, status: outcome.status, text: outcome.text });
+  }
+}
+
+describe("AgentTurns: turns nobody asked for, and the budget", () => {
+  const unprompted = (chat: FakeChat): Caller => ({
+    calledBy: { name: "the conversation", unprompted: "speak-up" },
+    ask: "[Mia · person]: anyone know the totals?",
+    byOwner: false,
+    unattended: true,
+  });
+
+  it("posts nothing for an unprompted turn that answers PASS, and counts it as passed", async () => {
+    const chat = new MeteredChat([A]);
+    const [turn] = chat.turns.call([idOf(A)], unprompted(chat));
+    await chat.flush();
+    expect(chat.submits[0].input).toContain("Nobody called you");
+    chat.finish(turn.id, done("**PASS**"));
+    await chat.flush();
+    expect(chat.posts).toEqual([]);
+    expect(chat.latest(A).status).toBe("done");
+    expect(chat.outcomes).toEqual([{ turn: turn.id, status: "passed", text: "**PASS**" }]);
+  });
+
+  it("posts an unprompted answer worth posting, and hands nothing on from it", async () => {
+    const chat = new MeteredChat([A, B]);
+    const [turn] = chat.turns.call([idOf(A)], unprompted(chat));
+    await chat.flush();
+    chat.finish(turn.id, done("The totals are in last week's report. @bard can you check them?"));
+    await chat.flush();
+    expect(chat.replies()).toEqual([expect.objectContaining({ agentId: idOf(A), calledBy: { name: "the conversation", unprompted: "speak-up" } })]);
+    // No hand-off: a turn nobody asked for starts no chain.
+    expect(chat.roster.recentTurns(idOf(B))).toEqual([]);
+    expect(chat.outcomes).toEqual([expect.objectContaining({ status: "done" })]);
+  });
+
+  it("posts nothing for an unprompted turn that failed", async () => {
+    const chat = new MeteredChat([A]);
+    const [turn] = chat.turns.call([idOf(A)], unprompted(chat));
+    await chat.flush();
+    chat.finish(turn.id, { status: "unanswered", reason: "model down" });
+    await chat.flush();
+    expect(chat.posts).toEqual([]);
+    expect(chat.outcomes).toEqual([expect.objectContaining({ status: "failed" })]);
+  });
+
+  it("ends a turn at once with the budget's notice once the chat's daily budget is used up", async () => {
+    const chat = new MeteredChat([A]);
+    chat.refused = "This chat's daily budget of 10,000 tokens is used up.";
+    chat.turns.call([idOf(A)], chat.say(OWNER, "@atlas go"));
+    await chat.flush();
+    expect(chat.submits).toEqual([]);
+    expect(chat.replies()).toEqual([expect.objectContaining({ agentId: idOf(A), failed: chat.refused })]);
+  });
+});

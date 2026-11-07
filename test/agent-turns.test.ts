@@ -3,6 +3,7 @@ import type { EntryRecord } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
 import { CHAT_AGENT_KIND, CHAT_TURN_KIND, MAX_HOPS, speakerLabel, type ChatAgentReplyData } from "../shared/agents.ts";
 import { AGENT_NAME } from "../shared/mentions.ts";
+import { OFFER_RULE } from "../shared/offers.ts";
 import { CHAT_ASIDE_KIND, CHAT_MESSAGE_KIND, CHAT_PEOPLE_KIND, PUBLISH_TOOL, type ChatMessageData } from "../shared/protocol.ts";
 import {
   agentInstructions,
@@ -477,6 +478,12 @@ describe("allowedTools", () => {
     expect(runTools(tools, mcp, {})).toEqual([...reads, "crm__list_deals", "mail__search", "vault__read"]);
   });
 
+  it("lets any turn post its plan as a checklist card, but not a run, which nobody watches", () => {
+    expect(allowedTools([...tools, "checklist"], mcp, agent, false, signsIn)).toContain("checklist");
+    expect(allowedTools([...tools, "checklist"], mcp, agent, true, signsIn)).toContain("checklist");
+    expect(runTools([...tools, "checklist"], mcp, agent)).not.toContain("checklist");
+  });
+
   it("gives anyone else's turn only the app's read tools and read tools of servers that do not sign in each user", () => {
     expect(allowedTools(tools, mcp, agent, false, signsIn)).toEqual([...reads, "crm__list_deals"]);
     // With no list of its own, every server that does not sign in is shared, for reading.
@@ -523,6 +530,14 @@ describe("agentInstructions", () => {
     expect(prompt).toContain('"Your turn: …"');
     expect(turnInput({ calledBy: { name: "Ana" }, hop: 0, ask: "" }).startsWith("Your turn: ")).toBe(true);
     expect(prompt).toContain(`@${AGENT_NAME}`);
+  });
+
+  it("tells it how a turn nobody asked for reads, to answer PASS when it has nothing, and how to offer one next step", () => {
+    const prompt = agentInstructions(research, "Radu");
+    expect(turnInput({ calledBy: { name: "the conversation", unprompted: "speak-up" }, hop: 0, ask: "[Ana · person]: hm" }).startsWith("Nobody called you")).toBe(true);
+    expect(prompt).toContain('"Nobody called you…"');
+    expect(prompt).toContain("answer exactly PASS");
+    expect(prompt).toContain(OFFER_RULE);
   });
 
   it("changes only with the definition and the owner's name", () => {

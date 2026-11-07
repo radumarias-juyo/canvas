@@ -83,12 +83,15 @@ const pi = (...content: unknown[]) =>
   ({ id: nextId++, conversationId: 0, kind: "pi.assistant", model: [{ role: "assistant", content, timestamp: 0 }] }) as unknown as EntryRecord;
 const text = (value: string) => ({ type: "text", text: value });
 const agent = (value: string) => ({ id: nextId++, conversationId: 0, kind: CHAT_AGENT_KIND, data: { text: value } }) as unknown as EntryRecord;
-const replyTo = (id: number) => ({ id: nextId++, conversationId: 0, kind: CHAT_MESSAGE_KIND, data: { text: "Yes", replyTo: { id } } }) as unknown as EntryRecord;
+const replyTo = (id: number) =>
+  ({ id: nextId++, conversationId: 0, kind: CHAT_MESSAGE_KIND, data: { text: "Yes", replyTo: { id } } }) as unknown as EntryRecord;
 const OFFERED = "Report ready.\nNext step: Send it every Monday?";
 
 describe("offers in the transcript", () => {
   it("finds pi's offer in its last text, unless a tool call comes after it", () => {
-    expect(assistantOffer([text("Looking."), { type: "thinking", thinking: "…" }, text(OFFERED), { type: "thinking", thinking: "done" }] as never)).toEqual({
+    expect(
+      assistantOffer([text("Looking."), { type: "thinking", thinking: "…" }, text(OFFERED), { type: "thinking", thinking: "done" }] as never),
+    ).toEqual({
       block: 2,
       body: "Report ready.",
       offer: "Send it every Monday?",

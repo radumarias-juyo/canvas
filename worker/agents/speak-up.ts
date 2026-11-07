@@ -7,16 +7,7 @@ import type { EntryRecord } from "@earendil-works/pi-durable";
 import { speakerLabel, type AgentDefinition, type UnpromptedKind } from "../../shared/agents.ts";
 import type { ChatAgentSettings } from "../../shared/agent-settings.ts";
 import { errorMessage } from "../../shared/util.ts";
-import {
-  agentProfile,
-  cosine,
-  followUpAsk,
-  gateRefusal,
-  INTEREST_THRESHOLD,
-  recentText,
-  type Embedder,
-  type GateRefusal,
-} from "./funnel.ts";
+import { agentProfile, cosine, followUpAsk, gateRefusal, INTEREST_THRESHOLD, recentText, type Embedder, type GateRefusal } from "./funnel.ts";
 import type { ChatRoster, RosterEntry, TurnRequest } from "./roster.ts";
 
 /** How long the interest stage may take: nobody waits for it, but the object stays awake while it runs. */
@@ -97,21 +88,35 @@ export class SpeakUp {
   async afterPause(recent: readonly EntryRecord[], last: { line: string; askKey?: string }): Promise<string | undefined> {
     const text = recentText(recent);
     if (!text) return undefined;
-    return this.#offer("speak-up", text, (entry) => ({ calledBy: { name: "the conversation", unprompted: "speak-up" }, ask: last.line, byOwner: false, unattended: true, ...(last.askKey && { askKey: last.askKey }) }));
+    return this.#offer("speak-up", text, (entry) => ({
+      calledBy: { name: "the conversation", unprompted: "speak-up" },
+      ask: last.line,
+      byOwner: false,
+      unattended: true,
+      ...(last.askKey && { askKey: last.askKey }),
+    }));
   }
 
   /** A question has had no answer for a while: the closest agent past the gates may offer to pick it up. */
   async followUp(ask: OpenAsk): Promise<string | undefined> {
     return this.#offer("follow-up", ask.text, (entry) => ({
       calledBy: { name: ask.name, uid: ask.uid, unprompted: "follow-up" },
-      ask: followUpAsk(`${speakerLabel({ name: ask.name, kind: "person", owner: ask.uid === entry.ownerUid })}: ${ask.text}`, ask.sentAt, this.#host.now()),
+      ask: followUpAsk(
+        `${speakerLabel({ name: ask.name, kind: "person", owner: ask.uid === entry.ownerUid })}: ${ask.text}`,
+        ask.sentAt,
+        this.#host.now(),
+      ),
       askKey: ask.askKey,
       byOwner: false,
       unattended: true,
     }));
   }
 
-  async #offer(kind: UnpromptedKind, text: string, request: (entry: RosterEntry) => Omit<TurnRequest, "agentId" | "hop">): Promise<string | undefined> {
+  async #offer(
+    kind: UnpromptedKind,
+    text: string,
+    request: (entry: RosterEntry) => Omit<TurnRequest, "agentId" | "hop">,
+  ): Promise<string | undefined> {
     const host = this.#host;
     const embedder = host.embedder;
     if (!this.possible() || !embedder) return undefined;

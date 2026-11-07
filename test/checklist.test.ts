@@ -65,7 +65,15 @@ describe("checkChecklist", () => {
     expect(bad({ title: "Plan", steps: steps(...Array(MAX_CHECKLIST_STEPS + 1).fill("todo")) })).toThrow(/at most 12 steps/);
     expect(bad({ title: "Plan", steps: [{ text: "x".repeat(MAX_STEP_CHARS + 1), status: "todo" }] })).toThrow(/Step 1's text is at most 200/);
     expect(bad({ title: "Plan", steps: [{ text: "ok", status: "todo", note: "x".repeat(MAX_NOTE_CHARS + 1) }] })).toThrow(/Step 1's note/);
-    expect(bad({ title: "Plan", steps: [{ text: "ok", status: "todo" }, { text: " ", status: "todo" }] })).toThrow(/Step 2 needs its text/);
+    expect(
+      bad({
+        title: "Plan",
+        steps: [
+          { text: "ok", status: "todo" },
+          { text: " ", status: "todo" },
+        ],
+      }),
+    ).toThrow(/Step 2 needs its text/);
     expect(bad({ title: "Plan", steps: [{ text: "ok", status: "finished" }] })).toThrow(/todo, doing, done, skipped/);
     expect(bad({ title: "Plan", steps: ["ok"] })).toThrow(/Step 1 must be an object/);
     expect(bad({ id: "nope", title: "Plan", steps: steps("todo") })).toThrow(/id is the one its first call returned/);
@@ -84,14 +92,7 @@ describe("foldChecklists", () => {
     const other = checklistEntry("bbbbbbbbbbbb", { title: "Research", steps: steps("todo") }, RESEARCH, 2);
     const update = checklistEntry("aaaaaaaaaaaa", { title: "Plan", steps: steps("done", "doing") }, PI, 3);
     const last = checklistEntry("aaaaaaaaaaaa", { title: "Plan", steps: steps("done", "skipped") }, PI, 4);
-    const entries = [
-      { id: 1, kind: "pi.user" },
-      entry(2, first),
-      { id: 3, kind: "pi.assistant" },
-      entry(4, other),
-      entry(5, update),
-      entry(6, last),
-    ];
+    const entries = [{ id: 1, kind: "pi.user" }, entry(2, first), { id: 3, kind: "pi.assistant" }, entry(4, other), entry(5, update), entry(6, last)];
     const folded = foldChecklists(entries);
     expect([...folded.keys()]).toEqual(["aaaaaaaaaaaa", "bbbbbbbbbbbb"]);
     expect(folded.get("aaaaaaaaaaaa")).toEqual({ first: 2, latest: last });
@@ -158,8 +159,18 @@ describe("checklists in the chat", () => {
       assistant(10, [call("b", "run_bash")]),
     ] as never;
     const runs = stepRuns(chat, new Set());
-    expect(runs.byEntry.get(2)?.get(0)?.map((item) => item.key)).toEqual(["p"]);
-    expect(runs.byEntry.get(5)?.get(0)?.map((item) => item.key)).toEqual(["a", "q", "b"]);
+    expect(
+      runs.byEntry
+        .get(2)
+        ?.get(0)
+        ?.map((item) => item.key),
+    ).toEqual(["p"]);
+    expect(
+      runs.byEntry
+        .get(5)
+        ?.get(0)
+        ?.map((item) => item.key),
+    ).toEqual(["a", "q", "b"]);
   });
 
   it("draws the card: who posted it, its title, how far it is, and each step's status and note", () => {

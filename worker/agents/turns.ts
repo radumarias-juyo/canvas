@@ -226,9 +226,10 @@ export function askOf(speaker: Parameters<typeof speakerLabel>[0], text: string,
 /** Tools an agent's session never has: they act for pi in the log (reactions). */
 const NEVER_FOR_AGENTS = ["react"];
 /**
- * The app's tools a turn its owner did not ask for may use: reading the pages of the chat and the owner's skills, and
- * loading a deferred tool it may use, and posting its plan as a checklist card (a display, no data). Every other tool of the app writes, runs code, reads the owner's private files,
- * or lists the owner's servers and sign-ins, and a tool added later is left out until it is named here.
+ * The app's tools a turn its owner did not ask for may use: reading the pages of the chat and the owner's skills,
+ * loading a deferred tool it may use, and posting its plan as a checklist card (a display, no data). Every other tool
+ * of the app writes, runs code, reads the owner's private files, or lists the owner's servers and sign-ins, and a tool
+ * added later is left out until it is named here.
  */
 const READ_TOOLS = ["artifact_read", "artifact_history", "artifact_diff", "activate_skill", "read_skill_resource", TOOL_SEARCH_TOOL_NAME, CHECKLIST_TOOL];
 

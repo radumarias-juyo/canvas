@@ -116,7 +116,8 @@ export function checklistOf(entry: { kind: string; data?: unknown }): ChatCheckl
   if (!isObject(data.by) || typeof data.by.name !== "string") return undefined;
   if (data.by.color !== undefined && !(AGENT_COLORS as readonly unknown[]).includes(data.by.color)) return undefined;
   const steps = data.steps as unknown[];
-  const known = (step: unknown) => isObject(step) && typeof step.text === "string" && (CHECKLIST_STATUSES as readonly unknown[]).includes(step.status);
+  const known = (step: unknown) =>
+    isObject(step) && typeof step.text === "string" && (CHECKLIST_STATUSES as readonly unknown[]).includes(step.status);
   if (!steps.every(known)) return undefined;
   return data as unknown as ChatChecklistData;
 }

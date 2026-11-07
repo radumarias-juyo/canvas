@@ -50,7 +50,9 @@ class FakeHome implements RunnerHost {
   readonly runs = new AgentRuns(this.sql, () => this.clock.now);
   readonly definitions = new Map<string, AgentDefinition>();
   readonly values = new Map<string, Value | ((input: StepInput) => Value)>([["crm.weekly_sales", { total: 940, lastYear: 1000 }]]);
-  readonly reads: { call: string; input: StepInput }[] = [];
+  readonly reads: { call: string; input: StepInput; agentId?: string }[] = [];
+  /** Why runs may not spend today, while set (RunHost.spendCap). */
+  capped: string | undefined;
   readonly signIn = new Set<string>();
   readonly writes = new Map<string, { session: string; text: string }>();
   readonly works: { session: string; prompt: string; operationId: string }[] = [];
@@ -69,12 +71,15 @@ class FakeHome implements RunnerHost {
   concurrent = 0;
   mostConcurrent = 0;
 
-  async read(server: string, tool: string, input: StepInput): Promise<Value> {
-    this.reads.push({ call: `${server}.${tool}`, input });
+  async read(server: string, tool: string, input: StepInput, agentId?: string): Promise<Value> {
+    this.reads.push({ call: `${server}.${tool}`, input, ...(agentId && { agentId }) });
     if (this.signIn.has(server)) throw new SignInNeeded(server);
     const value = this.values.get(`${server}.${tool}`);
     if (value === undefined) throw new Error(`${server} has no tool "${tool}".`);
     return typeof value === "function" ? value(input) : value;
+  }
+  async spendCap() {
+    return this.capped;
   }
   async needsSignIn(servers: readonly string[]) {
     return servers.filter((server) => this.signIn.has(server));
@@ -177,6 +182,26 @@ describe("scheduled runs", () => {
     expect(runAlarm(host).at).toBe(Date.parse("2026-11-05T05:00:00Z"));
     const [run] = host.runs.list(definition.id);
     expect(run).toMatchObject({ status: "sent", why: "schedule", cost: 0.01, items: { total: 1, acted: 1 }, summary: "Sales fell 6% against last year." });
+  });
+
+  it("skips a run once its owner's spend today is past the cap, with the reason as its summary, and runs the next", async () => {
+    const { host, runner, definition } = home();
+    await runner.apply(definition.id, definition);
+    host.clock.now = SEVEN;
+    host.capped = "Skipped: today's model calls cost $5.20, past the daily cap of $5.00 for agents' runs.";
+    expect(await runner.fired({ agentId: definition.id, dueAt: SEVEN })).toEqual({ status: "failed", started: true });
+    expect(host.reads).toEqual([]);
+    expect(host.works).toEqual([]);
+    expect(host.delivered).toEqual([]);
+    expect(host.runs.list(definition.id)[0]).toMatchObject({ status: "failed", summary: host.capped });
+    // The next one is still set, and runs once the cap lets it.
+    const next = runAlarm(host).at!;
+    expect(next).toBeGreaterThan(SEVEN);
+    host.capped = undefined;
+    host.clock.now = next;
+    expect(await runner.fired({ agentId: definition.id, dueAt: next })).toEqual({ status: "sent", started: true });
+    // Its reads are kept in its own share of the read cache.
+    expect(host.reads.map((read) => read.agentId)).toEqual([definition.id]);
   });
 
   it("sends once when the alarm fires twice, at once or later", async () => {

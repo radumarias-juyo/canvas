@@ -175,7 +175,15 @@ import {
 import { branchKind, ChatKindState, KIND_KV, MAX_BRANCHES, planKindChange } from "./chat-kind.ts";
 import { branchContext, branchCopies, summaryFor } from "./branch.ts";
 import { newId } from "./storage/index.ts";
-import { agentRouterOn, AgentSettingsError, budgetDay, chatAllowsServer, checkAgentSettings, type ChatAgentSettings, type ChatAgentSettingsView } from "../shared/agent-settings.ts";
+import {
+  agentRouterOn,
+  AgentSettingsError,
+  budgetDay,
+  chatAllowsServer,
+  checkAgentSettings,
+  type ChatAgentSettings,
+  type ChatAgentSettingsView,
+} from "../shared/agent-settings.ts";
 import { agentRouteHistory, agentRouterId, agentRouterModel, AGENT_ROUTE_MS, routeAgents } from "./agents/router.ts";
 import { answered, embedder, FOLLOW_UP_AFTER_MS, looksLikeAsk, PAUSE_MS } from "./agents/funnel.ts";
 import { SpeakUp, type FunnelEvent } from "./agents/speak-up.ts";
@@ -586,7 +594,9 @@ export class ChatAgent extends DurableObject<Env> {
     // Which session each model request is for, for its tags and its count (worker/agents/spend.ts).
     this.registry.install(meterExtension(this.spend));
     // A big ask's plan, as one card that edits in place (worker/agent/checklist.ts).
-    this.registry.install(checklistExtension({ postChecklist: (conversation, checklist, requestId) => this.#postChecklist(conversation, checklist, requestId) }));
+    this.registry.install(
+      checklistExtension({ postChecklist: (conversation, checklist, requestId) => this.#postChecklist(conversation, checklist, requestId) }),
+    );
     // The read cache's hits and evictions, per agent.
     this.hub.observe(this.metrics);
   }
@@ -2739,7 +2749,8 @@ export class ChatAgent extends DurableObject<Env> {
     try {
       const entries = (await recent()) ?? [];
       const signal = AbortSignal.timeout(AGENT_ROUTE_MS);
-      const { agents: picked, usage } = await routeAgents(this.env.AI as unknown as ModelRunner, model, { message: text, history: agentRouteHistory(entries), agents, piAnswers }, signal);
+      const request = { message: text, history: agentRouteHistory(entries), agents, piAnswers };
+      const { agents: picked, usage } = await routeAgents(this.env.AI as unknown as ModelRunner, model, request, signal);
       this.metrics.router({ picked, candidates: agents.length, ms: Date.now() - started });
       // Paid for whatever it said. Only a record: a failure is logged.
       void this.#root()

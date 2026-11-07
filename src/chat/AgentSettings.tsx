@@ -14,7 +14,15 @@ const tokens = (n: number) => n.toLocaleString("en");
  * message that names nobody, whether agents may speak up unprompted, which servers they may use here, a daily token
  * budget for every model call of the chat, today's use, and the agents muted here. Each change is saved at once.
  */
-export function AgentSettingsPanel({ chatId, view, agents }: { chatId: string; view: ChatAgentSettingsView | null; agents: readonly ChatAgentView[] }) {
+export function AgentSettingsPanel({
+  chatId,
+  view,
+  agents,
+}: {
+  chatId: string;
+  view: ChatAgentSettingsView | null;
+  agents: readonly ChatAgentView[];
+}) {
   const [shown, setShown] = useState(view);
   const [error, setError] = useState<string>();
   const [saving, setSaving] = useState(false);
@@ -58,14 +66,24 @@ export function AgentSettingsPanel({ chatId, view, agents }: { chatId: string; v
     <div className="agent-settings">
       <div className="section-head">In this chat</div>
       <label className="skill-toggle" title={available.router ? undefined : "This deployment has no model to pick agents with."}>
-        <input type="checkbox" checked={shown.router} disabled={saving || !available.router} onChange={(e) => void save({ router: e.target.checked })} />
+        <input
+          type="checkbox"
+          checked={shown.router}
+          disabled={saving || !available.router}
+          onChange={(e) => void save({ router: e.target.checked })}
+        />
         <span>
           Pick agents for messages that name nobody
           <small>{available.router ? "Up to two, from their job lines." : "Not available on this deployment."}</small>
         </span>
       </label>
       <label className="skill-toggle" title={available.speakUp ? undefined : "This deployment has no model to tell what an agent cares about."}>
-        <input type="checkbox" checked={!!settings.speakUp} disabled={saving || !available.speakUp} onChange={(e) => void save({ speakUp: e.target.checked || null })} />
+        <input
+          type="checkbox"
+          checked={!!settings.speakUp}
+          disabled={saving || !available.speakUp}
+          onChange={(e) => void save({ speakUp: e.target.checked || null })}
+        />
         <span>
           Let agents speak up
           <small>

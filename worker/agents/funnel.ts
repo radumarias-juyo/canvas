@@ -92,7 +92,8 @@ export function isPass(text: string): boolean {
 }
 
 /** Words that open a request or a question, in English: "can you", "who has", "please send". */
-const ASKING = /^(?:can|could|would|will|does|do|did|is|are|was|has|have|who|what|when|where|which|why|how|please|pls|send|pull|get|find|show|give|list|share|check)\b/i;
+const ASKING =
+  /^(?:can|could|would|will|does|do|did|is|are|was|has|have|who|what|when|where|which|why|how|please|pls|send|pull|get|find|show|give|list|share|check)\b/i;
 
 /** Whether a message reads as a question or a request someone could answer: one with a question mark, or opened by an asking word. */
 export function looksLikeAsk(text: string): boolean {

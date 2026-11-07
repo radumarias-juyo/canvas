@@ -44,7 +44,9 @@ export function checklistExtension(scope: ChecklistScope): Extension {
           "the same card edits in place, so send every step each time, not only the one that changed. Mark a step done when it is, doing while you work " +
           "on it, skipped when it turns out not to be needed (say why in its note). Finish with every step done or skipped. Keep steps short, one line each.",
         parameters: Type.Object({
-          id: Type.Optional(Type.String({ description: "The id the first call returned, to update that checklist; leave it out to post a new one." })),
+          id: Type.Optional(
+            Type.String({ description: "The id the first call returned, to update that checklist; leave it out to post a new one." }),
+          ),
           title: Type.String({ description: `What the plan is for, in a few words. Up to ${MAX_TITLE_CHARS} characters.` }),
           steps: Type.Array(
             Type.Object({
@@ -53,7 +55,9 @@ export function checklistExtension(scope: ChecklistScope): Extension {
                 CHECKLIST_STATUSES.map((status) => Type.Literal(status)),
                 { description: "todo, doing (working on it now), done, or skipped." },
               ),
-              note: Type.Optional(Type.String({ description: `A short note: what it found, or why it was skipped. Up to ${MAX_NOTE_CHARS} characters.` })),
+              note: Type.Optional(
+                Type.String({ description: `A short note: what it found, or why it was skipped. Up to ${MAX_NOTE_CHARS} characters.` }),
+              ),
             }),
             { description: `Every step of the plan, in order, as it stands now: 1 to ${MAX_CHECKLIST_STEPS}.` },
           ),
