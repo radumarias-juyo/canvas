@@ -196,6 +196,8 @@ import type { RoomLink, RoomRef, SeatBatch, SeatLink, SeatResult, SeatTurn } fro
 import { memberAgentName, seatChatId } from "./agents/seats/names.ts";
 import { postedVersion, readableVersion } from "./agent/page-authors.ts";
 import { SeatActions } from "./agents/seats/actions.ts";
+import { NOT_YOUR_AGENT, ownWindowEntry, roomWindowSessions } from "./agents/window.ts";
+import { MAX_WINDOW_TEXT, WINDOW_ENTRIES, windowText, type AgentWindowView, type SteerResult } from "../shared/agent-window.ts";
 import { addRefusal, mayRemove, mayShare, seatedEntry, type ChatRules } from "./agents/seats/rules.ts";
 import { AgentSeats, type SeatHost } from "./agents/seats/seat.ts";
 import { agentsExtension } from "./agents/tools.ts";
@@ -253,8 +255,18 @@ import {
   type ChatAgentSettings,
   type ChatAgentSettingsView,
 } from "../shared/agent-settings.ts";
-import { agentRouterId, agentRouterModel, AGENT_ROUTE_MS, piPicks, routableAgents, routeAgents, routesAgents } from "./agents/router.ts";
-import { answered, embedder, FOLLOW_UP_AFTER_MS, looksLikeAsk, PAUSE_MS } from "./agents/funnel.ts";
+import {
+  agentRouterId,
+  agentRouterModel,
+  AGENT_ROUTE_MS,
+  piPicks,
+  routableAgents,
+  routeAgents,
+  routesAgents,
+  withinRouteLimits,
+} from "./agents/router.ts";
+import { answered, countMessagesSince, embedder, FOLLOW_UP_AFTER_MS, looksLikeAsk } from "./agents/funnel.ts";
+import { SPEAK_UP_DEFAULTS, strictestLimits } from "../shared/speak-up.ts";
 import { SpeakUp, type FunnelEvent } from "./agents/speak-up.ts";
 import { ChatSpend, meterExtension, type Spent } from "./agents/spend.ts";
 import { Metrics } from "./metrics.ts";
@@ -539,9 +551,16 @@ export class ChatAgent extends DurableObject<Env> {
     },
     observe: (event: FunnelEvent) => this.metrics.funnel({ ...event, stage: event.refusal ? `${event.stage}:${event.refusal}` : event.stage }),
     now: () => Date.now(),
+    messagesSince: (at, max) => countMessagesSince(this.#log({ order: "descending" }), at, max),
+    penalties: this.ctx.storage.kv,
   });
-  /** How long the chat stays quiet before an agent may speak up: PAUSE_MS, or on the scripted model what DEV_PAUSE_MS says. */
-  readonly #pauseMs = scriptPauseMs(this.env) ?? PAUSE_MS;
+  /**
+   * How long the chat stays quiet before an agent may speak up: the chat's limit (an agent's own may be longer, which
+   * its gate reads), or on the scripted model what DEV_PAUSE_MS says.
+   */
+  get #pauseMs(): number {
+    return scriptPauseMs(this.env) ?? (this.#agentSettings().speakUpLimits?.pauseMinutes ?? SPEAK_UP_DEFAULTS.pauseMinutes) * 60_000;
+  }
   /** The spend not yet sent to each payer's directory, by uid (#spent). */
   readonly #ownerSpend = new Map<string, { calls: number; tokens: number; cost: number }>();
   /** What each session's model calls came to since its turn started, for the turn's metrics: tokens, dollars, tool calls. */
@@ -718,7 +737,7 @@ export class ChatAgent extends DurableObject<Env> {
       heldIn: (chatId, artifactId) => this.#heldIn(chatId, artifactId),
       chatPage: (meta, session) => this.#chatPage(meta, session),
       proposeSkill: (skill) => this.#directory.saveSkill(skill, "agent", false),
-      proposeAgent: (input) => this.#directory.saveAgent(input, "agent", false),
+      proposeAgent: (input) => this.#directory.saveAgent(input, "agent", false, { proposedIn: this.chatId }),
       checkPage: (input, signal) =>
         this.#checkBrowser.withPage((page) => checkPage(page, input, this.#checkBridge(input.manifest)), { timeoutMs: CHECK_MS, signal }),
       chatArtifacts: () => this.#directory.listChatArtifacts(this.chatId),
@@ -3269,6 +3288,8 @@ export class ChatAgent extends DurableObject<Env> {
     if (!entry) return refuse(404, "No such agent in this chat.");
     if (!muted && by.uid !== this.uid && by.uid !== entry.ownerUid) return refuse(403, `Only the chat's owner or @${entry.name}'s can unmute it.`);
     this.roster.setMuted(agentId, muted);
+    // It learns: its threshold for speaking up here goes up for a while.
+    if (muted) this.speakUp.lowered(agentId, "mute");
     this.#broadcastAgents();
     return this.agentViews();
   }
@@ -3308,7 +3329,15 @@ export class ChatAgent extends DurableObject<Env> {
     const speaksUp = async (entry: RosterEntry) => (await abortable(this.#index(entry.ownerUid).getAgent(entry.agentId), cap))?.speaksUp === true;
     // The conversation is read while the members' definitions are (memoised: the other pickers share it).
     void recent().catch(() => {});
-    const may = await routableAgents(roster, this.uid, this.#account(author), speaksUp);
+    const allowed = await routableAgents(roster, this.uid, this.#account(author), speaksUp);
+    // With others in the chat, a routed agent answers at most one of so many messages (its speaking-up limit).
+    const perMessages = async (entry: RosterEntry) => {
+      const agent = await abortable(this.#index(entry.ownerUid).getAgent(entry.agentId), cap);
+      return strictestLimits(this.#agentSettings().speakUpLimits, agent?.speakUpLimits).perMessages;
+    };
+    const messagesSince = (at: number, max: number) => countMessagesSince(this.#log({ order: "descending" }), at, max);
+    const lastRouted = (agentId: string) => this.roster.lastRoutedAt(agentId);
+    const may = this.members.hasAny() ? await withinRouteLimits(allowed, lastRouted, perMessages, messagesSince) : allowed;
     if (!may.length) return [];
     const agents = may.map(({ agentId, name, job }) => ({ id: agentId, name, job }));
     const started = Date.now();
@@ -3338,7 +3367,7 @@ export class ChatAgent extends DurableObject<Env> {
   }
 
   /**
-   * A person said something: once the chat has been quiet for PAUSE_MS after the newest message, an agent may speak up
+   * A person said something: once the chat has been quiet for its pause after the newest message, an agent may speak up
    * about it (#afterPause). One check is set at a time; when it fires early (newer messages came), it is set again.
    */
   #notePause(sentAt: number): void {
@@ -3359,7 +3388,7 @@ export class ChatAgent extends DurableObject<Env> {
   }
 
   /**
-   * The pause check: once the chat was quiet for PAUSE_MS after a person's message, the agents past the gates whose job
+   * The pause check: once the chat was quiet for its pause after a person's message, the agents past the gates whose job
    * is close to the conversation may speak up (worker/agents/speak-up.ts). While pi or an agent works, it waits again.
    */
   /** pi or an agent just finished: a pause waiting counts its quiet from now, not from the person's message. */
@@ -3386,7 +3415,7 @@ export class ChatAgent extends DurableObject<Env> {
     const data = last?.data as Partial<ChatMessageData> | undefined;
     if (!data?.text || data.uid === undefined || data.sentAt === undefined) return;
     const line = askOf({ name: data.name ?? "someone", kind: "person" }, data.text, MAX_ASK_CHARS);
-    await this.speakUp.afterPause(recent, { line, askKey: messageAskKey({ uid: data.uid, sentAt: data.sentAt }) });
+    await this.speakUp.afterPause(recent, { line, askKey: messageAskKey({ uid: data.uid, sentAt: data.sentAt }) }, Date.now() - kept.after);
   }
 
   /**
@@ -3504,6 +3533,8 @@ export class ChatAgent extends DurableObject<Env> {
   /** A roster agent's turn ended: its metrics. */
   #turnEnded(turn: AgentTurn, outcome: TurnOutcome): void {
     this.#quietFrom(outcome.endedAt);
+    // It learns: a turn nobody asked for that it passed raises its threshold for speaking up here for a while.
+    if (outcome.status === "passed") this.speakUp.lowered(turn.agentId, "pass");
     // A restore a Yes's run left undone (pi was busy at its settle) comes once anything ends.
     void this.#restorePiTools();
     const entry = this.roster.get(turn.agentId);
@@ -3808,6 +3839,7 @@ export class ChatAgent extends DurableObject<Env> {
     return {
       give: (batch, turn) => seat.seatGive(room, entry.agentId, { ...turn, ownerName: this.#nameOf(entry.ownerUid), kind: this.kinds.kind() }, batch),
       abort: (turn) => seat.seatAbort(room, turn),
+      steer: (turn, line) => seat.seatSteer(room, turn, line),
       wake: () => seat.seatWake(room),
       kind: (kind) => seat.seatKind(room, kind),
       decide: (id, decision) => seat.seatDecide(room, id, decision),
@@ -3991,6 +4023,11 @@ export class ChatAgent extends DurableObject<Env> {
     await this.seats.abort(room, turn);
   }
 
+  /** (RPC, from a room) This user's words, from their agent's window, for a turn of theirs a seat here runs (SeatLink.steer). */
+  async seatSteer(room: RoomRef, turn: number, line: string): Promise<boolean> {
+    return this.seats.steer(room, turn, line);
+  }
+
   /** (RPC, from a room) Post again what the room has not taken of its seats here. */
   seatWake(room: RoomRef): void {
     this.seats.wake(room);
@@ -4030,6 +4067,64 @@ export class ChatAgent extends DurableObject<Env> {
     for (const view of held) {
       await this.#cancelExpiry(view.id);
       await this.#expireAction(view.id);
+    }
+  }
+
+  // ---- An agent's window, for its owner alone (shared/agent-window.ts) ----
+
+  /**
+   * (the agent's owner) The window on one of their agents that run here: its sessions in this chat and one's transcript
+   * (`session`, else the one a turn runs in, else the shared one). A member's agent's window is in their own object
+   * (seatWindow): this refuses it, and anyone else's. JSON: the transcript is pi's entries, which no RPC type carries.
+   */
+  async agentWindow(by: Person, agentId: string, session?: string): Promise<{ json: string } | ChatRefusal> {
+    if (!this.isInChat(by.uid)) return refuse(403, NOT_YOUR_AGENT);
+    const entry = ownWindowEntry(this.roster, agentId, by.uid);
+    if (!entry) return refuse(403, NOT_YOUR_AGENT);
+    const sessions = roomWindowSessions(this.roster, entry, this.runs.sessionsOf(agentId));
+    return { json: JSON.stringify(await this.#windowView({ agentId, name: entry.name, seat: false, sessions }, session)) };
+  }
+
+  /**
+   * (RPC, from the Worker, for this user) The window on one of their agents seated in `room`, read here in their own
+   * object, where its sessions are. Refused for an agent with no seat there.
+   */
+  async seatWindow(room: RoomRef, agentId: string, session?: string): Promise<{ json: string } | ChatRefusal> {
+    const sessions = this.seats.window(room, agentId);
+    const agent = sessions && (await this.#directory.getAgent(agentId));
+    if (!sessions || !agent) return refuse(403, NOT_YOUR_AGENT);
+    return { json: JSON.stringify(await this.#windowView({ agentId, name: agent.name, seat: true, sessions }, session)) };
+  }
+
+  /**
+   * (the agent's owner) Their words to the agent from its window (AgentTurns.instruct): a steer into their own turn it
+   * runs apart now, else a turn of their own. Never in the chat's log. For a member's agent the seat steers it.
+   */
+  async steerAgent(by: Person, agentId: string, text: unknown): Promise<SteerResult | ChatRefusal> {
+    if (this.#gone) return refuse(404, DELETED);
+    if (!this.isInChat(by.uid)) return refuse(403, NOT_YOUR_AGENT);
+    const said = windowText(text);
+    if (said === null) return refuse(400, `Expected {text}: a non-empty instruction of at most ${MAX_WINDOW_TEXT} characters.`);
+    return this.turns.instruct(agentId, personOf(by), said);
+  }
+
+  /** The window's view of `sessions`: one's transcript as a snapshot of its newest entries, with how long its run went. */
+  async #windowView(base: Omit<AgentWindowView, "shown">, asked?: string): Promise<AgentWindowView> {
+    const { sessions } = base;
+    // Only a session the window lists: nothing else of this object's is the agent's.
+    const pick = sessions.find((one) => one.id === asked) ?? sessions.find((one) => one.running) ?? sessions[0];
+    if (!pick) return base;
+    const events = await this.harness.session(pick.id).events();
+    try {
+      const { snapshot } = events;
+      const shown = shownEvent({ ...snapshot, entries: snapshot.entries.slice(-WINDOW_ENTRIES) }, false);
+      const [started, toolsStarted] = await Promise.all([this.runStartedAt(snapshot), this.toolsStartedAt(snapshot)]);
+      const now = Date.now();
+      const since = (at: number) => Math.max(0, now - at);
+      const toolsElapsedMs = Object.fromEntries(Object.entries(toolsStarted).map(([id, at]) => [id, since(at)]));
+      return { ...base, shown: { session: pick.id, snapshot: shown, ...(started !== undefined && { runElapsedMs: since(started) }), toolsElapsedMs } };
+    } finally {
+      await events.stop().catch(() => {});
     }
   }
 

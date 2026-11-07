@@ -9,6 +9,7 @@ import { conditionProblem, MAX_CONDITION } from "./conditions.ts";
 import type { ItemRef } from "./items.ts";
 import { checkRules, GuardrailError, MAX_APPROVAL_HOURS, type GuardrailRule } from "./limits.ts";
 import { AGENT_NAME } from "./mentions.ts";
+import { checkSpeakUpLimits, SpeakUpLimitsError, type SpeakUpLimits } from "./speak-up.ts";
 import { EFFORT_LABELS } from "./models.ts";
 import type { RunRef } from "./runs.ts";
 import { isObject, isTimeZone, withoutUnseen } from "./util.ts";
@@ -139,6 +140,11 @@ export interface AgentInput {
   worthPosting?: string;
   /** At most this many posts a day from its runs on their own (schedule and watch); the rest are quiet lines. */
   postsPerDay?: number;
+  /**
+   * How often it may speak up, and be picked by a chat's router, as its owner limits it: the stricter of these and the
+   * chat's own holds (shared/speak-up.ts).
+   */
+  speakUpLimits?: SpeakUpLimits;
 }
 
 /** The longest "worth a post" bar, and the most posts a day an agent may be limited to. */
@@ -448,6 +454,13 @@ export function checkAgent(input: unknown): AgentInput {
   const postsPerDay = input.postsPerDay ?? undefined;
   const perDay = typeof postsPerDay === "number" && Number.isInteger(postsPerDay) && postsPerDay >= 1 && postsPerDay <= MAX_POSTS_PER_DAY;
   if (postsPerDay !== undefined && !perDay) fail(`An agent posts at most 1 to ${MAX_POSTS_PER_DAY} times a day.`);
+  let speakUpLimits: SpeakUpLimits | undefined;
+  try {
+    speakUpLimits = checkSpeakUpLimits(input.speakUpLimits);
+  } catch (error) {
+    if (error instanceof SpeakUpLimitsError) fail(`An agent's limits on speaking up: ${error.message}`);
+    throw error;
+  }
   return {
     name,
     ...(avatar && { avatar }),
@@ -469,6 +482,7 @@ export function checkAgent(input: unknown): AgentInput {
     ...(speaksUp && { speaksUp: true }),
     ...(worthPosting && { worthPosting }),
     ...(postsPerDay !== undefined && { postsPerDay: postsPerDay as number }),
+    ...(speakUpLimits && { speakUpLimits }),
   };
 }
 
@@ -573,6 +587,7 @@ export const COPIED_FIELDS = [
   "speaksUp",
   "worthPosting",
   "postsPerDay",
+  "speakUpLimits",
 ] as const satisfies readonly (keyof AgentInput)[];
 export type CopiedField = (typeof COPIED_FIELDS)[number];
 /** The fields a copy takes only as its new owner sets them when they copy it, never from the one it copies. */
@@ -642,9 +657,10 @@ export type ChatAgentReplyData = {
    * the chat's router picked this agent. `unprompted`: nobody did: the agent spoke up after a pause in a conversation
    * close to its job ("speak-up"), or offers to pick up a question nobody answered ("follow-up"); `name` is then the
    * person whose message it answers. `drafts`: its owner said Yes to the next step its reply offered, and the turn
-   * may only read and draft the routine (worker/agents/turns.ts, draftTools).
+   * may only read and draft the routine (worker/agents/turns.ts, draftTools). `window`: its owner told it from the
+   * agent's window (shared/agent-window.ts), not in the chat: its ask is in no log and no shared session, only its fork.
    */
-  calledBy: { name: string; uid?: string; agentId?: string; schedule?: true; routed?: true; unprompted?: UnpromptedKind; drafts?: true };
+  calledBy: { name: string; uid?: string; agentId?: string; schedule?: true; routed?: true; unprompted?: UnpromptedKind; drafts?: true; window?: true };
   /** The turn's id in the chat's turn table. */
   turn: number;
   /** How many hand-offs led to this turn: 0 when a person called it. */
