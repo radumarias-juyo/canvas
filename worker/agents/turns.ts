@@ -4,7 +4,16 @@
 import type { AssistantMessage, UserMessage } from "@earendil-works/pi-ai";
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { TOOL_SEARCH_TOOL_NAME } from "@earendil-works/pi-durable/tool-search";
-import { CHAT_AGENT_KIND, MAX_HOPS, mayUseServer, speakerLabel, type AgentDefinition, type ChatAgentReplyData } from "../../shared/agents.ts";
+import {
+  CHAT_AGENT_KIND,
+  CHAT_TURN_KIND,
+  MAX_HOPS,
+  mayUseServer,
+  speakerLabel,
+  type AgentDefinition,
+  type ChatAgentReplyData,
+  type ChatTurnData,
+} from "../../shared/agents.ts";
 import { textOf } from "../../shared/canonical.ts";
 import { MEMORY_RECALL_TOOL } from "../../shared/memory.ts";
 import { CHAT_CONTEXT_KIND, CHAT_COPY_KIND, type ChatCopyData } from "../../shared/chat-kinds.ts";
@@ -54,6 +63,27 @@ export function handOffs(text: string, from: string, hop: number, roster: readon
 }
 
 /** The text of an assistant message: its text blocks, without its thinking or tool calls. */
+/**
+ * What an entry of pi's log is to its runs: an agent's hand-off (chat.turn), a person's message (not an aside), another
+ * input, or a reply of pi's; undefined for the rest. One reading for every scan of the log (#piScan, runAskedByOwner).
+ */
+export type PiLogEntry =
+  | { input: "handOff"; data: Partial<ChatTurnData> | undefined }
+  | { input: "message"; uid: string | undefined }
+  | { input: "other" }
+  | { reply: AssistantMessage };
+
+export function piLogEntry(entry: Pick<EntryRecord, "kind" | "data" | "model">): PiLogEntry | undefined {
+  if (entry.kind === CHAT_TURN_KIND) return { input: "handOff", data: entry.data as Partial<ChatTurnData> | undefined };
+  if (entry.kind === "pi.user") return { input: "other" };
+  if (entry.kind === CHAT_MESSAGE_KIND) {
+    const data = entry.data as Partial<ChatMessageData> | undefined;
+    return data?.aside ? undefined : { input: "message", uid: data?.uid };
+  }
+  const reply = entry.kind === "pi.assistant" ? entry.model?.[0] : undefined;
+  return reply?.role === "assistant" ? { reply } : undefined;
+}
+
 export function assistantText(message: AssistantMessage): string {
   return textOf(message.content.filter(Boolean), "").trim();
 }

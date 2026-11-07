@@ -33,6 +33,9 @@ export const PROMPT_NOTES_CHARS = 4_000;
 /** How many notes memory_recall returns at most at once (an offset pages through the rest). */
 export const MAX_RECALLED = 20;
 
+/** What memory_forget did: the note it forgot, by id only (its text stays out of the transcript), or why not. */
+export type Forgot = { id: string } | { error: string };
+
 /** What memory_recall found: one page of the notes that match (from an offset), and how many match in all. */
 export interface Recalled {
   notes: MemoryNote[];

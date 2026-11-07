@@ -128,8 +128,13 @@ describe("a prompt that held the owner's own notes", () => {
     }
   });
 
-  /** A gate a compaction's summarizer waits at (`summarizing` once it got there) until `release`d or stopped. */
-  function gate() {
+  /**
+   * pi whose prompt held the owner's salary, two long messages in, and a compaction's summarizer (whose summary keeps
+   * the salary) held at a gate: `summarizing` once it got there, until `release`d or stopped. `compacts` starts it by
+   * hand (pi then never compacts on its own); else the second message's turn compacts first, and waits for it (`turn`).
+   * The note is out of the section by then.
+   */
+  async function compacting(compacts: boolean) {
     let started!: () => void;
     const summarizing = new Promise<void>((resolve) => (started = resolve));
     let release!: () => void;
@@ -138,22 +143,23 @@ describe("a prompt that held the owner's own notes", () => {
       started();
       return Promise.race([released, new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve()))]);
     };
-    return { summarizing, release, wait };
+    const summary = "Summary: the owner's salary is private.";
+    const pi = await piWithMemory([], { summary, summarizing: wait, ...(compacts && { contextWindow: 10_000_000 }) });
+    pi.notes.text = "- [a1] (just me) My salary is private.";
+    await pi.ask(`first ${"words ".repeat(30_000)}`);
+    const turn = pi.ask(`second ${"words ".repeat(30_000)}`);
+    if (compacts) await turn;
+    const compaction = compacts ? await pi.root.compact(undefined, BACKGROUND_CONTEXT) : undefined;
+    await summarizing;
+    pi.notes.text = "No notes yet.";
+    return { ...pi, turn, compaction, release };
   }
 
   it("stops a compaction summarizing the context as it was, so its summary never comes in", async () => {
-    const { summarizing, release, wait } = gate();
-    const summary = "Summary: the owner's salary is private.";
-    const { pi, root, notes, ask, requests } = await piWithMemory([], { summary, summarizing: wait, contextWindow: 10_000_000 });
+    const { pi, root, ask, requests, compaction, release } = await compacting(true);
     try {
-      notes.text = "- [a1] (just me) My salary is private.";
-      await ask(`first ${"words ".repeat(30_000)}`);
-      await ask(`second ${"words ".repeat(30_000)}`);
-      const compaction = await root.compact(undefined, BACKGROUND_CONTEXT);
-      await summarizing;
-      notes.text = "No notes yet.";
       expect(await freshPrompt(root, pi)).toEqual({});
-      expect((await pi.waitForTask(compaction, BACKGROUND_CONTEXT)).state.outcome.status).toBe("aborted");
+      expect((await pi.waitForTask(compaction!, BACKGROUND_CONTEXT)).state.outcome.status).toBe("aborted");
       await ask("and now?");
       expect(JSON.stringify(requests.at(-1))).not.toContain("salary");
       expect(JSON.stringify(requests.at(-1))).toContain("second");
@@ -164,21 +170,13 @@ describe("a prompt that held the owner's own notes", () => {
   });
 
   it("leaves out a summary placed while it stopped the compactions", async () => {
-    const { summarizing, release, wait } = gate();
-    const summary = "Summary: the owner's salary is private.";
-    const { pi, root, notes, ask, requests } = await piWithMemory([], { summary, summarizing: wait, contextWindow: 10_000_000 });
+    const { pi, root, ask, requests, compaction, release } = await compacting(true);
     try {
-      notes.text = "- [a1] (just me) My salary is private.";
-      await ask(`first ${"words ".repeat(30_000)}`);
-      await ask(`second ${"words ".repeat(30_000)}`);
-      const compaction = await root.compact(undefined, BACKGROUND_CONTEXT);
-      await summarizing;
-      notes.text = "No notes yet.";
       // It finishes before it is stopped: its summary comes in after the first edits.
       const fresh = freshPrompt(root, pi);
       release();
       expect(await fresh).toEqual({});
-      await pi.waitForTask(compaction, BACKGROUND_CONTEXT);
+      await pi.waitForTask(compaction!, BACKGROUND_CONTEXT);
       await ask("and now?");
       expect(JSON.stringify(requests.at(-1))).not.toContain("salary");
     } finally {
@@ -187,16 +185,8 @@ describe("a prompt that held the owner's own notes", () => {
   });
 
   it("leaves out the summary of a compaction a turn waits for once it is placed", async () => {
-    const { summarizing, release, wait } = gate();
-    const summary = "Summary: the owner's salary is private.";
-    const { pi, root, notes, ask, requests } = await piWithMemory([], { summary, summarizing: wait });
+    const { pi, root, ask, requests, turn, release } = await compacting(false);
     try {
-      notes.text = "- [a1] (just me) My salary is private.";
-      await ask(`first ${"words ".repeat(30_000)}`);
-      // This turn compacts first, and waits for it.
-      const turn = ask(`second ${"words ".repeat(30_000)}`);
-      await summarizing;
-      notes.text = "No notes yet.";
       const { compacting } = await freshPrompt(root, pi);
       expect(compacting).toBeDefined();
       release();

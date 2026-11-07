@@ -140,7 +140,6 @@ import {
   type ChatAgentReplyData,
   type ChatAgents,
   type ChatAgentView,
-  type ChatTurnData,
   type SharedAgentView,
 } from "../shared/agents.ts";
 import { AgentTurns, sessionOf, type TurnHost } from "./agents/controller.ts";
@@ -160,7 +159,18 @@ import { ChatMemory, runAskedByOwner, type MemoryAgent } from "./memory/chat.ts"
 import { freshPrompt } from "./memory/fresh.ts";
 import { memoryExtension } from "./memory/tools.ts";
 import { coverageOf } from "./memory/coverage.ts";
-import { agentInstructions, allowedTools, askOf, assistantText, attachedNote, MAX_ASK_CHARS, messageAskKey, runTools, speakersFor } from "./agents/turns.ts";
+import {
+  agentInstructions,
+  allowedTools,
+  askOf,
+  assistantText,
+  attachedNote,
+  MAX_ASK_CHARS,
+  messageAskKey,
+  piLogEntry,
+  runTools,
+  speakersFor,
+} from "./agents/turns.ts";
 import {
   answersEveryMessage,
   CHAT_CONTEXT_KIND,
@@ -2628,15 +2638,14 @@ export class ChatAgent extends DurableObject<Env> {
     for await (const page of this.#log({ order: "ascending", minEntryId: (through + 1) as EntryId })) {
       for (const entry of page) {
         through = entry.id as number;
-        if (entry.kind === CHAT_TURN_KIND) {
-          const data = entry.data as Partial<ChatTurnData> | undefined;
+        const seen = piLogEntry(entry);
+        if (!seen) continue;
+        if ("reply" in seen) {
+          if (seen.reply.stopReason === "stop") this.turns.fromPi(assistantText(seen.reply), through, chain);
+        } else if (seen.input === "handOff") {
+          const { data } = seen;
           chain = typeof data?.hop === "number" && typeof data.root === "number" ? { hop: data.hop, root: data.root } : undefined;
-        } else if (entry.kind === "pi.user" || (entry.kind === CHAT_MESSAGE_KIND && !(entry.data as Partial<ChatMessageData> | undefined)?.aside)) {
-          chain = undefined;
-        } else if (entry.kind === "pi.assistant") {
-          const message = entry.model?.[0];
-          if (message?.role === "assistant" && message.stopReason === "stop") this.turns.fromPi(assistantText(message), through, chain);
-        }
+        } else chain = undefined;
       }
       if (this.#gone) return;
       this.ctx.storage.kv.put(PI_SCAN_KEY, { through, ...(chain && { chain }) } satisfies PiScan);

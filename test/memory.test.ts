@@ -26,7 +26,7 @@ import { allowedTools } from "../worker/agents/turns.ts";
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { CHAT_TURN_KIND } from "../shared/agents.ts";
 import { CHAT_MESSAGE_KIND } from "../shared/protocol.ts";
-import { ChatMemory, runAskedByOwner, type MemoryAgent } from "../worker/memory/chat.ts";
+import { ChatMemory, MAX_RUN_PAGES, runAskedByOwner, type MemoryAgent } from "../worker/memory/chat.ts";
 import { coverageOf } from "../worker/memory/coverage.ts";
 import { UserMemory } from "../worker/memory/memory.ts";
 import { recalledText } from "../worker/memory/tools.ts";
@@ -607,6 +607,12 @@ describe("ChatMemory", () => {
     // Asides are not inputs; the conversation's first run goes back to the start of the log; no input is no one's.
     expect(await asked(reply("toolUse"), message("ana", true), message("owner"))).toBe(true);
     expect(await asked(reply("toolUse"))).toBe(false);
+    // A run longer than it reads is not judged the owner's.
+    const long = (async function* () {
+      for (let page = 0; page <= MAX_RUN_PAGES; page++) yield [reply("toolUse")];
+      yield [message("owner")];
+    })();
+    expect(await runAskedByOwner(long, "owner")).toBe(false);
   });
 
   it("never gives a run's sessions the owner's own notes, as their reports reach other chats", async () => {

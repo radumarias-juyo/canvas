@@ -13,7 +13,7 @@ import {
   type NoteChange,
 } from "../../shared/memory.ts";
 import { randomHex } from "../../shared/util.ts";
-import type { Sql } from "../members.ts";
+import { addColumns, type Sql } from "../members.ts";
 
 type NoteRow = {
   id: string;
@@ -76,9 +76,11 @@ export class MemoryStore {
       CREATE TABLE IF NOT EXISTS memory (
         id TEXT PRIMARY KEY, scope TEXT NOT NULL, agent_id TEXT, chat_id TEXT, text TEXT NOT NULL, source TEXT NOT NULL, kind TEXT NOT NULL,
         learned_by TEXT, uses INTEGER NOT NULL DEFAULT 0, pinned INTEGER NOT NULL DEFAULT 0, confirmed INTEGER NOT NULL, forgotten_at INTEGER,
-        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, by_owner INTEGER NOT NULL DEFAULT 1
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
       );
     `);
+    // Whether the save was in a turn the owner asked for (see add).
+    addColumns(sql, "memory", { by_owner: "INTEGER NOT NULL DEFAULT 1" });
   }
 
   #rows(where = "", ...params: (string | number)[]): MemoryNote[] {
@@ -109,7 +111,7 @@ export class MemoryStore {
   }
 
   /** Write `note` as a new row. */
-  #insert(note: MemoryNote, byOwner = true): void {
+  #insert(note: MemoryNote & Pick<NoteFields, "byOwner">): void {
     this.#sql.exec(
       `INSERT INTO memory (id, scope, agent_id, chat_id, text, source, kind, learned_by, uses, pinned, confirmed, forgotten_at, created_at, updated_at, by_owner)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -127,7 +129,7 @@ export class MemoryStore {
       note.forgottenAt ?? null,
       note.createdAt,
       note.updatedAt,
-      byOwner ? 1 : 0,
+      note.byOwner === false ? 0 : 1,
     );
   }
 
@@ -138,25 +140,25 @@ export class MemoryStore {
    * their chat's room: they never take the owner's (MAX_NOTES for the rest, MAX_UNCONFIRMED_ALL for the owner's own).
    */
   add(fields: NoteFields): NoteAdded {
-    const { byOwner = true, ...kept } = fields;
-    const same = this.#same(kept);
+    const byOwner = fields.byOwner !== false;
+    const same = this.#same(fields);
     if (same) {
-      if (confirmsKept(kept, same)) this.#sql.exec("UPDATE memory SET confirmed = 1, updated_at = ? WHERE id = ?", this.#at(same), same.id);
+      if (confirmsKept(fields, same)) this.#sql.exec("UPDATE memory SET confirmed = 1, updated_at = ? WHERE id = ?", this.#at(same), same.id);
       return { note: this.get(same.id)!, existed: true };
     }
     const waiting = "confirmed = 0 AND forgotten_at IS NULL";
     if (this.#count(byOwner ? `WHERE NOT (by_owner = 0 AND ${waiting})` : "") >= MAX_NOTES)
       return { error: `There are ${MAX_NOTES} memory notes, the most there can be; the owner deletes some first.` };
-    if (!kept.confirmed) {
-      if (this.#count(`WHERE ${waiting} AND chat_id IS ?`, kept.chatId ?? null) >= MAX_UNCONFIRMED)
+    if (!fields.confirmed) {
+      if (this.#count(`WHERE ${waiting} AND chat_id IS ?`, fields.chatId ?? null) >= MAX_UNCONFIRMED)
         return { error: `${MAX_UNCONFIRMED} notes from this chat already wait for the owner to confirm them; ask them to look at Memory first.` };
       if (byOwner && this.#count(`WHERE ${waiting} AND by_owner = 1`) >= MAX_UNCONFIRMED_ALL)
         return { error: `${MAX_UNCONFIRMED_ALL} notes already wait for the owner to confirm them; ask them to look at Memory first.` };
     }
     const now = this.#now();
-    const note: MemoryNote = { ...kept, id: randomHex(6), uses: 0, pinned: kept.pinned === true, createdAt: now, updatedAt: now };
-    this.#insert(note, byOwner);
-    return { note: this.get(note.id)! };
+    const id = randomHex(6);
+    this.#insert({ ...fields, id, uses: 0, pinned: fields.pinned === true, createdAt: now, updatedAt: now });
+    return { note: this.get(id)! };
   }
 
   /** A note in use with the same text for the same reader as `fields`. */

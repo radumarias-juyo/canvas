@@ -1,10 +1,17 @@
 import type { ChatKind } from "../../shared/chat-kinds.ts";
-import { memorySection, readsOwnNotes, type MemoryNote, type MemoryReader, type MemoryWriter, type Recalled } from "../../shared/memory.ts";
+import {
+  memorySection,
+  readsOwnNotes,
+  type MemoryNote,
+  type MemoryReader,
+  type MemoryWriter,
+  type Recalled,
+  type Forgot,
+} from "../../shared/memory.ts";
 import type { EntryRecord } from "@earendil-works/pi-durable";
-import { CHAT_TURN_KIND } from "../../shared/agents.ts";
 import { AGENT_NAME } from "../../shared/mentions.ts";
-import { CHAT_MESSAGE_KIND, type ChatMessageData } from "../../shared/protocol.ts";
 import { errorMessage } from "../../shared/util.ts";
+import { piLogEntry } from "../agents/turns.ts";
 import type { Learned, LearnedNote } from "./memory.ts";
 import type { MemoryHost } from "./tools.ts";
 
@@ -17,7 +24,7 @@ export interface NotesDirectory {
   useNotes(ids: readonly string[]): void | Promise<void>;
   recallNotes(reader: MemoryReader, query: string, shown: readonly string[], offset?: number): Recalled | Promise<Recalled>;
   learnNote(writer: MemoryWriter, note: LearnedNote): Learned | Promise<Learned>;
-  forgetNoteFor(writer: MemoryWriter, id: string): MemoryNote | { error: string } | Promise<MemoryNote | { error: string }>;
+  forgetNoteFor(writer: MemoryWriter, id: string): Forgot | Promise<Forgot>;
 }
 
 /**
@@ -54,25 +61,28 @@ export interface ChatMemoryDeps {
   kv: { get<T>(key: string): T | undefined; put(key: string, value: unknown): void };
 }
 
+/** How many pages of pi's log runAskedByOwner reads at most: a longer run is not judged the owner's. */
+export const MAX_RUN_PAGES = 20;
+
 /**
  * Whether the run pi is in answers only the owner's own messages, from its log read newest first (`pages`): every
  * input since the end of its last run (a reply that ended it, not one calling tools) is a message of `ownerUid`'s,
- * none an agent's hand-off (CHAT_TURN_KIND) or another input. Read from the transcript, so a run resumed after a restart
- * is judged as it was. `pages` go back to the start of the log when no run ended before (only this run is read).
+ * none an agent's hand-off or another input (piLogEntry). Read from the transcript, so a run resumed after a restart
+ * is judged as it was. `pages` go back to the start of the log when no run ended before (only this run is read); past
+ * MAX_RUN_PAGES of them, it is not the owner's.
  */
 export async function runAskedByOwner(pages: AsyncIterable<readonly EntryRecord[]>, ownerUid: string): Promise<boolean> {
   let asked = false;
+  let read = 0;
   for await (const page of pages) {
+    if (++read > MAX_RUN_PAGES) return false;
     for (const entry of page) {
-      if (entry.kind === "pi.assistant") {
-        const reply = entry.model?.[0];
-        if (reply?.role === "assistant" && reply.stopReason !== "toolUse") return asked;
-      } else if (entry.kind === CHAT_MESSAGE_KIND) {
-        const data = entry.data as Partial<ChatMessageData> | undefined;
-        if (data?.aside) continue;
-        if (data?.uid !== ownerUid) return false;
-        asked = true;
-      } else if (entry.kind === CHAT_TURN_KIND || entry.kind === "pi.user") return false;
+      const seen = piLogEntry(entry);
+      if (!seen) continue;
+      if ("reply" in seen) {
+        if (seen.reply.stopReason !== "toolUse") return asked;
+      } else if (seen.input !== "message" || seen.uid !== ownerUid) return false;
+      else asked = true;
     }
   }
   // The start of the log: the run is the conversation's first.

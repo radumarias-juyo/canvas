@@ -11,6 +11,7 @@ import {
   type MemoryNote,
   type MemoryScope,
   type Recalled,
+  type Forgot,
 } from "../../shared/memory.ts";
 import { text } from "../agent/output.ts";
 import type { Learned, LearnedNote } from "./memory.ts";
@@ -23,7 +24,7 @@ import type { Learned, LearnedNote } from "./memory.ts";
 export interface MemoryHost {
   note(conversation: string, note: LearnedNote): Promise<Learned>;
   recall(conversation: string, query: string, offset?: number): Promise<Recalled>;
-  forget(conversation: string, id: string): Promise<MemoryNote | { error: string }>;
+  forget(conversation: string, id: string): Promise<Forgot>;
   /** The prompt's memory section for the conversation: its notes as they were when its turn started. */
   section(conversation: string): Promise<string>;
 }
@@ -98,7 +99,6 @@ export function memoryExtension(host: MemoryHost): Extension {
         execute: async (args, api) => {
           const forgotten = await host.forget(String(api.conversationId), args.id.replace(/[[\]\s]/g, ""));
           if ("error" in forgotten) throw new Error(forgotten.error);
-          // Not its text: a note may be the owner's own, and the result stays in the transcript.
           return { output: text(`Forgot [${forgotten.id}]. The owner can bring it back under Memory.`) };
         },
       }),
