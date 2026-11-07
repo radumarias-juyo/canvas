@@ -49,10 +49,9 @@ function leftOutResult(message: Message | undefined, audience: Audience): ToolRe
  * the notes); the same entry when it holds neither.
  */
 function withoutNoteResult(entry: EntryRecord): EntryRecord {
-  if (CompactionEntry.is(entry) && entry.model?.length) return { ...entry, model: [leftOutSummary(entry.model[0]!, "shown")] };
   const [first, ...rest] = entry.model ?? [];
-  const result = leftOutResult(first, "shown");
-  return result ? { ...entry, model: [result, ...rest] } : entry;
+  const left = first && (CompactionEntry.is(entry) ? leftOutSummary(first.timestamp, "shown") : leftOutResult(first, "shown"));
+  return left ? { ...entry, model: [left, ...rest] } : entry;
 }
 
 /** `entries` with withoutNoteResult applied, the same array when none changed. */
@@ -80,11 +79,10 @@ export function withoutNoteResults(event: AgentEvent): AgentEvent {
       const tools = event.tools.some((slot) => LEFT_OUT[slot.name]) ? event.tools.map((slot) => blankCall(slot, slot.name)) : event.tools;
       return entries === event.entries && tools === event.tools ? event : { ...event, entries, tools };
     }
-    // An entry's message starts whole, before its entry lands: a result's, and a compaction's summary.
-    case "message_start": {
-      const message = isSummary(event.message) ? leftOutSummary(event.message, "shown") : leftOutResult(event.message, "shown");
-      return message ? { ...event, message } : event;
-    }
+    // An entry's message starts whole, before its entry lands (a result, a compaction's summary). The app reads only an
+    // assistant's as it starts; any other arrives again with its entry, as above: none is sent here.
+    case "message_start":
+      return event.message.role === "assistant" ? event : { ...event, message: { ...event.message, content: [], details: undefined } as Message };
     case "message_end":
     case "entry_appended": {
       const entry = withoutNoteResult(event.entry);
@@ -141,15 +139,11 @@ function isSummary(message: Message): boolean {
 }
 
 /** A compaction's summary put in place of one that says it is left out. */
-const leftOutSummary = (message: Pick<Message, "timestamp">, audience: Audience): Message => ({
-  role: "user",
-  content: SUMMARY_LEFT_OUT[audience],
-  timestamp: message.timestamp,
-});
+const leftOutSummary = (timestamp: number, audience: Audience): Message => ({ role: "user", content: SUMMARY_LEFT_OUT[audience], timestamp });
 
 /** `messages` with every compaction summary among them put in place of one that says it is left out. */
 export function withoutSummaries(messages: readonly Message[]): Message[] {
-  return messages.map((message) => (isSummary(message) ? leftOutSummary(message, "model") : message));
+  return messages.map((message) => (isSummary(message) ? leftOutSummary(message.timestamp, "model") : message));
 }
 
 /**
@@ -161,7 +155,7 @@ function leaveOutNotes(entries: readonly EntryRecord[]): ContextEdit[] {
   return entries.flatMap((entry): ContextEdit[] => {
     if (SystemEntry.is(entry)) return [{ target: entry.id, action: "omit" }];
     if (CompactionEntry.is(entry) && entry.model?.length)
-      return [{ target: entry.id, action: "replace", messages: [leftOutSummary({ timestamp: Date.now() }, "model")] }];
+      return [{ target: entry.id, action: "replace", messages: [leftOutSummary(Date.now(), "model")] }];
     const result = ToolResultEntry.is(entry) ? leftOutResult(entry.model?.[0], "model") : undefined;
     return result ? [{ target: entry.id, action: "replace", messages: [result] }] : [];
   });

@@ -511,7 +511,7 @@ describe("ChatMemory", () => {
    * turn answers the owner, and the conversations whose prompt was started afresh.
    */
   function chat(chatId: string, kind: ChatKind, alone: boolean, owner = directory(), kv = new Map<string, unknown>()) {
-    const state: { kind: ChatKind; alone: boolean; piByOwner: boolean; done?: Promise<boolean>; recalling?: () => void } = {
+    const state: { kind: ChatKind; alone: boolean; piByOwner: boolean; done?: Promise<boolean>; recalling?: () => void; reading?: () => void } = {
       kind,
       alone,
       piByOwner: true,
@@ -531,7 +531,11 @@ describe("ChatMemory", () => {
         return { done: state.done ?? Promise.resolve(true) };
       },
       directory: () => ({
-        readNotes: (reader) => owner.memory.read(reader),
+        readNotes: async (reader) => {
+          const read = owner.memory.read(reader);
+          state.reading?.();
+          return read;
+        },
         useNotes: (ids) => {
           used = [...used, ...ids];
           owner.memory.use(ids);
@@ -757,17 +761,26 @@ describe("ChatMemory", () => {
     const owner = directory();
     for (let n = 0; n < 30; n++) saved(owner.memory.add({ text: `Salary note ${n} ${"x".repeat(150)}.`, scope: "user" }));
     const { host, state } = chat(PRIVATE, "private", true, owner);
-    let joined = 0;
     state.recalling = () => {
-      if (joined++) return;
       state.alone = false;
       state.kind = "group";
     };
     expect((await host.recall("root", "salary")).notes).toEqual([]);
     // Alone all the while: as it was found.
-    const { host: alone, state: still } = chat(PRIVATE, "private", true, owner);
-    still.recalling = () => undefined;
+    const { host: alone } = chat(PRIVATE, "private", true, owner);
     expect((await alone.recall("root", "salary")).notes.length).toBeGreaterThan(0);
+  });
+
+  it("reads a section again for the chat's readers when someone joins while it is read", async () => {
+    const owner = directory();
+    saved(owner.memory.add({ text: "My salary is private.", scope: "user" }));
+    const { memory, host, state } = chat(PRIVATE, "private", true, owner);
+    state.reading = () => {
+      state.alone = false;
+      state.kind = "group";
+    };
+    expect(await host.section("root")).not.toContain("salary");
+    expect(await memory.refresh()).not.toContain("salary");
   });
 
   it("pages through the notes that match, saying how many more there are", async () => {
@@ -899,9 +912,11 @@ describe("what someone other than the owner sees of a chat's events", () => {
       result: { taskId: "t1", structuredOutput: "My salary", isError: false, diagnostics: [] },
     } as unknown as AgentEvent;
     expect(JSON.stringify(withoutNoteResults(nested))).not.toContain("salary");
-    // Anything else, as it is.
+    // Only an assistant's message starts as it is (the app reads no other as it starts; each comes again with its entry).
     const other = { type: "message_start", message: result("files_read", "salary.csv").model![0]! } as AgentEvent;
-    expect(withoutNoteResults(other)).toBe(other);
+    expect(JSON.stringify(withoutNoteResults(other))).not.toContain("salary.csv");
+    const answer = { type: "message_start", message: { role: "assistant", content: [{ type: "text", text: "Hi" }], timestamp: 0 } } as AgentEvent;
+    expect(withoutNoteResults(answer)).toBe(answer);
   });
 
   it("leaves out a compaction's summary, which may have kept the notes", () => {

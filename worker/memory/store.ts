@@ -143,12 +143,13 @@ export class MemoryStore {
 
   /**
    * Why there is no room for one more note (see add), if there is none: saved by the owner or not, in `chatId`, and
-   * `waits` to be confirmed there (within the chat's MAX_UNCONFIRMED, and the owner's own within MAX_UNCONFIRMED_ALL).
+   * `waits` to be confirmed (within its chat's MAX_UNCONFIRMED when it keeps a chat, and the owner's own within
+   * MAX_UNCONFIRMED_ALL).
    */
   #full(byOwner: boolean, waits: boolean, chatId: string | undefined): string | undefined {
     if ((byOwner ? this.#ownersCount() : this.#count()) >= MAX_NOTES)
       return `There are ${MAX_NOTES} memory notes, the most there can be; the owner deletes some first.`;
-    if (waits && this.#count(`WHERE ${WAITING} AND chat_id IS ?`, chatId ?? null) >= MAX_UNCONFIRMED)
+    if (waits && chatId !== undefined && this.#count(`WHERE ${WAITING} AND chat_id = ?`, chatId) >= MAX_UNCONFIRMED)
       return `${MAX_UNCONFIRMED} notes from this chat already wait for the owner to confirm them; ask them to look at Memory first.`;
     if (waits && byOwner && this.#count(`WHERE ${WAITING} AND by_owner = 1`) >= MAX_UNCONFIRMED_ALL)
       return `${MAX_UNCONFIRMED_ALL} notes already wait for the owner to confirm them; ask them to look at Memory first.`;
@@ -276,10 +277,9 @@ export class MemoryStore {
     const same = note.forgottenAt === undefined ? this.#same(note) : undefined;
     if (same) return { id: same.id, skipped: true };
     // One still waiting may have been saved in a turn the owner did not ask for: kept as such (add), so it takes
-    // nobody's room but its chat's, within all of them. One that keeps no chat (its chat did not come along) has no
-    // chat's room to wait in: only all of them.
+    // nobody's room but its chat's (when it keeps one), within all of them.
     const waits = !note.confirmed && note.forgottenAt === undefined;
-    const full = this.#full(!waits, waits && note.chatId !== undefined, note.chatId);
+    const full = this.#full(!waits, waits, note.chatId);
     if (full) return { error: full };
     const id = NOTE_ID_PATTERN.test(note.id) && !this.get(note.id) ? note.id : randomHex(6);
     // Its times as exported (recency ranks the notes), never later than now.

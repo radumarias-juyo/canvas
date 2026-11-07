@@ -248,11 +248,25 @@ export class ChatMemory {
     );
   }
 
-  async #read(key: string, agent: MemoryAgent | null): Promise<Section> {
+  /**
+   * `read` from the owner's directory as `agent`'s conversation reads, and again for the chat's readers now when it read
+   * the owner's own notes and they no longer do: someone joined meanwhile, and a fresh start may have read the context
+   * already, so it would never leave them out. They read no more than the first reader, so once is enough.
+   */
+  async #readNow<T>(agent: MemoryAgent | null, read: (reader: MemoryReader) => T | Promise<T>): Promise<{ reader: MemoryReader; found: T }> {
     const reader = this.#reader(agent);
+    const found = await read(reader);
+    const now = this.#reader(agent);
+    return readsOwnNotes(reader) && !readsOwnNotes(now) ? { reader: now, found: await read(now) } : { reader, found };
+  }
+
+  async #read(key: string, agent: MemoryAgent | null): Promise<Section> {
     const directory = this.#directory(agent);
     try {
-      const { notes, more, off } = await directory.readNotes(reader);
+      const {
+        reader,
+        found: { notes, more, off },
+      } = await this.#readNow(agent, (reader) => directory.readNotes(reader));
       // Off the record as the owner's directory knows it (its sidebar's kind, or a chat not theirs): say so, as the
       // tools refuse there.
       if (off) return { text: memorySection({ kinds: ["off_record"] }, []), ids: [] };
@@ -297,12 +311,7 @@ export class ChatMemory {
         const who = this.#who(conversation);
         const { ids } = await this.#section(who);
         const directory = this.#directory(who.agent);
-        const reader = this.#reader(who.agent);
-        let found = await directory.recallNotes(reader, query, ids, offset);
-        // Someone joined meanwhile: a fresh start may have read the context already, and would never leave this out.
-        // Read again for those who read the chat now (they read no more than the first reader, so once is enough).
-        const now = this.#reader(who.agent);
-        if (readsOwnNotes(reader) && !readsOwnNotes(now)) found = await directory.recallNotes(now, query, ids, offset);
+        const { found } = await this.#readNow(who.agent, (reader) => directory.recallNotes(reader, query, ids, offset));
         // Now in the transcript too: left out once the chat has more readers (freshPrompt).
         if (found.notes.some((note) => note.scope === "user")) this.#markOwn(who.key);
         return found;

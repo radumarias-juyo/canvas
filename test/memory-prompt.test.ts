@@ -163,8 +163,7 @@ describe("a prompt that held the owner's own notes", () => {
       await ask("third");
       await new Promise((resolve) => setTimeout(resolve, 0));
       // The owner's socket gets them (a result as it starts, and the summary), a member's none of either.
-      const kinds = new Set(events.map((event) => event.type));
-      expect(kinds.has("message_start")).toBe(true);
+      expect(events.some((event) => event.type === "message_start")).toBe(true);
       expect(JSON.stringify(events)).toContain("My bonus");
       expect(JSON.stringify(events)).toContain("the owner's bonus");
       const shown = JSON.stringify([stream.snapshot, ...events].map(withoutNoteResults));
