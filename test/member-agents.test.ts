@@ -1,7 +1,8 @@
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
 import { CHAT_AGENT_KIND, checkAgent, type AgentDefinition, type ChatAgentReplyData, type ChatTurnData } from "../shared/agents.ts";
-import { CHAT_MESSAGE_KIND } from "../shared/protocol.ts";
+import { CHAT_MESSAGE_KIND, PUBLISH_TOOL } from "../shared/protocol.ts";
+import { FILES_WRITE_TOOL } from "../worker/chat-traces.ts";
 import type { McpToolInfo } from "../worker/agent/mcp.ts";
 import { AgentTurns, operationId, type Caller, type TurnHost, type TurnResult } from "../worker/agents/controller.ts";
 import { ChatRoster, type RosterEntry, type RunningTurn } from "../worker/agents/roster.ts";
@@ -59,6 +60,12 @@ function definition(id: string, name: string, over: Partial<AgentDefinition> = {
 }
 
 /** A tool result in a session, as turnEntries returns it: `details` with records, from an MCP tool or an app's. */
+/** A tool result of the app's, with its details. */
+function tool(toolName: string, details: object): EntryRecord {
+  const message = { role: "toolResult", toolCallId: "c", toolName, content: [], details, isError: false, timestamp: T0 };
+  return { id: 0, conversationId: 0, kind: "pi.tool-result", model: [message] } as unknown as EntryRecord;
+}
+
 function result(toolName: string, records: { id: string; title: string }[]): EntryRecord {
   const server = MCP.get(toolName)?.server ?? "app";
   const details = { items: records.map((record) => ({ server, ...record })) };
@@ -871,6 +878,25 @@ describe("Member agents: private turns run apart", () => {
     expect(askLine(reply(false), "p", RADU.uid)).toBeUndefined();
     expect(askLine(reply(true), "other", RADU.uid)).toBe("[planner · agent]: Week 41.");
   });
+
+  it("reads with its own forked reply the pages it published and the files it saved there, which its session never saw", async () => {
+    const chat = room();
+    const planner = chat.add(RADU, "planner", { servers: ["db", "calendar"] });
+    const [turn] = chat.turns.call([planner.agentId], chat.say(RADU, "@planner chart my week"));
+    await settle();
+    chat.sessions.finish(turn.id, "Here it is.", [
+      tool(PUBLISH_TOOL, { artifactId: "page1", version: 2, title: "My week" }),
+      tool(FILES_WRITE_TOOL, { saved: ["out/c1/week.csv"] }),
+    ]);
+    await settle();
+    expect(chat.posts).toEqual([
+      expect.objectContaining({ published: [{ artifactId: "page1", version: 2, title: "My week" }], saved: ["out/c1/week.csv"] }),
+    ]);
+    const posted = { id: 9, conversationId: 0, kind: CHAT_AGENT_KIND, data: chat.posts[0] } as unknown as EntryRecord;
+    expect(askLine(posted, planner.agentId, RADU.uid)).toBe(
+      '[planner · agent] (your reply, as posted): Here it is. (in that turn you published "My week" (artifact page1, v2); saved out/c1/week.csv)',
+    );
+  });
 });
 
 describe("Member agents: what the review of private turns found", () => {
@@ -996,9 +1022,13 @@ describe("Member agents: what the review of private turns found", () => {
     const [unreviewed] = chat.turns.call([open.agentId], chat.say(RADU, "@helper my week"));
     await settle();
     const openFork = chat.sessions.sessionOf(unreviewed.id);
-    end(unreviewed.id, { status: "unanswered", reason: "model error" }, calendar);
+    end(unreviewed.id, { status: "unanswered", reason: "model error" }, [
+      ...calendar,
+      tool(PUBLISH_TOOL, { artifactId: "p9", version: 1, title: "Week" }),
+    ]);
     await settle();
     expect(chat.posts.at(-1)).toMatchObject({ turn: unreviewed.id, failed: "model error" });
+    expect(chat.posts.at(-1)).not.toHaveProperty("published");
     expect(chat.roster.withheld()).toEqual(new Set([emptyFork, openFork]));
   });
 

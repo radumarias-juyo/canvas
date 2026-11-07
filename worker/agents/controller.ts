@@ -4,6 +4,7 @@ import { AGENT_NAME } from "../../shared/mentions.ts";
 import { errorMessage, isObject, serial } from "../../shared/util.ts";
 import { sessionOf, type AgentTurn, type ChatRoster, type RosterEntry, type TurnRequest } from "./roster.ts";
 import type { SeatBatch, SeatLink, SeatResult } from "./seats/link.ts";
+import { chatTraces } from "../chat-traces.ts";
 import {
   askedApart,
   askOf,
@@ -23,7 +24,8 @@ import {
  * private servers it called, whether it ran in a fork (only its reply reaches the shared session, from the log), and
  * whether its owner reviews it before it is posted.
  */
-export type Outputs = Required<Pick<ChatAgentReplyData, "published" | "items" | "sources">> & { forked?: boolean; review?: boolean };
+export type Outputs = Required<Pick<ChatAgentReplyData, "published" | "items" | "sources">> &
+  Pick<ChatAgentReplyData, "saved"> & { forked?: boolean; review?: boolean };
 const NO_OUTPUTS: Outputs = { published: [], items: [], sources: [] };
 
 /** How one operation in an agent's session ended, as PiHarness.wait says. */
@@ -319,8 +321,12 @@ export class AgentTurns {
       const done = result.status === "done";
       const text = (result.text ?? "").trim();
       // Only a turn whose input went in has outputs in its session.
-      const { published, items, sources, review, ...out } = outputs ?? (now.submitted ? await this.#outputs(entry, now) : NO_OUTPUTS);
+      const { published, items, sources, review, saved, ...out } = outputs ?? (now.submitted ? await this.#outputs(entry, now) : NO_OUTPUTS);
       const forked = out.forked === true || now.forked === true;
+      // Its owner sees a reply built on a private server first, when they review those (`held`).
+      const held = review === true && sources.length > 0;
+      // What a fork made stays withheld unless its reply is posted: a failed or empty one released at once names none of it.
+      const shows = !forked || held || (done && !!text);
       const current = roster.get(entry.agentId) ?? entry;
       const reply: ChatAgentReplyData = {
         agentId: entry.agentId,
@@ -335,13 +341,14 @@ export class AgentTurns {
         startedAt: now.startedAt ?? now.createdAt,
         endedAt: roster.now(),
         ...(!done && { failed: result.reason ?? "it ended without an answer" }),
-        ...(published.length && { published }),
+        ...(shows && published.length && { published }),
+        ...(shows && saved?.length && { saved }),
         ...(turn.run && { run: turn.run }),
         ...(items.length && { items }),
         ...(forked && { forked: true as const }),
         ...(sources.length && { sources }),
       };
-      if (review && sources.length) {
+      if (held) {
         // Its owner sees it first: nothing of it reaches the chat, pi or other agents until they post it. A failed or
         // empty one too: what its fork published or saved stays withheld until they post or discard it.
         if (roster.end(turn.id, done ? "done" : "failed", { reply, toPi: false, held: true })) this.#host.drafted(current.ownerUid);
@@ -591,7 +598,8 @@ export async function outputsOf(
 ): Promise<Outputs> {
   const published = publishedIn(entries);
   if (!forked) return { published, items: itemsIn(entries), sources: [] };
-  return { published, forked: true, ...(await sources()) };
+  const saved = [...chatTraces(entries).files];
+  return { published, forked: true, ...(saved.length && { saved }), ...(await sources()) };
 }
 
 /** A turn's operation id in its agent's session: submitting it twice places it once. */

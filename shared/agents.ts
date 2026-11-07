@@ -596,6 +596,11 @@ export type ChatAgentReplyData = {
   failed?: string;
   /** Artifacts it published in this turn, for the app to show their cards. */
   published?: { artifactId: string; title: string; version: number }[];
+  /**
+   * The files a forked turn saved (its agent's shared session never saw the calls): what its agent reads with its
+   * reply, as posted, so it finds them again.
+   */
+  saved?: string[];
   /** Set on a run's report (calledBy.schedule): which run, so a reply to it continues that run (shared/runs.ts). */
   run?: RunRef;
   /**

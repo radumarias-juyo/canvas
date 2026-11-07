@@ -106,6 +106,16 @@ function said(text: string, max = MIRROR_CHARS): string {
   return cut.replace(OWNER_LABEL_END, "your owner (quoted)]").replace(LINE_BREAK, "\n  ");
 }
 
+/**
+ * What a forked reply's line adds for what its turn published and saved: the agent's shared session never saw those
+ * calls, and finds the pages and files again by these (ids, versions and paths, from the app's records).
+ */
+function madeNote(reply: Pick<ChatAgentReplyData, "published" | "saved">): string {
+  const pages = (reply.published ?? []).map((page) => `"${page.title}" (artifact ${page.artifactId}, v${page.version})`);
+  const parts = [...(pages.length ? [`published ${pages.join(", ")}`] : []), ...(reply.saved?.length ? [`saved ${reply.saved.join(", ")}`] : [])];
+  return parts.length ? said(` (in that turn you ${parts.join("; ")})`) : "";
+}
+
 /** What a message's line adds for the files attached to it. */
 export function attachedNote(paths: readonly string[]): string {
   return paths.length ? said(` (attached: ${paths.join(", ")})`) : "";
@@ -240,7 +250,9 @@ export function askLine(entry: EntryRecord, self: string, owner: OwnerMarks | st
     // and for one from a fork, which only the chat has.
     if (data.agentId === self && !data.copied) {
       if (data.run && data.turn) return `[you, in a run]: ${said(data.text)}`;
-      return data.forked ? `${speakerLabel({ name: data.name, kind: "agent" })} (your reply, as posted): ${said(data.text)}` : undefined;
+      return data.forked
+        ? `${speakerLabel({ name: data.name, kind: "agent" })} (your reply, as posted): ${said(data.text)}${madeNote(data)}`
+        : undefined;
     }
     return askOf({ name: data.name, kind: "agent" }, data.text);
   }
