@@ -2995,10 +2995,14 @@ export class ChatAgent extends DurableObject<Env> {
       this.runs.forget(agentId);
       this.#broadcastAgents();
     }
-    await this.runner.apply(agentId, agent);
     // The sign-ins its runs read with are kept alive daily and warned about before they end (worker/mcp/sign-ins.ts).
     const runs = agent?.enabled && agent.trigger ? runServers(agent, oauthServerNames(this.env)) : [];
-    await this.#directory.setRunServers(this.chatId, runs).catch((error: unknown) => console.error("agent sign-ins:", errorMessage(error)));
+    // Those it reads in a step it cannot go on without: their notices offer no Disconnect (for its runs waiting too).
+    // Before the alarms and waits follow: a run apply sets going again asks for its sign-ins with these as they are now.
+    // Off, none: turning it off is a way out, so Disconnect is offered again (its waits are skipped).
+    const steps = agent?.enabled ? [...stepServers(agent)] : [];
+    await this.#directory.setRunServers(this.chatId, runs, steps).catch((error: unknown) => console.error("agent sign-ins:", errorMessage(error)));
+    await this.runner.apply(agentId, agent);
     if (agent?.enabled && agent.trigger && !agent.workflow?.length) this.ctx.waitUntil(this.#compile(agent).catch(() => {}));
   }
 
@@ -3213,12 +3217,9 @@ export class ChatAgent extends DurableObject<Env> {
       signInNeeded: (agent, servers, quiet) => {
         const directory = this.#directory;
         const context = { chatId: this.chatId, what: `@${agent.name}`, ...(quiet && { quiet }) };
-        // A server it reads in a step it cannot go without: its notice offers no Disconnect.
-        const steps = stepServers(agent);
+        // Whether it reads one in a step (no Disconnect offered) the directory knows from setRunServers (agentChanged).
         const asking = servers.map((server) =>
-          directory
-            .notifySignInNeeded(server, { ...context, ...(steps.has(server) && { stepReads: true }) })
-            .catch((error: unknown) => console.error(`agent sign-in (${server}):`, errorMessage(error))),
+          directory.notifySignInNeeded(server, context).catch((error: unknown) => console.error(`agent sign-in (${server}):`, errorMessage(error))),
         );
         this.ctx.waitUntil(Promise.all(asking));
       },
