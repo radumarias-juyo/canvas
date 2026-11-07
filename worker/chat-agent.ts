@@ -718,7 +718,7 @@ export class ChatAgent extends DurableObject<Env> {
       heldIn: (chatId, artifactId) => this.#heldIn(chatId, artifactId),
       chatPage: (meta, session) => this.#chatPage(meta, session),
       proposeSkill: (skill) => this.#directory.saveSkill(skill, "agent", false),
-      proposeAgent: (input) => this.#directory.saveAgent(input, "agent", false),
+      proposeAgent: (input) => this.#directory.saveAgent(input, "agent", false, { proposedIn: this.chatId }),
       checkPage: (input, signal) =>
         this.#checkBrowser.withPage((page) => checkPage(page, input, this.#checkBridge(input.manifest)), { timeoutMs: CHECK_MS, signal }),
       chatArtifacts: () => this.#directory.listChatArtifacts(this.chatId),
