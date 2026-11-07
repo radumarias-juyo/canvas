@@ -955,6 +955,11 @@ a.mention-chip:hover { text-decoration: underline; }
 .context-meter { --level: var(--muted); }
 .context-meter.high { --level: var(--accent); }
 .context-meter.full { --level: var(--error); }
+/* The daily allowance beside it: the live colour while there is room, then the working colour, then the error. */
+.allowance-meter { --level: var(--live); }
+.allowance-meter.high { --level: var(--working); }
+.context-ring .mark { fill: none; stroke: var(--muted); stroke-width: 1.3; stroke-linecap: round; stroke-linejoin: round; }
+.allowance-meter.full .mark { stroke: var(--error); }
 .context-panel { position: absolute; right: 0; bottom: calc(100% + 8px); z-index: 5; width: min(300px, calc(100vw - 32px)); gap: 6px; box-shadow: var(--shadow-pop); font-size: 14px; }
 .context-head, .panel-head { display: flex; justify-content: space-between; gap: 12px; }
 .context-head span { font-variant-numeric: tabular-nums; }
