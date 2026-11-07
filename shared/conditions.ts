@@ -165,7 +165,7 @@ class Parser {
       if (token.text === "null") return { kind: "literal", value: null };
       if (this.#take("(")) {
         const name = token.text.toLowerCase();
-        if (!(name in FUNCTIONS)) throw new ConditionError(`There is no function "${token.text}"; there are ${Object.keys(FUNCTIONS).join(", ")}.`);
+        if (!Object.hasOwn(FUNCTIONS, name)) throw new ConditionError(`There is no function "${token.text}"; there are ${Object.keys(FUNCTIONS).join(", ")}.`);
         const args: Node[] = [];
         if (!this.#take(")")) {
           do args.push(this.#deeper(this.#or));
@@ -312,7 +312,7 @@ const FUNCTIONS: Record<string, (args: Value[], nodes: Node[]) => Value> = {
   contains: ([haystack, needle]) => {
     if (typeof haystack === "string") return haystack.toLowerCase().includes(String(needle ?? "").toLowerCase());
     if (Array.isArray(haystack)) return haystack.some((item) => equal(item, needle ?? null));
-    if (haystack && typeof haystack === "object" && typeof needle === "string") return needle in haystack;
+    if (haystack && typeof haystack === "object" && typeof needle === "string") return Object.hasOwn(haystack, needle);
     return false;
   },
   lower: ([x]) => (typeof x === "string" ? x.toLowerCase() : x),

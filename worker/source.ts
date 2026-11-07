@@ -1,6 +1,7 @@
 import { DurableObject, exports } from "cloudflare:workers";
 import type { Value } from "../shared/conditions.ts";
 import type { LookStep } from "../shared/agents.ts";
+import { isReadOnly } from "../shared/protocol.ts";
 import { errorMessage } from "../shared/util.ts";
 import { SourceCore, type Subscriber } from "./agents/runs/source.ts";
 import { connectStreamableHttp } from "./mcp/connect.ts";
@@ -16,6 +17,10 @@ export class Source extends DurableObject<Env> {
       const server = this.hub.server(step.server);
       // A Source reads only what every viewer shares: never with someone's own sign-in.
       if (!server || !watchableForAll(server)) throw new Error(`${step.server} cannot be watched for everyone.`);
+      // A watch only reads, as a run's look step does: a tool that changes data is never polled.
+      const info = await this.hub.tool(step.server, step.tool);
+      if (!info) throw new Error(`${step.server} has no tool "${step.tool}".`);
+      if (!isReadOnly(info)) throw new Error(`${step.server}.${step.tool} changes data: a watch only reads.`);
       return ((await this.hub.call(step.server, step.tool, step.input)).payload ?? null) as Value;
     },
     notify: (subscriber, value) => exports.ChatAgent.getByName(chatAgentName(subscriber.uid, subscriber.chatId)).sourceMoved(subscriber.agentId, value as never),

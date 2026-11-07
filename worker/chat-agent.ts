@@ -2279,7 +2279,11 @@ export class ChatAgent extends DurableObject<Env> {
     if (this.#gone) return;
     if (agent) {
       this.ctx.storage.kv.put(HOME_AGENT_KEY, agentId);
-      if (agent.enabled && !this.roster.get(agentId)) {
+      if (this.roster.get(agentId)) {
+        // Turned on or off, renamed: the roster follows now, so a message that calls nobody goes to it (or to pi) at once.
+        const view = { name: agent.name, avatar: agent.avatar, color: agent.color, job: agent.job, off: !agent.enabled };
+        if (this.roster.refresh(agentId, view)?.changed) this.#broadcastAgents();
+      } else if (agent.enabled) {
         const refused = await this.#addToRoster(agent);
         if (refused) console.error("agent home:", refused.error);
       }
@@ -2420,10 +2424,13 @@ export class ChatAgent extends DurableObject<Env> {
     return this.runner.signedIn(server);
   }
 
-  /** A Source this chat's agent watches through says its value moved. */
-  async sourceMoved(agentId: string, value: Value): Promise<void> {
+  /**
+   * A Source this chat's agent watches through says its value moved. The run it may start goes on here, off the
+   * Source's poll: the Source does not wait for its subscribers' runs.
+   */
+  sourceMoved(agentId: string, value: Value): void {
     if (this.#gone) return;
-    await this.runner.sourceMoved(agentId, value);
+    this.ctx.waitUntil(this.runner.sourceMoved(agentId, value).catch((error: unknown) => console.error("agent watch:", errorMessage(error))));
   }
 
   /**
@@ -2532,12 +2539,13 @@ export class ChatAgent extends DurableObject<Env> {
   /**
    * Set a run's session up for its work steps: the owner's tools and skills as they are now, the agent's model (or the
    * step's), its run instructions, and only reading tools: the read-only MCP tools of its servers and the app's read
-   * tools (runTools). `extra`: tools
-   * of the app a step needs besides (a page rebuild's).
+   * tools (runTools). `pageTools`: a page rebuild's, which has the report as its data and gets these artifact tools in
+   * place of the servers' (so nothing a server returns can steer what it writes).
    */
-  async #configureRun(session: string, agent: AgentDefinition, model: string | undefined, extra: readonly string[] = []): Promise<void> {
+  async #configureRun(session: string, agent: AgentDefinition, model: string | undefined, pageTools?: readonly string[]): Promise<void> {
     await this.#runRefresh(agent);
-    const allowed = (installed: readonly string[]) => [...runTools(installed, this.#mcpTools, agent), ...extra];
+    const allowed = (installed: readonly string[]) =>
+      pageTools ? [...runTools(installed, new Map(), agent), ...pageTools] : runTools(installed, this.#mcpTools, agent);
     await this.#configureSession(session, this.#agentChoice(agent, model), runInstructions(agent, this.#nameOf(this.uid)), allowed);
   }
 
@@ -2613,7 +2621,8 @@ export class ChatAgent extends DurableObject<Env> {
       };
     }
     // To chats: its home (this one), and the owner's chats it is in, by id or title. The list only when one is named.
-    const targets = step.to.map((to) => to.trim());
+    // The owner's names ("owner", "me", "@agent") are one place: the report goes there once.
+    const targets = [...new Set(step.to.map((to) => to.trim()).map((to) => (isOwner(to) ? "owner" : to)))];
     const chats = targets.every(isOwner) ? [] : (await this.#directory.listChats()).filter((chat) => !chat.sharedBy);
     const outcomes = await Promise.all(
       targets.map(async (target): Promise<{ sent: string } | { refused: string }> => {

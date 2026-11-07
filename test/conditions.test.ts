@@ -68,6 +68,10 @@ describe("conditions", () => {
     // A key named like a prototype's is only a missing key.
     expect(evaluate("signups.constructor", scope)).toBe(null);
     expect(evaluate('signups["__proto__"]', scope)).toBe(null);
+    // Nor is a function, or a key contains() looks for.
+    for (const bad of ["constructor(1)", "__proto__(1)", "tostring(1)"]) expect(conditionProblem(bad), bad).not.toBeNull();
+    expect(evaluate('contains(signups, "toString")', scope)).toBe(false);
+    expect(evaluate('contains(signups, "weekly")', scope)).toBe(true);
   });
 
   it("reports what is wrong, with where", () => {

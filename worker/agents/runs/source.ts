@@ -28,7 +28,7 @@ export interface SourceHost {
   now(): number;
 }
 
-type SubscriberRow = { uid: string; chat_id: string; agent_id: string; every_minutes: number };
+type SubscriberRow = { uid: string; chat_id: string; agent_id: string; every_minutes: number; fresh: number };
 
 /**
  * A Source's state and rules, in its SQLite: the read it makes, who subscribes and how often each wants it, and the last
@@ -44,7 +44,10 @@ export class SourceCore {
     sql.exec(`
       CREATE TABLE IF NOT EXISTS source_call (id INTEGER PRIMARY KEY CHECK (id = 1), step TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS source_subscribers (
-        uid TEXT NOT NULL, chat_id TEXT NOT NULL, agent_id TEXT NOT NULL, every_minutes INTEGER NOT NULL, PRIMARY KEY (uid, agent_id)
+        uid TEXT NOT NULL, chat_id TEXT NOT NULL, agent_id TEXT NOT NULL, every_minutes INTEGER NOT NULL,
+        -- 1 until the subscriber is told a value: the next poll tells it even when the value did not move.
+        fresh INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (uid, agent_id)
       );
       CREATE TABLE IF NOT EXISTS source_last (id INTEGER PRIMARY KEY CHECK (id = 1), value TEXT NOT NULL, at INTEGER NOT NULL);
     `);
@@ -64,17 +67,17 @@ export class SourceCore {
   }
 
   subscribe(step: Pick<LookStep, "server" | "tool" | "input">, subscriber: Subscriber, everyMinutes: number): void {
-    const first = !this.#anyone();
     this.#sql.exec("INSERT OR REPLACE INTO source_call (id, step) VALUES (1, ?)", canonicalJson({ server: step.server, tool: step.tool, input: step.input }));
     this.#sql.exec(
-      "INSERT OR REPLACE INTO source_subscribers (uid, chat_id, agent_id, every_minutes) VALUES (?, ?, ?, ?)",
+      "INSERT OR REPLACE INTO source_subscribers (uid, chat_id, agent_id, every_minutes, fresh) VALUES (?, ?, ?, ?, 1)",
       subscriber.uid,
       subscriber.chatId,
       subscriber.agentId,
       everyMinutes,
     );
-    // The first subscriber polls now; a later one waits for the next poll, at most its own interval away.
-    this.#host.setAlarm(first ? this.#host.now() : this.#host.now() + this.#interval()!);
+    // A new subscriber is told the value as it is now, as a watch of its own is at its first check: one read, now. The
+    // others hear of it only when it moved, and their next poll is an interval from this one.
+    this.#host.setAlarm(this.#host.now());
   }
 
   /** Whether anyone still subscribes. */
@@ -83,7 +86,7 @@ export class SourceCore {
     return this.#anyone();
   }
 
-  /** Read once for every subscriber; tell them when the value moved. Sets the next poll. */
+  /** Read once for every subscriber; tell them when the value moved, and new subscribers in any case. Sets the next poll. */
   async poll(): Promise<{ moved: boolean; told: number }> {
     const subscribers = this.#subscribers();
     const call = this.#sql.exec("SELECT step FROM source_call").toArray()[0] as { step: string } | undefined;
@@ -92,12 +95,17 @@ export class SourceCore {
     const value = await this.#host.read(JSON.parse(call.step) as LookStep);
     const json = canonicalJson(value);
     const last = this.#sql.exec("SELECT value FROM source_last").toArray()[0] as { value: string } | undefined;
-    if (last?.value === json) return { moved: false, told: 0 };
-    this.#sql.exec("INSERT OR REPLACE INTO source_last (id, value, at) VALUES (1, ?, ?)", json, this.#host.now());
+    const moved = last?.value !== json;
+    if (moved) this.#sql.exec("INSERT OR REPLACE INTO source_last (id, value, at) VALUES (1, ?, ?)", json, this.#host.now());
+    const telling = moved ? subscribers : subscribers.filter((row) => row.fresh === 1);
     const told = await Promise.allSettled(
-      subscribers.map((row) => this.#host.notify({ uid: row.uid, chatId: row.chat_id, agentId: row.agent_id }, value)),
+      telling.map((row) => this.#host.notify({ uid: row.uid, chatId: row.chat_id, agentId: row.agent_id }, value)),
     );
-    for (const result of told) if (result.status === "rejected") console.error("source notify:", errorMessage(result.reason));
-    return { moved: true, told: told.filter((result) => result.status === "fulfilled").length };
+    told.forEach((result, index) => {
+      if (result.status === "rejected") console.error("source notify:", errorMessage(result.reason));
+      else if (telling[index].fresh === 1)
+        this.#sql.exec("UPDATE source_subscribers SET fresh = 0 WHERE uid = ? AND agent_id = ?", telling[index].uid, telling[index].agent_id);
+    });
+    return { moved, told: told.filter((result) => result.status === "fulfilled").length };
   }
 }

@@ -37,7 +37,8 @@ export async function runsRoute(request: Request, uid: string, directory: Durabl
     return answer(await chat(home).runDetail(uid, agentId, Number(dueAt)));
   }
 
-  if (method !== "POST" || dueAt !== undefined || trace) return null;
+  // POST .../runs is no route: a real run now is the dev route's only.
+  if (method !== "POST" || what === "runs" || dueAt !== undefined || trace) return null;
   if (!(await readJson(request))) return json({ error: "Expected a JSON body (content-type: application/json), such as {}." }, 400);
   if (what === "run" && !devTools) return null;
   // Its first run makes an agent's home conversation, as turning it on does: a draft's Test it runs there too.

@@ -439,6 +439,19 @@ describe("Source", () => {
     expect(await core.poll()).toEqual({ moved: false, told: 0 });
     expect(host.reads).toBe(3);
   });
+
+  it("tells a new subscriber the value as it is now, and only it when the value did not move", async () => {
+    const { core, host } = source();
+    core.subscribe(step, ana, 60);
+    expect(await core.poll()).toEqual({ moved: true, told: 1 });
+    host.clock += 5 * 60_000;
+    core.subscribe(step, ben, 60);
+    // It polls now, not an interval away.
+    expect(host.alarms.at(-1)).toBe(host.clock);
+    expect(await core.poll()).toEqual({ moved: false, told: 1 });
+    expect(host.told.map((told) => told.subscriber.uid)).toEqual(["ana", "ben"]);
+    expect(await core.poll()).toEqual({ moved: false, told: 0 });
+  });
 });
 
 describe("run helpers", () => {
