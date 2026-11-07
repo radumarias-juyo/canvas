@@ -15,6 +15,9 @@ import {
 import { randomHex } from "../../shared/util.ts";
 import { addColumns, type Sql } from "../members.ts";
 
+/** A note that waits for its owner's confirm, as SQL. */
+const WAITING = "confirmed = 0 AND forgotten_at IS NULL";
+
 type NoteRow = {
   id: string;
   scope: MemoryScope;
@@ -106,6 +109,11 @@ export class MemoryStore {
     ).filter((note) => reads(reader, note));
   }
 
+  /** The notes that take the owner's room: all but those waiting from saves they did not ask for (see add). */
+  #ownersCount(): number {
+    return this.#count(`WHERE NOT (by_owner = 0 AND ${WAITING})`);
+  }
+
   #count(where = "", ...params: (string | number | null)[]): number {
     return this.#sql.exec(`SELECT COUNT(*) AS n FROM memory ${where}`, ...params).toArray()[0].n as number;
   }
@@ -146,13 +154,12 @@ export class MemoryStore {
       if (confirmsKept(fields, same)) this.#sql.exec("UPDATE memory SET confirmed = 1, updated_at = ? WHERE id = ?", this.#at(same), same.id);
       return { note: this.get(same.id)!, existed: true };
     }
-    const waiting = "confirmed = 0 AND forgotten_at IS NULL";
-    if (this.#count(byOwner ? `WHERE NOT (by_owner = 0 AND ${waiting})` : "") >= MAX_NOTES)
+    if ((byOwner ? this.#ownersCount() : this.#count()) >= MAX_NOTES)
       return { error: `There are ${MAX_NOTES} memory notes, the most there can be; the owner deletes some first.` };
     if (!fields.confirmed) {
-      if (this.#count(`WHERE ${waiting} AND chat_id IS ?`, fields.chatId ?? null) >= MAX_UNCONFIRMED)
+      if (this.#count(`WHERE ${WAITING} AND chat_id IS ?`, fields.chatId ?? null) >= MAX_UNCONFIRMED)
         return { error: `${MAX_UNCONFIRMED} notes from this chat already wait for the owner to confirm them; ask them to look at Memory first.` };
-      if (byOwner && this.#count(`WHERE ${waiting} AND by_owner = 1`) >= MAX_UNCONFIRMED_ALL)
+      if (byOwner && this.#count(`WHERE ${WAITING} AND by_owner = 1`) >= MAX_UNCONFIRMED_ALL)
         return { error: `${MAX_UNCONFIRMED_ALL} notes already wait for the owner to confirm them; ask them to look at Memory first.` };
     }
     const now = this.#now();
@@ -260,7 +267,7 @@ export class MemoryStore {
     if (kept && kept.scope === note.scope && kept.text.toLowerCase() === note.text.toLowerCase()) return { id: kept.id, skipped: true };
     const same = note.forgottenAt === undefined ? this.#same(note) : undefined;
     if (same) return { id: same.id, skipped: true };
-    if (this.#count() >= MAX_NOTES) return { error: `There are ${MAX_NOTES} memory notes already.` };
+    if (this.#ownersCount() >= MAX_NOTES) return { error: `There are ${MAX_NOTES} memory notes already.` };
     const id = NOTE_ID_PATTERN.test(note.id) && !this.get(note.id) ? note.id : randomHex(6);
     // Its times as exported (recency ranks the notes), never later than now.
     const now = this.#now();

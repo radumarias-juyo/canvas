@@ -1,5 +1,5 @@
 import { Type } from "@earendil-works/pi-ai";
-import { defineExtension, defineTool, section, type Extension } from "@earendil-works/pi-durable";
+import { defineExtension, defineTool, GenerationTask, hook, section, type Extension } from "@earendil-works/pi-durable";
 import {
   MAX_NOTE_CHARS,
   MAX_RECALLED,
@@ -14,6 +14,7 @@ import {
   type Forgot,
 } from "../../shared/memory.ts";
 import { text } from "../agent/output.ts";
+import { withoutSummaries } from "./fresh.ts";
 import type { Learned, LearnedNote } from "./memory.ts";
 
 /**
@@ -27,6 +28,12 @@ export interface MemoryHost {
   forget(conversation: string, id: string): Promise<Forgot>;
   /** The prompt's memory section for the conversation: its notes as they were when its turn started. */
   section(conversation: string): Promise<string>;
+  /**
+   * Whether the conversation's prompt held the owner's own notes, which it reads no longer, and its fresh start is not
+   * done yet: a summary of the conversation that comes in meanwhile (a compaction a turn waited for) is left out of
+   * each request until it is (withoutSummaries).
+   */
+  leavesOutSummaries(conversation: string): boolean;
 }
 
 /** What memory_recall says it found: `notes`, the matches from `offset` of `total`, and how to see the rest. */
@@ -56,6 +63,12 @@ export function memoryExtension(host: MemoryHost): Extension {
   return defineExtension({
     name: "memory",
     sections: [section("memory", ({ conversationId }) => host.section(String(conversationId)))],
+    hooks: [
+      hook(GenerationTask, {
+        beforeRequest: ({ messages }, api) =>
+          host.leavesOutSummaries(String(api.conversationId)) ? { messages: withoutSummaries(messages) } : undefined,
+      }),
+    ],
     tools: [
       defineTool({
         name: MEMORY_NOTE_TOOL,

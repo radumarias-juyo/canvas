@@ -62,7 +62,6 @@ export function handOffs(text: string, from: string, hop: number, roster: readon
   return calledNames(text, names).map((name) => (name === AGENT_NAME ? AGENT_NAME : on.find((entry) => entry.name === name)!.agentId));
 }
 
-/** The text of an assistant message: its text blocks, without its thinking or tool calls. */
 /**
  * What an entry of pi's log is to its runs: an agent's hand-off (chat.turn), a person's message (not an aside), another
  * input, or a reply of pi's; undefined for the rest. One reading for every scan of the log (#piScan, runAskedByOwner).
@@ -84,6 +83,7 @@ export function piLogEntry(entry: Pick<EntryRecord, "kind" | "data" | "model">):
   return reply?.role === "assistant" ? { reply } : undefined;
 }
 
+/** The text of an assistant message: its text blocks, without its thinking or tool calls. */
 export function assistantText(message: AssistantMessage): string {
   return textOf(message.content.filter(Boolean), "").trim();
 }

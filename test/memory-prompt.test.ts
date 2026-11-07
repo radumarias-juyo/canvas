@@ -2,10 +2,10 @@ import { describe, expect, it } from "vitest";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall, Type, type AssistantMessage, type Message } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { createRegistry, defineExtension, defineTool, Harness, MemoryStorage, section } from "@earendil-works/pi-durable";
+import { createRegistry, defineExtension, defineTool, GenerationTask, Harness, hook, MemoryStorage, section } from "@earendil-works/pi-durable";
 import { MEMORY_FORGET_TOOL, MEMORY_RECALL_TOOL } from "../shared/memory.ts";
 import { text } from "../worker/agent/output.ts";
-import { freshPrompt } from "../worker/memory/fresh.ts";
+import { freshPrompt, withoutSummaries } from "../worker/memory/fresh.ts";
 
 /**
  * pi over a faux model with one `memory` section whose text the test sets, a memory_recall that finds the owner's
@@ -48,12 +48,15 @@ async function piWithMemory(
     parameters: Type.Object({}),
     execute: async () => ({ output: text("Forgot [a3]: “My bonus is private too.”") }),
   });
-  registry.install(defineExtension({ name: "memory", sections: [section("memory", () => notes.text)], tools: [recall, forget] }));
+  // While `leaving`, each request leaves out summaries, as the memory extension's hook does (MemoryHost.leavesOutSummaries).
+  const leaving = { on: false };
+  const leaveOut = hook(GenerationTask, { beforeRequest: ({ messages }) => (leaving.on ? { messages: withoutSummaries(messages) } : undefined) });
+  registry.install(defineExtension({ name: "memory", sections: [section("memory", () => notes.text)], tools: [recall, forget], hooks: [leaveOut] }));
   const pi = await Harness.open(new MemoryStorage(), { models, registry }, BACKGROUND_CONTEXT);
   const root = await pi.root(BACKGROUND_CONTEXT);
   await root.configure({ model: { provider: faux.provider.id, modelId: "m" } }, BACKGROUND_CONTEXT);
   const ask = async (text: string) => (await root.submit({ type: "input", content: text }, BACKGROUND_CONTEXT)).wait(BACKGROUND_CONTEXT);
-  return { pi, root, notes, ask, requests };
+  return { pi, root, notes, ask, requests, leaving };
 }
 
 describe("a prompt that held the owner's own notes", () => {
@@ -158,7 +161,7 @@ describe("a prompt that held the owner's own notes", () => {
   it("stops a compaction summarizing the context as it was, so its summary never comes in", async () => {
     const { pi, root, ask, requests, compaction, release } = await compacting(true);
     try {
-      expect(await freshPrompt(root, pi)).toEqual({});
+      expect((await freshPrompt(root, pi)).compacting).toBeUndefined();
       expect((await pi.waitForTask(compaction!, BACKGROUND_CONTEXT)).state.outcome.status).toBe("aborted");
       await ask("and now?");
       expect(JSON.stringify(requests.at(-1))).not.toContain("salary");
@@ -175,7 +178,7 @@ describe("a prompt that held the owner's own notes", () => {
       // It finishes before it is stopped: its summary comes in after the first edits.
       const fresh = freshPrompt(root, pi);
       release();
-      expect(await fresh).toEqual({});
+      expect((await fresh).compacting).toBeUndefined();
       await pi.waitForTask(compaction!, BACKGROUND_CONTEXT);
       await ask("and now?");
       expect(JSON.stringify(requests.at(-1))).not.toContain("salary");
@@ -184,17 +187,37 @@ describe("a prompt that held the owner's own notes", () => {
     }
   });
 
-  it("leaves out the summary of a compaction a turn waits for once it is placed", async () => {
-    const { pi, root, ask, requests, turn, release } = await compacting(false);
+  it("leaves out the summary of a compaction a turn waits for, from the turn's next request on", async () => {
+    const { pi, root, ask, requests, turn, release, leaving } = await compacting(false);
     try {
       const { compacting } = await freshPrompt(root, pi);
       expect(compacting).toBeDefined();
+      leaving.on = true;
       release();
       await compacting;
-      expect(await freshPrompt(root, pi)).toEqual({});
+      const again = await freshPrompt(root, pi);
+      expect(again.compacting).toBeUndefined();
       await turn;
+      // The turn went on before the edits were in: its requests left the summary out themselves.
+      expect(JSON.stringify(requests.at(-1))).toContain("second");
+      expect(JSON.stringify(requests.at(-1))).not.toContain("salary");
+      await again.placed;
+      leaving.on = false;
       await ask("and now?");
       expect(JSON.stringify(requests.at(-1))).not.toContain("salary");
+    } finally {
+      release();
+      await pi.close(BACKGROUND_CONTEXT);
+    }
+  });
+
+  it("would carry the summary of a compaction a turn waits for without leaving it out", async () => {
+    const { pi, root, requests, turn, release } = await compacting(false);
+    try {
+      await freshPrompt(root, pi);
+      release();
+      await turn;
+      expect(JSON.stringify(requests.at(-1))).toContain("salary");
     } finally {
       release();
       await pi.close(BACKGROUND_CONTEXT);

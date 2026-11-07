@@ -1,5 +1,5 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import type { ToolResultMessage } from "@earendil-works/pi-ai";
+import type { Message, ToolResultMessage } from "@earendil-works/pi-ai";
 import {
   CompactionEntry,
   LiveDoc,
@@ -10,6 +10,7 @@ import {
   type EntryRecord,
   type Harness,
   type LiveState,
+  type Submission,
 } from "@earendil-works/pi-durable";
 import { MEMORY_FORGET_TOOL, MEMORY_RECALL_TOOL } from "../../shared/memory.ts";
 
@@ -27,6 +28,18 @@ const SUMMARY_REQUEST = "compaction:";
 
 /** What a summary of the conversation says once it is left out. */
 const SUMMARY_LEFT_OUT = "(A summary of the earlier conversation is left out here: more people read this chat now.)";
+
+/** How a compaction's summary starts in the model's context (pi-durable's CompactionTask; test/memory-prompt.test.ts checks it). */
+const SUMMARY_START = "The conversation history before this point was compacted into the following summary:";
+
+/** `messages` with every compaction summary among them put in place of one that says it is left out. */
+export function withoutSummaries(messages: readonly Message[]): Message[] {
+  return messages.map((message) => {
+    if (message.role !== "user") return message;
+    const first = typeof message.content === "string" ? message.content : message.content.find((part) => part.type === "text")?.text;
+    return first?.startsWith(SUMMARY_START) ? { ...message, content: SUMMARY_LEFT_OUT } : message;
+  });
+}
 
 /**
  * Edits that leave the owner's notes out of the model's context: every prompt entry (`pi.system`) of `entries`
@@ -57,14 +70,15 @@ export type Compactions = Pick<Harness, "inspect" | "abortTask" | "abortSubmissi
  * A compaction going now summarizes the context as it was, notes included, and its summary would come in after these
  * edits. One the conversation runs on its own is stopped, its summary too if it waits to be placed (a later one
  * compacts again), and a summary placed meanwhile is left out as well. One a turn waits for cannot be stopped (the
- * turn would fail): `compacting` resolves once it has placed its summary, and then freshPrompt is due again.
+ * turn would fail): `compacting` resolves once it has placed its summary, and then freshPrompt is due again (until
+ * its edits are in, withoutSummaries leaves the summary out of each request). `placed`: resolves once they are.
  */
 export async function freshPrompt(
   conversation: Pick<Conversation, "id" | "context" | "submit" | "viewState">,
   harness: Compactions,
-): Promise<{ compacting?: Promise<unknown> }> {
+): Promise<{ compacting?: Promise<unknown>; placed: Promise<unknown> }> {
   const view = await conversation.context(BACKGROUND_CONTEXT);
-  await leaveOut(conversation, view.entries);
+  const writes = [await leaveOut(conversation, view.entries)];
   const live = await conversation.viewState(BACKGROUND_CONTEXT);
   let compactions: LiveState["compactions"];
   try {
@@ -84,16 +98,16 @@ export async function freshPrompt(
       .map((each) => harness.abortSubmission(each.id, BACKGROUND_CONTEXT, conversation.id)),
   );
   const seen = new Set(view.entries.map((entry) => entry.id));
-  await leaveOut(
-    conversation,
-    (await conversation.context(BACKGROUND_CONTEXT)).entries.filter((entry) => !seen.has(entry.id) && CompactionEntry.is(entry)),
-  );
+  const late = (await conversation.context(BACKGROUND_CONTEXT)).entries.filter((entry) => !seen.has(entry.id) && CompactionEntry.is(entry));
+  writes.push(await leaveOut(conversation, late));
+  const placed = Promise.all(writes.map((write) => write?.wait(BACKGROUND_CONTEXT)));
   const waited = compactions?.filter((each) => each.blocking) ?? [];
-  return waited.length ? { compacting: Promise.allSettled(waited.map((each) => harness.waitForTask(each.taskId, BACKGROUND_CONTEXT))) } : {};
+  if (!waited.length) return { placed };
+  return { compacting: Promise.allSettled(waited.map((each) => harness.waitForTask(each.taskId, BACKGROUND_CONTEXT))), placed };
 }
 
 /** Write the edits that leave the notes of `entries` out, if any. */
-async function leaveOut(conversation: Pick<Conversation, "submit">, entries: readonly EntryRecord[]): Promise<void> {
+async function leaveOut(conversation: Pick<Conversation, "submit">, entries: readonly EntryRecord[]): Promise<Submission | undefined> {
   const edits = leaveOutNotes(entries);
-  if (edits.length) await conversation.submit({ type: "write", entry: { kind: MEMORY_FRESH_KIND, edits } }, BACKGROUND_CONTEXT);
+  return edits.length ? conversation.submit({ type: "write", entry: { kind: MEMORY_FRESH_KIND, edits } }, BACKGROUND_CONTEXT) : undefined;
 }

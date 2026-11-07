@@ -43,7 +43,9 @@ with `@cloudflare/vite-plugin`, pnpm; configured and deployed with the `cf` CLI 
   and anything pi saves in a chat others are in or in an agent's hand-off, waits unconfirmed until the owner confirms it.
   A run's sessions never read the owner's own notes (their reports reach other chats). A prompt stays in the transcript:
   once one held the owner's own notes and the chat is shared, its conversation starts the prompt afresh
-  (`worker/memory/fresh.ts`, `ChatMemory.audienceChanged`). Keep those rules in code.
+  (`worker/memory/fresh.ts`, `ChatMemory.audienceChanged`): a compaction going then is stopped, or, when a turn waits
+  for it, its summary is left out of each request (the memory extension's `beforeRequest` hook) until the edits are in.
+  Keep those rules in code.
 - Shared chats (`worker/chat-routes.ts`, `worker/members.ts`): the owner invites people by single-use link; they share
   the one conversation and the one agent, which always acts as the owner (owner's MCP sign-ins, files, skills; artifacts
   owned by the owner). The chat object checks membership on every socket and prompt; keep it that way. Once a chat

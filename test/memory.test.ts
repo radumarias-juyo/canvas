@@ -455,7 +455,11 @@ describe("ChatMemory", () => {
    * turn answers the owner, and the conversations whose prompt was started afresh.
    */
   function chat(chatId: string, kind: ChatKind, alone: boolean, owner = directory()) {
-    const state: { kind: ChatKind; alone: boolean; piByOwner: boolean; compacting?: Promise<unknown> } = { kind, alone, piByOwner: true };
+    const state: { kind: ChatKind; alone: boolean; piByOwner: boolean; compacting?: Promise<unknown>; placed?: Promise<unknown> } = {
+      kind,
+      alone,
+      piByOwner: true,
+    };
     const sessions = new Map<string, MemoryAgent>();
     const kv = new Map<string, unknown>();
     const fresh: (string | undefined)[] = [];
@@ -469,7 +473,7 @@ describe("ChatMemory", () => {
       piByOwner: async () => state.piByOwner,
       freshPrompt: async (conversation) => {
         fresh.push(conversation);
-        return state.compacting ? { compacting: state.compacting } : {};
+        return { placed: state.placed ?? Promise.resolve(), ...(state.compacting && { compacting: state.compacting }) };
       },
       directory: () => ({
         readNotes: (reader) => owner.memory.read(reader),
@@ -558,17 +562,25 @@ describe("ChatMemory", () => {
   it("starts a prompt afresh again once a compaction it could not stop has placed its summary", async () => {
     const owner = directory();
     saved(owner.memory.add({ text: "My salary is private.", scope: "user" }));
-    const { memory, state, fresh } = chat(PRIVATE, "private", true, owner);
+    const { memory, host, state, fresh } = chat(PRIVATE, "private", true, owner);
     await memory.refresh();
-    let placed!: () => void;
-    state.compacting = new Promise<void>((resolve) => (placed = resolve));
+    let settled!: () => void;
+    state.compacting = new Promise<void>((resolve) => (settled = resolve));
     state.kind = "group";
     await memory.audienceChanged();
     expect(fresh).toEqual([undefined]);
+    // Until the edits that leave it out are in, each request leaves the summary out itself.
+    expect(host.leavesOutSummaries("root")).toBe(true);
     state.compacting = undefined;
-    placed();
+    let placed!: () => void;
+    state.placed = new Promise<void>((resolve) => (placed = resolve));
+    settled();
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(fresh).toEqual([undefined, undefined]);
+    expect(host.leavesOutSummaries("root")).toBe(true);
+    placed();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(host.leavesOutSummaries("root")).toBe(false);
     // Done then: nothing more to leave out.
     await memory.refresh();
     expect(fresh).toHaveLength(2);
@@ -607,6 +619,9 @@ describe("ChatMemory", () => {
     // Asides are not inputs; the conversation's first run goes back to the start of the log; no input is no one's.
     expect(await asked(reply("toolUse"), message("ana", true), message("owner"))).toBe(true);
     expect(await asked(reply("toolUse"))).toBe(false);
+    // A failed request retried in the run does not end it; a run that ended in one is read over more inputs.
+    expect(await asked(reply("toolUse"), reply("error"), message("owner"), reply("stop"))).toBe(true);
+    expect(await asked(reply("toolUse"), reply("error"), message("owner"), entry(CHAT_TURN_KIND), reply("stop"))).toBe(false);
     // A run longer than it reads is not judged the owner's.
     const long = (async function* () {
       for (let page = 0; page <= MAX_RUN_PAGES; page++) yield [reply("toolUse")];
