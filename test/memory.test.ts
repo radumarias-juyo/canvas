@@ -700,9 +700,13 @@ describe("ChatMemory", () => {
     expect(await asked(reply("toolUse"), reply("error"), message("owner"), reply("stop"))).toBe(true);
     expect(await asked(reply("toolUse"), reply("error"), message("owner"), entry(CHAT_TURN_KIND), reply("stop"))).toBe(false);
     expect(await asked(reply("toolUse"), reply("aborted"), message("ana"), reply("stop"))).toBe(false);
-    // The owner's message after a run that failed, or was cut off by a restart, starts a run of its own.
-    expect(await asked(reply("toolUse"), message("owner"), reply("error"), entry(CHAT_TURN_KIND))).toBe(true);
-    expect(await asked(reply("toolUse"), message("owner"), reply("aborted"), message("ana"))).toBe(true);
+    // A run that failed, or was stopped, did not answer its inputs: they stay in the context, so the owner's message
+    // after a hand-off or a member's is judged with them. One after the owner's own failed run is the owner's.
+    expect(await asked(reply("toolUse"), message("owner"), reply("error"), entry(CHAT_TURN_KIND))).toBe(false);
+    expect(await asked(reply("toolUse"), message("owner"), reply("aborted"), entry(CHAT_TURN_KIND))).toBe(false);
+    expect(await asked(reply("toolUse"), message("owner"), reply("aborted"), message("ana"))).toBe(false);
+    expect(await asked(reply("toolUse"), message("owner"), reply("error"), message("owner"), reply("stop"))).toBe(true);
+    expect(await asked(reply("toolUse"), message("owner"), reply("length"), message("ana"))).toBe(true);
     // The owner's message steered into a member's run that failed once and went on: it is still that run.
     expect(await asked(reply("toolUse"), message("owner"), reply("toolUse"), reply("error"), message("ana"))).toBe(false);
     // A run longer than it reads is not judged the owner's.

@@ -66,15 +66,13 @@ export const MAX_RUN_PAGES = 20;
 
 /**
  * Whether the run pi is in answers only the owner's own messages, from its log read newest first (`pages`): every
- * input since the end of its last run (a reply that ended it, not one calling tools) is a message of `ownerUid`'s,
- * none an agent's hand-off or another input (piLogEntry). Read from the transcript, so a run resumed after a restart
- * is judged as it was. `pages` go back to the start of the log when no run ended before (only this run is read); past
+ * input since the end of its last answered run (a reply that ended it: not one calling tools, failed or cut off) is a
+ * message of `ownerUid`'s, none an agent's hand-off or another input (piLogEntry). Read from the transcript, so a run
+ * resumed after a restart is judged as it was. `pages` go back to the start of the log when no run ended before (only this run is read); past
  * MAX_RUN_PAGES of them, it is not the owner's.
  */
 export async function runAskedByOwner(pages: AsyncIterable<readonly EntryRecord[]>, ownerUid: string): Promise<boolean> {
   let asked = false;
-  /** Whether the entry read last (the next newer one) is an input. */
-  let newerIsInput = false;
   let read = 0;
   for await (const page of pages) {
     if (++read > MAX_RUN_PAGES) return false;
@@ -82,14 +80,13 @@ export async function runAskedByOwner(pages: AsyncIterable<readonly EntryRecord[
       const seen = piLogEntry(entry);
       if (!seen) continue;
       if ("reply" in seen) {
+        // Only a reply that answered its run ends it. A failed or cut off one did not: the harness keeps that run's
+        // inputs in the context (it drops only the reply), so whatever was asked then is still asked, retried,
+        // resumed or not, and is read past.
         const { stopReason } = seen.reply;
-        // A failed or cut off request is retried, or resumed, in the same run, which places no input before it goes
-        // on: one an input follows at once is a new run's end (the owner's message after a failed one). An input
-        // after a later reply of the run was steered into it. Any other reply ends a run.
-        if (stopReason !== "toolUse" && ((stopReason !== "error" && stopReason !== "aborted") || newerIsInput)) return asked;
-        newerIsInput = false;
+        if (stopReason === "stop" || stopReason === "length") return asked;
       } else if (seen.input !== "message" || seen.uid !== ownerUid) return false;
-      else asked = newerIsInput = true;
+      else asked = true;
     }
   }
   // The start of the log: the run is the conversation's first.
