@@ -30,6 +30,8 @@ export interface SeatBatch {
 
 /** A turn the room gives a seat: its id in the room, who asked, and the input (turnInput) that starts it. */
 export interface SeatTurn extends ChatTurnData {
+  /** The message it answers, as one labelled line (AgentTurn.ask): what the seat's session reads of a forked turn. */
+  ask: string;
   input: string;
   /** The agent's owner's name as the room shows it: its instructions name them. */
   ownerName: string;

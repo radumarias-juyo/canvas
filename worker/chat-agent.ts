@@ -287,7 +287,10 @@ const IMPORTED_KEY = "imported";
  * within the chain's cap. Set when the first agent joins, so pi's earlier answers start nothing.
  */
 const PI_SCAN_KEY = "piScan";
-type PiScan = { through: number; chain?: { hop: number; root: number } };
+/** What the chat's sessions name (#readTraces): the chat's, and what only forks whose replies were not posted did. */
+type SessionTraces = { shared: ChatTraces; withheld: ChatTraces };
+/** How far #piScan read pi's log, the chain pi's next answer is in, and the person who started it (`by`, whom its turns count for). */
+type PiScan = { through: number; chain?: { hop: number; root: number }; by?: string };
 /**
  * Set on an agent's home conversation: the agent whose own chat this is (the owner's directory marks the chat with
  * it too). There the agent is on the roster and answers every message that calls nobody else; its runs run here.
@@ -428,6 +431,8 @@ export class ChatAgent extends DurableObject<Env> {
     callbacks: {
       run: (payload: RunAlarm) => this.#onAlarm(() => this.runner.fired(payload)),
       watch: (payload: WatchAlarm) => this.#onAlarm(() => this.runner.watchTick(payload)),
+      // A seat's results its rooms have not taken yet go again (AgentSeats.#report).
+      seats: () => this.#onAlarm(async () => this.seats.wake()),
     },
   });
   readonly lifecycle = Lifecycle.install(this).use(this.harness).use(this.sockets).use(this.scheduler);
@@ -472,8 +477,10 @@ export class ChatAgent extends DurableObject<Env> {
   #kindWrites: Promise<unknown> = Promise.resolve();
   /** The last read of the queue, by the inbox ids it was for: every socket asks after the same commit. */
   #queuedRead: { key: string; read: Promise<QueuedMessage[]> } | undefined;
-  /** What the transcript names, and how far each of pi's sessions was read for it (see #transcriptTraces). */
+  /** What the transcript names, and how far each of pi's sessions was read for it (see #readTraces). */
   #seen: { through: Map<string, number>; traces: ChatTraces } = { through: new Map(), traces: chatTraces([]) };
+  /** The same, of the forks whose replies were not posted (ChatRoster.withheld): only the owner's (see #readTraces). */
+  #seenWithheld: { through: Map<string, number>; traces: ChatTraces } = { through: new Map(), traces: chatTraces([]) };
   /** Set while a broadcast of the agents' view waits for the current task to end (#broadcastAgents). */
   #agentsChanged = false;
   /** The asking line the skill classifier last read for an agent's turn (#skillsForTurn). */
@@ -1601,17 +1608,27 @@ export class ChatAgent extends DurableObject<Env> {
 
   /** Whether `path` of the owner's files belongs to this chat: attached to its messages, saved by its agent, or in its out/ folder. */
   async #isChatFile(path: string): Promise<boolean> {
-    return this.#inChat(path, await this.#transcriptTraces());
+    return this.#inChat(path, await this.#readTraces());
   }
 
-  #inChat(path: string, traces: ChatTraces): boolean {
-    return path.startsWith(chatOutFolder(this.chatId)) || traces.files.has(path);
+  /**
+   * Whether a file is the chat's: named in its sessions, or in its out/ folder, but for one only a fork whose reply was
+   * not posted saved (what an agent's private turn saved is the chat's once its reply is).
+   */
+  #inChat(path: string, { shared, withheld }: SessionTraces): boolean {
+    return shared.files.has(path) || (path.startsWith(chatOutFolder(this.chatId)) && !withheld.files.has(path));
   }
 
   /** The owner's files that belong to this chat (#isChatFile) and are still there, as the people it is shared with see them. */
   async chatFiles(): Promise<FileEntry[]> {
-    const [traces, listed] = await Promise.all([this.#transcriptTraces(), this.scope.files().then((files) => files.list())]);
+    const [traces, listed] = await Promise.all([this.#readTraces(), this.scope.files().then((files) => files.list())]);
     return listed.filter((file) => this.#inChat(file.path, traces));
+  }
+
+  /** Whether only a fork whose reply was not posted published `artifactId`: a page that is not the chat's yet, but for its owner. */
+  async #withheldPage(artifactId: string): Promise<boolean> {
+    const { shared, withheld } = await this.#readTraces();
+    return withheld.artifacts.has(artifactId) && !shared.artifacts.has(artifactId);
   }
 
   /**
@@ -1620,8 +1637,14 @@ export class ChatAgent extends DurableObject<Env> {
    */
   async contents(uid: string): Promise<ChatContents | null> {
     if (!this.isInChat(uid)) return null;
-    const [files, artifacts] = await Promise.all([this.chatFiles(), this.#directory.listChatArtifacts(this.chatId)]);
-    return { files: newestFirst(files), artifacts: uid === this.uid ? artifacts : artifacts.map(({ unread: _, ...artifact }) => artifact) };
+    const [files, artifacts, { shared, withheld }] = await Promise.all([
+      this.chatFiles(),
+      this.#directory.listChatArtifacts(this.chatId),
+      this.#readTraces(),
+    ]);
+    if (uid === this.uid) return { files: newestFirst(files), artifacts };
+    const visible = artifacts.filter((artifact) => !withheld.artifacts.has(artifact.id) || shared.artifacts.has(artifact.id));
+    return { files: newestFirst(files), artifacts: visible.map(({ unread: _, ...artifact }) => artifact) };
   }
 
   /** Paths someone other than the owner uploaded through this chat (noteUploads): the owner's files they may attach. */
@@ -1640,7 +1663,7 @@ export class ChatAgent extends DurableObject<Env> {
   async #attachable(uid: string, attachments: readonly AttachmentInput[]): Promise<AttachmentInput[]> {
     if (attachments.length === 0) return [];
     const uploaded = new Set(this.#uploads(uid));
-    const traces = await this.#transcriptTraces();
+    const traces = await this.#readTraces();
     return attachments.filter((attachment) => uploaded.has(attachment.path) || this.#inChat(attachment.path, traces));
   }
 
@@ -2413,18 +2436,24 @@ export class ChatAgent extends DurableObject<Env> {
    * one the list missed goes too), and the files it attached or saved. Read a page of the history at a time.
    */
   async #traces(): Promise<{ artifacts: string[]; files: string[] }> {
-    const [traces, ids] = await Promise.all([this.#transcriptTraces(), this.#directory.chatArtifactIds(this.chatId)]);
-    return { artifacts: [...new Set([...traces.artifacts, ...ids])], files: [...traces.files] };
+    const [{ shared, withheld }, ids] = await Promise.all([this.#readTraces(), this.#directory.chatArtifactIds(this.chatId)]);
+    return {
+      artifacts: [...new Set([...shared.artifacts, ...withheld.artifacts, ...ids])],
+      files: [...new Set([...shared.files, ...withheld.files])],
+    };
   }
 
   /**
    * What the transcript names (chatTraces), in every one of pi's sessions (the chat's, and each agent's, whose tool
    * calls publish and save for the chat as pi's do), read on from where the last read stopped: entries never change once
-   * written, so a chat's files are known without reading its whole history on every request.
+   * written, so a chat's files are known without reading its whole history on every request. `withheld`: what the
+   * forks whose replies were not posted named (ChatRoster.withheld), the chat's only for its owner until they are; a
+   * fork's reply posted, its session is read again into `shared`.
    */
-  readonly #transcriptTraces = singleFlight(async (): Promise<ChatTraces> => {
-    const seen = this.#seen;
+  readonly #readTraces = singleFlight(async (): Promise<SessionTraces> => {
+    const withheld = this.roster.withheld();
     for (const { id } of await this.harness.sessions.list()) {
+      const seen = withheld.has(id) ? this.#seenWithheld : this.#seen;
       const query = { order: "ascending", minEntryId: ((seen.through.get(id) ?? -1) + 1) as EntryId } as const;
       for await (const page of entryPages(await this.harness.conversation(id), query, 500)) {
         chatTraces(page, seen.traces);
@@ -2432,7 +2461,7 @@ export class ChatAgent extends DurableObject<Env> {
         if (last) seen.through.set(id, last.id as number);
       }
     }
-    return seen.traces;
+    return { shared: this.#seen.traces, withheld: this.#seenWithheld.traces };
   });
 
   /**
@@ -2664,22 +2693,30 @@ export class ChatAgent extends DurableObject<Env> {
   readonly #piScan = serial(async (): Promise<void> => {
     const scan = this.ctx.storage.kv.get<PiScan>(PI_SCAN_KEY);
     if (!scan) return;
-    let { through, chain } = scan;
+    let { through, chain, by } = scan;
     for await (const page of this.#log({ order: "ascending", minEntryId: (through + 1) as EntryId })) {
       for (const entry of page) {
         through = entry.id as number;
         if (entry.kind === CHAT_TURN_KIND) {
           const data = entry.data as Partial<ChatTurnData> | undefined;
           chain = typeof data?.hop === "number" && typeof data.root === "number" ? { hop: data.hop, root: data.root } : undefined;
-        } else if (entry.kind === "pi.user" || (entry.kind === CHAT_MESSAGE_KIND && !(entry.data as Partial<ChatMessageData> | undefined)?.aside)) {
+          by = typeof data?.turn === "number" ? this.roster.turn(data.turn)?.by : undefined;
+        } else if (entry.kind === "pi.user") {
           chain = undefined;
+          by = this.uid;
+        } else if (entry.kind === CHAT_MESSAGE_KIND && !(entry.data as Partial<ChatMessageData> | undefined)?.aside) {
+          chain = undefined;
+          const uid = (entry.data as Partial<ChatMessageData> | undefined)?.uid;
+          by = typeof uid === "string" ? uid : undefined;
         } else if (entry.kind === "pi.assistant") {
           const message = entry.model?.[0];
-          if (message?.role === "assistant" && message.stopReason === "stop") this.turns.fromPi(assistantText(message), through, chain);
+          if (message?.role === "assistant" && message.stopReason === "stop") {
+            this.turns.fromPi(assistantText(message), through, { ...(chain ?? { hop: 0 }), ...(by !== undefined && { by }) });
+          }
         }
       }
       if (this.#gone) return;
-      this.ctx.storage.kv.put(PI_SCAN_KEY, { through, ...(chain && { chain }) } satisfies PiScan);
+      this.ctx.storage.kv.put(PI_SCAN_KEY, { through, ...(chain && { chain }), ...(by !== undefined && { by }) } satisfies PiScan);
     }
   });
 
@@ -2791,10 +2828,20 @@ export class ChatAgent extends DurableObject<Env> {
 
   /** What the turn controller needs of this chat (worker/agents/controller.ts). */
   #turnHost(): TurnHost {
+    const uid = () => this.uid;
     return {
       roster: this.roster,
+      get chatOwner() {
+        return uid();
+      },
       definition: (entry) => this.#index(entry.ownerUid).getAgent(entry.agentId),
-      configure: (entry, agent, turn) => this.#configureAgent(sessionOf(entry, turn), agent, turn, this.#nameOf(entry.ownerUid)),
+      configure: (entry, agent, turn) =>
+        this.#configureAgent(
+          sessionOf(entry, turn),
+          agent,
+          { ask: turn.ask, byOwner: turn.byOwner, apart: turn.session !== undefined },
+          this.#nameOf(entry.ownerUid),
+        ),
       logSince: (after) => this.#log({ order: "descending", minEntryId: (after + 1) as EntryId }),
       write: (session, text, requestId) => this.#writeTo(session, text, requestId),
       submit: (session, input, operationId, data) => this.#submitTo(session, input, operationId, data),
@@ -2907,13 +2954,18 @@ export class ChatAgent extends DurableObject<Env> {
       fork: (session) => this.#fork(session),
       write: (session, text, requestId) => this.#writeTo(session, text, requestId),
       forks: (agent, turn) => this.#forks(agent, turn.input),
-      configure: (session, agent, turn) => this.#configureAgent(session, agent, { ask: turn.input, byOwner: turn.byOwner }, turn.ownerName),
+      configure: (session, agent, turn, apart) =>
+        this.#configureAgent(session, agent, { ask: turn.input, byOwner: turn.byOwner, apart }, turn.ownerName),
       submit: (session, input, operationId, data) => this.#submitTo(session, input, operationId, data),
       wait: (session, operationId) => this.harness.wait(operationId, { session }),
       abort: (session) => this.#abortSession(session),
       turnEntries: (session, turn) => this.#turnEntries(session, turn),
       sources: (agent, entries) => this.#sources(agent, entries),
       waitUntil: (promise) => this.ctx.waitUntil(promise),
+      later: (ms) => {
+        const set = this.scheduler.set(new Date(Date.now() + ms), "seats", {});
+        this.ctx.waitUntil(set.catch((error: unknown) => console.error("agent seat, alarm:", errorMessage(error))));
+      },
     };
   }
 
@@ -2969,11 +3021,17 @@ export class ChatAgent extends DurableObject<Env> {
   /**
    * Set an agent session up for a turn: the owner's tools and skills as they are now, its model and effort (the
    * chat's model when it names none), its own instructions, and only the tools this turn may use (allowedTools): the
-   * harness offers and runs no other. `turn.ask` is what the skill classifier reads.
+   * harness offers and runs no other. `turn.ask` is what the skill classifier reads; `turn.apart`: it runs in a session
+   * apart from the chat (a fork, a run's), where its owner's turn may use all of theirs.
    */
-  async #configureAgent(session: string, agent: AgentDefinition, turn: { ask: string; byOwner: boolean }, ownerName: string): Promise<void> {
+  async #configureAgent(
+    session: string,
+    agent: AgentDefinition,
+    turn: { ask: string; byOwner: boolean; apart: boolean },
+    ownerName: string,
+  ): Promise<void> {
     await this.#refreshForTurn(turn.ask);
-    const allowed = (installed: readonly string[]) => allowedTools(installed, this.#mcpTools, agent, turn.byOwner, this.#signsIn);
+    const allowed = (installed: readonly string[]) => allowedTools(installed, this.#mcpTools, agent, turn.byOwner, this.#signsIn, turn.apart);
     await this.#configureSession(session, this.#agentChoice(agent), agentInstructions(agent, ownerName), allowed);
   }
 
@@ -3093,12 +3151,13 @@ export class ChatAgent extends DurableObject<Env> {
     // Before its session is made: a session made for an agent the roster refuses would stay, read by every traces read.
     const early = this.roster.refusal(name);
     if (early) return early;
+    const first = !this.roster.hasAny();
     const [session, newest] = await Promise.all([
       // A member's runs in their own object: no session here.
       member ? "" : this.harness.sessions.create().then((made) => made.id as string),
-      this.roster.hasAny() ? undefined : this.#root().then((root) => root.entries({ order: "descending" }, 1, undefined, BACKGROUND_CONTEXT)),
+      first || member ? this.#root().then((root) => root.entries({ order: "descending" }, 1, undefined, BACKGROUND_CONTEXT)) : undefined,
     ]);
-    const first = !this.roster.hasAny();
+    const newestId = (newest?.items[0]?.id as number | undefined) ?? -1;
     const refused = this.roster.add({
       agentId: agent.id,
       ownerUid,
@@ -3107,11 +3166,12 @@ export class ChatAgent extends DurableObject<Env> {
       avatar: agent.avatar,
       color: agent.color,
       job: agent.job,
-      ...(member && { seat: seatChatId(agent.id) }),
+      // A member's agent reads its owner's messages as theirs only from here on (OwnerMarks in turns.ts).
+      ...(member && { seat: seatChatId(agent.id), ownerFrom: newestId + 1, ...(name !== agent.name && { alias: true as const }) }),
     });
     if (refused) return refused;
     // The first agent: pi's answers from now on are read for the agents they name, none before.
-    if (first) this.ctx.storage.kv.put(PI_SCAN_KEY, { through: (newest?.items[0]?.id as number | undefined) ?? -1 } satisfies PiScan);
+    if (first) this.ctx.storage.kv.put(PI_SCAN_KEY, { through: newestId } satisfies PiScan);
     this.#broadcastAgents();
     return { name };
   }
@@ -3548,8 +3608,11 @@ export class ChatAgent extends DurableObject<Env> {
   async artifactTools(artifactId: string, version: number, viewer: string): Promise<DeclaredTool[] | null> {
     const manifest = await this.#manifest(artifactId, version);
     if (!manifest) return null;
+    const withheld = viewer !== this.uid && (await this.#withheldPage(artifactId));
     const perServer = await Promise.all(
-      (manifest.mcp?.servers ?? []).filter((entry) => this.#mayLoad(entry.server, viewer)).map(async (entry) =>
+      (manifest.mcp?.servers ?? [])
+        .filter((entry) => this.#mayLoad(entry.server, viewer) && !(withheld && this.#membersOnly(entry.server)))
+        .map(async (entry) =>
         (await this.hub.tools(entry.server).catch(() => [])).filter((tool) => entry.tools.includes(tool.name)).map((tool) => ({ ...tool, server: entry.server })),
       ),
     );
@@ -3569,6 +3632,13 @@ export class ChatAgent extends DurableObject<Env> {
 
     if (!this.#mayLoad(server, viewer)) {
       return fail({ code: "not_granted", server, message: `${server} signs in each user, and this page calls as its author, so only people in its chat can load it.` });
+    }
+    if (viewer !== this.uid && this.#membersOnly(server) && (await this.#withheldPage(artifactId))) {
+      return fail({
+        code: "not_granted",
+        server,
+        message: `${server} signs in each user, and this page is not the chat's yet, so only its author can load it.`,
+      });
     }
 
     try {
@@ -3732,7 +3802,7 @@ const REATTACH_MS = 10_000;
 class AttachStalled extends Error {}
 
 /** One agent's turn a socket follows live: which turn, and the stream of its session. */
-type AgentFollow = { turn: number; stream: Promise<AgentEventStream> };
+type AgentFollow = { turn: number; session: string; stream: Promise<AgentEventStream> };
 
 /**
  * A chat socket's hibernation attachment: whose socket it is, and a digest of the last snapshot it was sent (see
@@ -4031,13 +4101,15 @@ class ChatSockets extends LifecycleCapability implements DurableObjectCapability
     const uid = this.#person(ws)?.uid;
     const running = new Map(runs.filter((run) => run.only === undefined || run.only === uid).map((run) => [run.agentId, run]));
     for (const [agent, follow] of following) {
-      if (running.get(agent)?.turn === follow.turn) continue;
+      // The same turn in another session (it forked since the socket followed it) is followed again, there.
+      const run = running.get(agent);
+      if (run?.turn === follow.turn && run.session === follow.session) continue;
       following.delete(agent);
       void follow.stream.then((events) => events.stop()).catch(() => {});
     }
     for (const run of running.values()) {
       if (following.has(run.agentId)) continue;
-      const follow = { turn: run.turn } as AgentFollow;
+      const follow = { turn: run.turn, session: run.session } as AgentFollow;
       following.set(run.agentId, follow);
       const current = () => following.get(run.agentId) === follow;
       const letGo = () => current() && following.delete(run.agentId);

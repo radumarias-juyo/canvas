@@ -7,7 +7,8 @@ import type { EntryRecord } from "@earendil-works/pi-durable";
 import type { AgentDefinition, ChatTurnData } from "../../../shared/agents.ts";
 import { errorMessage } from "../../../shared/util.ts";
 import type { Sql } from "../../members.ts";
-import { operationId, outputsOf, type Outputs, type TurnResult } from "../controller.ts";
+import { operationId, outputsOf, unreadOutputs, type Outputs, type TurnResult } from "../controller.ts";
+import { askedApart } from "../turns.ts";
 import type { RoomLink, RoomRef, SeatBatch, SeatResult, SeatTurn } from "./link.ts";
 
 /** What a seat needs of the object it is in: its owner's definitions, pi's sessions there, and its rooms. */
@@ -26,8 +27,11 @@ export interface SeatHost {
   write(session: string, text: string, requestId: string): Promise<void>;
   /** Whether a turn its owner asked for may reach a server outside the agent's shared list (forksFor). */
   forks(agent: AgentDefinition, turn: SeatTurn): Promise<boolean>;
-  /** Set a session up for a turn: the agent's model, effort and instructions, and the tools this turn may use. */
-  configure(session: string, agent: AgentDefinition, turn: SeatTurn): Promise<void>;
+  /**
+   * Set a session up for a turn: the agent's model, effort and instructions, and the tools this turn may use (`apart`:
+   * it runs in a fork, where its owner's turn may use all of theirs).
+   */
+  configure(session: string, agent: AgentDefinition, turn: SeatTurn, apart: boolean): Promise<void>;
   submit(session: string, input: string, operationId: string, data: ChatTurnData): Promise<void>;
   wait(session: string, operationId: string): Promise<TurnResult>;
   abort(session: string): Promise<void>;
@@ -39,6 +43,8 @@ export interface SeatHost {
    */
   sources(agent: AgentDefinition, entries: readonly EntryRecord[]): Promise<Pick<Outputs, "items" | "sources" | "review">>;
   waitUntil(promise: Promise<unknown>): void;
+  /** Wake this object's seats again in `ms` (wake), even when nothing else does: results no room took yet go again then. */
+  later(ms: number): void;
 }
 
 type SeatRow = { room_owner: string; room_chat: string; agent_id: string; session: string; delivered: number };
@@ -53,8 +59,10 @@ type SeatTurnRow = {
   result: string | null;
 };
 
-/** How long a seat waits before it posts a turn's result again, after each failed post (#report); then the next wake. */
+/** How long a seat waits before it posts a turn's result again, after each failed post (#report); then REPORT_LATER. */
 const REPORT_RETRIES = [1_000, 5_000, 30_000];
+/** When a seat tries again a result its room has not taken after REPORT_RETRIES: an alarm wakes it. */
+const REPORT_LATER = 5 * 60_000;
 
 const refOf = (row: Pick<SeatRow, "room_owner" | "room_chat">): RoomRef => ({ ownerUid: row.room_owner, chatId: row.room_chat });
 
@@ -151,9 +159,17 @@ export class AgentSeats {
    * to the room when it ends. A turn given again is placed once.
    */
   async give(ref: RoomRef, agentId: string, turn: SeatTurn, batch: SeatBatch | null = null): Promise<number> {
-    if (this.#turn(ref, turn.turn)) return this.delivered(ref, agentId);
+    const known = this.#turn(ref, turn.turn);
+    if (known) {
+      // Given again (the room did not hear back): it runs, or its result goes to the room again.
+      this.#host.waitUntil(known.status === "ended" ? this.#report(ref, known.turn) : this.#await(known));
+      return this.delivered(ref, agentId);
+    }
     const agent = await this.#agent(agentId);
     const seat = await this.#ensure(ref, agentId, true);
+    // The room gives an agent one turn at a time: one still running here is one the room ended (a give it thought
+    // failed), and it stops before this turn sets the session up for someone else's tools.
+    await this.#abortOthers(ref, agentId, turn.turn);
     const delivered = batch ? await this.deliver(ref, agentId, batch) : seat.delivered;
     const byOwner = turn.byOwner && !turn.unattended && turn.hop === 0 && turn.calledBy.uid === this.#host.uid && !turn.calledBy.agentId;
     const checked: SeatTurn = { ...turn, byOwner };
@@ -171,7 +187,9 @@ export class AgentSeats {
       forked ? 1 : 0,
     );
     try {
-      await this.#host.configure(session, agent, checked);
+      // Its input goes only into the fork: the seat's session reads the ask as context (the batch left it out).
+      const apart = forked ? this.#host.write(seat.session, askedApart(turn.ask), `apart:${turn.turn}`) : undefined;
+      await Promise.all([apart, this.#host.configure(session, agent, checked, forked)]);
       await this.#host.submit(session, turn.input, operationId(turn.turn), { turn: turn.turn, calledBy: turn.calledBy, hop: turn.hop });
     } catch (error) {
       this.#end(ref, turn.turn, { status: "unanswered", reason: errorMessage(error), published: [], items: [], sources: [] });
@@ -203,7 +221,24 @@ export class AgentSeats {
     }
   }
 
-  /** What a turn left in its session: the pages it published, and its records, only the shared servers' for a fork. */
+  /** The turns of `agentId` still running in a room's seat but `turn`: stopped, as the room no longer waits on them. */
+  async #abortOthers(ref: RoomRef, agentId: string, turn: number): Promise<void> {
+    const others = this.#sql
+      .exec(
+        "SELECT session FROM agent_seat_turns WHERE room_owner = ? AND room_chat = ? AND agent_id = ? AND turn != ? AND status = 'running'",
+        ref.ownerUid,
+        ref.chatId,
+        agentId,
+        turn,
+      )
+      .toArray() as Pick<SeatTurnRow, "session">[];
+    await Promise.all([...new Set(others.map((row) => row.session))].map((session) => this.#host.abort(session)));
+  }
+
+  /**
+   * What a turn left in its session: the pages it published, and its records, only the shared servers' for a fork.
+   * A fork's that cannot be read shows unknown sources, for review when its owner reviews such replies.
+   */
   async #outputs(row: SeatTurnRow): Promise<Outputs> {
     try {
       const entries = await this.#host.turnEntries(row.session, row.turn);
@@ -213,7 +248,9 @@ export class AgentSeats {
       });
     } catch (error) {
       console.error("agent seat, outputs:", errorMessage(error));
-      return { published: [], items: [], sources: [], ...(row.forked && { forked: true }) };
+      if (row.forked !== 1) return { published: [], items: [], sources: [] };
+      const agent = await this.#host.definition(row.agent_id).catch(() => null);
+      return unreadOutputs(true, agent?.reviewBeforePosting === true);
     }
   }
 
@@ -244,7 +281,11 @@ export class AgentSeats {
       } catch (error) {
         console.error("agent seat, reply:", errorMessage(error));
         const delay = REPORT_RETRIES[attempt];
-        if (delay === undefined) return;
+        if (delay === undefined) {
+          // The room's turn runs until it hears: try again later, also when nothing wakes this object.
+          this.#host.later(REPORT_LATER);
+          return;
+        }
         await new Promise((resolve) => setTimeout(resolve, delay));
       }
     }

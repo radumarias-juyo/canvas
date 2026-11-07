@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useState } from "react";
 import { isDraftAgent, MAX_CHAT_AGENTS, type AgentDefinition, type AgentTurnView, type ChatAgentView } from "../../shared/agents.ts";
 import { AGENT_NAME } from "../../shared/mentions.ts";
-import { everyone, type ChatPeople, type Presence } from "../../shared/protocol.ts";
+import { everyone, isSecondSeatUid, type ChatPeople, type Presence } from "../../shared/protocol.ts";
 import { errorMessage } from "../../shared/util.ts";
 import { api } from "../api.ts";
 import { Icon } from "../Icon.tsx";
@@ -53,6 +53,7 @@ export function PeopleBar({
   const all = everyone(people);
   const here = all.filter((person) => windows.has(person.uid)).length;
   const isOwner = people.owner.uid === uid;
+  const secondSeat = isSecondSeatUid(uid);
   // One popup at a time: an agent's menu (by its id), or the viewer's list of their agents to add.
   const [open, setOpen] = useState<string | null>(null);
   const close = useCallback(() => setOpen(null), []);
@@ -101,19 +102,22 @@ export function PeopleBar({
         ))}
       </div>
       )}
-      <button
-        type="button"
-        className="icon-button agents-button"
-        onClick={() => setOpen(open === ADDING ? null : ADDING)}
-        aria-expanded={open === ADDING}
-        title="Agents in this chat"
-        aria-label="Agents in this chat"
-      >
-        <Icon size={16} stroke={1.8}>
-          <rect x="5" y="7" width="14" height="11" rx="3" />
-          <path d="M12 4v3M9.5 12h.01M14.5 12h.01" />
-        </Icon>
-      </button>
+      {/* The owner's second seat is a person in the chat with no agents of its own: it adds none. */}
+      {!secondSeat && (
+        <button
+          type="button"
+          className="icon-button agents-button"
+          onClick={() => setOpen(open === ADDING ? null : ADDING)}
+          aria-expanded={open === ADDING}
+          title="Agents in this chat"
+          aria-label="Agents in this chat"
+        >
+          <Icon size={16} stroke={1.8}>
+            <rect x="5" y="7" width="14" height="11" rx="3" />
+            <path d="M12 4v3M9.5 12h.01M14.5 12h.01" />
+          </Icon>
+        </button>
+      )}
       {agent && (
         <AgentMenu
           key={agent.id}
@@ -125,7 +129,7 @@ export function PeopleBar({
           onClose={close}
         />
       )}
-      {open === ADDING && <AddAgents chatId={chatId} roster={agents} uid={uid} isOwner={isOwner} onClose={close} />}
+      {open === ADDING && !secondSeat && <AddAgents chatId={chatId} roster={agents} uid={uid} isOwner={isOwner} onClose={close} />}
     </div>
   );
 }

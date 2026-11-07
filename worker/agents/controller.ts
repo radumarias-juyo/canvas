@@ -4,7 +4,19 @@ import { AGENT_NAME } from "../../shared/mentions.ts";
 import { errorMessage, serial } from "../../shared/util.ts";
 import { sessionOf, type AgentTurn, type ChatRoster, type RosterEntry, type TurnRequest } from "./roster.ts";
 import type { SeatBatch, SeatLink, SeatResult } from "./seats/link.ts";
-import { askOf, CatchUp, entryAskKey, handOffs, itemsIn, MAX_ASK_CHARS, publishedIn, turnAskKey, turnInput } from "./turns.ts";
+import {
+  askedApart,
+  askOf,
+  CatchUp,
+  entryAskKey,
+  handOffs,
+  itemsIn,
+  MAX_ASK_CHARS,
+  publishedIn,
+  turnAskKey,
+  turnInput,
+  UNKNOWN_SOURCE,
+} from "./turns.ts";
 
 /**
  * What a turn left in its session for its reply to show: the pages it published, the records its results held, the
@@ -24,6 +36,8 @@ export interface TurnResult {
 /** What the turn controller needs from the chat object it runs in: pi's sessions, the log, and the owner's directory. */
 export interface TurnHost {
   readonly roster: ChatRoster;
+  /** Whose chat this is: pi's prompts in its log are theirs. */
+  readonly chatOwner: string;
   /** The owner's current definition of an agent; null when it is gone. */
   definition(entry: RosterEntry): Promise<AgentDefinition | null>;
   /** Set an agent's session up for a turn: its model and effort, its instructions, and the tools the turn may use. */
@@ -62,7 +76,7 @@ export interface TurnHost {
   sources(entry: RosterEntry, entries: readonly EntryRecord[]): Promise<Pick<Outputs, "items" | "sources" | "review">>;
   /** The seat of an agent that runs in its owner's own object (a member's: `entry.seat`). */
   seat(entry: RosterEntry): SeatLink;
-  /** Whether `uid` may give this agent another turn now (a per-person rate limit). */
+  /** Whether `uid` (the person whose message started the turn's chain) may give this agent another turn now: a rate limit. */
   mayCall(entry: RosterEntry, uid: string): Promise<boolean>;
   /** A reply of an agent of `ownerUid`'s is held for them to review, or no longer is: tell them. */
   drafted(ownerUid: string): void;
@@ -106,7 +120,8 @@ export class AgentTurns {
       // Never in a chain no person started (a run's hand-over), whatever it says.
       const byOwner = caller.byOwner && !caller.unattended && (caller.calledBy.uid === undefined || caller.calledBy.uid === entry.ownerUid);
       const ask = typeof caller.ask === "function" ? caller.ask(byOwner) : caller.ask;
-      const turn = this.#host.roster.enqueue({ ...caller, agentId, byOwner, ask, hop: caller.hop ?? 0, root });
+      const by = caller.by ?? caller.calledBy.uid;
+      const turn = this.#host.roster.enqueue({ ...caller, agentId, byOwner, ask, hop: caller.hop ?? 0, root, ...(by !== undefined && { by }) });
       root ??= turn.id;
       return [turn];
     });
@@ -154,7 +169,8 @@ export class AgentTurns {
         await this.#ended(entry, turn, { status: "unanswered", reason: `its owner turned @${entry.name} off` });
         return;
       }
-      const asker = turn.calledBy.uid;
+      // Counted for the person who started the chain, however many agents (pi among them) it went through.
+      const asker = turn.by ?? turn.calledBy.uid;
       if (asker !== undefined && !(await this.#host.mayCall(entry, asker))) {
         await this.#ended(entry, turn, { status: "unanswered", reason: `@${entry.name} was asked too often just now; try again in a minute` });
         return;
@@ -163,16 +179,13 @@ export class AgentTurns {
       if (entry.seat !== undefined) {
         // Its owner's own object runs it: the turn ends when the seat says so (seatEnded).
         await this.#giveSeat(entry, turn);
-        if (!live())
-          await this.#host
-            .seat(entry)
-            .abort(turn.id)
-            .catch((error: unknown) => console.error("agent stop:", errorMessage(error)));
+        if (!live()) await this.#abortSeat(entry, turn.id);
         return;
       }
-      // A turn in a session of its own (a reply to a run's report) reads that session, not the chat: it catches up on
-      // nothing, and forks nothing.
-      if (turn.session === undefined && turn.byOwner && (await this.#host.forks(entry, agent, turn))) {
+      if (turn.forked) {
+        // Its fork was made before a restart, and its input may be in it already: it goes in again there, placed once.
+        await Promise.all([this.#tellApart(entry, turn), this.#host.configure(entry, agent, turn)]);
+      } else if (turn.session === undefined && turn.byOwner && (await this.#host.forks(entry, agent, turn))) {
         // A fork sees the agent's session as it is when made: the catch-up goes in first.
         await this.#catchUp(entry, turn.id);
         // Stopped meanwhile: no fork, which nothing would run in or abort.
@@ -181,8 +194,14 @@ export class AgentTurns {
         if (!live()) return;
         roster.setFork(turn.id, session);
         turn = { ...turn, session, forked: true };
-        await this.#host.configure(entry, agent, turn);
-      } else await Promise.all([turn.session ? undefined : this.#catchUp(entry, turn.id), this.#host.configure(entry, agent, turn)]);
+        // Its owner follows it live in the fork from now on, and nobody follows the agent's session for it.
+        this.#host.changed();
+        await Promise.all([this.#tellApart(entry, turn), this.#host.configure(entry, agent, turn)]);
+      } else {
+        // A turn in a session of its own (a reply to a run's report) reads that session, not the chat: it catches up on
+        // nothing, and forks nothing.
+        await Promise.all([turn.session ? undefined : this.#catchUp(entry, turn.id), this.#host.configure(entry, agent, turn)]);
+      }
       if (!live()) return;
       await this.#host.submit(sessionOf(entry, turn), turnInput(turn), operationId(turn.id), {
         turn: turn.id,
@@ -196,10 +215,27 @@ export class AgentTurns {
         return;
       }
     } catch (error) {
+      // A seat may have started it all the same (its answer was lost on the way): it stops there too.
+      if (entry.seat !== undefined) await this.#abortSeat(entry, turn.id);
       await this.#ended(entry, turn, { status: "unanswered", reason: errorMessage(error) });
       return;
     }
     this.#host.waitUntil(this.#await(entry, { ...turn, submitted: true }));
+  }
+
+  async #abortSeat(entry: RosterEntry, turn: number): Promise<void> {
+    await this.#host
+      .seat(entry)
+      .abort(turn)
+      .catch((error: unknown) => console.error("agent stop:", errorMessage(error)));
+  }
+
+  /**
+   * A forked turn's ask goes into the agent's own session as well, as context: its input went only into the fork, and
+   * the catch-up before it left the ask out (the input carries it). Later turns read it there, with the reply as posted.
+   */
+  async #tellApart(entry: RosterEntry, turn: AgentTurn): Promise<void> {
+    await this.#host.write(entry.session, askedApart(turn.ask), `apart:${entry.agentId}:${turn.id}`);
   }
 
   /**
@@ -208,14 +244,17 @@ export class AgentTurns {
    */
   async #giveSeat(entry: RosterEntry, turn: AgentTurn): Promise<void> {
     const batch = await this.batchFor(entry, entry.mirrored, turn.id);
-    const delivered = await this.#host.seat(entry).give(batch.through > entry.mirrored ? batch : null, {
+    const given = {
       turn: turn.id,
       calledBy: turn.calledBy,
       hop: turn.hop,
+      ask: turn.ask,
       input: turnInput(turn),
       byOwner: turn.byOwner,
-      ...(turn.unattended && { unattended: true }),
-    });
+      ...(turn.unattended && { unattended: true as const }),
+    };
+    // Giving a turn twice places it once: a call cut off on the way (the seat's object restarted) is made again.
+    const delivered = await retried(() => this.#host.seat(entry).give(batch.through > entry.mirrored ? batch : null, given));
     this.#host.roster.setMirrored(entry.agentId, delivered);
     this.#host.roster.markSubmitted(turn.id);
   }
@@ -225,7 +264,8 @@ export class AgentTurns {
    * and only as far back as the catch-up keeps. A seat pulls it to fill a gap.
    */
   async batchFor(entry: RosterEntry, after: number, turn: number): Promise<SeatBatch> {
-    const catchUp = new CatchUp(entry.agentId, entry.ownerUid, this.#host.roster.askKeys(entry.agentId, turn));
+    const owner = { uid: entry.ownerUid, chatOwner: this.#host.chatOwner, ...(entry.ownerFrom !== undefined && { from: entry.ownerFrom }) };
+    const catchUp = new CatchUp(entry.agentId, owner, this.#host.roster.askKeys(entry.agentId, turn));
     for await (const page of this.#host.logSince(after)) if (!catchUp.add(page)) break;
     const { text, through } = catchUp.result();
     return { from: after + 1, through: Math.max(through, after), text, turn };
@@ -337,7 +377,16 @@ export class AgentTurns {
     // A hand-off can only read, whoever started the chain: agents cannot give each other permission.
     const ask = askOf({ name: reply.name, kind: "agent" }, reply.text, MAX_ASK_CHARS);
     const calledBy = { name: reply.name, agentId: reply.agentId };
-    const hop = { calledBy, ask, askKey: turnAskKey(id), byOwner: false, hop: turn.hop + 1, root: turn.root, unattended: turn.unattended };
+    const hop = {
+      calledBy,
+      ask,
+      askKey: turnAskKey(id),
+      byOwner: false,
+      hop: turn.hop + 1,
+      root: turn.root,
+      unattended: turn.unattended,
+      ...(turn.by !== undefined && { by: turn.by }),
+    };
     if (agents.length) this.call(agents, hop);
     return this.#deliver(id);
   }
@@ -394,7 +443,10 @@ export class AgentTurns {
       return turn.forked ? found : { ...found, forked: false };
     } catch (error) {
       console.error("agent turn, outputs:", errorMessage(error));
-      return NO_OUTPUTS;
+      if (turn.session === undefined) return NO_OUTPUTS;
+      // What a turn apart from the chat read cannot be told: its reply says it may be private, and waits for review.
+      const agent = await this.#host.definition(entry).catch(() => null);
+      return unreadOutputs(turn.forked === true, agent?.reviewBeforePosting === true);
     }
   }
 
@@ -484,7 +536,7 @@ export class AgentTurns {
    * pi replied (entry `entry` of the log, `text`): the agents it names get turns, as hand-offs within the chain pi's turn
    * was in (`root` and `hop` when another agent handed pi that turn; none when a person asked it).
    */
-  fromPi(text: string, entry: number, chain: { hop: number; root?: number } = { hop: 0 }): void {
+  fromPi(text: string, entry: number, chain: { hop: number; root?: number; by?: string } = { hop: 0 }): void {
     const roster = this.#host.roster;
     const left = chain.root === undefined ? MAX_HOPS : MAX_HOPS - roster.handOffsFrom(chain.root);
     const agents = left > 0 ? handOffs(text, AGENT_NAME, chain.hop, roster.list()).slice(0, left) : [];
@@ -496,7 +548,34 @@ export class AgentTurns {
       byOwner: false,
       hop: chain.hop + 1,
       ...(chain.root !== undefined && { root: chain.root }),
+      ...(chain.by !== undefined && { by: chain.by }),
     });
+  }
+}
+
+/**
+ * The outputs of a turn apart from the chat whose session could not be read: nothing it published or held shows, its
+ * sources are unknown, and its owner reviews it when they review such replies.
+ */
+export function unreadOutputs(forked: boolean, review: boolean): Outputs {
+  return { published: [], items: [], sources: [UNKNOWN_SOURCE], ...(forked && { forked: true }), ...(review && { review: true }) };
+}
+
+/** Errors of a call between objects that a retry may get past (the other object restarted, or was overloaded). */
+function retryable(error: unknown): boolean {
+  return typeof error === "object" && error !== null && (error as { retryable?: unknown }).retryable === true;
+}
+
+/** Make a call between objects, again after a short wait when it failed in a way a retry may get past (twice at most). */
+export async function retried<T>(call: () => Promise<T>, waits: readonly number[] = [250, 1_000]): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await call();
+    } catch (error) {
+      const wait = waits[attempt];
+      if (wait === undefined || !retryable(error)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, wait));
+    }
   }
 }
 

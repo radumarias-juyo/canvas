@@ -17,12 +17,13 @@ export interface DumpKv {
 
 /**
  * What of a chat object's storage an export carries: its conversation (pi's tables, `pi_…`), its reactions, its
- * owner's name and its agents' roster (their sessions are pi's). Not its members and invites: they are people of the
+ * owner's name, its agents' roster (their sessions are pi's), and which of their forks' pages and files are not the
+ * chat's (chat_agent_withheld: their replies were never posted, so they stay out of what members see). Not its members and invites: they are people of the
  * deployment it was made on, whose ids mean nothing on another, so an imported chat starts with nobody in it but its
  * owner. Nor the Lifecycle's jobs (`cf_agents_…`), nor the agents' turns (chat_agent_turns): work still to do, which
  * would run as the importer, unasked.
  */
-const APP_TABLES = ["chat_reactions", "chat_owner", "chat_agents"];
+const APP_TABLES = ["chat_reactions", "chat_owner", "chat_agents", "chat_agent_withheld"];
 const PI_TABLE = /^pi_[a-z0-9_]+$/;
 const isCarried = (table: string) => PI_TABLE.test(table) || APP_TABLES.includes(table);
 

@@ -33,6 +33,13 @@ export interface RosterEntry {
    * as a seat (worker/agents/seats/). Its turns are given there by RPC, and `session` is unused. Absent: it runs here.
    */
   seat?: string;
+  /** A member's agent whose own name was taken here when it joined: its name is an alias (memberAgentName), kept on a rename. */
+  alias?: true;
+  /**
+   * The first log entry whose messages by its owner it reads as theirs: where a member's agent joined. What the log
+   * held before, such as an import's entries, no one checked the authors of for it (OwnerMarks in turns.ts).
+   */
+  ownerFrom?: number;
 }
 
 /** A turn running in this object, as the chat's sockets follow it: `only` the person who may see it live, when not everyone. */
@@ -65,6 +72,8 @@ export interface AgentTurn extends AgentTurnView {
    * the owner's full tools; pi only reads their replies.
    */
   unattended?: true;
+  /** The person whose message started its chain, also when an agent or pi handed it on: whom its rate limit counts. */
+  by?: string;
 }
 
 /**
@@ -72,7 +81,7 @@ export interface AgentTurn extends AgentTurnView {
  * leaves out what its input already says; absent when it is no entry of the log. Without a `root`, the turn starts a
  * chain of hand-offs of its own.
  */
-export type TurnRequest = Pick<AgentTurn, "agentId" | "hop" | "calledBy" | "byOwner" | "ask" | "session" | "run" | "unattended"> & {
+export type TurnRequest = Pick<AgentTurn, "agentId" | "hop" | "calledBy" | "byOwner" | "ask" | "session" | "run" | "unattended" | "by"> & {
   root?: number;
   askKey?: string;
 };
@@ -98,6 +107,8 @@ type RosterRow = {
   off: number;
   shared: number;
   seat: string | null;
+  alias: number;
+  owner_from: number;
 };
 
 type TurnRow = {
@@ -122,6 +133,7 @@ type TurnRow = {
   forked: number;
   run: string | null;
   unattended: number;
+  by_uid: string | null;
 };
 
 function entryOf(row: RosterRow): RosterEntry {
@@ -137,6 +149,8 @@ function entryOf(row: RosterRow): RosterEntry {
     off: row.off === 1,
     shared: row.shared === 1,
     ...(row.seat !== null && { seat: row.seat }),
+    ...(row.alias === 1 && { alias: true }),
+    ...(row.owner_from >= 0 && { ownerFrom: row.owner_from }),
   };
 }
 
@@ -158,6 +172,7 @@ function turnOf(row: TurnRow): AgentTurn {
     ...(row.forked === 1 && { forked: true }),
     ...(row.run !== null && { run: JSON.parse(row.run) as RunRef }),
     ...(row.unattended === 1 && { unattended: true }),
+    ...(row.by_uid !== null && { by: row.by_uid }),
   };
 }
 
@@ -200,15 +215,22 @@ export class ChatRoster {
       CREATE INDEX IF NOT EXISTS chat_agent_turns_by_agent ON chat_agent_turns (agent_id, status, id);
       CREATE INDEX IF NOT EXISTS chat_agent_turns_by_status ON chat_agent_turns (status);
       CREATE INDEX IF NOT EXISTS chat_agent_turns_by_root ON chat_agent_turns (root);
+      CREATE TABLE IF NOT EXISTS chat_agent_withheld (session TEXT PRIMARY KEY);
     `);
     // Columns added later: a roster or turn table made before them lacks them.
-    addColumns(sql, "chat_agents", { shared: "INTEGER NOT NULL DEFAULT 0", seat: "TEXT" });
+    addColumns(sql, "chat_agents", {
+      shared: "INTEGER NOT NULL DEFAULT 0",
+      seat: "TEXT",
+      alias: "INTEGER NOT NULL DEFAULT 0",
+      owner_from: "INTEGER NOT NULL DEFAULT -1",
+    });
     addColumns(sql, "chat_agent_turns", {
       session: "TEXT",
       run: "TEXT",
       unattended: "INTEGER NOT NULL DEFAULT 0",
       held: "INTEGER NOT NULL DEFAULT 0",
       forked: "INTEGER NOT NULL DEFAULT 0",
+      by_uid: "TEXT",
     });
   }
 
@@ -245,14 +267,16 @@ export class ChatRoster {
    * Add an agent, in the session made for it. Refused when the chat holds MAX_CHAT_AGENTS, or another agent has its
    * name here. Adding one already in the roster changes nothing.
    */
-  add(entry: Pick<RosterEntry, "agentId" | "ownerUid" | "name" | "session" | "avatar" | "color" | "job" | "seat">): { error: string } | null {
+  add(
+    entry: Pick<RosterEntry, "agentId" | "ownerUid" | "name" | "session" | "avatar" | "color" | "job" | "seat" | "alias" | "ownerFrom">,
+  ): { error: string } | null {
     const here = this.get(entry.agentId);
     // Agent ids are unique per user only: another person's agent with this id keeps it.
     if (here) return here.ownerUid === entry.ownerUid ? null : { error: "Another agent with this id is in the chat." };
     const refused = this.refusal(entry.name);
     if (refused) return refused;
     this.#sql.exec(
-      "INSERT INTO chat_agents (agent_id, owner_uid, name, session, added_at, avatar, color, job, seat) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO chat_agents (agent_id, owner_uid, name, session, added_at, avatar, color, job, seat, alias, owner_from) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       entry.agentId,
       entry.ownerUid,
       entry.name.toLowerCase(),
@@ -262,6 +286,8 @@ export class ChatRoster {
       entry.color,
       entry.job,
       entry.seat ?? null,
+      entry.alias ? 1 : 0,
+      entry.ownerFrom ?? -1,
     );
     return null;
   }
@@ -304,7 +330,7 @@ export class ChatRoster {
     if (!before) return null;
     // A name taken here when it joined, kept as the one it got then ("planner-ana" for "planner"), as long as that is
     // still its name.
-    const alias = before.seat !== undefined && before.name.startsWith(`${view.name.toLowerCase()}-`);
+    const alias = before.alias === true && before.name.startsWith(`${view.name.toLowerCase()}-`);
     const taken = view.name !== before.name && (alias || this.byName(view.name) !== null);
     const entry = { ...before, ...view, name: taken ? before.name : view.name.toLowerCase() };
     const changed = (["name", "avatar", "color", "job", "off"] as const).some((field) => entry[field] !== before[field]);
@@ -336,8 +362,8 @@ export class ChatRoster {
   enqueue(turn: TurnRequest): AgentTurn {
     const row = this.#sql
       .exec(
-        `INSERT INTO chat_agent_turns (agent_id, status, hop, called_by, by_owner, root, ask, ask_key, created_at, session, run, unattended)
-         VALUES (?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
+        `INSERT INTO chat_agent_turns (agent_id, status, hop, called_by, by_owner, root, ask, ask_key, created_at, session, run, unattended, by_uid)
+         VALUES (?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
         turn.agentId,
         turn.hop,
         JSON.stringify(turn.calledBy),
@@ -349,6 +375,7 @@ export class ChatRoster {
         turn.session ?? null,
         turn.run ? JSON.stringify(turn.run) : null,
         turn.unattended ? 1 : 0,
+        turn.by ?? null,
       )
       .toArray()[0] as TurnRow;
     return turnOf(row);
@@ -395,9 +422,27 @@ export class ChatRoster {
     return new Set(rows.map((row) => row.ask_key as string));
   }
 
-  /** A turn runs in a session of its own (a fork of its agent's): set before its input goes in. */
+  /**
+   * A turn runs in a session of its own (a fork of its agent's): set before its input goes in. What the fork publishes
+   * or saves is withheld from the chat's listings until its reply is posted (`withheld`).
+   */
   setFork(id: number, session: string): void {
-    this.#sql.exec("UPDATE chat_agent_turns SET session = ?, forked = 1 WHERE id = ? AND status = 'running'", session, id);
+    if (this.#sql.exec("UPDATE chat_agent_turns SET session = ?, forked = 1 WHERE id = ? AND status = 'running'", session, id).rowsWritten) {
+      this.#sql.exec("INSERT INTO chat_agent_withheld (session) VALUES (?) ON CONFLICT DO NOTHING", session);
+    }
+  }
+
+  /**
+   * The forks whose turns' replies were not posted (yet): running, held for review, discarded, stopped. What they
+   * published or saved is not the chat's for anyone but its owner.
+   */
+  withheld(): Set<string> {
+    return new Set(
+      this.#sql
+        .exec("SELECT session FROM chat_agent_withheld")
+        .toArray()
+        .map((row) => row.session as string),
+    );
   }
 
   /** A running turn's input reached its session: a restart waits on it, where one not submitted yet starts again. */
@@ -407,10 +452,8 @@ export class ChatRoster {
 
   /** After a restart: the running turns whose input never reached their session go back to the queue, at their place. */
   requeueUnsubmitted(): void {
-    // A fork made for it before it went in is left: its next start decides again whether it forks, after its catch-up.
-    this.#sql.exec(
-      "UPDATE chat_agent_turns SET status = 'queued', started_at = NULL, session = CASE WHEN forked = 1 THEN NULL ELSE session END, forked = 0 WHERE status = 'running' AND submitted_at IS NULL",
-    );
+    // A fork made for it stays its session: its input may be in it already, and goes in again there, placed once.
+    this.#sql.exec("UPDATE chat_agent_turns SET status = 'queued', started_at = NULL WHERE status = 'running' AND submitted_at IS NULL");
   }
 
   /** Whether any turn waits, runs or has a reply to deliver: what a restarted object picks up again. */
@@ -498,7 +541,16 @@ export class ChatRoster {
    * turn when it names pi: it is then delivered. Nothing when it has nothing to deliver (delivered or discarded already).
    */
   release(id: number, reply: ChatAgentReplyData, toPi: boolean): void {
-    this.#sql.exec(`UPDATE chat_agent_turns SET held = 0, reply = ?, to_pi = ? WHERE id = ? AND ${PENDING}`, JSON.stringify(reply), toPi ? 1 : 0, id);
+    const row = this.#sql
+      .exec(
+        `UPDATE chat_agent_turns SET held = 0, reply = ?, to_pi = ? WHERE id = ? AND ${PENDING} RETURNING session, forked`,
+        JSON.stringify(reply),
+        toPi ? 1 : 0,
+        id,
+      )
+      .toArray()[0] as Pick<TurnRow, "session" | "forked"> | undefined;
+    // Its fork's pages and files are the chat's now, as its reply is.
+    if (row?.forked === 1 && row.session !== null) this.#sql.exec("DELETE FROM chat_agent_withheld WHERE session = ?", row.session);
   }
 
   /** Drop a held reply, as its owner discards it: it never reaches the chat. */

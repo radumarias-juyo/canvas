@@ -76,7 +76,7 @@ export function mcpExtension(
             // a table of rows adds a token or so per field.
             return {
               output: text(clip(typeof payload === "string" ? payload : JSON.stringify(payload))),
-              ...(items.length && { details: { items } satisfies McpResultDetails }),
+              details: { server, ...(items.length && { items }) } satisfies McpResultDetails,
             };
           },
         }),

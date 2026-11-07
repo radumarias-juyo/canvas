@@ -64,6 +64,7 @@ function toolResult(toolName: string, details: object, isError = false): EntryRe
  * every other call recorded. Each turn's wait is a promise the test settles by the turn's id (finish, fail).
  */
 class FakeChat implements TurnHost {
+  readonly chatOwner = OWNER.uid;
   readonly clock = { now: T0 };
   readonly sql = memorySql();
   readonly roster = new ChatRoster(this.sql, () => this.clock.now);
