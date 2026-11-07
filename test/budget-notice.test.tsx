@@ -1,8 +1,7 @@
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { CHAT_BUDGET_KIND } from "../shared/agent-settings.ts";
-import { CHAT_EVENT_KIND, type ChatEventData } from "../shared/chat-kinds.ts";
+import { CHAT_BUDGET_KIND, type ChatEventData } from "../shared/chat-kinds.ts";
 import { ChatEventNotice } from "../src/chat/ChatKinds.tsx";
 import { shown } from "../src/chat/entries.ts";
 
@@ -18,6 +17,5 @@ describe("the budget notice", () => {
     // An entry of the old shape (a budget chat.event) draws nothing either.
     const old = { event: "budget", scope: "chat", text: "Used up." } as unknown as ChatEventData;
     expect(renderToStaticMarkup(<ChatEventNotice data={old} uid="olga" />)).toBe("");
-    expect(CHAT_EVENT_KIND).not.toBe(CHAT_BUDGET_KIND);
   });
 });

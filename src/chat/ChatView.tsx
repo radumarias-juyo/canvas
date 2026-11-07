@@ -65,11 +65,19 @@ import { OrphanResult, StepRun, StepsProvider, stepLabel } from "./Steps.tsx";
 import { endedEarly, stepRuns, streamingSteps, type MessageSteps, type StepRuns, type StreamingSteps } from "./stepRuns.ts";
 import { Thinking } from "./Thinking.tsx";
 import { useRevealedText } from "./reveal.ts";
-import { assistantOffer, blocks, entryOffer, firstNew, inReply, isAgent, liveOffer, openHints, published, replyItems, sentAt, shown, showsAsCard, userText } from "./entries.ts";
+import { assistantOffer, blocks, firstNew, inReply, isAgent, liveOffer, openHints, published, replyItems, sentAt, shown, showsAsCard, userText } from "./entries.ts";
 import { OfferRow } from "./Offer.tsx";
 import { offerYes } from "../../shared/offers.ts";
-import { CHAT_BUDGET_KIND, type ChatBudgetData } from "../../shared/agent-settings.ts";
-import { answersEveryMessage, CHAT_COPY_KIND, CHAT_EVENT_KIND, legacyKind, type ChatCopyData, type ChatEventData } from "../../shared/chat-kinds.ts";
+import {
+  answersEveryMessage,
+  CHAT_BUDGET_KIND,
+  CHAT_COPY_KIND,
+  CHAT_EVENT_KIND,
+  legacyKind,
+  type ChatBudgetData,
+  type ChatCopyData,
+  type ChatEventData,
+} from "../../shared/chat-kinds.ts";
 import { BranchOff, ChatEventNotice, EntryOf, KindChip, TagCard } from "./ChatKinds.tsx";
 
 interface Props {
@@ -146,14 +154,12 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
   // message, which calls the agent that wrote it, asking it to set the step up.
   const offered = useMemo(() => (isOwner ? liveOffer(state.entries) : undefined), [isOwner, state.entries]);
   const takeOffer = useCallback(
-    (entry: number) => {
-      const offer = state.entries.find((each) => each.id === entry);
-      const said = offer && entryOffer(offer);
-      if (!said || !prompt(offerYes(said), undefined, undefined, entry)) return false;
+    (entry: number, offer: string) => {
+      if (!prompt(offerYes(offer), undefined, undefined, entry)) return false;
       following.current = true;
       return true;
     },
-    [prompt, state.entries],
+    [prompt],
   );
   // Branch off a new chat from a message, and go to it.
   // One branch at a time: a second click while one is made does nothing.
@@ -631,10 +637,10 @@ const Entry = memo(function Entry({
   /** For the entry a checklist was first posted at: its latest state (the same object until it changes). */
   checklist?: ChatChecklistData;
   /** Set on the reply with the chat's latest offer, for its owner: Yes under it replies to it (false when not sent). */
-  onOffer?: (entry: number) => boolean;
+  onOffer?: (entry: number, offer: string) => boolean;
 }) {
   const people = useSharedChat();
-  const offerYes = onOffer && (() => onOffer(entry.id as number));
+  const offerYes = onOffer && ((offer: string) => onOffer(entry.id as number, offer));
   const reactions = useMessageReactions(isReactable(entry) ? entry.id : undefined, byEmoji);
   const message = entry.model?.[0];
   // What a reply to it quotes: none for a message from before replies (pi.user).
@@ -1082,7 +1088,7 @@ function Assistant({
   /** Its entry in the transcript, which the answer to its offered next step is remembered by. */
   entry?: number;
   /** On the chat's latest offer, for its owner: what Yes does (OfferRow). */
-  onOfferYes?: () => boolean;
+  onOfferYes?: (offer: string) => boolean;
 }) {
   const content = useRef<HTMLDivElement>(null);
   // What a copy pastes as plain text: its Markdown. Not while it streams, when it has no actions.

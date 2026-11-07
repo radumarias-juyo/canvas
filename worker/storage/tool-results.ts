@@ -1,5 +1,5 @@
 import { sha256Hex } from "../../shared/util.ts";
-import { deletePrefix } from "./r2.ts";
+import { deleteKeys, deletePrefix, listPrefix } from "./r2.ts";
 
 /** What a saved result's path starts with, as the spill note names it and files_read and the sandbox take it. */
 export const TOOL_RESULTS = "tool-results/";
@@ -39,12 +39,10 @@ export class ToolResults {
     return TOOL_RESULTS + name;
   }
 
-  /** The text saved at `path` (as put returned it); null for a path that names none, or one gone. */
-  async get(path: string): Promise<string | null> {
-    const name = path.startsWith(TOOL_RESULTS) ? path.slice(TOOL_RESULTS.length) : path;
-    if (!NAME.test(name)) return null;
-    const object = await this.#bucket.get(this.#prefix + name, { ssecKey: this.#key });
-    return object ? object.text() : null;
+  /** The result saved at `path` (as put returned it); null for a path that names none, or one gone. */
+  async get(path: string): Promise<R2ObjectBody | null> {
+    const name = path.slice(TOOL_RESULTS.length);
+    return path.startsWith(TOOL_RESULTS) && NAME.test(name) ? this.#bucket.get(this.#prefix + name, { ssecKey: this.#key }) : null;
   }
 
   /** Drop every result of the chat. */
@@ -54,16 +52,11 @@ export class ToolResults {
 
   /** Drop those past TOOL_RESULT_MS and, newest first, past MAX_TOOL_RESULTS; never `kept`, just saved. */
   async #prune(kept: string): Promise<void> {
-    const objects: { key: string; uploaded: Date }[] = [];
-    let cursor: string | undefined;
-    do {
-      const page = await this.#bucket.list({ prefix: this.#prefix, cursor, limit: 500 });
-      objects.push(...page.objects);
-      cursor = page.truncated ? page.cursor : undefined;
-    } while (cursor);
-    if (objects.length <= MAX_TOOL_RESULTS && objects.every((o) => this.#now() - +o.uploaded <= TOOL_RESULT_MS)) return;
-    objects.sort((a, b) => +b.uploaded - +a.uploaded);
+    const objects = (await listPrefix(this.#bucket, this.#prefix)).sort((a, b) => +b.uploaded - +a.uploaded);
     const old = objects.filter((o, i) => o.key !== this.#prefix + kept && (i >= MAX_TOOL_RESULTS || this.#now() - +o.uploaded > TOOL_RESULT_MS));
-    for (let i = 0; i < old.length; i += 1000) await this.#bucket.delete(old.slice(i, i + 1000).map((o) => o.key));
+    await deleteKeys(
+      this.#bucket,
+      old.map((o) => o.key),
+    );
   }
 }

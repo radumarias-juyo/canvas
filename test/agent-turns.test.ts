@@ -485,7 +485,6 @@ describe("allowedTools", () => {
     expect(allowedTools([...tools, "checklist"], mcp, agent, false, signsIn)).toContain("checklist");
     expect(allowedTools([...tools, "checklist"], mcp, agent, true, signsIn)).toContain("checklist");
     // Speaking up, it may still PASS: then nothing of it may show.
-    expect(allowedTools([...tools, "checklist"], mcp, agent, false, signsIn, true)).not.toContain("checklist");
     expect(allowedTools([...tools, "checklist"], mcp, agent, false, signsIn, true)).toEqual(allowedTools(tools, mcp, agent, false, signsIn));
     expect(runTools([...tools, "checklist"], mcp, agent)).not.toContain("checklist");
   });

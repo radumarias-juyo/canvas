@@ -104,8 +104,7 @@ export function filesExtension(scope: ChatScope): Extension {
         replay: "safe",
         execute: async (args) => {
           if (args.path.startsWith(TOOL_RESULTS)) {
-            const saved = await (await scope.toolResults()).get(args.path);
-            if (saved === null) throw new Error(`There is no tool result ${args.path} (any more): call the tool again.`);
+            const saved = await (await savedResult(await scope.toolResults(), args.path)).text();
             const from = Math.min(args.offset ?? 0, saved.length);
             const part = clip(saved.slice(from));
             return { output: text(`${args.path}, characters ${from.toLocaleString("en")} on of ${saved.length.toLocaleString("en")}:\n${part}`) };
@@ -190,17 +189,18 @@ async function sandboxInputs(files: UserFiles, refs: readonly string[], ownFolde
   );
 }
 
+/** The tool result saved at `path`: one gone (or never saved) is an error that says to call the tool again. */
+async function savedResult(results: ToolResults, path: string): Promise<R2ObjectBody> {
+  const saved = await results.get(path);
+  if (!saved) throw new Error(`There is no tool result ${path} (any more): call the tool again.`);
+  return saved;
+}
+
 /** The saved tool results `refs` name, for ./files/tool-results/. */
 async function savedResults(scope: ChatScope, refs: readonly string[]): Promise<SandboxFile[]> {
   if (!refs.length) return [];
   const results = await scope.toolResults();
-  return Promise.all(
-    [...new Set(refs)].map(async (ref) => {
-      const saved = await results.get(ref);
-      if (saved === null) throw new Error(`There is no tool result ${ref} (any more): call the tool again.`);
-      return { name: ref, bytes: new TextEncoder().encode(saved).buffer as ArrayBuffer };
-    }),
-  );
+  return Promise.all([...new Set(refs)].map(async (ref) => ({ name: ref, bytes: await (await savedResult(results, ref)).arrayBuffer() })));
 }
 
 function tooMuch(bytes: number, maxBytes: number): string {
@@ -224,11 +224,13 @@ async function runInSandbox(
 ) {
   const files = await scope.files();
   const folder = chatOutFolder(scope.chatId);
-  // The skills first: their sizes are known before they are read, and the files get what they leave of the limit.
-  const skills = args.skills?.length ? await scope.skillFolders(args.skills, MAX_SANDBOX_BYTES) : [];
+  // The skills and saved results first: their sizes are known before the files are read, which get what they leave of the limit.
   // Tool results saved whole (TOOL_RESULTS…) come from their own store, to ./files/tool-results/.
   const refs = args.files ?? [];
-  const results = await savedResults(scope, refs.filter((ref) => ref.startsWith(TOOL_RESULTS)));
+  const [skills, results] = await Promise.all([
+    args.skills?.length ? scope.skillFolders(args.skills, MAX_SANDBOX_BYTES) : [],
+    savedResults(scope, refs.filter((ref) => ref.startsWith(TOOL_RESULTS))),
+  ]);
   const room = MAX_SANDBOX_BYTES - [...skills, ...results].reduce((sum, file) => sum + file.bytes.byteLength, 0);
   if (room < 0) throw new Error(tooMuch(MAX_SANDBOX_BYTES - room, MAX_SANDBOX_BYTES));
   const inputs = [...results, ...(await sandboxInputs(files, refs.filter((ref) => !ref.startsWith(TOOL_RESULTS)), folder, room))];

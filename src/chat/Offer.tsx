@@ -14,7 +14,7 @@ const isAnswer = (value: unknown): value is Answer => value === "yes" || value =
  * set it up (`onYes`, false when it could not be sent), No thanks hides them. Anyone else, and older offers, see the
  * question only.
  */
-export function OfferRow({ offer, entry, onYes }: { offer: string; entry?: number; onYes?: () => boolean }) {
+export function OfferRow({ offer, entry, onYes }: { offer: string; entry?: number; onYes?: (offer: string) => boolean }) {
   const chatId = useContext(FoldScope);
   // An offer with no entry has no Yes or No thanks (no onYes), so nothing is kept for it.
   const [answered, answer] = useStoredState<Answer>(`offer.${chatId}.${entry ?? "none"}`, null, isAnswer);
@@ -29,7 +29,7 @@ export function OfferRow({ offer, entry, onYes }: { offer: string; entry?: numbe
       <span className="offer-text">{offer}</span>
       {live && (
         <span className="offer-actions">
-          <button type="button" className="offer-yes" onClick={() => onYes() && answer("yes")} title="Reply to it, asking the agent to set it up">
+          <button type="button" className="offer-yes" onClick={() => onYes(offer) && answer("yes")} title="Reply to it, asking the agent to set it up">
             Yes
           </button>
           <button type="button" className="offer-no" onClick={() => answer("no")}>

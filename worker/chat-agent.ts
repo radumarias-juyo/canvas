@@ -161,6 +161,7 @@ import { agentsExtension } from "./agents/tools.ts";
 import { agentInstructions, allowedTools, askOf, assistantText, attachedNote, MAX_ASK_CHARS, messageAskKey, runTools, speakersFor } from "./agents/turns.ts";
 import {
   answersEveryMessage,
+  CHAT_BUDGET_KIND,
   CHAT_CONTEXT_KIND,
   CHAT_EVENT_KIND,
   isChatKind,
@@ -168,6 +169,7 @@ import {
   legacyKind,
   losesAccess,
   type BranchedFrom,
+  type ChatBudgetData,
   type ChatEventData,
   type ChatKind,
   type ChatMemberVia,
@@ -180,14 +182,12 @@ import {
   agentRouterOn,
   AgentSettingsError,
   budgetDay,
-  CHAT_BUDGET_KIND,
   chatAllowsServer,
   checkAgentSettings,
   type ChatAgentSettings,
   type ChatAgentSettingsView,
-  type ChatBudgetData,
 } from "../shared/agent-settings.ts";
-import { agentRouterId, agentRouterModel, AGENT_ROUTE_MS, piPreparation, routeAgents, routesAgents } from "./agents/router.ts";
+import { agentRouterId, agentRouterModel, AGENT_ROUTE_MS, piPicks, routeAgents, routesAgents } from "./agents/router.ts";
 import { answered, embedder, FOLLOW_UP_AFTER_MS, looksLikeAsk, PAUSE_MS } from "./agents/funnel.ts";
 import { SpeakUp, type FunnelEvent } from "./agents/speak-up.ts";
 import { ChatSpend, meterExtension, type Spent } from "./agents/spend.ts";
@@ -1477,13 +1477,13 @@ export class ChatAgent extends DurableObject<Env> {
         underBudget,
       });
     const agentPicking = routes ? this.#pickAgents(agentRouter, roster, text, everyMessage, recentOnce) : undefined;
-    // Its pick (capped at AGENT_ROUTE_MS) comes first: a message it hands to agents is not pi's (piPreparation).
-    const handedOn = agentPicking ? (await agentPicking).length > 0 : false;
-    const prepare = piPreparation({ calling, underBudget, handedOn });
-    const recent = prepare.picks ? recentOnce : undefined;
+    // Pi's paid picks wait for that pick (capped at AGENT_ROUTE_MS): a message it hands to agents is not pi's (piPicks).
+    // The free work goes ahead meanwhile.
+    const picks = Promise.resolve(agentPicking ?? []).then((picked) => piPicks({ calling, underBudget, handedOn: picked.length > 0 }));
     // A new chat is put on Auto as it opens (startingSetting), which its first message may come before: wait for that.
-    const onAuto = recent && (this.#auto() || ((await this.harness.pi()) && this.#auto()));
-    const routing = onAuto ? this.#route(text, images, attachments.length + own.length - images, recent) : undefined;
+    const onAuto = calling && underBudget && (this.#auto() || ((await this.harness.pi()) && this.#auto()));
+    const others = attachments.length + own.length - images;
+    const routing = onAuto ? picks.then((picking) => (picking ? this.#route(text, images, others, recentOnce) : undefined)) : undefined;
     this.#announce({
       uid: author.uid,
       name: author.name,
@@ -1500,16 +1500,8 @@ export class ChatAgent extends DurableObject<Env> {
     // Picked (or not): the rest may still take a while, and should not say the router is still at it.
     void routing?.then(() => this.#picked(incomingKey({ uid: author.uid, sentAt })));
     // The tool picker reads the tools the refresh installs, while the rest gets ready. Used only if the message is a prompt.
-    const tooling = recent
-      ? this.refreshMcpTools()
-          .catch(() => {})
-          .then(() => this.#pickTools(text, recent))
-      : prepare.refreshes
-        ? this.refreshMcpTools().then(
-            () => undefined,
-            () => undefined,
-          )
-        : undefined;
+    const refreshing = calling ? this.refreshMcpTools().catch(() => {}) : undefined;
+    const tooling = refreshing && Promise.all([picks, refreshing]).then(([picking]) => (picking ? this.#pickTools(text, recentOnce) : undefined));
     const [[attached, title], { mentions, note, broughtIn }] = await Promise.all([
       // Named after its text, or its files when it has none: for the sidebars.
       attaching.then(async (inputs) => [
@@ -1531,7 +1523,7 @@ export class ChatAgent extends DurableObject<Env> {
       // A message to the people in the chat starts no run: the agent needs its tools only when it is called.
       tooling,
       // Without a pick (handed to agents, or past the budget), the skills as they are: no classifier call.
-      recent ? this.refreshSkills({ text: skillText, recent }) : prepare.refreshes && this.refreshSkills(),
+      calling && picks.then((picking) => (picking ? this.refreshSkills({ text: skillText, recent: recentOnce }) : this.refreshSkills())),
       calling && this.refreshFiles(),
       calling && this.refreshUserPrompt(),
     ]);

@@ -21,7 +21,7 @@ import {
   unpromptedInput,
   type GateState,
 } from "../worker/agents/funnel.ts";
-import { agentRouterModel, MAX_ROUTED, NO_AGENT, piPreparation, routeAgents, routesAgents, ROUTE_THRESHOLD, selectAgents } from "../worker/agents/router.ts";
+import { agentRouterModel, MAX_ROUTED, NO_AGENT, piPicks, routeAgents, routesAgents, ROUTE_THRESHOLD, selectAgents } from "../worker/agents/router.ts";
 import { routeHistory } from "../worker/agent/route.ts";
 import { ChatRoster } from "../worker/agents/roster.ts";
 import { SpeakUp, type FunnelEvent, type SpeakUpHost } from "../worker/agents/speak-up.ts";
@@ -131,10 +131,10 @@ describe("the agent router", () => {
   });
 
   it("lets pi pay for its picks only when it answers: not past the budget, nor for a message handed to agents", () => {
-    expect(piPreparation({ calling: true, underBudget: true, handedOn: false })).toEqual({ picks: true, refreshes: true });
-    expect(piPreparation({ calling: true, underBudget: false, handedOn: false })).toEqual({ picks: false, refreshes: true });
-    expect(piPreparation({ calling: true, underBudget: true, handedOn: true })).toEqual({ picks: false, refreshes: true });
-    expect(piPreparation({ calling: false, underBudget: true, handedOn: false })).toEqual({ picks: false, refreshes: false });
+    expect(piPicks({ calling: true, underBudget: true, handedOn: false })).toBe(true);
+    expect(piPicks({ calling: true, underBudget: false, handedOn: false })).toBe(false);
+    expect(piPicks({ calling: true, underBudget: true, handedOn: true })).toBe(false);
+    expect(piPicks({ calling: false, underBudget: true, handedOn: false })).toBe(false);
   });
 
   it("names no router for an empty or unknown model id", () => {

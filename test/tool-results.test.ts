@@ -13,12 +13,17 @@ function setup() {
   return { bucket, clock, results: new ToolResults(bucket.r2, "olga", "chat1", KEY, () => clock.now), files: new UserFiles(bucket.r2, "olga", KEY) };
 }
 
+/** The text saved at `path`, null for none. */
+async function text(results: ToolResults, path: string): Promise<string | null> {
+  return (await results.get(path))?.text() ?? null;
+}
+
 describe("ToolResults", () => {
   it("keeps a result outside the owner's files, encrypted, and reads it back by the path it gave", async () => {
     const { bucket, results, files } = setup();
     const path = await results.put("crm/list deals", "x".repeat(40_000));
     expect(path).toMatch(new RegExp(`^${TOOL_RESULTS}crm_list_deals-[0-9a-f]{16}\\.txt$`));
-    expect(await results.get(path)).toBe("x".repeat(40_000));
+    expect(await text(results, path)).toBe("x".repeat(40_000));
     // Never in a listing of the owner's files, nor in their folder.
     expect(await files.list()).toEqual([]);
     expect([...bucket.objects.keys()].every((key) => key.startsWith("users/olga/tool-results/chat1/"))).toBe(true);
@@ -30,8 +35,10 @@ describe("ToolResults", () => {
     const a = await results.put("tool", "same");
     expect(await results.put("tool", "same")).toBe(a);
     expect(bucket.objects.size).toBe(1);
-    expect(await results.get(`${TOOL_RESULTS}../files/uploads/q3.csv`)).toBeNull();
-    expect(await results.get(`${TOOL_RESULTS}tool-0123456789abcdef.txt`)).toBeNull();
+    expect(await text(results, `${TOOL_RESULTS}../files/uploads/q3.csv`)).toBeNull();
+    expect(await text(results, `${TOOL_RESULTS}tool-0123456789abcdef.txt`)).toBeNull();
+    // Only by the path put gave: not by its bare name.
+    expect(await text(results, a.slice(TOOL_RESULTS.length))).toBeNull();
   });
 
   it("keeps at most MAX_TOOL_RESULTS a chat, the newest, and none older than TOOL_RESULT_MS", async () => {
@@ -42,8 +49,8 @@ describe("ToolResults", () => {
       paths.push(await results.put("tool", `result ${i}`));
     }
     expect(bucket.objects.size).toBe(MAX_TOOL_RESULTS);
-    expect(await results.get(paths[0])).toBeNull();
-    expect(await results.get(paths.at(-1)!)).toBe(`result ${MAX_TOOL_RESULTS + 4}`);
+    expect(await text(results, paths[0])).toBeNull();
+    expect(await text(results, paths.at(-1)!)).toBe(`result ${MAX_TOOL_RESULTS + 4}`);
     clock.now += TOOL_RESULT_MS + 1;
     const fresh = await results.put("tool", "new");
     expect([...bucket.objects.keys()]).toEqual([`users/olga/tool-results/chat1/${fresh.slice(TOOL_RESULTS.length)}`]);

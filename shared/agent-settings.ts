@@ -98,10 +98,3 @@ export function budgetNotice(tokens: number): string {
   // Worded so pi-ai never takes it for a passing failure to retry (no "limit", "timeout" or status codes).
   return `This chat's daily budget of ${tokens.toLocaleString("en")} tokens is used up, so nothing more runs in it today (UTC). Its owner can raise the budget in the chat's agent settings.`;
 }
-
-/**
- * A daily cap was reached: the chat's token budget (no more model calls in it today), or the owner's spend on runs. Its
- * own entry kind, not a chat.event: an app from before it skips a kind it does not know.
- */
-export const CHAT_BUDGET_KIND = "chat.budget";
-export type ChatBudgetData = { scope: "chat" | "runs"; text: string };

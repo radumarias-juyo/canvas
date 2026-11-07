@@ -47,12 +47,12 @@ export function routesAgents(state: RoutingState): boolean {
 }
 
 /**
- * What pi gets ready for a message before it knows it answers: the paid picks (Auto's router, the tools, the skills)
- * only when it is called, the chat has budget left, and the router did not hand the message to agents; the free
- * refreshes (tools, skills and files as they are) whenever it is called, in case it answers after all.
+ * Whether pi pays for its picks (Auto's router, the tools, the skills) for a message: only when it is called, the chat
+ * has budget left, and the agents' router did not hand the message to agents. Called or not, the free refreshes (tools,
+ * skills and files as they are) run whenever it is called, in case it answers after all.
  */
-export function piPreparation(state: { calling: boolean; underBudget: boolean; handedOn: boolean }): { picks: boolean; refreshes: boolean } {
-  return { picks: state.calling && state.underBudget && !state.handedOn, refreshes: state.calling };
+export function piPicks(state: { calling: boolean; underBudget: boolean; handedOn: boolean }): boolean {
+  return state.calling && state.underBudget && !state.handedOn;
 }
 
 /** An agent of the chat's roster, as the router reads it. */

@@ -3,8 +3,7 @@ import type { EntryRecord } from "@earendil-works/pi-durable";
 import { CHAT_AGENT_KIND, CHAT_TURN_KIND, proposedBy, type ChatAgentReplyData } from "../../shared/agents.ts";
 import { entryItems, mergeItems, type ItemRef } from "../../shared/items.ts";
 import { CHAT_MESSAGE_KIND, CHAT_PEOPLE_KIND, publishedBy, type ChatMessageData, type ChatPeopleData } from "../../shared/protocol.ts";
-import { CHAT_BUDGET_KIND } from "../../shared/agent-settings.ts";
-import { CHAT_COPY_KIND, CHAT_EVENT_KIND, type ChatCopyData } from "../../shared/chat-kinds.ts";
+import { CHAT_BUDGET_KIND, CHAT_COPY_KIND, CHAT_EVENT_KIND, type ChatCopyData } from "../../shared/chat-kinds.ts";
 import { CHAT_CHECKLIST_KIND, checklistOf, type ChatChecklistData } from "../../shared/checklist.ts";
 import { offerOf } from "../../shared/offers.ts";
 
