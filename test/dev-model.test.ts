@@ -1,7 +1,8 @@
 import { createModels, fauxAssistantMessage, fauxToolCall, type Message } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
 import { assistantText as said } from "../worker/agents/turns.ts";
-import { scriptModel, scriptOn, scriptReply, scriptSteps } from "../worker/dev-model.ts";
+import { agentProfile, cosine, INTEREST_THRESHOLD } from "../worker/agents/funnel.ts";
+import { scriptEmbedder, scriptModel, scriptOn, scriptPauseMs, scriptReply, scriptSteps } from "../worker/dev-model.ts";
 
 const user = (text: string): Message => ({ role: "user", content: text, timestamp: 0 });
 const system = (text: string, sections?: Record<string, string>): Message => ({ role: "system", content: text, ...(sections && { sections }), timestamp: 0 });
@@ -79,5 +80,36 @@ describe("the scripted dev model", () => {
       const reply = await models.completeSimple(model, { messages: [user(`/say ${text}`)] });
       expect(said(reply)).toBe(text);
     }
+  });
+
+  it("stands in for the interest model: texts are as close as the words they share", async () => {
+    const signal = AbortSignal.timeout(1_000);
+    const profile = (name: string, job: string, instructions: string) => agentProfile({ name, job, instructions });
+    const [subject, same, tracker, dispatch, planner, short] = await scriptEmbedder.embed(
+      [
+        "Shipping delays at the warehouse\nok: Shipping delays at the warehouse",
+        "shipping DELAYS, warehouse!",
+        profile("tracker", "Shipping delays at the warehouse", "/say Shipping delays at the warehouse: two orders are past due."),
+        profile("dispatch", "Warehouse shipping", "/say Noted: warehouse shipping."),
+        profile("planner", "Plans the recurring reports", "1. List the deals."),
+        "at the a of",
+      ],
+      signal,
+    );
+    expect(cosine(subject, same)).toBeCloseTo(1);
+    // What the e2e suite's speak-up flow counts on: the closer agent wins, and the other is past the threshold too.
+    expect(cosine(subject, tracker)).toBeGreaterThan(cosine(subject, dispatch));
+    expect(cosine(subject, dispatch)).toBeGreaterThanOrEqual(INTEREST_THRESHOLD);
+    expect(cosine(subject, planner)).toBe(0);
+    // Words under four letters do not count.
+    expect(short.every((n) => n === 0)).toBe(true);
+  });
+
+  it("shortens the pause before speaking up only on the scripted model", () => {
+    expect(scriptPauseMs({ DEV_MODEL: "script", DEV_TOOLS: "true", DEV_PAUSE_MS: "1500" })).toBe(1500);
+    expect(scriptPauseMs({ DEV_MODEL: "", DEV_TOOLS: "true", DEV_PAUSE_MS: "1500" })).toBeUndefined();
+    expect(scriptPauseMs({ DEV_MODEL: "script", DEV_TOOLS: "false", DEV_PAUSE_MS: "1500" })).toBeUndefined();
+    expect(scriptPauseMs({ DEV_MODEL: "script", DEV_TOOLS: "true" })).toBeUndefined();
+    expect(scriptPauseMs({ DEV_MODEL: "script", DEV_TOOLS: "true", DEV_PAUSE_MS: "soon" })).toBeUndefined();
   });
 });
