@@ -7,7 +7,7 @@ import {
   type ChatAgentReplyData,
   type ChatAgentView,
 } from "../../shared/agents.ts";
-import { addColumn, type Sql } from "../members.ts";
+import { addColumns, type Sql } from "../members.ts";
 
 /** One agent of a chat's roster: which definition it points at, and the pi session it runs in. */
 export interface RosterEntry {
@@ -181,10 +181,8 @@ export class ChatRoster {
       CREATE INDEX IF NOT EXISTS chat_agent_turns_by_root ON chat_agent_turns (root);
     `);
     // Columns added later: a roster or turn table made before them lacks them.
-    addColumn(sql, "chat_agents", "shared", "INTEGER NOT NULL DEFAULT 0");
-    addColumn(sql, "chat_agents", "seat", "TEXT");
-    addColumn(sql, "chat_agent_turns", "session", "TEXT");
-    addColumn(sql, "chat_agent_turns", "held", "INTEGER NOT NULL DEFAULT 0");
+    addColumns(sql, "chat_agents", { shared: "INTEGER NOT NULL DEFAULT 0", seat: "TEXT" });
+    addColumns(sql, "chat_agent_turns", { session: "TEXT", held: "INTEGER NOT NULL DEFAULT 0" });
   }
 
   /** The roster's clock: what its turns' times are taken from. */
@@ -377,7 +375,9 @@ export class ChatRoster {
   /** After a restart: the running turns whose input never reached their session go back to the queue, at their place. */
   requeueUnsubmitted(): void {
     // A fork made for it before it went in is left: its next start decides again whether it forks, after its catch-up.
-    this.#sql.exec("UPDATE chat_agent_turns SET status = 'queued', started_at = NULL, session = NULL WHERE status = 'running' AND submitted_at IS NULL");
+    this.#sql.exec(
+      "UPDATE chat_agent_turns SET status = 'queued', started_at = NULL, session = NULL WHERE status = 'running' AND submitted_at IS NULL",
+    );
   }
 
   /** Whether any turn waits, runs or has a reply to deliver: what a restarted object picks up again. */

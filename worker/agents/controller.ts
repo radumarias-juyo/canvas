@@ -203,15 +203,13 @@ export class AgentTurns {
    */
   async #giveSeat(entry: RosterEntry, turn: AgentTurn): Promise<void> {
     const batch = await this.batchFor(entry, entry.mirrored, turn.id);
-    const delivered = await this.#host
-      .seat(entry)
-      .give(batch.through > entry.mirrored ? batch : null, {
-        turn: turn.id,
-        calledBy: turn.calledBy,
-        hop: turn.hop,
-        input: turnInput(turn),
-        byOwner: turn.byOwner,
-      });
+    const delivered = await this.#host.seat(entry).give(batch.through > entry.mirrored ? batch : null, {
+      turn: turn.id,
+      calledBy: turn.calledBy,
+      hop: turn.hop,
+      input: turnInput(turn),
+      byOwner: turn.byOwner,
+    });
     this.#host.roster.setMirrored(entry.agentId, delivered);
     this.#host.roster.markSubmitted(turn.id);
   }

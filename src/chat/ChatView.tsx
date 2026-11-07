@@ -65,6 +65,8 @@ import { endedEarly, stepRuns, streamingSteps, type MessageSteps, type StepRuns,
 import { Thinking } from "./Thinking.tsx";
 import { useRevealedText } from "./reveal.ts";
 import { blocks, firstNew, isAgent, openHints, published, replyItems, sentAt, shown, showsAsCard, userText } from "./entries.ts";
+import { answersEveryMessage, CHAT_COPY_KIND, CHAT_EVENT_KIND, legacyKind, type ChatCopyData, type ChatEventData } from "../../shared/chat-kinds.ts";
+import { BranchOff, ChatEventNotice, EntryOf, KindChip, TagCard } from "./ChatKinds.tsx";
 
 interface Props {
   chatId: string;
@@ -81,6 +83,8 @@ interface Props {
   onLeft: () => void;
   /** Opens the app's menu (the sidebar), on a phone or a narrow window, where the header has a button for it. */
   onMenu?: () => void;
+  /** Go to another chat: a branch, or the chat a branch came from. */
+  onOpenChat?: (chatId: string) => void;
 }
 
 const GROWS_ITSELF = CSS.supports("field-sizing", "content");
@@ -88,7 +92,7 @@ const GROWS_ITSELF = CSS.supports("field-sizing", "content");
 /** Whether the conversation is scrolled to (near) its end, where new output is followed. */
 const atBottom = (el: HTMLElement) => el.scrollHeight - el.scrollTop - el.clientHeight < 80;
 
-export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity, onLeft, onMenu }: Props) {
+export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity, onLeft, onMenu, onOpenChat }: Props) {
   const { state, connected, people, online, prompt, abort, setModel, auto, reactions, react, hints, dropHint, agents, live, drafts, setDrafts } =
     useChat(chatId);
   // pi, or an agent of the chat, is working or has turns waiting: Stop stops them all.
@@ -108,10 +112,16 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
   const shared = people && people.members.length > 0 ? people : null;
   // A chat with other people or other agents: every message shows its author's badge, and the people bar lists them.
   const group = shared ?? (people && agents.length > 0 ? people : null);
-  const mentions = useMentions(chatId, draft, setDraft, input, shared, uid, agents);
+  const isOwner = people?.owner.uid === uid;
+  // The people the viewer shares other chats with, whom "@" offers to add (TagCard).
+  const [known, setKnown] = useState<Person[]>([]);
+  useEffect(() => void api.people().then(setKnown, () => {}), []);
+  // Agents answer only messages that call them, unless the chat is private.
+  const callsOnly = !answersEveryMessage(people?.kind ?? legacyKind(shared !== null));
+  const around = useMemo(() => ({ known, canInvite: isOwner, inChat: people ? everyone(people) : [], callsOnly }), [known, isOwner, people, callsOnly]);
+  const mentions = useMentions(chatId, draft, setDraft, input, shared, uid, agents, around);
   // The viewer's own earlier messages, to bring back into the composer (Up, or the "more" menu). Who owns the chat must be
   // known first: a plain `pi.user` entry is the owner's.
-  const isOwner = people?.owner.uid === uid;
   const history = useMemo(() => (people ? ownMessages(state.entries, uid, isOwner) : []), [people, state.entries, uid, isOwner]);
   const recalling = useHistory(history, draft, setDraft, input, (message) => mentions.restore(message.text, message.mentions));
   // The message the next one answers, quoted above the composer until it is sent or let go.
@@ -128,6 +138,23 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
       following.current = true;
     },
     [prompt, dropHint],
+  );
+  // Branch off a new chat from a message, and go to it.
+  // One branch at a time: a second click while one is made does nothing.
+  const branching = useRef(false);
+  const branchOff = useCallback(
+    (entry: number) => {
+      if (branching.current) return;
+      branching.current = true;
+      api
+        .branch(chatId, entry)
+        .then(
+          (made) => onOpenChat?.(made.chatId),
+          (error) => alert(`Could not branch off: ${errorMessage(error)}`),
+        )
+        .finally(() => (branching.current = false));
+    },
+    [chatId, onOpenChat],
   );
   const picker = useRef<HTMLInputElement>(null);
   const lastArtifact = useRef<string>("");
@@ -294,6 +321,7 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
     <SharedChat.Provider value={group}>
       <ChatAgents.Provider value={agents}>
         <FoldScope.Provider value={chatId}>
+        <BranchOff.Provider value={onOpenChat ? branchOff : null}>
         <ReactionsContext.Provider value={chatReactions}>
           <section className="chat">
             <header className="chat-header">
@@ -301,6 +329,7 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
               <h1 className="chat-title" title={title}>
                 {title}
               </h1>
+              {people?.kind && <KindChip chatId={chatId} kind={people.kind} page={people.page} isOwner={isOwner} />}
               {!group && <span className="chat-people">{mine > 1 && `Open in ${mine} of your windows`}</span>}
               {people && (group || isOwner) && (
                 <PeopleBar chatId={chatId} people={people} online={online} uid={uid} piWorking={state.busy} agents={agents} live={live} bar={group !== null} />
@@ -334,20 +363,24 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
                           {dayStart !== undefined && <DaySeparator at={dayStart} />}
                           {entry.id === newAt && <NewDivider />}
                           {bylines.has(entry.id) && <AgentByline />}
-                          <Entry
-                            entry={entry}
-                            steps={streamed?.grown?.entry === entry.id ? streamed.grown.steps : runs.byEntry.get(entry.id as number)}
-                            reactions={reactions[entry.id]}
-                            uid={uid}
-                            ownerName={ownerName}
-                            onOpen={onArtifact}
-                            onReply={reply}
-                            hinted={hinted.has(entry.id as number)}
-                            onAskAgent={askAgent}
-                            onNoHint={dropHint}
-                            chatId={chatId}
-                            items={items.get(entry.id as number)}
-                          />
+                          {/* A message's actions branch off from it (BranchOff). */}
+                          <EntryOf.Provider value={entry.id as number}>
+                            <Entry
+                              entry={entry}
+                              steps={streamed?.grown?.entry === entry.id ? streamed.grown.steps : runs.byEntry.get(entry.id as number)}
+                              reactions={reactions[entry.id]}
+                              uid={uid}
+                              ownerName={ownerName}
+                              onOpen={onArtifact}
+                              onReply={reply}
+                              hinted={hinted.has(entry.id as number)}
+                              onAskAgent={askAgent}
+                              onNoHint={dropHint}
+                              onOpenChat={onOpenChat}
+                              chatId={chatId}
+                              items={items.get(entry.id as number)}
+                            />
+                          </EntryOf.Provider>
                           {spend && <PromptCost spend={spend} />}
                         </Fragment>
                       );
@@ -380,6 +413,28 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
             <form className="composer" onSubmit={submit} onDragOver={onDragOver} onDrop={onDrop}>
               {attachments.error && <div className="chat-error">{attachments.error}</div>}
               <MentionList mentions={mentions} uid={uid} />
+              {mentions.outsider && (
+                <TagCard
+                  key={mentions.outsider.name}
+                  person={mentions.outsider}
+                  isOwner={isOwner}
+                  onNotNow={mentions.dismissOutsider}
+                  onAdd={async () => {
+                    const outsider = mentions.outsider;
+                    if (outsider && "uid" in outsider) await api.addMember(chatId, outsider.uid);
+                    mentions.dismissOutsider();
+                  }}
+                  onNewChat={async () => {
+                    const outsider = mentions.outsider;
+                    if (!outsider || !("uid" in outsider)) return;
+                    const made = await api.createChat();
+                    await api.addMember(made.id, outsider.uid);
+                    mentions.dismissOutsider();
+                    onOpenChat?.(made.id);
+                  }}
+                  onInvite={async () => (await api.createInvite(chatId)).url}
+                />
+              )}
               {replying && (
                 <div className="replying">
                   <ReplyQuoteView quote={replying} />
@@ -419,7 +474,7 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
                     placeholder={
                       !connected
                         ? "Connecting…"
-                        : shared
+                        : callsOnly
                           ? `Message everyone; ${AGENT_TOKEN} asks ${AGENT_NAME}, and @ names someone, a file or an artifact…`
                           : "Describe a dashboard, or type @ to name a file or artifact…"
                     }
@@ -512,6 +567,7 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
             </form>
           </section>
         </ReactionsContext.Provider>
+        </BranchOff.Provider>
         </FoldScope.Provider>
       </ChatAgents.Provider>
     </SharedChat.Provider>
@@ -530,6 +586,7 @@ const Entry = memo(function Entry({
   hinted,
   onAskAgent,
   onNoHint,
+  onOpenChat,
   chatId,
   items,
 }: {
@@ -547,6 +604,7 @@ const Entry = memo(function Entry({
   hinted: boolean;
   onAskAgent: (entry: number) => void;
   onNoHint: (entry: number) => void;
+  onOpenChat?: (chatId: string) => void;
   /** The chat it is in: where an agent pi drafted is brought when its owner turns it on from its card. */
   chatId: string;
   /** For one of pi's replies: the records its tool results held, as chips under it. */
@@ -587,8 +645,15 @@ const Entry = memo(function Entry({
     const data = entry.data as unknown as ChatPeopleData;
     // A Stop of one agent names it; one of everything names pi, whose run it stopped with the agents' turns.
     const agent = data.agent ? `@${data.agent}` : data.event === "stopped" ? AGENT_NAME : "an agent";
-    const [them, you] = PEOPLE_EVENTS[data.event].map((said) => said.replace("{agent}", agent));
+    const [them, you] = PEOPLE_EVENTS[data.event].map((said) => said.replace("{agent}", agent).replace("{by}", data.by ?? "the owner"));
     return <div className="chat-notice">{data.uid === uid ? `You ${you}` : `${data.name} ${them}`}</div>;
+  }
+  if (entry.kind === CHAT_EVENT_KIND) return <ChatEventNotice data={entry.data as unknown as ChatEventData} uid={uid} onOpenChat={onOpenChat} />;
+  if (entry.kind === CHAT_COPY_KIND) {
+    const data = entry.data as unknown as ChatCopyData;
+    if (data.from === "artifact") return <ArtifactCard artifact={{ artifactId: data.artifactId, title: data.title, version: data.version }} onOpen={onOpen} />;
+    const copied = { role: "assistant", content: [{ type: "text", text: data.text }], timestamp: data.sentAt ?? 0, stopReason: "stop" } as unknown as AssistantMessage;
+    return <Assistant message={copied} reactions={reactions} onReply={answer} />;
   }
   if (entry.kind === CHAT_AGENT_KIND) {
     return <AgentReply data={entry.data as unknown as ChatAgentReplyData} reactions={reactions} onReply={answer} onOpen={onOpen} />;
@@ -680,6 +745,7 @@ const PEOPLE_EVENTS: Record<ChatPeopleData["event"], readonly [string, string]> 
   stopped: ["stopped {agent}", "stopped {agent}"],
   "agent-added": ["added {agent} to the chat", "added {agent} to the chat"],
   "agent-removed": ["removed {agent} from the chat", "removed {agent} from the chat"],
+  added: ["was added by {by}", "were added by {by}"],
 };
 
 /**

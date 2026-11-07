@@ -15,7 +15,7 @@ import {
 } from "../../shared/agents.ts";
 import type { ExportedAgent } from "../../shared/data-export.ts";
 import { isObject, randomHex } from "../../shared/util.ts";
-import { addColumn, type Sql } from "../members.ts";
+import { addColumns, type Sql } from "../members.ts";
 
 type AgentRow = {
   id: string;
@@ -78,7 +78,7 @@ export class AgentStore {
       );
     `);
     // The chat's owner, for a chat of someone else's the user brought the agent into as a member; added later.
-    addColumn(sql, "agent_chats", "owner_uid", "TEXT");
+    addColumns(sql, "agent_chats", { owner_uid: "TEXT" });
   }
 
   list(): AgentDefinition[] {

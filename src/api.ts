@@ -26,7 +26,9 @@ import type {
 import { formatCursor, NEXT_PART_HEADER, parseCursor } from "../shared/data-export.ts";
 import { DICTATION_ROUTE, DICTATION_TYPE } from "../shared/dictation.ts";
 import type { MentionOptions } from "../shared/mentions.ts";
+import type { ChatKind } from "../shared/chat-kinds.ts";
 import type { ModelCatalog } from "../shared/models.ts";
+import type { McpSignInView } from "../shared/sign-ins.ts";
 import type { ChatSystemPrompt } from "../shared/system-prompt.ts";
 import { skillPath, type SkillInfo, type SkillInput } from "../shared/skills.ts";
 import { FILE_ROUTE, VIEW_PARAM, ZIP_ROUTE } from "../shared/uploads.ts";
@@ -39,6 +41,9 @@ import {
   type ArtifactView,
   type ChatContents,
   type ChatDeletion,
+  type ChatPeopleView,
+  type ChatRowChange,
+  type Person,
   type ChatSummary,
   type CloneAccess,
   type CreatedInvite,
@@ -159,6 +164,34 @@ export const api = {
   revokeInvite: (chatId: string, inviteId: string) => request<object>(`/api/chats/${chatId}/invites/${inviteId}`, { method: "DELETE" }),
   /** The owner removes a member; a member passes their own uid to leave. */
   removeMember: (chatId: string, uid: string) => request<object>(chatPath(chatId, `/members/${uid}`), { method: "DELETE" }),
+  /** (owner) Add someone they share another chat with, directly: they see the whole conversation. */
+  addMember: (chatId: string, uid: string) => request<ChatPeopleView>(chatPath(chatId, "/members"), post({ uid })),
+  /** The people the user shares chats with: whom "@" offers to add. */
+  people: () => request<Person[]>("/api/me/people"),
+  /** This user's own sidebar row for a chat: pinned, closed, marked unread, their own name for it. */
+  changeChatRow: (chatId: string, change: ChatRowChange) =>
+    request<object>(`/api/chats/${chatId}`, send("PATCH", change)),
+  /** (owner) Who would lose access if the chat became `kind`. */
+  kindPreview: (chatId: string, kind: ChatKind) => {
+    const path = chatPath(chatId, "/kind");
+    return request<{ loses: Person[] }>(`${path}${path.includes("?") ? "&" : "?"}to=${kind}`);
+  },
+  /** (owner) Make the chat `kind`, removing exactly `loses` (uids, as kindPreview listed them); a 409 carries the new list. */
+  changeKind: async (chatId: string, kind: ChatKind, loses: readonly string[]): Promise<ChatPeopleView> => {
+    const { response, body } = await fetchJson(chatPath(chatId, "/kind"), send("PUT", { kind, loses }));
+    if (response.ok) return body as ChatPeopleView;
+    const changed = (body as { loses?: Person[] } | null)?.loses;
+    throw Object.assign(responseError(response, body), changed && { loses: changed });
+  },
+  /** Branch off a new chat that carries the conversation up to transcript entry `entry`. */
+  branch: (chatId: string, entry: number) => request<{ chatId: string }>(chatPath(chatId, "/branch"), post({ entry })),
+  /** The chat that discusses an artifact: its owner opens or makes it, anyone else joins it. */
+  discuss: async (artifactId: string, create = false): Promise<{ chatId: string } | { canStart: true }> => {
+    const { response, body } = await fetchJson(`/api/artifacts/${artifactId}/discuss`, post({ create }));
+    if (response.ok) return body as { chatId: string };
+    if ((body as { canStart?: unknown } | null)?.canStart === true) return { canStart: true };
+    throw responseError(response, body);
+  },
   /** The owner joins their chat a second time, as a member (secondSeat); open it at secondSeatPath. */
   joinSecondSeat: (chatId: string) => request<object>(`/api/chats/${chatId}/seat`, post({})),
   acceptInvite: (token: string) => request<{ chatId: string }>("/api/invites/accept", post({ token })),
@@ -215,6 +248,21 @@ export const api = {
   /** (the agent's owner) Post a reply of theirs held for review, as edited (`text`), or discard it: the drafts left. */
   reviewAgentDraft: (chatId: string, draft: Pick<AgentDraftView, "agentId" | "turn">, action: "post" | "discard", text?: string) =>
     request<AgentDraftView[]>(chatPath(chatId, `/agents/${draft.agentId}/draft`), post({ turn: draft.turn, action, ...(text !== undefined && { text }) })),
+  /** The user's sign-ins to servers that sign in each user: which, since when, and any notice about them. */
+  signIns: () => request<McpSignInView[]>("/api/mcp/sign-ins"),
+  /** Forget the stored sign-in to `server`: the next use asks for a new one. */
+  disconnect: (server: string) => request<McpSignInView[]>(`/api/mcp/sign-ins/${encodeURIComponent(server)}`, { method: "DELETE" }),
+  dismissSignInNotice: (server: string) => request<McpSignInView[]>(`/api/mcp/notices/${encodeURIComponent(server)}`, { method: "DELETE" }),
+  /** The key to subscribe to push with, or null when this deployment sends none. */
+  pushKey: async (): Promise<string | null> => {
+    const { response, body } = await fetchJson("/api/push/key");
+    // 404: this deployment sends none. Any other failure throws, so the next call asks again instead of keeping null.
+    if (response.status === 404) return null;
+    if (!response.ok) throw responseError(response, body);
+    return (body as { publicKey?: string } | null)?.publicKey ?? null;
+  },
+  subscribePush: (subscription: PushSubscriptionJSON) => request<object>("/api/push/subscribe", post(subscription)),
+  unsubscribePush: (endpoint: string) => request<object>("/api/push/unsubscribe", post({ endpoint })),
   /** The MCP servers an agent may use, and which this user signed in to. */
   agentServers: () => request<AgentServerInfo[]>("/api/agents/servers"),
   /** The chats one of the user's agents is in, with whether it is shared in each. */

@@ -10,8 +10,9 @@ import { dataRoute } from "./data-routes.ts";
 import { dictationRoute } from "./dictation.ts";
 import { filesRoute } from "./files-routes.ts";
 import { json, readJson } from "./http.ts";
-import { chatRoute } from "./chat-routes.ts";
+import { chatRoute, discussRoute } from "./chat-routes.ts";
 import { mcpRoute } from "./mcp-routes.ts";
+import { pushRoute } from "./push-routes.ts";
 import { mcpServers } from "./mcp/servers.ts";
 import { catalogSource, loadCatalog } from "./models.ts";
 import { skillsRoute } from "./skills-routes.ts";
@@ -98,7 +99,7 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (page && method === "GET") return artifactPage(request, storage, page[1], Number(page[2]), !!page[3]);
 
   // Artifact metadata, the MCP proxy, and what a page saves and asks its model.
-  const artifact = path.match(/^\/api\/artifacts\/([a-z0-9]+)(\/mcp|\/tools|\/clone|\/seen|\/storage|\/ai)?$/);
+  const artifact = path.match(/^\/api\/artifacts\/([a-z0-9]+)(\/mcp|\/tools|\/clone|\/seen|\/storage|\/ai|\/discuss)?$/);
   if (artifact && ID_PATTERN.test(artifact[1])) {
     const id = artifact[1];
     // The owner opened a version of one of their artifacts: only their own sidebar entry changes.
@@ -107,6 +108,11 @@ async function route(request: Request, env: Env): Promise<Response> {
       if (!Number.isInteger(version)) return json({ error: "Expected {version}." }, 400);
       await exports.UserDirectory.getByName(uid).markArtifactSeen(id, version as number);
       return json({});
+    }
+    // The chat that discusses the page (worker/chat-routes.ts).
+    if (artifact[2] === "/discuss" && method === "POST") {
+      const create = (await readJson<{ create?: unknown }>(request))?.create === true;
+      return discussRoute(storage, id, { uid, name: identity.email ?? uid }, create);
     }
     // A page's saved values and its model run as the viewer (worker/artifacts/page-routes.ts).
     if ((artifact[2] === "/storage" || artifact[2] === "/ai") && method === "POST") {
@@ -153,6 +159,8 @@ async function route(request: Request, env: Env): Promise<Response> {
 
   const mcp = await mcpRoute(request, env, uid);
   if (mcp) return mcp;
+  const push = await pushRoute(request, env, uid);
+  if (push) return push;
 
   const directory = exports.UserDirectory.getByName(uid);
   // The sidebar's socket: it hears which of the chat, artifact and skill lists changed (worker/users.ts).
@@ -163,6 +171,8 @@ async function route(request: Request, env: Env): Promise<Response> {
   // Speech to text for browsers whose own recognition is missing or cannot reach its service (worker/dictation.ts).
   if (path === DICTATION_ROUTE && method === "POST") return dictationRoute(request, env, uid, directory);
   if (path === "/api/chats" && method === "GET") return json(await directory.listChats());
+  // The people this user shares chats with: whom "@" offers to add to a chat.
+  if (path === "/api/me/people" && method === "GET") return json(await directory.knownPeople());
   if (path === "/api/chats" && method === "POST") return json(await directory.createChat(newId()));
   if (path === "/api/artifacts" && method === "GET") return json(await directory.listArtifacts());
   // The model picker's choices: the models AI Gateway's providers list (for those it holds a key for), and Workers AI's.

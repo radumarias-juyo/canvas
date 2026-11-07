@@ -18,7 +18,9 @@ import { serveChatFile, storeUpload } from "./files-routes.ts";
 import type { ChatSystemPrompt } from "../shared/system-prompt.ts";
 import { json, readJson } from "./http.ts";
 import { parseInviteToken } from "./members.ts";
+import { parseRowChange } from "./chat-rows.ts";
 import { newestFirst, type UserFiles } from "./storage/user-files.ts";
+import { newId, type Storage } from "./storage/index.ts";
 import type { UserDirectory } from "./users.ts";
 
 /**
@@ -29,7 +31,12 @@ import type { UserDirectory } from "./users.ts";
  *   GET    /api/chats/:id/ws                  the chat's WebSocket, for its owner and members; it also carries who is in the chat
  *   POST   /api/chats/:id/invites             (owner) a new single-use invite link
  *   DELETE /api/chats/:id/invites/:inviteId   (owner) revoke an invite
+ *   PATCH  /api/chats/:id                     this user's own sidebar row (ChatRowChange): {pinned?, closed?, unread?, title?}
+ *   POST   /api/chats/:id/members             (owner) {uid}: add someone they share another chat with, directly
  *   DELETE /api/chats/:id/members/:uid        (owner) remove a member, or (member) leave
+ *   GET    /api/chats/:id/kind?to=<kind>      (owner) who would lose access if the chat became that kind
+ *   PUT    /api/chats/:id/kind                (owner) {kind, loses: uids}: make it that kind, removing exactly `loses`
+ *   POST   /api/chats/:id/branch              {entry}: branch off a new chat carrying the conversation up to that entry
  *   POST   /api/chats/:id/seat                (owner) join the chat a second time, as a member (secondSeat)
  *   POST   /api/chats/:id/attachments         files for a message, as POST /api/files takes them, into the owner's files
  *   POST   /api/chats/:id/seen                this user has seen the chat: it is no longer unread in their sidebar.
@@ -53,6 +60,8 @@ import type { UserDirectory } from "./users.ts";
  *                                             they read (a newer one refuses), with their changes,
  *                                             saved off in their directory with copiedFrom; it runs with their sign-ins
  *   POST   /api/invites/accept                {token}: join the chat an invite link is for
+ *   POST   /api/artifacts/:id/discuss         {create?}: the chat that discusses an artifact: its owner opens it, or with
+ *                                             `create` makes it; anyone else joins it
  * With `?as=second`, a chat's routes (but its files) take the owner as their second seat in it, and refuse anyone else.
  * Returns null for any other path.
  */
@@ -89,7 +98,7 @@ export async function chatRoute(
   }
 
   const match = url.pathname.match(
-    /^\/api\/chats\/([a-z0-9]+)(?:\/(ws|invites|members|attachments|mentions|contents|deletion|seen|seat|system-prompt|agents)(?:\/([a-z0-9-]+)(?:\/(copy|draft))?)?)?$/,
+    /^\/api\/chats\/([a-z0-9]+)(?:\/(ws|invites|members|attachments|mentions|contents|deletion|seen|seat|system-prompt|agents|kind|branch)(?:\/([a-z0-9-]+)(?:\/(copy|draft))?)?)?$/,
   );
   if (!match || !ID_PATTERN.test(match[1])) return null;
   const [, chatId, what, item, sub] = match;
@@ -105,6 +114,11 @@ export async function chatRoute(
     }
     const seenAt = await directory.markSeen(chatId);
     return json(seenAt === null ? {} : { seenAt });
+  }
+  if (!what && method === "PATCH") {
+    const change = parseRowChange(await readJson(request));
+    if (!change) return json({ error: "Expected {pinned?, closed?, unread?, title?}." }, 400);
+    return (await directory.changeChatRow(chatId, change)) ? json({}) : json({ error: "No such chat" }, 404);
   }
   // Own chats and chats shared with this user.
   const deny = (error: string, status: number) => (isSocket ? closedSocket(SOCKET_NOT_A_MEMBER, error) : json({ error }, status));
@@ -206,9 +220,55 @@ export async function chatRoute(
     if (!result) return null;
     return "status" in result ? answer(result) : json(result);
   }
+  if (what === "members" && method === "POST" && !item) {
+    const added = await chat.addMember(person, (await readJson<{ uid?: unknown }>(request))?.uid);
+    return "status" in added ? answer(added) : json(added);
+  }
+  if (what === "kind" && !item && method === "GET") {
+    const preview = await chat.kindPreview(person, url.searchParams.get("to"));
+    return "status" in preview ? answer(preview) : json(preview);
+  }
+  if (what === "kind" && !item && method === "PUT") {
+    const body = await readJson<{ kind?: unknown; loses?: unknown }>(request);
+    const changed = await chat.changeKind(person, body?.kind, body?.loses);
+    return "status" in changed ? json({ error: changed.error, ...(changed.loses && { loses: changed.loses }) }, changed.status) : json(changed);
+  }
+  if (what === "branch" && !item && method === "POST") {
+    const branched = await chat.branchOff(person, (await readJson<{ entry?: unknown }>(request))?.entry);
+    return "status" in branched ? answer(branched) : json(branched);
+  }
   if (what === "invites" && method === "DELETE" && item) return answer(await chat.revokeInvite(person, item));
   if (what === "members" && method === "DELETE" && item) return answer(await chat.removeMember(person, item));
   return null;
+}
+
+/**
+ * POST /api/artifacts/:id/discuss: the chat that discusses an artifact (a chat "on a page"). Its owner opens it, or makes
+ * it the first time. Anyone else who may open the page (every signed-in person: pages are shared by link) joins the one
+ * its owner made; until then there is none to join. Only the owner makes one: the chat's agents act as its owner.
+ */
+export async function discussRoute(storage: Storage, artifactId: string, signedIn: Person, create: boolean): Promise<Response> {
+  const meta = await storage.artifacts.readMeta(artifactId);
+  if (!meta) return json({ error: "No such artifact" }, 404);
+  const owner = exports.UserDirectory.getByName(meta.ownerUid);
+  const existing = await owner.pageChat(artifactId);
+  const page = { id: meta.id, title: meta.title, version: meta.latest };
+  const title = `About ${meta.title}`;
+  if (signedIn.uid === meta.ownerUid) {
+    if (existing) return json({ chatId: existing });
+    // Made only once the owner confirmed (`create`): anyone who can open the page may then join, and call its agents.
+    if (!create) return json({ error: "This page has no chat yet.", canStart: true }, 404);
+    const chatId = newId();
+    await owner.createChat(chatId, { title, kind: "page" });
+    const refused = await exports.ChatAgent.getByName(chatAgentName(meta.ownerUid, chatId)).startPage(signedIn, page);
+    if (refused) return json({ error: refused.error }, refused.status);
+    await owner.linkPageChat(artifactId, chatId);
+    return json({ chatId });
+  }
+  if (!existing) return json({ error: "Nobody discusses this page yet: its author starts the discussion from it." }, 404);
+  const chatTitle = (await owner.chatTitle(existing)) ?? title;
+  const refused = await exports.ChatAgent.getByName(chatAgentName(meta.ownerUid, existing)).joinPage(signedIn, artifactId, chatTitle);
+  return refused ? json({ error: refused.error }, refused.status) : json({ chatId: existing });
 }
 
 /**
