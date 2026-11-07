@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall, Type, type AssistantMessage, type Message } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -34,11 +34,13 @@ async function piWithMemory(
     summarizing,
     contextWindow,
     rendering,
+    recalling,
   }: {
     summary?: string | ((request: string) => string);
     summarizing?: (signal?: AbortSignal) => Promise<void>;
     contextWindow?: number;
     rendering?: () => Promise<void>;
+    recalling?: () => Promise<void>;
   } = {},
 ) {
   const faux = fauxProvider({ models: [{ id: "m", contextWindow }] });
@@ -63,7 +65,7 @@ async function piWithMemory(
     name: MEMORY_RECALL_TOOL,
     description: "Look through the memory notes.",
     parameters: Type.Object({}),
-    execute: async () => ({ output: text("- [a2] (just me) My bonus is private too.") }),
+    execute: async () => (await recalling?.(), { output: text("- [a2] (just me) My bonus is private too.") }),
   });
   const forget = defineTool({
     name: MEMORY_FORGET_TOOL,
@@ -161,7 +163,8 @@ describe("a prompt that held the owner's own notes", () => {
       await ask(`second ${"words ".repeat(30_000)}`);
       await pi.waitForTask(await root.compact(undefined, BACKGROUND_CONTEXT), BACKGROUND_CONTEXT);
       await ask("third");
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      // The stream delivers the last commits after them: wait until the summary's are in.
+      await vi.waitFor(() => expect(JSON.stringify(events)).toContain("the owner's bonus"));
       // The owner's socket gets them (a result as it starts, and the summary), a member's none of either.
       expect(events.some((event) => event.type === "message_start")).toBe(true);
       expect(JSON.stringify(events)).toContain("My bonus");
@@ -170,6 +173,31 @@ describe("a prompt that held the owner's own notes", () => {
       expect(shown).not.toContain("bonus");
     } finally {
       await stream.stop();
+      await pi.close(BACKGROUND_CONTEXT);
+    }
+  });
+
+  it("leaves out a recall answered while the fresh start read the context", async () => {
+    let reached!: () => void;
+    const there = new Promise<void>((resolve) => (reached = resolve));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const { pi, root, notes, ask, requests } = await piWithMemory(
+      [fauxAssistantMessage(fauxToolCall(MEMORY_RECALL_TOOL, {}, { id: "c1" }), { stopReason: "toolUse" })],
+      { recalling: async () => (reached(), gate) },
+    );
+    try {
+      notes.text = "No notes yet.";
+      const turn = ask("what do you know?");
+      await there;
+      // Someone joins while the recall is answered: its result lands after the fresh start read the context.
+      const { done } = await freshPrompt(root, pi);
+      release();
+      await turn;
+      expect(await done).toBe(true);
+      await ask("and now?");
+      expect(JSON.stringify(requests.at(-1))).not.toContain("bonus");
+    } finally {
       await pi.close(BACKGROUND_CONTEXT);
     }
   });

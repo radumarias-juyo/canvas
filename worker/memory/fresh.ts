@@ -50,7 +50,10 @@ function leftOutResult(message: Message | undefined, audience: Audience): ToolRe
  */
 function withoutNoteResult(entry: EntryRecord): EntryRecord {
   const [first, ...rest] = entry.model ?? [];
-  const left = first && (CompactionEntry.is(entry) ? leftOutSummary(first.timestamp, "shown") : leftOutResult(first, "shown"));
+  if (!first) return entry;
+  // A summary is the whole of its entry's model, as leaveOutNotes replaces it.
+  if (CompactionEntry.is(entry)) return { ...entry, model: [leftOutSummary(first.timestamp, "shown")] };
+  const left = leftOutResult(first, "shown");
   return left ? { ...entry, model: [left, ...rest] } : entry;
 }
 
@@ -177,8 +180,8 @@ const MAX_LOOKS = 5;
  * them. So `done` looks again once they are in, and again after each look that found one: a compaction the
  * conversation runs on its own is stopped, its summary too if it waits to be placed (a later one compacts again); one a
  * turn waits for cannot be (the turn would fail), and is waited for; and every summary placed since the first look is
- * left out too. True once a look finds none; false when MAX_LOOKS were not enough. Until then the caller has each
- * request leave summaries out (withoutSummaries).
+ * left out too, as is a memory tool's result that landed after the context was read. True once a look finds none;
+ * false when MAX_LOOKS were not enough. Until then the caller has each request leave summaries out (withoutSummaries).
  */
 export async function freshPrompt(
   conversation: Pick<Conversation, "id" | "context" | "submit" | "viewState">,
@@ -200,7 +203,12 @@ async function lookAgain(
     await written?.wait(BACKGROUND_CONTEXT);
     const waited = await stopCompactions(conversation, harness);
     await Promise.allSettled(waited.map((taskId) => harness.waitForTask(taskId, BACKGROUND_CONTEXT)));
-    const late = (await conversation.context(BACKGROUND_CONTEXT)).entries.filter((entry) => !seen.has(entry.id) && CompactionEntry.is(entry));
+    // A compaction placed since, and a memory tool's result that landed after the context was read (its call was
+    // answered as someone joined): neither is in the edits yet.
+    const late = (await conversation.context(BACKGROUND_CONTEXT)).entries.filter(
+      (entry) =>
+        !seen.has(entry.id) && (CompactionEntry.is(entry) || (ToolResultEntry.is(entry) && leftOutResult(entry.model?.[0], "model") !== undefined)),
+    );
     if (!late.length && !waited.length) return true;
     for (const entry of late) seen.add(entry.id);
     written = await leaveOut(conversation, late);
