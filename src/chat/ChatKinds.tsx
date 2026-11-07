@@ -31,7 +31,17 @@ interface Pending {
  * access first, and removes exactly them when confirmed; widening says that everyone added sees the whole history.
  * Anyone else sees what the kind means.
  */
-export function KindChip({ chatId, kind, page, isOwner }: { chatId: string; kind: ChatKind; page?: ChatPage; isOwner: boolean }) {
+export function KindChip({
+  chatId,
+  kind,
+  page,
+  isOwner,
+}: {
+  chatId: string;
+  kind: ChatKind;
+  page?: ChatPage;
+  isOwner: boolean;
+}) {
   const [open, setOpen] = useState(false);
   const [pending, setPending] = useState<Pending | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -91,17 +101,38 @@ export function KindChip({ chatId, kind, page, isOwner }: { chatId: string; kind
         {isOwner && <span aria-hidden="true"> ▾</span>}
       </button>
       {open && (
-        <div className="kind-panel" role="dialog" aria-label="What kind of chat this is">
+        <div
+          className="kind-panel"
+          role="dialog"
+          aria-label="What kind of chat this is"
+        >
           {!isOwner ? (
             <KindLines kind={kind} page={page} />
           ) : pending ? (
-            <KindConfirm from={kind} pending={pending} busy={busy} onConfirm={() => void confirm()} onCancel={() => setPending(null)} />
+            <KindConfirm
+              from={kind}
+              pending={pending}
+              busy={busy}
+              onConfirm={() => void confirm()}
+              onCancel={() => setPending(null)}
+            />
           ) : (
             <ul className="kind-choices">
               {kindChoices(page !== undefined).map((choice) => (
                 <li key={choice}>
-                  <button type="button" className={choice === kind ? "kind-choice active" : "kind-choice"} aria-pressed={choice === kind} disabled={busy} onClick={() => void ask(choice)}>
-                    <KindLines kind={choice} page={choice === "page" ? page : undefined} />
+                  <button
+                    type="button"
+                    className={
+                      choice === kind ? "kind-choice active" : "kind-choice"
+                    }
+                    aria-pressed={choice === kind}
+                    disabled={busy}
+                    onClick={() => void ask(choice)}
+                  >
+                    <KindLines
+                      kind={choice}
+                      page={choice === "page" ? page : undefined}
+                    />
                   </button>
                 </li>
               ))}
@@ -130,14 +161,30 @@ function KindLines({ kind, page }: { kind: ChatKind; page?: ChatPage }) {
 }
 
 /** The owner's last look before the kind changes: who loses access when narrowing, and that widening shows the history. */
-function KindConfirm({ from, pending, busy, onConfirm, onCancel }: { from: ChatKind; pending: Pending; busy: boolean; onConfirm: () => void; onCancel: () => void }) {
+function KindConfirm({
+  from,
+  pending,
+  busy,
+  onConfirm,
+  onCancel,
+}: {
+  from: ChatKind;
+  pending: Pending;
+  busy: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
   const to = KIND_TEXT[pending.kind];
   return (
     <div className="kind-confirm">
       <strong>Make this chat {to.label.toLowerCase()}?</strong>
       {pending.loses.length > 0 && (
         <>
-          <p>{pending.loses.length === 1 ? "This person loses access now:" : `These ${pending.loses.length} people lose access now:`}</p>
+          <p>
+            {pending.loses.length === 1
+              ? "This person loses access now:"
+              : `These ${pending.loses.length} people lose access now:`}
+          </p>
           <ul className="kind-loses">
             {pending.loses.map((person) => (
               <li key={person.uid}>{person.name}</li>
@@ -145,18 +192,48 @@ function KindConfirm({ from, pending, busy, onConfirm, onCancel }: { from: ChatK
           </ul>
         </>
       )}
-      {widens(from, pending.kind) && <p>Everyone added from now on sees the whole history, including what was said before.</p>}
-      {pending.kind === "off_record" && <p>From now on nothing leaves this chat: no memory notes, search, routines or feed previews.</p>}
-      {from === "off_record" && <p>What is said from now on may leave this chat again: {to.leaves.toLowerCase()}.</p>}
+      {widens(from, pending.kind) && (
+        <p>
+          Everyone added from now on sees the whole history, including what was
+          said before.
+        </p>
+      )}
+      {pending.kind === "off_record" && (
+        <p>
+          From now on nothing leaves this chat: no memory notes, search,
+          routines or feed previews.
+        </p>
+      )}
+      {from === "off_record" && (
+        <p>
+          What is said from now on may leave this chat again:{" "}
+          {to.leaves.toLowerCase()}.
+        </p>
+      )}
       {answersEveryMessage(pending.kind) !== answersEveryMessage(from) && (
-        <p>{answersEveryMessage(pending.kind) ? `${AGENT_NAME} will answer every message.` : `${AGENT_NAME} will answer only when someone calls ${AGENT_TOKEN}.`}</p>
+        <p>
+          {answersEveryMessage(pending.kind)
+            ? `${AGENT_NAME} will answer every message.`
+            : `${AGENT_NAME} will answer only when someone calls ${AGENT_TOKEN}.`}
+        </p>
       )}
       <div className="kind-actions">
         <button type="button" onClick={onCancel} disabled={busy}>
           Cancel
         </button>
-        <button type="button" className={narrows(from, pending.kind) && pending.loses.length ? "danger" : "primary"} onClick={onConfirm} disabled={busy}>
-          {pending.loses.length ? `Remove ${pending.loses.length === 1 ? "them" : "them all"} and change` : "Change"}
+        <button
+          type="button"
+          className={
+            narrows(from, pending.kind) && pending.loses.length
+              ? "danger"
+              : "primary"
+          }
+          onClick={onConfirm}
+          disabled={busy}
+        >
+          {pending.loses.length
+            ? `Remove ${pending.loses.length === 1 ? "them" : "them all"} and change`
+            : "Change"}
         </button>
       </div>
     </div>
@@ -164,7 +241,15 @@ function KindConfirm({ from, pending, busy, onConfirm, onCancel }: { from: ChatK
 }
 
 /** A transcript line about the chat itself (CHAT_EVENT_KIND): its kind changed, its page has a new version, a branch. */
-export function ChatEventNotice({ data, uid, onOpenChat }: { data: ChatEventData; uid: string; onOpenChat?: (chatId: string) => void }) {
+export function ChatEventNotice({
+  data,
+  uid,
+  onOpenChat,
+}: {
+  data: ChatEventData;
+  uid: string;
+  onOpenChat?: (chatId: string) => void;
+}) {
   const who = (person: Person) => (person.uid === uid ? "You" : person.name);
   const link = (chatId: string, title: string) => (
     <a
@@ -180,14 +265,23 @@ export function ChatEventNotice({ data, uid, onOpenChat }: { data: ChatEventData
   );
   if (data.event === "kind") {
     const label = KIND_TEXT[data.kind].label.toLowerCase();
-    const removed = data.removed?.length ? ` · ${data.removed.map((person) => person.name).join(", ")} lost access` : "";
-    const answers = answersEveryMessage(data.kind) !== answersEveryMessage(data.from);
+    const removed = data.removed?.length
+      ? ` · ${data.removed.map((person) => person.name).join(", ")} lost access`
+      : "";
+    const answers =
+      answersEveryMessage(data.kind) !== answersEveryMessage(data.from);
     return (
       <>
-        <div className="chat-notice">{data.by ? `${who(data.by)} made the chat ${label}${removed}` : `The chat is now ${data.kind === "group" ? "a group" : label}`}</div>
+        <div className="chat-notice">
+          {data.by
+            ? `${who(data.by)} made the chat ${label}${removed}`
+            : `The chat is now ${data.kind === "group" ? "a group" : label}`}
+        </div>
         {answers && (
           <div className="chat-notice">
-            {answersEveryMessage(data.kind) ? `${AGENT_NAME} now answers every message` : `${AGENT_NAME} now answers only when someone calls ${AGENT_TOKEN}`}
+            {answersEveryMessage(data.kind)
+              ? `${AGENT_NAME} now answers every message`
+              : `${AGENT_NAME} now answers only when someone calls ${AGENT_TOKEN}`}
           </div>
         )}
       </>
@@ -206,13 +300,16 @@ export function ChatEventNotice({ data, uid, onOpenChat }: { data: ChatEventData
   if (data.event === "branch") {
     return (
       <div className="chat-notice branch-line">
-        {who(data.by)} branched off {link(data.chatId, data.title)} from an earlier message
+        {who(data.by)} branched off {link(data.chatId, data.title)} from an
+        earlier message
       </div>
     );
   }
   return (
     <div className="chat-notice branch-line">
-      Above: the conversation this chat carries from {link(data.from.chatId, data.from.title)}, where {data.by.uid === uid ? "you" : data.by.name} branched it off
+      Above: the conversation this chat carries from{" "}
+      {link(data.from.chatId, data.from.title)}, where{" "}
+      {data.by.uid === uid ? "you" : data.by.name} branched it off
     </div>
   );
 }
@@ -235,10 +332,12 @@ export function TagCard({
   onNotNow: () => void;
   onAdd: () => Promise<void>;
   onNewChat: () => Promise<void>;
-  onInvite: () => Promise<void>;
+  /** Make an invite link: shown here, with Copy (a copy must come from the click itself, not after a request). */
+  onInvite: () => Promise<string>;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [link, setLink] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const run = (action: () => Promise<void>, after?: () => void) => async () => {
     setBusy(true);
@@ -256,9 +355,14 @@ export function TagCard({
   return (
     <div className="tag-card" role="alert">
       <p>
-        <strong>@{person.name}</strong> isn't in this chat. Adding them shows them everything said so far.
+        <strong>@{person.name}</strong> isn't in this chat. Adding them shows
+        them everything said so far.
       </p>
-      {invite && !isOwner && <p className="tag-card-note">Only the chat's owner can invite people to it.</p>}
+      {invite && !isOwner && (
+        <p className="tag-card-note">
+          Only the chat's owner can invite people to it.
+        </p>
+      )}
       <div className="tag-card-actions">
         <button type="button" onClick={onNotNow} disabled={busy}>
           Not now
@@ -270,15 +374,52 @@ export function TagCard({
         )}
         {isOwner &&
           (invite ? (
-            <button type="button" className="primary" onClick={run(onInvite, () => setCopied(true))} disabled={busy}>
-              {copied ? "Invite link copied" : "Copy an invite link"}
-            </button>
+            !link && (
+              <button
+                type="button"
+                className="primary"
+                onClick={run(async () => setLink(await onInvite()))}
+                disabled={busy}
+              >
+                Make an invite link
+              </button>
+            )
           ) : (
-            <button type="button" className="primary" onClick={run(onAdd)} disabled={busy}>
+            <button
+              type="button"
+              className="primary"
+              onClick={run(onAdd)}
+              disabled={busy}
+            >
               Add to this chat
             </button>
           ))}
       </div>
+      {link && (
+        <div className="tag-card-link">
+          <input
+            readOnly
+            value={link}
+            aria-label="Invite link"
+            onFocus={(e) => e.target.select()}
+          />
+          <button
+            type="button"
+            className="primary"
+            onClick={() =>
+              void navigator.clipboard.writeText(link).then(
+                () => setCopied(true),
+                () =>
+                  setError(
+                    "Copying was not allowed: select the link and copy it.",
+                  ),
+              )
+            }
+          >
+            {copied ? "Copied" : "Copy"}
+          </button>
+        </div>
+      )}
       {error && <p className="form-error">{error}</p>}
     </div>
   );

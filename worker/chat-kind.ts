@@ -20,17 +20,23 @@ export interface Kv {
 const KIND_KEY = "kind";
 const PAGE_KEY = "page";
 const BRANCHED_FROM_KEY = "branchedFrom";
-const BRANCHES_KEY = "branches";
+/** A branch of a chat on a page: the page, for its agents to know, though the branch is not on it. */
+const CONTEXT_PAGE_KEY = "contextPage";
 /** Not exported: the people of a chat stay behind with it. */
 const SHUT_OUT_KEY = "shutOut";
 
 /** The chat storage keys an export carries (with the chat's other settings, worker/chat-dump.ts). */
-export const KIND_KV = [KIND_KEY, PAGE_KEY, BRANCHED_FROM_KEY, BRANCHES_KEY];
+export const KIND_KV = [
+  KIND_KEY,
+  PAGE_KEY,
+  BRANCHED_FROM_KEY,
+  CONTEXT_PAGE_KEY,
+];
 
-/** The most people one chat remembers its owner removed. */
+/** The most people one chat remembers left it or were removed. */
 export const MAX_SHUT_OUT = 500;
 
-/** The most branches one chat has. */
+/** The most branches one conversation has, counted against the chat they all came from (UserDirectory.takeBranch). */
 export const MAX_BRANCHES = 100;
 
 /**
@@ -89,11 +95,16 @@ export class ChatKindState {
   }
 
   /**
-   * The owner removed `uid`: opening the page the chat discusses does not let them back in (joinPage). Being added
-   * again, or joining by an invite, does (letBackIn). The newest MAX_SHUT_OUT are kept.
+   * `uid` left the chat or was removed: neither the owner adding them (addMember) nor opening the page it discusses
+   * (joinPage) lets them back in; an invite does (letBackIn). The newest MAX_SHUT_OUT are kept.
    */
   shutOut(uid: string): void {
-    this.#kv.put(SHUT_OUT_KEY, [...this.#shutOut().filter((other) => other !== uid), uid].slice(-MAX_SHUT_OUT));
+    this.#kv.put(
+      SHUT_OUT_KEY,
+      [...this.#shutOut().filter((other) => other !== uid), uid].slice(
+        -MAX_SHUT_OUT,
+      ),
+    );
   }
 
   isShutOut(uid: string): boolean {
@@ -102,7 +113,11 @@ export class ChatKindState {
 
   letBackIn(uid: string): void {
     const shut = this.#shutOut();
-    if (shut.includes(uid)) this.#kv.put(SHUT_OUT_KEY, shut.filter((other) => other !== uid));
+    if (shut.includes(uid))
+      this.#kv.put(
+        SHUT_OUT_KEY,
+        shut.filter((other) => other !== uid),
+      );
   }
 
   #shutOut(): string[] {
@@ -110,32 +125,64 @@ export class ChatKindState {
   }
 
   /** How many chats branched off from this one. */
-  branchCount(): number {
-    return this.#kv.get<number>(BRANCHES_KEY) ?? 0;
+  /** The page this chat's agents should know of: the one it is on, or (a branch of a chat on one) the one it came from. */
+  knownPage(): ChatPage | undefined {
+    return this.page() ?? this.#kv.get<ChatPage>(CONTEXT_PAGE_KEY);
   }
 
-  countBranch(): void {
-    this.#kv.put(BRANCHES_KEY, this.branchCount() + 1);
+  setContextPage(page: ChatPage): void {
+    this.#kv.put(CONTEXT_PAGE_KEY, page);
   }
 }
 
+/**
+ * The kind of a branch (branchOff), from the kind of the chat it came from and whether someone besides the owner is in
+ * it: off the record stays so; else private with nobody else in it, and a group with someone. Never on a page: the
+ * page's chat is the one its author started.
+ */
+export function branchKind(from: ChatKind, withMember: boolean): ChatKind {
+  if (from === "off_record") return "off_record";
+  return withMember ? "group" : "private";
+}
+
 /** The owner's change of a chat's kind, checked: the members it removes, or why it cannot be made. */
-export type KindPlan = { removed: ChatMemberVia[] } | { error: string; status: 400 | 409; loses?: ChatMemberVia[] };
+export type KindPlan =
+  | { removed: ChatMemberVia[] }
+  | { error: string; status: 400 | 409; loses?: ChatMemberVia[] };
 
 /**
  * Plan changing a chat of `from` to `to`, for the owner who confirmed that `confirmed` (uids) lose access. Narrowing
  * lists who loses access first and then removes exactly them: if the list changed since it was shown (someone joined,
  * or left), nothing changes and the new list comes back, to confirm again.
  */
-export function planKindChange(from: ChatKind, to: unknown, members: readonly ChatMemberVia[], confirmed: readonly string[], hasPage: boolean): KindPlan {
+export function planKindChange(
+  from: ChatKind,
+  to: unknown,
+  members: readonly ChatMemberVia[],
+  confirmed: readonly string[],
+  hasPage: boolean,
+): KindPlan {
   if (!isChatKind(to) || !kindChoices(hasPage).includes(to)) {
-    return { error: to === "page" ? "Only a chat made from a page with Discuss can be on a page." : "Not a kind of chat.", status: 400 };
+    return {
+      error:
+        to === "page"
+          ? "Only a chat made from a page with Discuss can be on a page."
+          : "Not a kind of chat.",
+      status: 400,
+    };
   }
   const loses = losesAccess(to, members);
   if (from === to) return { removed: [] };
   const asked = new Set(confirmed);
-  if (loses.length !== asked.size || loses.some((member) => !asked.has(member.uid))) {
-    return { error: `Who loses access changed: check the list again before making the chat ${KIND_TEXT[to].label.toLowerCase()}.`, status: 409, loses };
+  if (
+    loses.length !== asked.size ||
+    loses.some((member) => !asked.has(member.uid))
+  ) {
+    return {
+      error: `Who loses access changed: check the list again before making the chat ${KIND_TEXT[to].label.toLowerCase()}.`,
+      status: 409,
+      loses,
+    };
   }
   return { removed: loses };
 }
