@@ -1,5 +1,5 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import type { EntryRecord } from "@earendil-works/pi-durable";
+import { ROOT_CONVERSATION_ID, type EntryRecord } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
 import { CHAT_AGENT_KIND, CHAT_TURN_KIND, MAX_HOPS, speakerLabel, type ChatAgentReplyData } from "../shared/agents.ts";
 import { AGENT_NAME } from "../shared/mentions.ts";
@@ -13,6 +13,7 @@ import {
   assistantText,
   allowedTools,
   draftTools,
+  piBusy,
   runTools,
   CatchUp,
   handOffs,
@@ -438,6 +439,16 @@ describe("askOf", () => {
     const long = "z".repeat(6_001);
     expect(askOf({ name: "builder", kind: "agent" }, long)).toBe(`[builder · agent]: ${"z".repeat(6_000)}${CUT}`);
     expect(askOf({ name: "builder", kind: "agent" }, long)).toBe(askLine(replied("a-builder", "builder", long, 1), SELF, OWNER));
+  });
+});
+
+describe("piBusy", () => {
+  it("counts only pi's own conversation: an agent's turn or a run step working leaves pi free", () => {
+    const of = (conversationId: unknown) => ({ conversationId }) as never;
+    expect(piBusy([])).toBe(false);
+    // @atlas works in its session, a run step in another: pi is idle, so a Yes is taken and its tools come back.
+    expect(piBusy([of("session-atlas"), of("run-7")])).toBe(false);
+    expect(piBusy([of("session-atlas"), of(ROOT_CONVERSATION_ID)])).toBe(true);
   });
 });
 

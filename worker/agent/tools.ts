@@ -134,6 +134,8 @@ export function filesExtension(scope: ChatScope): Extension {
           "Keep files you make for this chat, such as notes or an intermediate CSV, in this chat's folder under out/ (named with the user's files): the user's other chats save to their own.",
         parameters: Type.Object({ path: Type.String(), content: Type.String() }),
         execute: async (args) => {
+          // That name reads a saved tool result (files_read, run_python), never the file: one written there could not be read back.
+          if (isToolResult(literalPath(args.path) ?? args.path)) throw new FileRefError(`${args.path} is where tool results are saved: pick another name, or another folder.`);
           const path = await (await scope.files()).put(args.path, args.content, "text/plain; charset=utf-8");
           return { output: text(wroteReport(path, args.content.length)), details: { saved: [path] } satisfies SavedFilesDetails };
         },

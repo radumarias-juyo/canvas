@@ -6,6 +6,7 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { AGENT_PROPOSE_TOOL, CHAT_AGENT_KIND, type ChatAgentReplyData } from "./agents.ts";
+import { withoutUnseen } from "./util.ts";
 
 /** What starts the line an answer offers its next step on. */
 export const OFFER_PREFIX = "Next step:";
@@ -25,12 +26,6 @@ export const MAX_OFFER = 200;
 export const OFFER_YES =
   `Yes to the next step your message offers: draft it as a routine with ${AGENT_PROPOSE_TOOL} for me to look over and turn on. ` +
   "Don't do anything else for it now.";
-
-/**
- * Characters a browser draws as nothing (format characters such as zero-width, bidi controls and tags, private and
- * unassigned code points), but the zero-width joiner, which joins emoji into one ("👩‍💻") and hides nothing alone.
- */
-const UNSEEN = /(?!\u200d)[\p{Cf}\p{Co}\p{Cn}]/gu;
 
 /** The rule in the agents' instructions (pi's and the roster's) for when and how to offer a next step. */
 export const OFFER_RULE =
@@ -62,7 +57,7 @@ export function offerOf(text: string): { body: string; offer: string } | null {
   if (!match) return null;
   const body = trimmed.slice(0, start).trim();
   // Only what the owner sees: nothing hidden rides along with the offer.
-  const offer = match[1].replace(UNSEEN, "").replace(/^[\s*_]+|[\s*_]+$/g, "").replace(/\s+/g, " ");
+  const offer = withoutUnseen(match[1]).replace(/^[\s*_]+|[\s*_]+$/g, "").replace(/\s+/g, " ");
   if (!body || !offer || offer.length > MAX_OFFER) return null;
   return { body, offer };
 }

@@ -2,7 +2,7 @@
 // reads of the chat's log before its turn, which tools a turn may use, and what an agent's own prompt says.
 
 import type { AssistantMessage, UserMessage } from "@earendil-works/pi-ai";
-import type { EntryRecord } from "@earendil-works/pi-durable";
+import { ROOT_CONVERSATION_ID, type EntryRecord, type SubmissionRecord } from "@earendil-works/pi-durable";
 import { TOOL_SEARCH_TOOL_NAME } from "@earendil-works/pi-durable/tool-search";
 import {
   AGENT_PROPOSE_TOOL,
@@ -75,6 +75,11 @@ export type PiLogEntry =
   | { input: "message"; uid: string | undefined; drafts?: true }
   | { input: "other" }
   | { reply: AssistantMessage };
+
+/** Whether pi itself is busy, by the harness's queue: a submission of its own conversation, not one of an agent's session. */
+export function piBusy(submissions: readonly Pick<SubmissionRecord, "conversationId">[]): boolean {
+  return submissions.some((submission) => String(submission.conversationId) === String(ROOT_CONVERSATION_ID));
+}
 
 export function piLogEntry(entry: Pick<EntryRecord, "kind" | "data" | "model">): PiLogEntry | undefined {
   if (entry.kind === CHAT_TURN_KIND) return { input: "handOff", data: entry.data as Partial<ChatTurnData> | undefined };

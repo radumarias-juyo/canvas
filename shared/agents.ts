@@ -10,7 +10,7 @@ import type { ItemRef } from "./items.ts";
 import { AGENT_NAME } from "./mentions.ts";
 import { EFFORT_LABELS } from "./models.ts";
 import type { RunRef } from "./runs.ts";
-import { isObject } from "./util.ts";
+import { isObject, withoutUnseen } from "./util.ts";
 
 /** An agent's handle, as "@name" calls it: a lowercase letter, then letters, digits or hyphens. */
 export const AGENT_NAME_PATTERN = /^[a-z][a-z0-9-]{1,23}$/;
@@ -166,13 +166,14 @@ function fail(message: string): never {
  * A text field, trimmed. `field` words its messages: what a missing one needs ("An agent needs a job line") and whose
  * it is ("An agent's job line").
  */
-function str(value: unknown, field: { needs: string; its: string }, max: number, { required = true } = {}): string | undefined {
+function str(value: unknown, field: { needs: string; its: string }, max: number, { required = true, seen = false } = {}): string | undefined {
   if (value === undefined || value === null || value === "") {
     if (required) fail(`${field.needs}.`);
     return undefined;
   }
   if (typeof value !== "string") fail(`${field.its} must be text.`);
-  const trimmed = value.trim();
+  // `seen`: text the agent follows, which its owner reads first (a draft card, the editor): nothing hidden in it.
+  const trimmed = (seen ? withoutUnseen(value) : value).trim();
   if (!trimmed && required) fail(`${field.needs}.`);
   if (trimmed.length > max) fail(`${field.its} is at most ${max} characters.`);
   return trimmed || undefined;
@@ -338,7 +339,7 @@ function checkSteps(value: unknown, depth = 0, count = { steps: 0 }): AgentStep[
       case "work": {
         const skill = str(step.skill, field("A work step", "a", "skill"), 64, { required: false });
         const model = str(step.model, field("A work step", "a", "model"), 200, { required: false });
-        return { kind: "work", prompt: str(step.prompt, field("A work step", "a", "prompt"), 4_000)!, ...(skill && { skill }), ...(model && { model }) };
+        return { kind: "work", prompt: str(step.prompt, field("A work step", "a", "prompt"), 4_000, { seen: true })!, ...(skill && { skill }), ...(model && { model }) };
       }
       case "onlyIf":
         return { kind: "onlyIf", condition: condition(step.condition, field("An onlyIf step", "a", "condition")) };
@@ -412,8 +413,8 @@ export function checkAgent(input: unknown): AgentInput {
     name,
     ...(avatar && { avatar }),
     ...(color !== undefined && { color: color as AgentColor }),
-    job: str(input.job, field("An agent", "a", "job line"), MAX_AGENT_JOB)!,
-    instructions: str(input.instructions, field("An agent", "", "instructions"), MAX_AGENT_INSTRUCTIONS)!,
+    job: str(input.job, field("An agent", "a", "job line"), MAX_AGENT_JOB, { seen: true })!,
+    instructions: str(input.instructions, field("An agent", "", "instructions"), MAX_AGENT_INSTRUCTIONS, { seen: true })!,
     ...(model && { model }),
     ...(effort !== undefined && { effort: effort as ModelThinkingLevel }),
     ...(servers && { servers }),
