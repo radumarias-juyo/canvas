@@ -543,6 +543,14 @@ export class ChatRoster {
     return turnOf(row);
   }
 
+  /** When the router last picked an agent here (its newest routed turn); undefined when it never did. */
+  lastRoutedAt(agentId: string): number | undefined {
+    const at = this.#sql
+      .exec("SELECT MAX(created_at) AS at FROM chat_agent_turns WHERE agent_id = ? AND json_extract(called_by, '$.routed') IS NOT NULL", agentId)
+      .toArray()[0]?.at;
+    return typeof at === "number" ? at : undefined;
+  }
+
   /** pi's place, not ended, in the chain of the message whose ask key is `askKey` (enqueue's `placed`); null for none. */
   piTurnFor(askKey: string): AgentTurn | null {
     return this.#turns(`agent_id = ? AND ask_key = ? AND ${OPEN} ORDER BY id LIMIT 1`, PI_TURN, askKey)[0] ?? null;

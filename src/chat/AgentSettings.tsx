@@ -8,6 +8,14 @@ import {
   type ChatAgentSettingsView,
 } from "../../shared/agent-settings.ts";
 import type { ChatAgentView } from "../../shared/agents.ts";
+import {
+  SPEAK_UP_BOUNDS,
+  SPEAK_UP_DEFAULTS,
+  SPEAK_UP_FIELDS,
+  SPEAK_UP_LABELS,
+  type SpeakUpLimitField,
+  type SpeakUpLimits,
+} from "../../shared/speak-up.ts";
 import { errorMessage } from "../../shared/util.ts";
 import { api } from "../api.ts";
 
@@ -15,6 +23,13 @@ import { api } from "../api.ts";
 type SettingsChange = { [K in keyof ChatAgentSettings]?: ChatAgentSettings[K] | null };
 
 const tokens = (n: number) => n.toLocaleString("en");
+
+/** Speaking-up limits with one changed (null: back to the default), or null when none is left set. */
+export function limitsWith(limits: SpeakUpLimits | undefined, field: SpeakUpLimitField, value: number | null): SpeakUpLimits | null {
+  const { [field]: _, ...rest } = limits ?? {};
+  const next: SpeakUpLimits = value === null ? rest : { ...rest, [field]: value };
+  return Object.keys(next).length ? next : null;
+}
 
 /**
  * A whole number the owner sets, saved by its own Save: empty clears it (back to `unset`, the placeholder). The
@@ -33,7 +48,7 @@ export function NumberSetting({
 }: {
   id: string;
   label: string;
-  hint: ReactNode;
+  hint?: ReactNode;
   value: number | undefined;
   min: number;
   max: number;
@@ -57,7 +72,7 @@ export function NumberSetting({
     >
       <label htmlFor={id}>
         {label}
-        <small>{hint}</small>
+        {hint && <small>{hint}</small>}
       </label>
       <div className="agent-budget-row">
         <input id={id} inputMode="numeric" placeholder={unset} value={text} aria-invalid={!valid} onChange={(e) => setText(e.target.value)} />
@@ -154,6 +169,30 @@ export function AgentSettingsPanel({
           </small>
         </span>
       </label>
+      {(settings.speakUp || shown.router) && (
+        <fieldset className="agent-servers-here">
+          <legend>
+            How often agents speak up here
+            <small>
+              Each agent's owner may set stricter limits for it; the stricter of the two holds. With others in the chat, an agent the chat
+              picks answers at most one of so many messages too.
+            </small>
+          </legend>
+          {SPEAK_UP_FIELDS.map((field) => (
+            <NumberSetting
+              key={field}
+              id={`${field}-${chatId}`}
+              label={SPEAK_UP_LABELS[field]}
+              value={settings.speakUpLimits?.[field]}
+              min={SPEAK_UP_BOUNDS[field][0]}
+              max={SPEAK_UP_BOUNDS[field][1]}
+              unset={`Default (${SPEAK_UP_DEFAULTS[field]})`}
+              disabled={saving}
+              onSave={(value) => void save({ speakUpLimits: limitsWith(settings.speakUpLimits, field, value) })}
+            />
+          ))}
+        </fieldset>
+      )}
       {muted.length > 0 && (
         <ul className="agent-runs">
           {muted.map((agent) => (

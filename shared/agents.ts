@@ -9,6 +9,7 @@ import { conditionProblem, MAX_CONDITION } from "./conditions.ts";
 import type { ItemRef } from "./items.ts";
 import { checkRules, GuardrailError, MAX_APPROVAL_HOURS, type GuardrailRule } from "./limits.ts";
 import { AGENT_NAME } from "./mentions.ts";
+import { checkSpeakUpLimits, SpeakUpLimitsError, type SpeakUpLimits } from "./speak-up.ts";
 import { EFFORT_LABELS } from "./models.ts";
 import type { RunRef } from "./runs.ts";
 import { isObject, isTimeZone, withoutUnseen } from "./util.ts";
@@ -129,6 +130,11 @@ export interface AgentInput {
    * offer to pick up a question nobody answered (worker/agents/funnel.ts). Off when absent.
    */
   speaksUp?: boolean;
+  /**
+   * How often it may speak up, and be picked by a chat's router, as its owner limits it: the stricter of these and the
+   * chat's own holds (shared/speak-up.ts).
+   */
+  speakUpLimits?: SpeakUpLimits;
 }
 
 /** Who made an agent: its owner, or the model in a chat (saved off until the owner turns it on, as skills are). */
@@ -427,6 +433,13 @@ export function checkAgent(input: unknown): AgentInput {
   if (review !== undefined && typeof review !== "boolean") fail("An agent's review before posting is true or false.");
   const speaksUp = input.speaksUp ?? undefined;
   if (speaksUp !== undefined && typeof speaksUp !== "boolean") fail("An agent's speaksUp is true or false.");
+  let speakUpLimits: SpeakUpLimits | undefined;
+  try {
+    speakUpLimits = checkSpeakUpLimits(input.speakUpLimits);
+  } catch (error) {
+    if (error instanceof SpeakUpLimitsError) fail(`An agent's limits on speaking up: ${error.message}`);
+    throw error;
+  }
   return {
     name,
     ...(avatar && { avatar }),
@@ -446,6 +459,7 @@ export function checkAgent(input: unknown): AgentInput {
     ...(assumed?.length && { assumed }),
     ...(review && { reviewBeforePosting: true }),
     ...(speaksUp && { speaksUp: true }),
+    ...(speakUpLimits && { speakUpLimits }),
   };
 }
 
@@ -548,6 +562,7 @@ export const COPIED_FIELDS = [
   "scope",
   "workflow",
   "speaksUp",
+  "speakUpLimits",
 ] as const satisfies readonly (keyof AgentInput)[];
 export type CopiedField = (typeof COPIED_FIELDS)[number];
 /** The fields a copy takes only as its new owner sets them when they copy it, never from the one it copies. */

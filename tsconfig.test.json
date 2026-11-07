@@ -137,6 +137,7 @@
     "src/agents/limits/rules.ts",
     "src/chat/ActionCard.tsx",
     "src/chat/AgentDraft.tsx",
+    "src/chat/AgentSettings.tsx",
     "src/chat/people.tsx",
     "src/SignIns.tsx",
     "src/push.ts",

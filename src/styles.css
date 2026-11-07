@@ -1255,6 +1255,9 @@ a.mention-chip:hover { text-decoration: underline; }
 .agent-form { display: flex; flex-direction: column; gap: 18px; margin-top: 20px; padding: 20px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-card); }
 .agent-form > .skills-note { margin: 0; }
 .agent-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.agent-speak-limits { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+.agent-speak-limits > small { grid-column: 1 / -1; color: var(--muted); }
+.agent-speak-limits label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
 .agent-label { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; font-size: 13px; font-weight: 600; }
 .agent-label small { flex-basis: 100%; color: var(--muted); font-weight: 400; }
 .agent-form input:not([type="checkbox"], [type="radio"]), .agent-form textarea { width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); font-size: 15px; }
