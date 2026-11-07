@@ -59,6 +59,10 @@ with `@cloudflare/vite-plugin`, pnpm; configured and deployed with the `cf` CLI 
   read-only MCP tools of the agent's own servers), and a page rebuild only the artifact tools, for the report it is
   given; `do` steps wait for approvals; keep it that way. Shared watches poll once for all through a `Source` object
   (`worker/source.ts`), only for servers whose results everyone shares and nobody signs in to.
+  The editor is `src/agents/` (sidebar section, agent page with its `TABS`, the draft card an `agent_propose` result
+  shows); `AgentStore`'s `agent_chats` is the used-in index the chats keep. A chat's owner can share a roster agent
+  there: members see it read-only and saving makes their own copy (`copiedFrom`, off). With `DEV_TOOLS=true`,
+  `POST /api/dev/agents/propose` saves a proposal as the model would.
   A DO method's return type must not contain `unknown` (the RPC type turns `never`) or recursive JSON types (too deep).
 - Before a page becomes a version it is checked in a headless browser (`BROWSER` binding, `worker/artifacts/check.ts`):
   the agent saves a page with `artifact_write` (then changes it only by edits), and `artifact_check` and `artifact_publish` take it by draft id and report console errors, failed calls, a screenshot and the agent's tests, and

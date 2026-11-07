@@ -25,6 +25,8 @@ export interface RosterEntry {
   mirrored: number;
   /** Its owner turned it off since: it takes no turns until they turn it on. */
   off: boolean;
+  /** Its owner shares it with the people of the chat: they may open it read-only and copy it. */
+  shared: boolean;
 }
 
 /** What everyone sees of an agent, as its definition says now. */
@@ -71,6 +73,7 @@ type RosterRow = {
   job: string;
   mirrored: number;
   off: number;
+  shared: number;
 };
 
 type TurnRow = {
@@ -105,6 +108,7 @@ function entryOf(row: RosterRow): RosterEntry {
     job: row.job,
     mirrored: row.mirrored,
     off: row.off === 1,
+    shared: row.shared === 1,
   };
 }
 
@@ -151,7 +155,8 @@ export class ChatRoster {
     sql.exec(`
       CREATE TABLE IF NOT EXISTS chat_agents (
         agent_id TEXT PRIMARY KEY, owner_uid TEXT NOT NULL, name TEXT NOT NULL UNIQUE, session TEXT NOT NULL, added_at INTEGER NOT NULL,
-        avatar TEXT NOT NULL, color TEXT NOT NULL, job TEXT NOT NULL, mirrored INTEGER NOT NULL DEFAULT -1, off INTEGER NOT NULL DEFAULT 0
+        avatar TEXT NOT NULL, color TEXT NOT NULL, job TEXT NOT NULL, mirrored INTEGER NOT NULL DEFAULT -1, off INTEGER NOT NULL DEFAULT 0,
+        shared INTEGER NOT NULL DEFAULT 0
       );
       CREATE TABLE IF NOT EXISTS chat_agent_turns (
         id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT NOT NULL, status TEXT NOT NULL, hop INTEGER NOT NULL, called_by TEXT NOT NULL,
@@ -165,6 +170,10 @@ export class ChatRoster {
     // Added later: a turn's own session, and the run its reply carries.
     const columns = sql.exec("SELECT name FROM pragma_table_info('chat_agent_turns')").toArray();
     for (const name of ["session", "run"]) if (!columns.some((column) => column.name === name)) sql.exec(`ALTER TABLE chat_agent_turns ADD COLUMN ${name} TEXT`);
+    // A roster made before agents could be shared lacks the column.
+    if (!sql.exec("SELECT 1 FROM pragma_table_info('chat_agents') WHERE name = 'shared'").toArray().length) {
+      sql.exec("ALTER TABLE chat_agents ADD COLUMN shared INTEGER NOT NULL DEFAULT 0");
+    }
   }
 
   /** The roster's clock: what its turns' times are taken from. */
@@ -260,6 +269,11 @@ export class ChatRoster {
       );
     }
     return { entry, changed };
+  }
+
+  /** Share an agent with the people of the chat, or stop; false when it is not here. */
+  setShared(agentId: string, shared: boolean): boolean {
+    return this.#sql.exec("UPDATE chat_agents SET shared = ? WHERE agent_id = ?", shared ? 1 : 0, agentId).rowsWritten > 0;
   }
 
   /** The newest log entry an agent's session has read: what it is sent next starts after it. */
@@ -453,6 +467,7 @@ export class ChatRoster {
       ...(count(entry.agentId, "running") && { busy: true as const }),
       ...(count(entry.agentId, "queued") && { queued: count(entry.agentId, "queued") }),
       ...(entry.off && { off: true as const }),
+      ...(entry.shared && { shared: true as const }),
     }));
   }
 
