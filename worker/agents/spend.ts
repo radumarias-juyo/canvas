@@ -6,7 +6,9 @@
 
 import { createAssistantMessageEventStream, type AssistantMessage, type Models, type Usage } from "@earendil-works/pi-ai";
 import { defineExtension, GenerationTask, hook, ProviderDoc, type Extension } from "@earendil-works/pi-durable";
+import { calculateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import { budgetDay, budgetNotice } from "../../shared/agent-settings.ts";
+import { NO_USAGE } from "../agent/route.ts";
 import { tapStream } from "../streams.ts";
 import type { Kv } from "../chat-kind.ts";
 
@@ -80,12 +82,6 @@ export class ChatSpend {
     return this.#kv.get<DaySpend>(`${SPEND_KEY}${budgetDay(this.#now())}`) ?? { tokens: 0, costUsd: 0 };
   }
 
-  /** Whether the chat's daily budget is used up; never without a budget. */
-  usedUp(): boolean {
-    const budget = this.#budget();
-    return budget !== undefined && this.today().tokens >= budget;
-  }
-
   /** The notice a call stopped by the budget answers with; undefined while there is room. */
   refusal(): string | undefined {
     const budget = this.#budget();
@@ -109,7 +105,7 @@ export class ChatSpend {
 
   /** Count one answer's usage (and its tool calls), for the session it was for when known. */
   record(usage: Usage, conversation?: string, toolCalls = 0): void {
-    const tokens = usage.totalTokens || usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+    const tokens = calculateContextTokens(usage);
     const costUsd = usage.cost.total;
     if (!tokens && !costUsd) return;
     const day = budgetDay(this.#now());
@@ -184,7 +180,7 @@ function refusedStream(model: { api: string; provider: string; id: string }, rea
     api: model.api as AssistantMessage["api"],
     provider: model.provider as AssistantMessage["provider"],
     model: model.id,
-    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    usage: structuredClone(NO_USAGE),
     stopReason: "error",
     errorMessage: reason,
     timestamp: Date.now(),

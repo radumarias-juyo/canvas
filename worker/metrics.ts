@@ -23,7 +23,7 @@ import type { EvictReason } from "./mcp/result-cache.ts";
  *   run     1 wall ms, 2 cost USD, 3 items
  *   router  1 candidates, 2 picked, 3 ms, 4 failed (1/0)
  *   funnel  1 passed (1/0), 2 has a score (1/0), 3 score (0 when none)
- *   budget  1 tokens used, 2 USD used, 3 capped (1/0)
+ *   budget  1 tokens used, 2 USD used (one point when a budget runs out, once a day)
  *
  * For example, hits per owner for a day:
  *   SELECT blob4 AS owner, SUM(_sample_interval * double1) AS hits FROM <dataset>
@@ -109,14 +109,14 @@ export class Metrics implements CacheObserver {
     this.#write("router", "", r.picked.join(","), r.failed ?? "", [r.candidates, r.picked.length, r.ms, flag(r.failed !== undefined)]);
   }
 
-  /** One gate an agent's unprompted turn went through ("gates", "pause", "interest", "turn", "pass"), and whether it passed. */
+  /** One stage an agent's unprompted turn went through ("gates" or "gates:<refusal>", "interest", "turn"), and whether it passed. */
   funnel(f: { agent: string; stage: string; passed: boolean; score?: number }): void {
     this.#write("funnel", f.agent, f.stage, "", [flag(f.passed), flag(f.score !== undefined), f.score ?? 0]);
   }
 
-  /** How much of a chat's or a user's budget is used, and whether it is used up. */
-  budget(b: { scope: "chat" | "user"; usedTokens?: number; usedUsd?: number; capped: boolean }): void {
-    this.#write("budget", b.scope, b.capped ? "capped" : "", "", [b.usedTokens ?? 0, b.usedUsd ?? 0, flag(b.capped)]);
+  /** A chat's or a user's budget ran out today (one point a day each), and what was used by then. */
+  budget(b: { scope: "chat" | "user"; usedTokens?: number; usedUsd?: number }): void {
+    this.#write("budget", b.scope, "capped", "", [b.usedTokens ?? 0, b.usedUsd ?? 0]);
   }
 
   /** Write the cache counts since the last flush, one point per owner. */

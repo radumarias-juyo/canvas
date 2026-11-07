@@ -226,18 +226,19 @@ export function askOf(speaker: Parameters<typeof speakerLabel>[0], text: string,
 /** Tools an agent's session never has: they act for pi in the log (reactions). */
 const NEVER_FOR_AGENTS = ["react"];
 /**
- * The app's tools a turn its owner did not ask for may use: reading the pages of the chat and the owner's skills,
- * loading a deferred tool it may use, and posting its plan as a checklist card (a display, no data). Every other tool
- * of the app writes, runs code, reads the owner's private files, or lists the owner's servers and sign-ins, and a tool
- * added later is left out until it is named here.
+ * The app's tools a turn its owner did not ask for may use: reading the pages of the chat and the owner's skills, and
+ * loading a deferred tool it may use. Every other tool of the app writes, runs code, reads the owner's private files,
+ * or lists the owner's servers and sign-ins, and a tool added later is left out until it is named here.
  */
-const READ_TOOLS = ["artifact_read", "artifact_history", "artifact_diff", "activate_skill", "read_skill_resource", TOOL_SEARCH_TOOL_NAME, CHECKLIST_TOOL];
+const READ_TOOLS = ["artifact_read", "artifact_history", "artifact_diff", "activate_skill", "read_skill_resource", TOOL_SEARCH_TOOL_NAME];
+/** The tools that only show something in the chat (a plan as a checklist card: no data): for a turn, not a run, which nobody watches. */
+const DISPLAY_TOOLS = [CHECKLIST_TOOL];
 
 /**
  * The tools a turn may use, by name, of `tools` (every tool installed), as an allow-list: a tool installed after the
  * turn was set up stays off. A turn its owner asked for gets every tool but the MCP tools of servers the agent may not
  * use. A turn its owner did not ask for (a member's, another agent's hand-off, a schedule's) gets only the app's read
- * tools (READ_TOOLS) and the read-only MCP tools of its servers for shared chats. Its owner then approves any write in
+ * tools (READ_TOOLS), the display ones (DISPLAY_TOOLS) and the read-only MCP tools of its servers for shared chats. Its owner then approves any write in
  * their own view.
  *
  * `servers`: the agent's own list (every server when absent); `sharedServers`: the one for shared chats (when absent,
@@ -256,7 +257,7 @@ export function allowedTools(
     if (NEVER_FOR_AGENTS.includes(name)) return false;
     const info = mcp.get(name);
     if (byOwner) return !info || own(info.server);
-    return info ? info.readOnly && shared(info.server) : READ_TOOLS.includes(name);
+    return info ? info.readOnly && shared(info.server) : READ_TOOLS.includes(name) || DISPLAY_TOOLS.includes(name);
   });
 }
 
@@ -267,8 +268,7 @@ export function allowedTools(
  */
 export function runTools(tools: readonly string[], mcp: ReadonlyMap<string, McpToolInfo>, agent: Pick<AgentDefinition, "servers">): string[] {
   return tools.filter((name) => {
-    // A run posts its report, not a plan: nobody watches it work.
-    if (NEVER_FOR_AGENTS.includes(name) || name === CHECKLIST_TOOL) return false;
+    if (NEVER_FOR_AGENTS.includes(name)) return false;
     const info = mcp.get(name);
     return info ? info.readOnly && mayUseServer(agent, info.server) : READ_TOOLS.includes(name);
   });

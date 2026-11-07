@@ -79,15 +79,15 @@ describe("Metrics", () => {
     metrics.router({ picked: [], candidates: 5, ms: 3_000, failed: "timeout" });
     metrics.funnel({ agent: "a", stage: "interest", passed: false, score: 0.4 });
     metrics.funnel({ agent: "a", stage: "gates", passed: true });
-    metrics.budget({ scope: "chat", usedUsd: 1.5, capped: true });
-    metrics.budget({ scope: "user", usedTokens: 10_000, capped: false });
+    metrics.budget({ scope: "chat", usedTokens: 10_000 });
+    metrics.budget({ scope: "user", usedUsd: 1.5 });
     expect(data.points).toEqual([
       { indexes: ["router"], blobs: ["router", "u1", "c1", "", "a,b", ""], doubles: [5, 2, 120, 0] },
       { indexes: ["router"], blobs: ["router", "u1", "c1", "", "", "timeout"], doubles: [5, 0, 3_000, 1] },
       { indexes: ["funnel"], blobs: ["funnel", "u1", "c1", "a", "interest", ""], doubles: [0, 1, 0.4] },
       { indexes: ["funnel"], blobs: ["funnel", "u1", "c1", "a", "gates", ""], doubles: [1, 0, 0] },
-      { indexes: ["budget"], blobs: ["budget", "u1", "c1", "chat", "capped", ""], doubles: [0, 1.5, 1] },
-      { indexes: ["budget"], blobs: ["budget", "u1", "c1", "user", "", ""], doubles: [10_000, 0, 0] },
+      { indexes: ["budget"], blobs: ["budget", "u1", "c1", "chat", "capped", ""], doubles: [10_000, 0] },
+      { indexes: ["budget"], blobs: ["budget", "u1", "c1", "user", "capped", ""], doubles: [0, 1.5] },
     ]);
   });
 

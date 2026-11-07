@@ -3,7 +3,7 @@
 // first posted, with what its latest entry says.
 
 import { AGENT_COLORS, type AgentColor } from "./agents.ts";
-import { isObject, randomHex } from "./util.ts";
+import { isObject } from "./util.ts";
 
 /** The tool an agent posts and updates a checklist with. */
 export const CHECKLIST_TOOL = "checklist";
@@ -18,7 +18,7 @@ export const MAX_CHECKLIST_STEPS = 12;
 export const MAX_STEP_CHARS = 200;
 export const MAX_NOTE_CHARS = 200;
 export const MAX_TITLE_CHARS = 120;
-/** A checklist's id, as newChecklistId makes it. */
+/** A checklist's id: the start of its first call's request id, hashed (ChatAgent.#postChecklist). */
 export const CHECKLIST_ID_PATTERN = /^[a-f0-9]{12}$/;
 
 export const CHECKLIST_STATUSES = ["todo", "doing", "done", "skipped"] as const;
@@ -53,11 +53,6 @@ export class ChecklistError extends Error {}
 
 function fail(message: string): never {
   throw new ChecklistError(message);
-}
-
-/** A new checklist's id. */
-export function newChecklistId(): string {
-  return randomHex(6);
 }
 
 /** One line of text, trimmed, its runs of spaces and line breaks as one space; undefined when there is none. */

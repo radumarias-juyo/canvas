@@ -195,8 +195,9 @@ export async function chatRoute(
       method === "GET" ? await chat.chatSystemPrompt(person.uid) : await chat.setChatSystemPrompt(person, (await readJson<{ text?: unknown }>(request))?.text);
     return "status" in result ? answer(result) : json(result satisfies ChatSystemPrompt);
   }
-  if (what === "agent-settings" && !item && (method === "GET" || method === "PUT")) {
-    const result = method === "GET" ? await chat.agentSettingsFor(person.uid) : await chat.setAgentSettings(person, await readJson(request));
+  if (what === "agent-settings" && !item && method === "PUT") {
+    // The settings reach the app over its socket; this changes them.
+    const result = await chat.setAgentSettings(person, await readJson(request));
     return "status" in result ? answer(result) : json(result);
   }
   if (what === "agents" && sub === "mute") {

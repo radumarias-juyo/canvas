@@ -13,6 +13,7 @@ import {
   gateRefusal,
   INTEREST_THRESHOLD,
   isPass,
+  lateRefusal,
   looksLikeAsk,
   MAX_UNPROMPTED_PER_DAY,
   recentText,
@@ -20,12 +21,12 @@ import {
   unpromptedInput,
   type GateState,
 } from "../worker/agents/funnel.ts";
-import { agentRouteHistory, agentRouterModel, MAX_ROUTED, NO_AGENT, routeAgents, ROUTE_THRESHOLD, selectAgents } from "../worker/agents/router.ts";
+import { agentRouterModel, MAX_ROUTED, NO_AGENT, routeAgents, ROUTE_THRESHOLD, selectAgents } from "../worker/agents/router.ts";
+import { routeHistory } from "../worker/agent/route.ts";
 import { ChatRoster } from "../worker/agents/roster.ts";
 import { SpeakUp, type FunnelEvent, type SpeakUpHost } from "../worker/agents/speak-up.ts";
 import { ChatSpend, type Spent } from "../worker/agents/spend.ts";
-import type { Kv } from "../worker/chat-kind.ts";
-import { memorySql } from "./fakes.ts";
+import { memoryKv, memorySql } from "./fakes.ts";
 
 const T0 = Date.parse("2026-11-07T10:00:00Z");
 const OWNER = "olga";
@@ -125,39 +126,35 @@ describe("the agent router", () => {
   });
 
   it("reads the agents' replies as named answers in the history", () => {
-    const history = agentRouteHistory([agentReply("research", "Found three sources."), message("mia", "thanks")]);
+    const history = routeHistory([agentReply("research", "Found three sources."), message("mia", "thanks")]);
     expect(history.some((turn) => turn.text.includes("@research: Found three sources."))).toBe(true);
   });
 });
 
 describe("the funnel's gates", () => {
-  const open: GateState = {
-    agentAllows: true,
-    chatAllows: true,
-    muted: false,
-    off: false,
-    busy: false,
-    postsToday: 0,
-    now: T0,
-    budgetLeft: true,
-    spendLeft: true,
-  };
+  const open: GateState = { muted: false, off: false, busy: false, postsToday: 0, now: T0, budgetLeft: true };
 
   it("lets an agent past when every gate is open", () => {
     expect(gateRefusal(open)).toBeNull();
   });
 
   it("stops at the first closed gate, cheapest first", () => {
-    expect(gateRefusal({ ...open, chatAllows: false, agentAllows: false })).toBe("chat");
-    expect(gateRefusal({ ...open, agentAllows: false, muted: true })).toBe("agent");
     expect(gateRefusal({ ...open, off: true, muted: true })).toBe("off");
     expect(gateRefusal({ ...open, muted: true, busy: true })).toBe("muted");
     expect(gateRefusal({ ...open, busy: true })).toBe("busy");
     expect(gateRefusal({ ...open, postsToday: MAX_UNPROMPTED_PER_DAY })).toBe("daily");
     expect(gateRefusal({ ...open, lastAt: T0 - UNPROMPTED_COOLDOWN_MS + 1 })).toBe("cooldown");
     expect(gateRefusal({ ...open, lastAt: T0 - UNPROMPTED_COOLDOWN_MS })).toBeNull();
-    expect(gateRefusal({ ...open, budgetLeft: false, spendLeft: false })).toBe("budget");
-    expect(gateRefusal({ ...open, spendLeft: false })).toBe("spend");
+    expect(gateRefusal({ ...open, budgetLeft: false })).toBe("budget");
+  });
+
+  it("then reads the owner's word: the agent is on, may speak up, and its owner's spend has room", () => {
+    const agent = { enabled: true, speaksUp: true };
+    expect(lateRefusal(agent, true)).toBeNull();
+    expect(lateRefusal(null, true)).toBe("off");
+    expect(lateRefusal({ ...agent, enabled: false }, true)).toBe("off");
+    expect(lateRefusal({ ...agent, speaksUp: false }, false)).toBe("agent");
+    expect(lateRefusal(agent, false)).toBe("spend");
   });
 });
 
@@ -184,7 +181,7 @@ describe("the funnel's helpers", () => {
 
   it("reads the end of the conversation oldest first: people, agents and pi", () => {
     const newestFirst = [piSays("Here are the totals."), agentReply("research", "Two sources."), message("mia", "what are the totals?")];
-    expect(recentText(newestFirst)).toBe("what are the totals?\nTwo sources.\nHere are the totals.");
+    expect(recentText(newestFirst)).toBe("what are the totals?\n@research: Two sources.\nHere are the totals.");
   });
 
   it("tells a question answered by someone else, pi or an agent, but not by its asker alone", () => {
@@ -265,11 +262,9 @@ function speakUpChat(names: readonly string[], over: Partial<{ speakUp: boolean;
   const embedded: string[] = [];
   const events: FunnelEvent[] = [];
   const given: { agentId: string; request: Parameters<SpeakUpHost["give"]>[1] }[] = [];
-  const muted = new Set<string>();
   const host: SpeakUpHost = {
     roster,
     settings: () => ({ speakUp: over.speakUp ?? true }),
-    muted: (id) => muted.has(id),
     definition: async (entry) => definitions.get(entry.agentId) ?? null,
     budgetLeft: () => over.budgetLeft ?? true,
     spendLeft: async () => over.spendLeft ?? true,
@@ -290,7 +285,7 @@ function speakUpChat(names: readonly string[], over: Partial<{ speakUp: boolean;
     observe: (event) => events.push(event),
     now: () => clock.now,
   };
-  return { roster, definitions, host, speakUp: new SpeakUp(host), events, given, muted, clock, embedded };
+  return { roster, definitions, host, speakUp: new SpeakUp(host), events, given, clock, embedded };
 }
 
 describe("agents that speak up", () => {
@@ -338,7 +333,7 @@ describe("agents that speak up", () => {
   it("stops at the gates before any model is asked: muted, its owner does not let it, its daily posts, the chat's budget", async () => {
     const chat = speakUpChat(names);
     jobs(chat);
-    chat.muted.add("id-finance");
+    chat.roster.setMuted("id-finance", true);
     chat.definitions.set("id-builder", definition("builder", { speaksUp: false }));
     expect(await chat.speakUp.afterPause(talk, { line: "x" })).toBeUndefined();
     expect(chat.embedded).toEqual([]);
@@ -419,17 +414,6 @@ describe("agents that speak up", () => {
     expect(chat.embedded.filter((text) => text.startsWith("finance:"))).toHaveLength(2);
   });
 });
-
-/** A KV store in memory, as the chat object's. */
-function memoryKv(): Kv & { map: Map<string, unknown> } {
-  const map = new Map<string, unknown>();
-  return {
-    map,
-    get: <T>(key: string) => map.get(key) as T | undefined,
-    put: (key, value) => void map.set(key, value),
-    delete: (key) => map.delete(key),
-  };
-}
 
 const usage = (totalTokens: number, total: number): Usage => ({
   input: totalTokens,
@@ -515,14 +499,14 @@ describe("a chat's spend meter", () => {
     const metered = spend.models(models);
     expect(spend.refusal()).toBeUndefined();
     await metered.streamSimple(MODEL, { messages: [] } as never).result();
-    expect(spend.usedUp()).toBe(true);
+    expect(spend.refusal()).toBeDefined();
     expect(spend.refusal()).toBe(budgetNotice(MIN_DAILY_TOKENS));
     const refused = await metered.streamSimple(MODEL, { messages: [] } as never).result();
     expect(refused).toMatchObject({ stopReason: "error", errorMessage: budgetNotice(MIN_DAILY_TOKENS) });
     // Not sent: the provider saw only the first call.
     expect(sent).toHaveLength(1);
     clock.now += 86_400_000;
-    expect(spend.usedUp()).toBe(false);
+    expect(spend.refusal()).toBeUndefined();
     await metered.streamSimple(MODEL, { messages: [] } as never).result();
     expect(sent).toHaveLength(2);
   });
@@ -533,7 +517,7 @@ describe("a chat's spend meter", () => {
     const metered = spend.models(models);
     for (let day = 0; day < 6; day++) {
       await metered.streamSimple(MODEL, { messages: [] } as never).result();
-      expect(spend.usedUp()).toBe(false);
+      expect(spend.refusal()).toBeUndefined();
       clock.now += 86_400_000;
     }
     expect([...kv.map.keys()].filter((key) => key.startsWith("spend:")).length).toBeLessThanOrEqual(3);

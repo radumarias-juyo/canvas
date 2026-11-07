@@ -2,6 +2,7 @@ import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { DatabaseSync } from "node:sqlite";
 import type { DumpSql } from "../worker/chat-dump.ts";
+import type { Kv } from "../worker/chat-kind.ts";
 import type { Sql } from "../worker/members.ts";
 
 /** A FILES_MASTER_KEY for tests. */
@@ -94,5 +95,16 @@ export function memorySql(): Sql & DumpSql & { db: DatabaseSync } {
       const { changes } = statement.run(...bindings);
       return { toArray: () => [], rowsWritten: Number(changes) };
     },
+  };
+}
+
+/** A KV store in memory, as a Durable Object's (`ctx.storage.kv`). */
+export function memoryKv(): Kv & { map: Map<string, unknown> } {
+  const map = new Map<string, unknown>();
+  return {
+    map,
+    get: <T>(key: string) => map.get(key) as T | undefined,
+    put: (key, value) => void map.set(key, value),
+    delete: (key) => map.delete(key),
   };
 }

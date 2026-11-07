@@ -1249,14 +1249,14 @@ describe("AgentTurns: pi's replies", () => {
 /** A chat with a daily budget that may be used up, which counts how each turn ended. */
 class MeteredChat extends FakeChat {
   refused: string | undefined;
-  readonly outcomes: { turn: number; status: string; text: string }[] = [];
+  readonly outcomes: { turn: number; status: string }[] = [];
 
   refusal(): string | undefined {
     return this.refused;
   }
 
-  ended(turn: AgentTurn, outcome: { status: string; text: string }): void {
-    this.outcomes.push({ turn: turn.id, status: outcome.status, text: outcome.text });
+  ended(turn: AgentTurn, outcome: { status: string }): void {
+    this.outcomes.push({ turn: turn.id, status: outcome.status });
   }
 }
 
@@ -1277,7 +1277,7 @@ describe("AgentTurns: turns nobody asked for, and the budget", () => {
     await chat.flush();
     expect(chat.posts).toEqual([]);
     expect(chat.latest(A).status).toBe("done");
-    expect(chat.outcomes).toEqual([{ turn: turn.id, status: "passed", text: "**PASS**" }]);
+    expect(chat.outcomes).toEqual([{ turn: turn.id, status: "passed" }]);
   });
 
   it("posts an unprompted answer worth posting, and hands nothing on from it", async () => {

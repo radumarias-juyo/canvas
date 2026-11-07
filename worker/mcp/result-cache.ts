@@ -89,9 +89,10 @@ export class ResultCache {
     if (bytes > this.#maxBytes) return;
     const fits = () => this.#bytes + bytes <= this.#maxBytes;
     const now = this.#now();
+    // Oldest first: the first entry still alive ends the sweep.
     for (const [k, e] of this.#entries) {
-      if (fits()) break;
-      if (now - e.storedAt > this.#lifetimeMs) this.#evict(k, "expired");
+      if (fits() || now - e.storedAt <= this.#lifetimeMs) break;
+      this.#evict(k, "expired");
     }
     while (!fits()) {
       const over = this.#mostOverShare(owner, bytes);
@@ -108,6 +109,11 @@ export class ResultCache {
   /** What each owner holds now. */
   stats(): Map<string, OwnerStats> {
     return new Map([...this.#owners].map(([owner, held]) => [owner, { ...held }]));
+  }
+
+  /** The bytes `owner` holds now. */
+  bytesOf(owner: string): number {
+    return this.#owners.get(owner)?.bytes ?? 0;
   }
 
   /**

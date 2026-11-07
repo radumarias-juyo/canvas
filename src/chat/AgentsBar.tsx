@@ -18,9 +18,8 @@ import type { AgentsLive } from "./useChat.ts";
 /** What an agent is doing, as its badge's hover and its menu say it. */
 function agentState(agent: ChatAgentView): string {
   if (agent.off) return "off: its owner turned it off";
-  const muted = agent.muted ? ", muted here" : "";
-  if (agent.busy) return (agent.queued ? `working, ${agent.queued} more waiting` : "working") + muted;
-  return (agent.queued ? `${agent.queued} waiting` : "idle") + muted;
+  const doing = agent.busy ? (agent.queued ? `working, ${agent.queued} more waiting` : "working") : agent.queued ? `${agent.queued} waiting` : "idle";
+  return agent.muted ? `${doing}, muted here` : doing;
 }
 
 /**

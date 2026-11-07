@@ -881,6 +881,10 @@ export class UserDirectory extends DurableObject<Env> {
   recordModelSpend(spent: { calls: number; tokens: number; cost: number }): void {
     const sql = this.ctx.storage.sql;
     const day = utcDay();
+    // A month is kept, for a look back: older days go as a new one starts.
+    if (!sql.exec("SELECT 1 FROM model_spend WHERE day = ?", day).toArray().length) {
+      sql.exec("DELETE FROM model_spend WHERE day < ?", utcDay(Date.now() - 31 * 86_400_000));
+    }
     sql.exec(
       `INSERT INTO model_spend (day, calls, tokens, cost) VALUES (?, ?, ?, ?)
        ON CONFLICT(day) DO UPDATE SET calls = calls + excluded.calls, tokens = tokens + excluded.tokens, cost = cost + excluded.cost`,
@@ -889,8 +893,6 @@ export class UserDirectory extends DurableObject<Env> {
       spent.tokens,
       spent.cost,
     );
-    // A month is kept, for a look back; older days go.
-    sql.exec("DELETE FROM model_spend WHERE day < ?", utcDay(Date.now() - 31 * 86_400_000));
   }
 
   /**

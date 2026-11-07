@@ -47,7 +47,7 @@ export interface TurnHost {
   /** Keep the object alive for work that outlives the call that started it. */
   waitUntil(promise: Promise<unknown>): void;
   /** Why no turn may start now (the chat's daily budget is used up), as the turn's reply says it; undefined when one may. */
-  refusal?(turn: AgentTurn): string | undefined;
+  refusal?(): string | undefined;
   /** A turn ended: how, and whether a reply was posted for it (an unprompted turn that passed posts none). For the metrics. */
   ended?(turn: AgentTurn, outcome: TurnOutcome): void;
 }
@@ -55,7 +55,6 @@ export interface TurnHost {
 /** How a turn ended, as the metrics count it. */
 export interface TurnOutcome {
   status: "done" | "failed" | "passed";
-  text: string;
   startedAt: number;
   endedAt: number;
 }
@@ -135,7 +134,7 @@ export class AgentTurns {
         await this.#ended(entry, turn, { status: "unanswered", reason: `its owner turned @${entry.name} off` });
         return;
       }
-      const refused = this.#host.refusal?.(turn);
+      const refused = this.#host.refusal?.();
       if (refused) {
         await this.#ended(entry, turn, { status: "unanswered", reason: refused });
         return;
@@ -205,7 +204,7 @@ export class AgentTurns {
       // for it), and it hands nothing on.
       if (turn.calledBy.unprompted && (!done || !text || isPass(text))) {
         if (roster.end(turn.id, done ? "done" : "failed")) {
-          this.#host.ended?.(turn, { status: done ? "passed" : "failed", text, startedAt: now.startedAt ?? now.createdAt, endedAt: roster.now() });
+          this.#host.ended?.(turn, { status: done ? "passed" : "failed", startedAt: now.startedAt ?? now.createdAt, endedAt: roster.now() });
         }
         this.#host.changed();
         this.pump(entry.agentId);
@@ -236,7 +235,7 @@ export class AgentTurns {
       const next = done && left > 0 && !turn.calledBy.unprompted ? handOffs(text, entry.agentId, turn.hop, roster.list()).slice(0, left) : [];
       // A chain no person started never hands pi a turn: pi has the owner's full tools. It reads the reply instead.
       if (roster.end(turn.id, done ? "done" : "failed", { reply, toPi: !turn.unattended && next.includes(AGENT_NAME) })) {
-        this.#host.ended?.(turn, { status: done ? "done" : "failed", text, startedAt: reply.startedAt, endedAt: reply.endedAt });
+        this.#host.ended?.(turn, { status: done ? "done" : "failed", startedAt: reply.startedAt, endedAt: reply.endedAt });
         const agents = next.filter((id) => id !== AGENT_NAME);
         // A hand-off can only read, whoever started the chain: agents cannot give each other permission.
         const ask = askOf({ name: current.name, kind: "agent" }, text, MAX_ASK_CHARS);

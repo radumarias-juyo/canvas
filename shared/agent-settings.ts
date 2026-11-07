@@ -28,8 +28,6 @@ export interface ChatAgentSettingsView {
   available: { router: boolean; speakUp: boolean };
   /** The chat's model calls today (UTC): tokens and dollars. */
   today: { tokens: number; costUsd: number };
-  /** The agents muted here (their ids): they post nothing unprompted in this chat. */
-  muted: string[];
   /** The servers of the deployment, for the owner's list. */
   servers: string[];
 }

@@ -97,6 +97,11 @@ export class McpHub {
     return this.#cache.stats();
   }
 
+  /** The bytes `owner` holds in the read cache now. */
+  cacheBytes(owner: string): number {
+    return this.#cache.bytesOf(owner);
+  }
+
   servers(): McpServerConfig[] {
     return [...this.#servers.values()];
   }

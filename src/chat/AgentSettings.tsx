@@ -1,5 +1,11 @@
 import { useEffect, useState } from "react";
-import { MAX_DAILY_TOKENS, MIN_DAILY_TOKENS, type ChatAgentSettings, type ChatAgentSettingsView } from "../../shared/agent-settings.ts";
+import {
+  chatAllowsServer,
+  MAX_DAILY_TOKENS,
+  MIN_DAILY_TOKENS,
+  type ChatAgentSettings,
+  type ChatAgentSettingsView,
+} from "../../shared/agent-settings.ts";
 import type { ChatAgentView } from "../../shared/agents.ts";
 import { errorMessage } from "../../shared/util.ts";
 import { api } from "../api.ts";
@@ -52,7 +58,7 @@ export function AgentSettingsPanel({
       setError(errorMessage(e));
     }
   };
-  const allowed = (server: string) => !settings.servers || settings.servers.includes(server);
+  const allowed = (server: string) => chatAllowsServer(settings, server);
   const toggleServer = (server: string, on: boolean) => {
     const list = shown.servers.filter((name) => (name === server ? on : allowed(name)));
     void save({ servers: list.length === shown.servers.length ? null : list });
@@ -60,7 +66,7 @@ export function AgentSettingsPanel({
   const budgetValue = Number(budget.replace(/[,_\s]/g, ""));
   const budgetValid = budget.trim() === "" || (Number.isInteger(budgetValue) && budgetValue >= MIN_DAILY_TOKENS && budgetValue <= MAX_DAILY_TOKENS);
   const budgetChanged = (budget.trim() === "" ? undefined : budgetValue) !== settings.dailyTokens;
-  const muted = shown.muted.map((id) => agents.find((agent) => agent.id === id)).filter((agent) => agent !== undefined);
+  const muted = agents.filter((agent) => agent.muted);
 
   return (
     <div className="agent-settings">

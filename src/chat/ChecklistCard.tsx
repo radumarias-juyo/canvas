@@ -1,4 +1,4 @@
-import { defaultColor } from "../../shared/agents.ts";
+import { defaultAvatar, defaultColor } from "../../shared/agents.ts";
 import { checklistCount, type ChatChecklistData, type ChecklistStatus } from "../../shared/checklist.ts";
 import { AGENT_NAME } from "../../shared/mentions.ts";
 import { AgentAvatar, type AgentBadge } from "./people.tsx";
@@ -9,7 +9,7 @@ const STATUS_WORDS: Record<ChecklistStatus, string> = { todo: "to do", doing: "i
 /** The badge of the agent that posted a checklist: none for pi's (its own), else the one the entry names, or its name's. */
 function badgeOf(by: ChatChecklistData["by"]): AgentBadge | undefined {
   if (by.agentId === undefined) return undefined;
-  return { avatar: by.avatar || by.name.slice(0, 2), color: by.color ?? defaultColor(by.name) };
+  return { avatar: by.avatar || defaultAvatar(by.name), color: by.color ?? defaultColor(by.name) };
 }
 
 /** How far a plan is, in a line: "3 of 5 done", with how many were skipped. */

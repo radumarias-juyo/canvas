@@ -4,6 +4,7 @@
 // to repeat, a routine: a draft agent with a schedule, saved off until its owner turns it on).
 
 import { AGENT_PROPOSE_TOOL } from "./agents.ts";
+import { excerpt } from "./replies.ts";
 
 /** What starts the line an answer offers its next step on. */
 export const OFFER_PREFIX = "Next step:";
@@ -43,7 +44,7 @@ export function offerOf(text: string): { body: string; offer: string } | null {
   const match = OFFER_LINE.exec(trimmed.slice(start));
   if (!match) return null;
   const body = trimmed.slice(0, start).trim();
-  const offer = match[1].replace(/^[\s*_]+|[\s*_]+$/g, "").replace(/\s+/g, " ");
+  const offer = match[1].replace(/^[\s*_]+|[\s*_]+$/g, "");
   if (!body || !offer) return null;
-  return { body, offer: offer.length > MAX_OFFER ? `${offer.slice(0, MAX_OFFER - 1).trimEnd()}…` : offer };
+  return { body, offer: excerpt(offer, MAX_OFFER) };
 }

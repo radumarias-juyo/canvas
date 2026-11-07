@@ -6,13 +6,11 @@
 
 import type { ClassifierModel, Usage } from "@earendil-works/pi-ai";
 import { classify } from "@earendil-works/pi-ai/api/cloudflare-workers-ai-system-one";
-import type { EntryRecord } from "@earendil-works/pi-durable";
-import { CHAT_AGENT_KIND, type ChatAgentReplyData } from "../../shared/agents.ts";
 import { AGENT_NAME } from "../../shared/mentions.ts";
 import { modelKey } from "../../shared/models.ts";
 import { excerpt } from "../../shared/replies.ts";
 import { clip } from "../../shared/util.ts";
-import { MAX_MESSAGE_CHARS, NO_USAGE, routeHistory, type RouteTurn } from "../agent/route.ts";
+import { MAX_MESSAGE_CHARS, NO_USAGE, type RouteTurn } from "../agent/route.ts";
 import { bindingClassifierOptions, systemOneModel, type ModelRunner } from "../agent/workers-ai.ts";
 
 /** How long the pick may take: the message waits for it (beside the refreshes before a run, which take as long). */
@@ -106,20 +104,4 @@ export function selectAgents(probabilities: Iterable<[string, number]>, agents: 
     .sort((a, b) => b[1] - a[1])
     .slice(0, MAX_ROUTED)
     .map(([name]) => byName.get(name)!);
-}
-
-/**
- * The conversation before a message as the router reads it, from entries newest first: what routeHistory reads, and
- * the agents' replies too, each with its agent's name.
- */
-export function agentRouteHistory(entries: readonly EntryRecord[]): RouteTurn[] {
-  return routeHistory(
-    entries.map((entry) => {
-      if (entry.kind !== CHAT_AGENT_KIND) return entry;
-      const data = entry.data as unknown as ChatAgentReplyData;
-      // As one of pi's answers, which routeHistory reads, named.
-      const text = data.text ? `@${data.name}: ${data.text}` : "";
-      return { ...entry, kind: "pi.assistant", model: [{ role: "assistant", content: [{ type: "text", text }] }] } as unknown as EntryRecord;
-    }),
-  );
 }

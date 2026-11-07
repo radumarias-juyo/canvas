@@ -100,7 +100,7 @@ export interface RunHost {
    * Why a run may not spend today (its owner's daily spend cap is reached), its owner told once a day; undefined when it
    * may. Not asked for a test, which its owner started by hand.
    */
-  spendCap?(agent: AgentDefinition): Promise<string | undefined>;
+  spendCap?(): Promise<string | undefined>;
 }
 
 /** A run to start. */
@@ -275,12 +275,11 @@ export class RunExecutor {
     if (!started && run.status !== "running") return { status: run.status, started: false };
     this.#host.changed(agent.id);
     try {
-      const capped = test ? undefined : await this.#host.spendCap?.(agent);
+      const [capped, missing] = await Promise.all([test ? undefined : this.#host.spendCap?.(), this.#host.needsSignIn(reads)]);
       if (capped) {
         runs.update(agent.id, dueAt, { status: "failed", summary: capped });
         return { status: "failed", started };
       }
-      const missing = await this.#host.needsSignIn(reads);
       if (missing.length) return this.#waitForSignIn(agent, run, missing);
       const elements = await this.#elements(agent);
       const outcomes = await mapLimit(elements, RUN_CONCURRENCY, (element) => this.#item(agent, run, element, when));

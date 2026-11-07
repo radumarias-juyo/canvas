@@ -13,7 +13,6 @@ import {
   MAX_NOTE_CHARS,
   MAX_STEP_CHARS,
   MAX_TITLE_CHARS,
-  newChecklistId,
   type ChatChecklistData,
   type ChecklistInput,
   type ChecklistStep,
@@ -80,9 +79,8 @@ describe("checkChecklist", () => {
     expect(bad({ id: 12, title: "Plan", steps: steps("todo") })).toThrow(/id is the one/);
   });
 
-  it("makes ids it accepts", () => {
-    expect(newChecklistId()).toMatch(CHECKLIST_ID_PATTERN);
-    expect(newChecklistId()).not.toBe(newChecklistId());
+  it("takes an id of the shape the chat makes", () => {
+    expect(checkChecklist({ id: "0123456789ab", title: "Plan", steps: steps("todo") }).id).toBe("0123456789ab");
   });
 });
 

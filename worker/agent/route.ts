@@ -15,6 +15,7 @@ import { classify as classifyWithDecisions } from "@earendil-works/pi-ai/api/ope
 import { OPENAI_CLASSIFIER_MODELS } from "@earendil-works/pi-ai/providers/openai.models";
 import { calculateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import type { EntryRecord } from "@earendil-works/pi-durable";
+import { CHAT_AGENT_KIND, type ChatAgentReplyData } from "../../shared/agents.ts";
 import { textOf } from "../../shared/canonical.ts";
 import { COMPACTION, modelKey, pricePerMillion, type AutoCandidate, type ModelInfo } from "../../shared/models.ts";
 import { CHAT_MESSAGE_KIND, type ChatMessageData, type RouterSpend } from "../../shared/protocol.ts";
@@ -102,17 +103,18 @@ export function autoCandidates(models: readonly ModelInfo[], wanted: readonly Au
 
 /**
  * The conversation so far as the router reads it, oldest first, from `entries` newest first (as pi pages them): the
- * people's messages and the agent's replies, by their text (a person's named only in a shared chat), each cut to
- * MAX_TURN_CHARS, the newest MAX_TURNS within MAX_HISTORY_CHARS. A reply that only called tools says which.
+ * people's messages, pi's replies and the other agents' (by handle), by their text (a person's named only in a shared
+ * chat), each cut to MAX_TURN_CHARS, the newest MAX_TURNS within MAX_HISTORY_CHARS (or `turns` within `chars`). A reply
+ * that only called tools says which.
  */
-export function routeHistory(entries: readonly EntryRecord[]): RouteTurn[] {
+export function routeHistory(entries: readonly EntryRecord[], { turns: maxTurns = MAX_TURNS, chars: maxChars = MAX_HISTORY_CHARS } = {}): RouteTurn[] {
   const turns: RouteTurn[] = [];
   let chars = 0;
   for (const entry of entries) {
     const turn = turnOf(entry);
     if (!turn) continue;
     const text = clip(turn.text, MAX_TURN_CHARS);
-    if (turns.length >= MAX_TURNS || chars + text.length > MAX_HISTORY_CHARS) break;
+    if (turns.length >= maxTurns || chars + text.length > maxChars) break;
     chars += text.length;
     turns.push({ from: turn.from, text });
   }
@@ -128,6 +130,12 @@ function turnOf(entry: EntryRecord): RouteTurn | undefined {
     // reaches the router for a chat nobody shares.
     const named = data?.name && (data.summoned || data.aside);
     return text ? { from: "person", text: named ? `${data.name}: ${text}` : text } : undefined;
+  }
+  // Another agent of the chat's reply, by its handle.
+  if (entry.kind === CHAT_AGENT_KIND) {
+    const data = entry.data as Partial<ChatAgentReplyData> | undefined;
+    const text = data?.text?.trim();
+    return text ? { from: "agent", text: `@${data?.name}: ${text}` } : undefined;
   }
   if (entry.kind === "pi.user" && message?.role === "user") {
     const text = (typeof message.content === "string" ? message.content : textOf(message.content)).trim();

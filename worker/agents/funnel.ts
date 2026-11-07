@@ -1,7 +1,8 @@
 // The funnel an agent's unprompted post goes through, cheapest stage first, so most never reach a model:
-//   1. gates, in code: its owner lets it speak up (AgentDefinition.speaksUp), the chat's owner lets agents speak up
-//      there (ChatAgentSettings.speakUp), nobody muted it in this chat, it is on and not working, it has posts left
-//      today and its last one was a while ago, and the chat's and its owner's budgets have room;
+//   1. gates, in code: the chat's owner lets agents speak up there (ChatAgentSettings.speakUp), it is on, nobody muted
+//      it in this chat, it is not working, it has posts left today and its last one was a while ago, the chat's budget
+//      has room (gateRefusal); then, from its owner's directory, its owner lets it speak up (AgentDefinition.speaksUp)
+//      and the owner's daily spend has room (lateRefusal);
 //   2. a pause: nothing was said in the chat for PAUSE_MS, and nobody is working;
 //   3. interest: embeddings on Workers AI of the recent messages (or the unanswered question) and of the agent's job are
 //      close enough (INTEREST_THRESHOLD);
@@ -10,9 +11,10 @@
 // it up. Every stage is counted in the metrics.
 
 import type { EntryRecord } from "@earendil-works/pi-durable";
-import { CHAT_AGENT_KIND, type UnpromptedKind } from "../../shared/agents.ts";
+import { CHAT_AGENT_KIND, type AgentDefinition, type UnpromptedKind } from "../../shared/agents.ts";
 import { CHAT_MESSAGE_KIND, type ChatMessageData } from "../../shared/protocol.ts";
-import { clip } from "../../shared/util.ts";
+import { clip, plural } from "../../shared/util.ts";
+import { routeHistory } from "../agent/route.ts";
 import type { ModelRunner } from "../agent/workers-ai.ts";
 
 /** How long a conversation stays quiet before an agent may speak up in it. */
@@ -33,12 +35,8 @@ const MAX_RECENT_MESSAGES = 8;
 /** How much of an agent's instructions its profile takes after its job line. */
 const MAX_PROFILE_INSTRUCTIONS = 600;
 
-/** What the gates read of one agent in one chat. */
+/** What the cheap gates read of one agent in one chat (the chat's own switch is read before: SpeakUp.possible). */
 export interface GateState {
-  /** Its owner lets it speak up. */
-  agentAllows: boolean;
-  /** The chat's owner lets agents speak up here. */
-  chatAllows: boolean;
   /** Someone in the chat muted it here. */
   muted: boolean;
   /** Its owner turned it off. */
@@ -51,25 +49,30 @@ export interface GateState {
   now: number;
   /** The chat's daily token budget has room. */
   budgetLeft: boolean;
-  /** Its owner's daily spend has room. */
-  spendLeft: boolean;
 }
 
 /** The gate that stopped an agent, for the metrics. */
-export type GateRefusal = "agent" | "chat" | "muted" | "off" | "busy" | "daily" | "cooldown" | "budget" | "spend";
+export type GateRefusal = "off" | "muted" | "busy" | "daily" | "cooldown" | "budget" | "agent" | "spend";
 
-/** The first gate that stops the agent, cheapest first; null when it may go on to the next stage. */
+/** The first of the cheap gates (read in the chat object) that stops the agent; null when it may go on to the late ones. */
 export function gateRefusal(state: GateState): GateRefusal | null {
-  if (!state.chatAllows) return "chat";
-  if (!state.agentAllows) return "agent";
   if (state.off) return "off";
   if (state.muted) return "muted";
   if (state.busy) return "busy";
   if (state.postsToday >= MAX_UNPROMPTED_PER_DAY) return "daily";
   if (state.lastAt !== undefined && state.now - state.lastAt < UNPROMPTED_COOLDOWN_MS) return "cooldown";
   if (!state.budgetLeft) return "budget";
-  if (!state.spendLeft) return "spend";
   return null;
+}
+
+/**
+ * The first of the late gates, read from the owner's directory, that stops the agent: its definition is gone or off,
+ * its owner does not let it speak up, or its owner's daily spend is used up. Null when it may go on to interest.
+ */
+export function lateRefusal(agent: Pick<AgentDefinition, "enabled" | "speaksUp"> | null, spendLeft: boolean): GateRefusal | null {
+  if (!agent?.enabled) return "off";
+  if (!agent.speaksUp) return "agent";
+  return spendLeft ? null : "spend";
 }
 
 /** Cosine similarity of two vectors of one length; 0 for an empty or zero one. */
@@ -111,40 +114,13 @@ export function agentProfile(agent: { name: string; job: string; instructions: s
 }
 
 /**
- * The end of the conversation as the interest stage reads it, from the log's entries newest first: the people's
- * messages and the agents' replies, oldest first, within MAX_RECENT_CHARS.
+ * The end of the conversation as the interest stage reads it, from the log's entries newest first, as the routers read
+ * it (routeHistory): the people's messages and the agents' replies, oldest first, within MAX_RECENT_CHARS.
  */
 export function recentText(entries: readonly EntryRecord[]): string {
-  const lines: string[] = [];
-  let chars = 0;
-  for (const entry of entries) {
-    const line = lineOf(entry);
-    if (!line) continue;
-    if (lines.length >= MAX_RECENT_MESSAGES || chars + line.length > MAX_RECENT_CHARS) break;
-    lines.push(line);
-    chars += line.length;
-  }
-  return lines.reverse().join("\n");
-}
-
-function lineOf(entry: EntryRecord): string | undefined {
-  if (entry.kind === CHAT_MESSAGE_KIND) {
-    const data = entry.data as unknown as Partial<ChatMessageData>;
-    return data.text?.trim() ? clip(data.text.trim(), 600) : undefined;
-  }
-  if (entry.kind === CHAT_AGENT_KIND) {
-    const text = (entry.data as unknown as { text?: string }).text?.trim();
-    return text ? clip(text, 600) : undefined;
-  }
-  const message = entry.model?.[0];
-  if (entry.kind === "pi.assistant" && message?.role === "assistant") {
-    const text = message.content
-      .flatMap((block) => (block?.type === "text" ? [block.text] : []))
-      .join("")
-      .trim();
-    return text ? clip(text, 600) : undefined;
-  }
-  return undefined;
+  return routeHistory(entries, { turns: MAX_RECENT_MESSAGES, chars: MAX_RECENT_CHARS })
+    .map((turn) => turn.text)
+    .join("\n");
 }
 
 /**
@@ -167,8 +143,8 @@ export function followUpAsk(line: string, sentAt: number, now: number): string {
 /** A time span as the follow-up's input says it: "3 hours ago", "yesterday", "2 days ago". */
 export function agoText(ms: number): string {
   const hours = Math.round(ms / 3_600_000);
-  if (hours < 1) return `${Math.max(1, Math.round(ms / 60_000))} minutes ago`;
-  if (hours < 20) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  if (hours < 1) return `${plural(Math.max(1, Math.round(ms / 60_000)), "minute")} ago`;
+  if (hours < 20) return `${plural(hours, "hour")} ago`;
   const days = Math.round(hours / 24);
   return days <= 1 ? "yesterday" : `${days} days ago`;
 }

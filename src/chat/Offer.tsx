@@ -1,30 +1,12 @@
-import { useContext, useState } from "react";
+import { useContext } from "react";
 import { Icon } from "../Icon.tsx";
+import { useStoredState } from "../layout.tsx";
 import { FoldScope } from "./Fold.tsx";
 
 /** What the viewer answered to an offer: kept in this browser by chat and entry, so No thanks stays after a reload. */
-type Answer = "yes" | "no";
+type Answer = "yes" | "no" | null;
 
-function answerKey(chatId: string, entry: number): string {
-  return `offer.${chatId}.${entry}`;
-}
-
-function storedAnswer(key: string): Answer | null {
-  try {
-    const value = localStorage.getItem(key);
-    return value === "yes" || value === "no" ? value : null;
-  } catch {
-    return null;
-  }
-}
-
-function storeAnswer(key: string, answer: Answer): void {
-  try {
-    localStorage.setItem(key, answer);
-  } catch {
-    // Not remembered: the buttons still go for now, and come back after a reload.
-  }
-}
+const isAnswer = (value: unknown): value is Answer => value === "yes" || value === "no" || value === null;
 
 /**
  * The next step a reply offers (shared/offers.ts), as a row under its bubble: an arrow and the question. For the chat's
@@ -34,12 +16,8 @@ function storeAnswer(key: string, answer: Answer): void {
  */
 export function OfferRow({ offer, entry, onYes }: { offer: string; entry?: number; onYes?: () => boolean }) {
   const chatId = useContext(FoldScope);
-  const key = entry === undefined ? undefined : answerKey(chatId, entry);
-  const [answered, setAnswered] = useState<Answer | null>(() => (key ? storedAnswer(key) : null));
-  const answer = (value: Answer) => {
-    setAnswered(value);
-    if (key) storeAnswer(key, value);
-  };
+  // An offer with no entry has no Yes or No thanks (no onYes), so nothing is kept for it.
+  const [answered, answer] = useStoredState<Answer>(`offer.${chatId}.${entry ?? "none"}`, null, isAnswer);
   const live = onYes && !answered;
   return (
     <div className={live ? "offer live" : "offer"} role="group" aria-label="Offered next step">
