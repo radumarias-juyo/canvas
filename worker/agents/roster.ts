@@ -6,6 +6,7 @@ import {
   type ChatAgentReplyData,
   type ChatAgentView,
 } from "../../shared/agents.ts";
+import type { RunRef } from "../../shared/runs.ts";
 import type { Sql } from "../members.ts";
 
 /** One agent of a chat's roster: which definition it points at, and the pi session it runs in. */
@@ -39,6 +40,18 @@ export interface AgentTurn extends AgentTurnView {
   ask: string;
   /** Its input reached its session (see ChatRoster.markSubmitted). */
   submitted?: true;
+  /**
+   * A session of its own to run in, not its agent's: one that has what the turn is about (a reply to a run's report
+   * runs in a fork of the run's). It reads nothing of the chat, so it catches up on nothing.
+   */
+  session?: string;
+  /** The run its reply carries, so a reply to that continues the run too. */
+  run?: RunRef;
+  /**
+   * In a chain no person started (a run's hand-over): it and its hand-offs never hand pi a turn, which would run with
+   * the owner's full tools; pi only reads their replies.
+   */
+  unattended?: true;
 }
 
 /**
@@ -46,7 +59,10 @@ export interface AgentTurn extends AgentTurnView {
  * leaves out what its input already says; absent when it is no entry of the log. Without a `root`, the turn starts a
  * chain of hand-offs of its own.
  */
-export type TurnRequest = Pick<AgentTurn, "agentId" | "hop" | "calledBy" | "byOwner" | "ask"> & { root?: number; askKey?: string };
+export type TurnRequest = Pick<AgentTurn, "agentId" | "hop" | "calledBy" | "byOwner" | "ask" | "session" | "run" | "unattended"> & {
+  root?: number;
+  askKey?: string;
+};
 
 /** What an ended turn still has to deliver: its reply to the log, and whether pi is handed a turn for it. */
 export interface Outbox {
@@ -85,6 +101,9 @@ type TurnRow = {
   reply: string | null;
   to_pi: number;
   delivered_at: number | null;
+  session: string | null;
+  run: string | null;
+  unattended: number;
 };
 
 function entryOf(row: RosterRow): RosterEntry {
@@ -116,6 +135,9 @@ function turnOf(row: TurnRow): AgentTurn {
     ...(row.started_at !== null && { startedAt: row.started_at }),
     ...(row.submitted_at !== null && { submitted: true }),
     ...(row.ended_at !== null && { endedAt: row.ended_at }),
+    ...(row.session !== null && { session: row.session }),
+    ...(row.run !== null && { run: JSON.parse(row.run) as RunRef }),
+    ...(row.unattended === 1 && { unattended: true }),
   };
 }
 
@@ -155,6 +177,10 @@ export class ChatRoster {
       CREATE INDEX IF NOT EXISTS chat_agent_turns_by_status ON chat_agent_turns (status);
       CREATE INDEX IF NOT EXISTS chat_agent_turns_by_root ON chat_agent_turns (root);
     `);
+    // Added later: a turn's own session, and the run its reply carries.
+    const columns = sql.exec("SELECT name FROM pragma_table_info('chat_agent_turns')").toArray();
+    for (const name of ["session", "run"]) if (!columns.some((column) => column.name === name)) sql.exec(`ALTER TABLE chat_agent_turns ADD COLUMN ${name} TEXT`);
+    if (!columns.some((column) => column.name === "unattended")) sql.exec("ALTER TABLE chat_agent_turns ADD COLUMN unattended INTEGER NOT NULL DEFAULT 0");
     // A roster made before agents could be shared lacks the column.
     if (!sql.exec("SELECT 1 FROM pragma_table_info('chat_agents') WHERE name = 'shared'").toArray().length) {
       sql.exec("ALTER TABLE chat_agents ADD COLUMN shared INTEGER NOT NULL DEFAULT 0");
@@ -270,8 +296,8 @@ export class ChatRoster {
   enqueue(turn: TurnRequest): AgentTurn {
     const row = this.#sql
       .exec(
-        `INSERT INTO chat_agent_turns (agent_id, status, hop, called_by, by_owner, root, ask, ask_key, created_at)
-         VALUES (?, 'queued', ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
+        `INSERT INTO chat_agent_turns (agent_id, status, hop, called_by, by_owner, root, ask, ask_key, created_at, session, run, unattended)
+         VALUES (?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
         turn.agentId,
         turn.hop,
         JSON.stringify(turn.calledBy),
@@ -280,6 +306,9 @@ export class ChatRoster {
         turn.ask,
         turn.askKey ?? null,
         this.#now(),
+        turn.session ?? null,
+        turn.run ? JSON.stringify(turn.run) : null,
+        turn.unattended ? 1 : 0,
       )
       .toArray()[0] as TurnRow;
     return turnOf(row);
@@ -311,12 +340,13 @@ export class ChatRoster {
 
   /**
    * What the newest turns of an agent answered (askKey), the ones its session was given and `current`: its catch-up
-   * leaves them out, as their inputs carry them. A turn still waiting, or one stopped before it started, is read there.
+   * leaves them out, as their inputs carry them. A turn still waiting, or one stopped before it started, is read there,
+   * and so is one that ran in a session of its own (a reply to a run's report), which its own session never saw.
    */
   askKeys(agentId: string, current: number, limit = 50): Set<string> {
     const rows = this.#sql
       .exec(
-        "SELECT ask_key FROM chat_agent_turns WHERE agent_id = ? AND ask_key IS NOT NULL AND (submitted_at IS NOT NULL OR id = ?) ORDER BY id DESC LIMIT ?",
+        "SELECT ask_key FROM chat_agent_turns WHERE agent_id = ? AND ask_key IS NOT NULL AND ((submitted_at IS NOT NULL AND session IS NULL) OR id = ?) ORDER BY id DESC LIMIT ?",
         agentId,
         current,
         limit,
@@ -481,7 +511,8 @@ export class ChatRoster {
     if (!running.length) return [];
     const sessions = new Map(this.list().map((entry) => [entry.agentId, entry.session]));
     return running.flatMap((turn) => {
-      const session = sessions.get(turn.agentId);
+      // A run's reply turn works in its own session (a fork of the run's), not the agent's.
+      const session = turn.session ?? sessions.get(turn.agentId);
       return session ? [{ agentId: turn.agentId, session, turn: turn.id }] : [];
     });
   }

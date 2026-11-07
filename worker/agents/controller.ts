@@ -122,13 +122,14 @@ export class AgentTurns {
         await this.#ended(entry, turn, { status: "unanswered", reason: `its owner turned @${entry.name} off` });
         return;
       }
-      await Promise.all([this.#catchUp(entry, turn.id), this.#host.configure(entry, agent, turn)]);
+      // A turn in a session of its own reads that session, not the chat: it catches up on nothing.
+      await Promise.all([turn.session ? undefined : this.#catchUp(entry, turn.id), this.#host.configure(entry, agent, turn)]);
       if (!live()) return;
-      await this.#host.submit(entry.session, turnInput(turn), operationId(turn.id), { turn: turn.id, calledBy: turn.calledBy, hop: turn.hop });
+      await this.#host.submit(sessionOf(entry, turn), turnInput(turn), operationId(turn.id), { turn: turn.id, calledBy: turn.calledBy, hop: turn.hop });
       roster.markSubmitted(turn.id);
       if (!live()) {
         // Stopped while its input went in: the stop's abort may have come first, so the run it started stops too.
-        await this.#host.abort(entry.session).catch((error: unknown) => console.error("agent stop:", errorMessage(error)));
+        await this.#host.abort(sessionOf(entry, turn)).catch((error: unknown) => console.error("agent stop:", errorMessage(error)));
         return;
       }
     } catch (error) {
@@ -158,11 +159,11 @@ export class AgentTurns {
     try {
       let result: TurnResult;
       try {
-        result = await this.#host.wait(entry.session, operationId(turn.id));
+        result = await this.#host.wait(sessionOf(entry, turn), operationId(turn.id));
       } catch (error) {
         result = { status: "unanswered", reason: errorMessage(error) };
         // The run may still be going: stop it before the next turn sets the session up for someone else's tools.
-        await this.#host.abort(entry.session).catch((abortError: unknown) => console.error("agent stop:", errorMessage(abortError)));
+        await this.#host.abort(sessionOf(entry, turn)).catch((abortError: unknown) => console.error("agent stop:", errorMessage(abortError)));
       }
       await this.#ended(entry, turn, result);
     } finally {
@@ -183,7 +184,7 @@ export class AgentTurns {
       const done = result.status === "done";
       const text = (result.text ?? "").trim();
       // Only a turn whose input went in has outputs in its session.
-      const { published, items } = now.submitted ? await this.#outputs(entry.session, turn.id) : NO_OUTPUTS;
+      const { published, items } = now.submitted ? await this.#outputs(sessionOf(entry, turn), turn.id) : NO_OUTPUTS;
       const current = roster.get(entry.agentId) ?? entry;
       const reply: ChatAgentReplyData = {
         agentId: entry.agentId,
@@ -199,17 +200,20 @@ export class AgentTurns {
         endedAt: roster.now(),
         ...(!done && { failed: result.reason ?? "it ended without an answer" }),
         ...(published.length && { published }),
+        ...(turn.run && { run: turn.run }),
         ...(items.length && { items }),
       };
       // Who it hands work to, within what the chain may still make.
       const left = MAX_HOPS - roster.handOffsFrom(turn.root);
       const next = done && left > 0 ? handOffs(text, entry.agentId, turn.hop, roster.list()).slice(0, left) : [];
-      if (roster.end(turn.id, done ? "done" : "failed", { reply, toPi: next.includes(AGENT_NAME) })) {
+      // A chain no person started never hands pi a turn: pi has the owner's full tools. It reads the reply instead.
+      if (roster.end(turn.id, done ? "done" : "failed", { reply, toPi: !turn.unattended && next.includes(AGENT_NAME) })) {
         const agents = next.filter((id) => id !== AGENT_NAME);
         // A hand-off can only read, whoever started the chain: agents cannot give each other permission.
         const ask = askOf({ name: current.name, kind: "agent" }, text, MAX_ASK_CHARS);
         const calledBy = { name: current.name, agentId: entry.agentId };
-        if (agents.length) this.call(agents, { calledBy, ask, askKey: turnAskKey(turn.id), byOwner: false, hop: turn.hop + 1, root: turn.root });
+        const hop = { calledBy, ask, askKey: turnAskKey(turn.id), byOwner: false, hop: turn.hop + 1, root: turn.root, unattended: turn.unattended };
+        if (agents.length) this.call(agents, hop);
         delivering = this.#deliver(turn.id);
       }
     }
@@ -284,7 +288,9 @@ export class AgentTurns {
   /** Abort the sessions of the turns just stopped that had started, and tell everyone. */
   async #stopped(stopped: readonly AgentTurn[]): Promise<boolean> {
     const roster = this.#host.roster;
-    const sessions = new Set(stopped.filter((turn) => turn.startedAt !== undefined).flatMap((turn) => roster.get(turn.agentId)?.session ?? []));
+    const sessions = new Set(
+      stopped.filter((turn) => turn.startedAt !== undefined).flatMap((turn) => turn.session ?? roster.get(turn.agentId)?.session ?? []),
+    );
     await Promise.all([...sessions].map((session) => this.#host.abort(session).catch((error: unknown) => console.error("agent stop:", errorMessage(error)))));
     if (stopped.length) this.#host.changed();
     return stopped.length > 0;
@@ -308,6 +314,11 @@ export class AgentTurns {
       ...(chain.root !== undefined && { root: chain.root }),
     });
   }
+}
+
+/** The session a turn runs in: its own, else its agent's. */
+export function sessionOf(entry: Pick<RosterEntry, "session">, turn: Pick<AgentTurn, "session">): string {
+  return turn.session ?? entry.session;
 }
 
 /** A turn's operation id in its agent's session: submitting it twice places it once. */
