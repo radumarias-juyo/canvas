@@ -344,7 +344,8 @@ function checkSteps(value: unknown, depth = 0, count = { steps: 0 }): AgentStep[
       case "work": {
         const skill = str(step.skill, field("A work step", "a", "skill"), 64, { required: false });
         const model = str(step.model, field("A work step", "a", "model"), 200, { required: false });
-        return { kind: "work", prompt: str(step.prompt, field("A work step", "a", "prompt"), 4_000, { seen: true })!, ...(skill && { skill }), ...(model && { model }) };
+        const prompt = str(step.prompt, field("A work step", "a", "prompt"), 4_000, { seen: true })!;
+        return { kind: "work", prompt, ...(skill && { skill }), ...(model && { model }) };
       }
       case "onlyIf":
         return { kind: "onlyIf", condition: condition(step.condition, field("An onlyIf step", "a", "condition")) };
