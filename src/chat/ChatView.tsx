@@ -65,7 +65,9 @@ import { OrphanResult, StepRun, StepsProvider, stepLabel } from "./Steps.tsx";
 import { endedEarly, stepRuns, streamingSteps, type MessageSteps, type StepRuns, type StreamingSteps } from "./stepRuns.ts";
 import { Thinking } from "./Thinking.tsx";
 import { useRevealedText } from "./reveal.ts";
-import { blocks, firstNew, inReply, isAgent, openHints, published, replyItems, sentAt, shown, showsAsCard, userText } from "./entries.ts";
+import { assistantOffer, blocks, firstNew, inReply, isAgent, liveOffer, openHints, published, replyItems, sentAt, shown, showsAsCard, userText } from "./entries.ts";
+import { OfferRow } from "./Offer.tsx";
+import { OFFER_YES } from "../../shared/offers.ts";
 import { answersEveryMessage, CHAT_COPY_KIND, CHAT_EVENT_KIND, legacyKind, type ChatCopyData, type ChatEventData } from "../../shared/chat-kinds.ts";
 import { BranchOff, ChatEventNotice, EntryOf, KindChip, TagCard } from "./ChatKinds.tsx";
 
@@ -138,6 +140,17 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
       following.current = true;
     },
     [prompt, dropHint],
+  );
+  // The latest next step a reply offered (shared/offers.ts), which only the chat's owner answers: Yes replies to that
+  // message, which calls the agent that wrote it, asking it to set the step up.
+  const offered = useMemo(() => (isOwner ? liveOffer(state.entries) : undefined), [isOwner, state.entries]);
+  const takeOffer = useCallback(
+    (entry: number) => {
+      if (!prompt(OFFER_YES, undefined, undefined, entry)) return false;
+      following.current = true;
+      return true;
+    },
+    [prompt],
   );
   // Branch off a new chat from a message, and go to it.
   // One branch at a time: a second click while one is made does nothing.
@@ -377,6 +390,7 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
                               onReply={reply}
                               hinted={hinted.has(entry.id as number)}
                               onAskAgent={askAgent}
+                              onOffer={entry.id === offered ? takeOffer : undefined}
                               onNoHint={dropHint}
                               onOpenChat={onOpenChat}
                               chatId={chatId}
@@ -590,6 +604,7 @@ const Entry = memo(function Entry({
   chatId,
   items,
   checklist,
+  onOffer,
 }: {
   entry: EntryRecord;
   /** Where an agent message's steps show (stepRuns.ts). */
@@ -612,8 +627,11 @@ const Entry = memo(function Entry({
   items?: ItemRef[];
   /** For the entry a checklist was first posted at: its latest state (the same object until it changes). */
   checklist?: ChatChecklistData;
+  /** Set on the reply with the chat's latest offer, for its owner: Yes under it replies to it (false when not sent). */
+  onOffer?: (entry: number) => boolean;
 }) {
   const people = useSharedChat();
+  const offerYes = onOffer && (() => onOffer(entry.id as number));
   const reactions = useMessageReactions(isReactable(entry) ? entry.id : undefined, byEmoji);
   const message = entry.model?.[0];
   // What a reply to it quotes: none for a message from before replies (pi.user).
@@ -661,10 +679,30 @@ const Entry = memo(function Entry({
   // A checklist's later entries draw nothing: its card, where it was first posted, shows what they say.
   if (entry.kind === CHAT_CHECKLIST_KIND) return checklist ? <ChecklistCard data={checklist} /> : null;
   if (entry.kind === CHAT_AGENT_KIND) {
-    return <AgentReply data={entry.data as unknown as ChatAgentReplyData} reactions={reactions} onReply={answer} onOpen={onOpen} />;
+    return (
+      <AgentReply
+        data={entry.data as unknown as ChatAgentReplyData}
+        reactions={reactions}
+        onReply={answer}
+        onOpen={onOpen}
+        entry={entry.id as number}
+        onOfferYes={offerYes}
+      />
+    );
   }
   if (entry.kind === "pi.assistant" && message?.role === "assistant") {
-    return <Assistant message={message} steps={steps} reactions={reactions} onReply={answer} items={items} foldKey={String(entry.id)} />;
+    return (
+      <Assistant
+        message={message}
+        steps={steps}
+        reactions={reactions}
+        onReply={answer}
+        items={items}
+        foldKey={String(entry.id)}
+        entry={entry.id as number}
+        onOfferYes={offerYes}
+      />
+    );
   }
   if (entry.kind === "pi.tool-result" && message?.role === "toolResult") {
     const artifact = published(entry);
@@ -1021,6 +1059,8 @@ function Assistant({
   items,
   foldKey,
   bare = false,
+  entry,
+  onOfferYes,
 }: {
   message: AssistantMessage;
   steps?: MessageSteps;
@@ -1034,27 +1074,35 @@ function Assistant({
   foldKey?: string;
   /** Without reactions, actions and its time: a live agent's message, whose reply the chat shows once it is posted. */
   bare?: boolean;
+  /** Its entry in the transcript, which the answer to its offered next step is remembered by. */
+  entry?: number;
+  /** On the chat's latest offer, for its owner: what Yes does (OfferRow). */
+  onOfferYes?: () => boolean;
 }) {
   const content = useRef<HTMLDivElement>(null);
   // What a copy pastes as plain text: its Markdown. Not while it streams, when it has no actions.
   const text = streaming ? "" : textOf(blocks(message.content), "\n\n");
+  // The next step its answer offers, shown under it without its line in the text; not before the answer is whole.
+  const offered = streaming || bare ? null : assistantOffer(message.content);
   const parts = message.content.map((block, i) => {
     if (!block) return null;
-    if (block.type === "text")
+    if (block.type === "text") {
+      const said = offered?.block === i ? offered.body : block.text;
       // The fold goes round the bubble, so a copy (the bubbles' HTML) holds neither "Show more" nor the fold's height.
-      return block.text ? (
+      return said ? (
         !streaming && foldKey ? (
           <Fold key={i} foldKey={`${foldKey}:${i}`}>
             <div className="bubble markdown">
-              <Markdown text={block.text} />
+              <Markdown text={said} />
             </div>
           </Fold>
         ) : (
           <div key={i} className="bubble markdown">
-            {streaming ? <RevealedMarkdown text={block.text} onGrow={onGrow} /> : <Markdown text={block.text} />}
+            {streaming ? <RevealedMarkdown text={said} onGrow={onGrow} /> : <Markdown text={said} />}
           </div>
         )
       ) : null;
+    }
     // A step shows in its run, at the run's first step.
     const run = steps?.get(i);
     return run ? <StepRun key={i} items={run} /> : null;
@@ -1068,6 +1116,7 @@ function Assistant({
       {message.stopReason === "error" && <div className="chat-error">The model failed: {message.errorMessage ?? "unknown error"}</div>}
       {message.stopReason === "aborted" && <div className="tool-call">Stopped.</div>}
       {items && <ItemChips items={items} />}
+      {offered && <OfferRow offer={offered.offer} entry={entry} onYes={onOfferYes} />}
       {text && !bare && (
         <>
           <ReactionChips reactions={reactions} />

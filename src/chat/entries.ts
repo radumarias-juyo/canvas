@@ -1,10 +1,11 @@
-import type { UserMessage } from "@earendil-works/pi-ai";
+import type { AssistantMessage, UserMessage } from "@earendil-works/pi-ai";
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { CHAT_AGENT_KIND, CHAT_TURN_KIND, proposedBy, type ChatAgentReplyData } from "../../shared/agents.ts";
 import { entryItems, mergeItems, type ItemRef } from "../../shared/items.ts";
 import { CHAT_MESSAGE_KIND, CHAT_PEOPLE_KIND, publishedBy, type ChatMessageData, type ChatPeopleData } from "../../shared/protocol.ts";
 import { CHAT_COPY_KIND, CHAT_EVENT_KIND, type ChatCopyData } from "../../shared/chat-kinds.ts";
 import { CHAT_CHECKLIST_KIND, checklistOf, type ChatChecklistData } from "../../shared/checklist.ts";
+import { offerOf } from "../../shared/offers.ts";
 
 /** When an entry was sent, for one that has a time: messages from before chats kept `sentAt` have only the time pi wrote them, and asides not even that. */
 export function sentAt(entry: EntryRecord): number | undefined {
@@ -157,4 +158,45 @@ export function replyItems(entries: readonly EntryRecord[], previous?: ReadonlyM
 
 function sameItems(a: readonly ItemRef[], b: readonly ItemRef[]): boolean {
   return a.length === b.length && a.every((item, i) => item.server === b[i].server && item.id === b[i].id && item.title === b[i].title && item.url === b[i].url);
+}
+
+/**
+ * The next step one of pi's messages offers (shared/offers.ts), in its last text: only when nothing but its thoughts
+ * come after that text, since a message that goes on to call a tool is not the answer yet. `block` is the text's place
+ * in the message, where the answer shows without the offer's line.
+ */
+export function assistantOffer(content: AssistantMessage["content"]): { block: number; body: string; offer: string } | null {
+  for (let i = content.length - 1; i >= 0; i--) {
+    const block = content[i];
+    if (!block || block.type === "thinking") continue;
+    if (block.type !== "text") return null;
+    if (!block.text.trim()) continue;
+    const found = offerOf(block.text);
+    return found && { block: i, ...found };
+  }
+  return null;
+}
+
+/** The next step an entry offers: in one of pi's replies, or in another agent's (a `chat.agent` entry). */
+export function entryOffer(entry: EntryRecord): string | undefined {
+  if (entry.kind === CHAT_AGENT_KIND) return offerOf((entry.data as unknown as ChatAgentReplyData).text ?? "")?.offer;
+  const message = entry.model?.[0];
+  if (entry.kind === "pi.assistant" && message?.role === "assistant") return assistantOffer(message.content)?.offer;
+  return undefined;
+}
+
+/**
+ * The entry whose offer still takes an answer (Yes, No thanks): the latest offer in the chat, until someone replied to
+ * it. Older offers show as text only, so a long chat is not full of buttons.
+ */
+export function liveOffer(entries: readonly EntryRecord[]): number | undefined {
+  const replied = new Set<number>();
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (entry.kind === CHAT_MESSAGE_KIND) {
+      const to = (entry.data as unknown as ChatMessageData).replyTo?.id;
+      if (to !== undefined) replied.add(to);
+    } else if (entryOffer(entry) !== undefined) return replied.has(entry.id as number) ? undefined : (entry.id as number);
+  }
+  return undefined;
 }

@@ -536,6 +536,17 @@ a.item-chip:hover { border-color: var(--accent); color: var(--accent); }
 .call-hint-no { width: 22px; height: 22px; padding: 0; border: 0; border-radius: 50%; background: none; color: var(--muted); font: inherit; font-size: 16px; line-height: 1; cursor: pointer; }
 .call-hint-ask:hover { filter: brightness(1.1); }
 .call-hint-no:hover { background: color-mix(in srgb, var(--text) 8%, transparent); color: var(--text); }
+/* Under a reply: the next step it offers. On the chat's latest offer, for its owner, Yes and No thanks beside it. */
+.offer { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; align-self: flex-start; max-width: 100%; color: var(--muted); font-size: 13px; line-height: 20px; }
+.offer.live { padding: 4px 4px 4px 10px; border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border)); border-radius: var(--radius); background: var(--accent-soft); color: var(--text); }
+.offer-icon { flex: none; display: inline-flex; color: var(--accent); }
+.offer-text { flex: 1 1 12em; min-width: 0; overflow-wrap: anywhere; }
+.offer-actions { display: inline-flex; flex: none; gap: 6px; margin-left: auto; }
+.offer-actions button { padding: 0 12px; border-radius: 999px; font: inherit; line-height: 22px; cursor: pointer; }
+.offer-actions .offer-yes { border: 1px solid var(--accent); background: var(--accent); color: var(--accent-text); font-weight: 600; }
+.offer-actions .offer-no { border: 1px solid var(--border); background: var(--surface); color: var(--text); }
+.offer-yes:hover { filter: brightness(1.1); }
+.offer-no:hover { border-color: var(--muted); }
 /* Reactions under a message: each emoji, how many, the viewer's own marked; a click adds or takes back theirs. */
 .reactions { display: flex; flex-wrap: wrap; gap: 4px; }
 .reaction { display: inline-flex; align-items: center; gap: 4px; padding: 0 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--text); font-size: 13px; line-height: 22px; }
