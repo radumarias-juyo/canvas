@@ -313,6 +313,103 @@ test("j. checklists: pi's and an agent's plans show as cards", async () => {
   await shot(page, "j-checklists");
 });
 
-test.skip("limits and approvals (do steps waiting for the owner): in an open PR (#113), not on feat/agents yet", () => {});
-test.skip("members' own agents in a shared chat: in an open PR (#110), not on feat/agents yet", () => {});
-test.skip("agents speaking up unprompted: needs INTEREST_MODEL (Workers AI embeddings), which PI_OFFLINE=1 leaves empty", () => {});
+test("k. a run's write waits for the owner's approval, and one a guardrail blocks never reaches the server", async () => {
+  const { page } = ada;
+  const before = await crmState(page);
+  // At autonomy 3 each write waits for ada; a rule blocks marking a deal lost, whatever the level.
+  const closer = await call<{ id: string }>(page, "POST", "/api/agents", {
+    name: "closer",
+    job: "Moves the deals along",
+    instructions: "1. Move Northwind to negotiation.\n2. Mark Initech lost.",
+    servers: ["crm"],
+    trigger: { kind: "schedule", at: "10:00", tz: "UTC" },
+    autonomy: 3,
+    guardrails: [{ id: "nolost", server: "crm", tool: "update_deal", arg: "stage", kind: "never", value: ["lost"], effect: "block", note: "People mark deals lost." }],
+    workflow: [
+      { kind: "do", server: "crm", tool: "update_deal", input: { id: "d1", stage: "negotiation" } },
+      { kind: "do", server: "crm", tool: "update_deal", input: { id: "d3", stage: "lost" } },
+    ],
+  });
+  const started = await call<{ homeChatId: string }>(page, "POST", `/api/dev/agents/${closer.id}/run`, {});
+
+  // The call waits, as a card in the run's chat and in the feed's Needs you; nothing reached the server yet.
+  await page.goto(`/c/${started.homeChatId}`);
+  const card = page.getByRole("article", { name: "@closer asks to crm.update_deal" });
+  await expect(card).toContainText("negotiation");
+  await expect(card.getByRole("button", { name: "Approve" })).toBeVisible();
+  await shot(page, "k-approval-card");
+  expect((await crmState(page)).writes).toHaveLength(before.writes.length);
+
+  await page.goto("/feed");
+  await page.getByRole("tab", { name: /^Needs you/ }).click();
+  const item = page.locator(".feed-item").filter({ hasText: 'crm.update_deal {"id":"d1","stage":"negotiation"}' });
+  await expect(item).toBeVisible();
+  await shot(page, "k-needs-you");
+  await item.getByRole("button", { name: "Approve" }).click();
+
+  // The server got exactly the stored call, once; the run went on to the blocked step, which never reached it.
+  await page.goto(`/agents/${closer.id}?tab=runs`);
+  const run = page.locator(".run-row").first();
+  await expect(run).toContainText("Sent");
+  await run.click();
+  await expect(page.getByRole("heading", { name: "How it got there" })).toBeVisible();
+  await expect(page.getByText(/a rule blocks it.*People mark deals lost/)).toBeVisible();
+  const after = await crmState(page);
+  expect(after.writes).toEqual([...before.writes, { tool: "update_deal", input: { id: "d1", stage: "negotiation" } }]);
+  expect(after.deals.find((deal) => deal.id === "d3")?.stage).toBe(before.deals.find((deal) => deal.id === "d3")?.stage);
+  await shot(page, "k-run-blocked");
+
+  await page.goto(`/c/${started.homeChatId}`);
+  await expect(card).toContainText("Ran");
+  await expect(card.getByRole("button", { name: "Approve" })).toHaveCount(0);
+});
+
+test.skip("members' own agents in a shared chat: waits for the seat write-gate fix", () => {});
+
+test("l. agents speak up after a pause in the chat, and a muted one does not", async () => {
+  const { page } = ada;
+  // Two agents that may speak up, both close to what the chat is about. On the scripted model the interest stage scores
+  // by the words two texts share (worker/dev-model.ts): tracker is the closer, dispatch is past the threshold too.
+  const agents = [
+    { name: "tracker", job: "Shipping delays at the warehouse", instructions: "/say Shipping delays at the warehouse: two orders are past due." },
+    { name: "dispatch", job: "Warehouse shipping", instructions: "/say Noted: warehouse shipping." },
+  ];
+  for (const agent of agents) await call(page, "POST", "/api/agents", { ...agent, speaksUp: true });
+  await newChat(page);
+  await addToChat(page, "tracker");
+  await addToChat(page, "dispatch");
+  await page.getByRole("button", { name: "Agents in this chat" }).click();
+  const settings = page.getByRole("dialog", { name: "Add agents to this chat" });
+  // Checked once the chat has saved it.
+  const speakUp = settings.getByRole("checkbox", { name: /Let agents speak up/ });
+  await speakUp.click();
+  await expect(speakUp).toBeChecked();
+  await settings.getByRole("button", { name: "Close" }).click();
+
+  // Muted here, tracker stays quiet though it is the closer: dispatch is the one that speaks up after the pause.
+  const toggleMute = async (name: string, mute: boolean) => {
+    await page.getByRole("button", { name: new RegExp(`^@${name},`) }).click();
+    const menu = page.getByRole("dialog", { name: `@${name}` });
+    await menu.getByRole("button", { name: mute ? "Mute here" : "Unmute here" }).click();
+    await expect(menu.getByRole("button", { name: mute ? "Unmute here" : "Mute here" })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(menu).toBeHidden();
+  };
+  await toggleMute("tracker", true);
+  await send(page, "Shipping delays at the warehouse");
+  const dispatchPost = agentReply(page, "dispatch", "Noted: warehouse shipping.");
+  await expect(dispatchPost).toBeVisible();
+  await expect(dispatchPost.locator(".mute-row")).toContainText("Nobody asked");
+  await expect(page.locator(".agent-reply").filter({ has: page.getByText("@tracker", { exact: true }) })).toHaveCount(0);
+
+  // Unmuted, it speaks up after the next pause (dispatch waits out its cooldown); its post can mute it again.
+  await toggleMute("tracker", false);
+  await send(page, "More shipping delays at the warehouse");
+  const trackerPost = agentReply(page, "tracker", "two orders are past due");
+  await expect(trackerPost).toBeVisible();
+  await expect(trackerPost.locator(".mute-row")).toContainText("Nobody asked");
+  await shot(page, "l-speak-up");
+  await trackerPost.getByRole("button", { name: "Mute @tracker here" }).click();
+  await expect(trackerPost).toContainText("@tracker won't speak up unasked here again.");
+  await expect(agentReply(page, "dispatch", /./)).toHaveCount(1);
+});
