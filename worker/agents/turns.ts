@@ -205,9 +205,10 @@ export function askLine(entry: EntryRecord, self: string, owner: OwnerMarks | st
     const data = entry.data as unknown as ChatAgentReplyData & { copied?: true };
     if (!data.text) return undefined;
     // Its own replies are in its session already (unless copied into a branch, where its session started afresh), but
-    // for those of its runs (a report, a reply in a run's own session) and one from a fork, which only the chat has.
+    // for its replies in a run's own session (a turn there): a run's report (turn 0) was written into it as it went out;
+    // and for one from a fork, which only the chat has.
     if (data.agentId === self && !data.copied) {
-      if (data.run) return `[you, in a run]: ${said(data.text)}`;
+      if (data.run && data.turn) return `[you, in a run]: ${said(data.text)}`;
       return data.forked ? `${speakerLabel({ name: data.name, kind: "agent" })} (your reply, as posted): ${said(data.text)}` : undefined;
     }
     return askOf({ name: data.name, kind: "agent" }, data.text);

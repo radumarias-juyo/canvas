@@ -1,6 +1,9 @@
 import { useRef } from "react";
 import type { ChatAgentReplyData } from "../../shared/agents.ts";
 import { everyone, type PublishedDetails } from "../../shared/protocol.ts";
+import { agentPath } from "../agents/nav.ts";
+import { whyLabel } from "../agents/runs.ts";
+import { AppLink } from "../layout.tsx";
 import { callerName } from "./agentLines.ts";
 import { ArtifactCard } from "./ArtifactCard.tsx";
 import { Markdown } from "./Markdown.tsx";
@@ -11,7 +14,8 @@ import { ReactionChips, type MessageReactions } from "./Reactions.tsx";
 import { SentTime } from "./SentTime.tsx";
 
 /** Who gave an agent the turn it answers, as its byline says it. */
-function calledByLabel(calledBy: ChatAgentReplyData["calledBy"]): string {
+function calledByLabel(calledBy: ChatAgentReplyData["calledBy"], run: ChatAgentReplyData["run"]): string {
+  if (run) return whyLabel(run.test ? "test" : run.why).toLowerCase();
   return calledBy.schedule ? "on its schedule" : `for ${callerName(calledBy)}`;
 }
 
@@ -32,11 +36,14 @@ export function sourceLine(data: Pick<ChatAgentReplyData, "sources" | "postedBy"
  */
 export function AgentReply({
   data,
+  chatId,
   reactions,
   onReply,
   onOpen,
 }: {
   data: ChatAgentReplyData;
+  /** The chat it is in: the run's page leads back to it. */
+  chatId: string;
   reactions: MessageReactions | null;
   onReply?: () => void;
   onOpen: (artifact: PublishedDetails) => void;
@@ -47,9 +54,10 @@ export function AgentReply({
   const owner = people && everyone(people).find((person) => person.uid === data.ownerUid)?.name;
   // In a shared chat whose people no longer list the owner (they left), never "your": the viewer is not the owner.
   const source = sourceLine(data, people ? (owner ?? "its owner") : undefined);
+  const runPath = data.run && agentPath({ id: data.agentId, tab: "runs", run: data.run.dueAt, chat: chatId });
   return (
     <div className="agent-reply" ref={content}>
-      <AgentByline name={data.name} badge={data} note={["agent", owner && `${owner}'s`, calledByLabel(data.calledBy)].filter(Boolean).join(" · ")} />
+      <AgentByline name={data.name} badge={data} note={["agent", owner && `${owner}'s`, calledByLabel(data.calledBy, data.run)].filter(Boolean).join(" · ")} />
       {data.text && (
         <Fold foldKey={`agent:${data.agentId}:${data.turn}`}>
           <div className="bubble markdown">
@@ -67,6 +75,12 @@ export function AgentReply({
         <ArtifactCard key={`${artifact.artifactId}:${artifact.version}`} artifact={artifact} onOpen={onOpen} />
       ))}
       {data.failed && <div className="chat-error">{data.failed}</div>}
+      {runPath && (
+        // A run's post: where it came from, opening on how the run got there. A reply to it continues the run.
+        <AppLink path={runPath} className="run-marker">
+          {data.run?.test ? "Test run: nothing was sent or changed" : "From a run"} · See how it got there
+        </AppLink>
+      )}
       {data.text && (
         <>
           <ReactionChips reactions={reactions} />
