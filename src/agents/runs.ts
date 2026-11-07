@@ -1,8 +1,10 @@
 // What the Runs tab says of a run, in plain functions the tests read without a browser.
 
 import { stepServers, type AgentDefinition } from "../../shared/agents.ts";
+import { firstLine } from "../../shared/replies.ts";
 import { readsInStepText } from "../../shared/sign-ins.ts";
-import type { AgentRunView, RunDelivery, RunDeliveryKind, RunItemStatus, RunStatus, RunWhy } from "../../shared/runs.ts";
+import type { AgentRunDetail, AgentRunView, RunDelivery, RunDeliveryKind, RunItemStatus, RunItemView, RunStatus, RunWhy } from "../../shared/runs.ts";
+import { plural } from "../../shared/util.ts";
 
 /** A pill's tone, as the stylesheet colours it. */
 export type Tone = "on" | "draft" | "off" | "error";
@@ -39,6 +41,56 @@ const ITEM_STATUS: Record<RunItemStatus, string> = {
 /** An item's status, in words. */
 export function itemStatusLabel(status: RunItemStatus): string {
   return ITEM_STATUS[status];
+}
+
+/** One group of a run's items in its detail: those that went the same way, each with its line. */
+export interface ItemGroup {
+  status: RunItemStatus;
+  /** "Acted on", "Not today", … */
+  title: string;
+  /** How many of how many for the acted ("5 of 7"), else how many. */
+  count: string;
+  items: { item: RunItemView; line: string }[];
+}
+
+/** The groups in the order the detail shows them: what is still going first, then what it did, then why not. */
+const GROUPS: [RunItemStatus, string][] = [
+  ["running", "Running"],
+  ["waiting", RUN_STATUS.waiting.text],
+  ["acted", "Acted on"],
+  ["failed", "Failed"],
+  ["not_today", "Not today"],
+];
+
+/**
+ * What one item came to, in a line: its report's first line when it acted, why it stopped when it did not (the
+ * condition, the failure), else the step it is at.
+ */
+export function itemLine(item: Pick<RunItemView, "status" | "text" | "reason" | "steps">): string {
+  if (item.status === "acted") return firstLine(item.text ?? "", 120);
+  if (item.reason) return firstLine(item.reason, 120);
+  if (item.status === "waiting") return "Waits for you to approve a call.";
+  return item.steps.at(-1)?.label ?? "";
+}
+
+/** A run's items grouped as its detail shows them: acted on, not today, and the rest; empty groups left out. */
+export function itemGroups(items: readonly RunItemView[]): ItemGroup[] {
+  return GROUPS.flatMap(([status, title]) => {
+    const these = items.filter((item) => item.status === status);
+    if (!these.length) return [];
+    const count = status === "acted" ? `${these.length} of ${items.length}` : String(these.length);
+    return [{ status, title, count, items: these.map((item) => ({ item, line: itemLine(item) })) }];
+  });
+}
+
+/** What a run used, as its detail's Used list says it: its skills, how many memory notes, the servers it read, its models. */
+export function usedParts(used: AgentRunDetail["used"]): { what: string; text: string }[] {
+  const parts: { what: string; text: string }[] = [];
+  if (used.skills.length) parts.push({ what: used.skills.length === 1 ? "Skill" : "Skills", text: used.skills.join(", ") });
+  if (used.notes > 0) parts.push({ what: "Memory", text: plural(used.notes, "note") });
+  if (used.servers.length) parts.push({ what: "Read", text: used.servers.join(", ") });
+  if (used.models.length) parts.push({ what: used.models.length === 1 ? "Model" : "Models", text: used.models.join(", ") });
+  return parts;
 }
 
 /** How a run's items went, when it had a scope: "3 of 6 acted · 3 not today". Empty for a run with one item. */

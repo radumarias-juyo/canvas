@@ -4250,7 +4250,7 @@ export class ChatAgent extends DurableObject<Env> {
       when: run.detail.when ?? "",
       itemsList: this.runs.items(agentId, dueAt),
       deliveries: run.detail.deliveries,
-      used: run.detail.used ?? { skills: [], servers: [], models: [] },
+      used: { skills: [], servers: [], models: [], ...run.detail.used, notes: run.detail.used?.notes?.length ?? 0 },
     };
   }
 
@@ -4422,6 +4422,7 @@ export class ChatAgent extends DurableObject<Env> {
       },
       newSession: async () => (await this.harness.sessions.create()).id,
       configure: (session, agent, model, dueAt) => this.#configureRun(session, agent, model, undefined, dueAt),
+      notesRead: (session) => this.memory.notesIn(session),
       write: (session, text, requestId) => this.#writeTo(session, text, requestId),
       work: async (session, prompt, operationId) => {
         const { result, entries } = await this.#runStep(session, prompt, operationId);
