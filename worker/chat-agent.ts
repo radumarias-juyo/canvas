@@ -4657,6 +4657,13 @@ export class ChatAgent extends DurableObject<Env> {
       },
       alarmAt: async (at, payload) => (await this.scheduler.set(new Date(at), "run", payload)).id,
       alarmEvery: async (seconds, payload) => (await this.scheduler.every(seconds, "watch", payload)).id,
+      watchAt: async (at, payload) => (await this.scheduler.set(new Date(at), "watch", payload)).id,
+      // The owner's day of model calls against their cap for runs: what paces their watches (worker/agents/runs/pacing.ts).
+      spend: async () => {
+        const capUsd = Number(this.env.RUNS_DAILY_USD);
+        if (!Number.isFinite(capUsd) || capUsd <= 0) return undefined;
+        return { spentUsd: (await this.#index(this.uid).modelSpentToday()).costUsd, capUsd };
+      },
       cancelAlarm: async (id) => {
         await this.scheduler.cancel(id);
       },
