@@ -3551,7 +3551,8 @@ export class ChatAgent extends DurableObject<Env> {
       await conversation.submit({ type: "write", requestId: `approval:${view.id}`, entry: { kind: APP_APPROVAL_KIND, model: [message] } }, BACKGROUND_CONTEXT);
     }
     // A run's item waited at this step: it goes on from there (after the note above, which its later steps read).
-    if (origin?.run) this.ctx.waitUntil(this.runner.decided(origin.run, actedOf(view)).catch((error: unknown) => console.error("run:", errorMessage(error))));
+    const acted = origin?.run && actedOf(view);
+    if (origin?.run && acted) this.ctx.waitUntil(this.runner.decided(origin.run, acted).catch((error: unknown) => console.error("run:", errorMessage(error))));
   }
 
   /**

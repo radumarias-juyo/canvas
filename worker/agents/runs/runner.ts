@@ -368,29 +368,24 @@ export class AgentRunner {
   async decided(ref: { agentId: string; dueAt: number; item: string; step: string }, acted: ActedStep): Promise<void> {
     if (!this.executor.decided(ref.agentId, ref.dueAt, ref.item, ref.step, acted)) return;
     this.#host.changed(ref.agentId);
-    const agent = await this.#host.definition(ref.agentId);
-    const run = this.#host.runs.get(ref.agentId, ref.dueAt);
-    if (!run) return;
+    await this.#goOn(this.#host.runs.get(ref.agentId, ref.dueAt)!, (start) => this.executor.again(start));
+  }
+
+  /** A run that did not end goes on from where its rows say: failed instead when its agent was deleted. */
+  async #goOn(run: RunRecord, start: (start: RunStart) => Promise<RunEnd> = (one) => this.executor.start(one)): Promise<RunEnd | null> {
+    const agent = await this.#host.definition(run.agentId);
     if (!agent) {
       this.#host.runs.update(run.agentId, run.dueAt, { status: "failed", summary: "Failed: the agent was deleted." });
-      return;
+      return null;
     }
-    await this.executor.again(startOf(agent, run));
+    return start(startOf(agent, run));
   }
 
   /** After a restart: the runs that were going go on, from where their rows say. Cheap when there are none. */
   resume(): void {
     for (const run of this.#host.runs.unfinished()) {
       if (run.status !== "running" || this.executor.busy(run.agentId)) continue;
-      this.#host.waitUntil(
-        this.#host.definition(run.agentId).then((agent) => {
-          if (!agent) {
-            this.#host.runs.update(run.agentId, run.dueAt, { status: "failed", summary: "Failed: the agent was deleted." });
-            return null;
-          }
-          return this.executor.start(startOf(agent, run));
-        }),
-      );
+      this.#host.waitUntil(this.#goOn(run));
     }
   }
 

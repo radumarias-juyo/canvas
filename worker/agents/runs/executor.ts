@@ -32,7 +32,7 @@ import {
   type RunWhy,
 } from "../../../shared/runs.ts";
 import type { PendingActionView } from "../../../shared/limits.ts";
-import { clip, errorMessage, mapLimit } from "../../../shared/util.ts";
+import { clip, errorMessage, mapLimit, plural } from "../../../shared/util.ts";
 import { describeSchedule } from "./schedule.ts";
 import type { ActedStep, AgentRuns, RunRecord } from "./store.ts";
 
@@ -47,9 +47,6 @@ export class SignInNeeded extends Error {
     super(`Sign in to ${server} again.`);
   }
 }
-
-/** A do step held for its owner: its item stops there, and waits until they decide. */
-class ItemWaits extends Error {}
 
 /** What a work step's run came to. */
 export interface WorkResult {
@@ -218,6 +215,9 @@ function workPrompt(step: Extract<AgentStep, { kind: "work" }>, when: string, it
   ].join("\n\n");
 }
 
+/** Where an item stopped before its last step, and why. */
+type ItemStop = { status: "not_today" | "waiting"; reason: string };
+
 /** One item's way through the steps. */
 interface ItemRun {
   agent: AgentDefinition;
@@ -291,15 +291,17 @@ export class RunExecutor {
       const missing = await this.#host.needsSignIn(runServers(agent, await this.#host.signInServers()));
       if (missing.length) return this.#waitForSignIn(agent, run, missing);
       const elements = await this.#elements(agent);
-      await mapLimit(elements, RUN_CONCURRENCY, (element) => this.#item(agent, run, element, when));
-      // Read back, not as the items returned: an item decided while others ran is running again (a start after this
-      // one takes it on), and one held waits. No await between the read and the update, so neither is lost.
-      const outcomes = elements.map((element) => runs.item(agent.id, dueAt, element.key)!);
-      if (outcomes.some((item) => item.status === "running")) return { status: "running", started };
+      let outcomes: RunItemView[];
+      // An item decided while the others ran is running again: it goes through again before the run ends. The read
+      // and the update after it have no await between them, so a decision is never lost between them.
+      do {
+        await mapLimit(elements, RUN_CONCURRENCY, (element) => this.#item(agent, run, element, when));
+        outcomes = this.#outcomes(agent.id, dueAt, elements);
+      } while (outcomes.some((item) => item.status === "running"));
       const held = outcomes.filter((item) => item.status === "waiting");
       if (held.length) {
-        const which = held.length === 1 ? (held[0].label ? `for ${held[0].label}` : "") : `for ${held.length} items`;
-        runs.update(agent.id, dueAt, { status: "waiting", summary: `Waiting for you to approve a call${which && ` ${which}`}.` });
+        const which = held.length > 1 ? ` for ${plural(held.length, "item")}` : held[0].label ? ` for ${held[0].label}` : "";
+        runs.update(agent.id, dueAt, { status: "waiting", summary: `Waiting for you to approve a call${which}.` });
         return { status: "waiting", started };
       }
       const status = await this.#finish(agent, runs.get(agent.id, dueAt)!, outcomes);
@@ -311,6 +313,12 @@ export class RunExecutor {
     } finally {
       this.#host.changed(agent.id);
     }
+  }
+
+  /** The run's items as their rows have them, in the order of its elements: one read. */
+  #outcomes(agentId: string, dueAt: number, elements: readonly { key: string }[]): RunItemView[] {
+    const rows = new Map(this.#host.runs.items(agentId, dueAt).map((item) => [item.item, item]));
+    return elements.map((element) => rows.get(element.key)!);
   }
 
   #waitForSignIn(agent: AgentDefinition, run: RunRecord, servers: string[]): RunEnd {
@@ -342,10 +350,10 @@ export class RunExecutor {
   }
 
   /** One item through the workflow, in a session of its own; an item that ended already is read back as it was. */
-  async #item(agent: AgentDefinition, run: RunRecord, element: { key: string; label: string; value?: Value }, when: string): Promise<RunItemView> {
+  async #item(agent: AgentDefinition, run: RunRecord, element: { key: string; label: string; value?: Value }, when: string): Promise<void> {
     const runs = this.#host.runs;
     const { view, started } = await runs.beginItem(agent.id, run.dueAt, element.key, element.label, () => this.#host.newSession());
-    if (!started && view.status !== "running") return view;
+    if (!started && view.status !== "running") return;
     const watched = run.detail.watch as Value | undefined;
     const trigger = agent.trigger?.kind === "watch" ? agent.trigger : undefined;
     const scope = trigger && watched !== undefined ? watchScope(resultName(trigger.step), watched, run.detail.previous as Value | undefined) : bareScope();
@@ -376,13 +384,10 @@ export class RunExecutor {
         await this.#host.write(state.session, text, `${opId(state)}:watch`);
       }
       const stopped = await this.#steps(state, workflowOf(agent), "");
-      if (stopped) {
-        status = "not_today";
-        reason = stopped;
-      }
+      if (stopped) ({ status, reason } = stopped);
     } catch (error) {
       if (error instanceof SignInNeeded) throw error;
-      status = error instanceof ItemWaits ? "waiting" : "failed";
+      status = "failed";
       reason = errorMessage(error);
     }
     runs.endItem(agent.id, run.dueAt, element.key, {
@@ -396,11 +401,13 @@ export class RunExecutor {
       cost: state.cost,
     });
     this.#host.changed(agent.id);
-    return runs.item(agent.id, run.dueAt, element.key)!;
   }
 
-  /** Run steps in order. Returns why the item stopped at a condition, or undefined when it went through. */
-  async #steps(state: ItemRun, steps: readonly AgentStep[], path: string): Promise<string | undefined> {
+  /**
+   * Run steps in order. Returns where the item stopped and why (a condition that did not hold or a do step not done:
+   * not today; a do step held for the owner: waiting), or undefined when it went through.
+   */
+  async #steps(state: ItemRun, steps: readonly AgentStep[], path: string): Promise<ItemStop | undefined> {
     for (const [index, step] of steps.entries()) {
       const key = stepKey(path, index);
       const started = Date.now();
@@ -429,7 +436,7 @@ export class RunExecutor {
           const label = `${STEP_LABELS.onlyIf} ${step.condition}`;
           if (!this.#holds(step.condition, state, record, label)) {
             record(label, false, "did not hold: stopped here");
-            return `${step.condition} did not hold`;
+            return { status: "not_today", reason: `${step.condition} did not hold` };
           }
           record(label, true, "held");
           break;
@@ -472,8 +479,8 @@ export class RunExecutor {
           record(label, acted.ok, acted.detail);
           // Held: the item stops here, its deliveries unsent, until the owner decides (then it goes through again,
           // to this step's outcome). Declined or expired, it stops as at a condition that did not hold.
-          if (acted.waiting) throw new ItemWaits(`Waits for you to approve ${step.server}.${step.tool}.`);
-          if (acted.stopped) return `${step.server}.${step.tool} was not done: ${acted.detail}`;
+          if (acted.end === "waiting") return { status: "waiting", reason: `Waits for you to approve ${step.server}.${step.tool}.` };
+          if (acted.end === "stopped") return { status: "not_today", reason: `${step.server}.${step.tool} was not done: ${acted.detail}` };
           break;
         }
         case "tell":
@@ -503,10 +510,7 @@ export class RunExecutor {
     const input = fillInput(step.input, state.scope);
     if (state.run.test) return { ok: true, detail: `a test: would call it with ${excerpt(jsonOf(input), DETAIL_CHARS)}` };
     const context: ActContext = { agentId: state.agent.id, dueAt: state.run.dueAt, item: state.item, step: key };
-    const keep = (acted: ActedStep) => {
-      const run = runs.get(state.agent.id, state.run.dueAt);
-      runs.update(state.agent.id, state.run.dueAt, { detail: { acted: { ...run?.detail.acted, [mark]: acted } } });
-    };
+    const keep = (acted: ActedStep | undefined) => runs.setActed(state.agent.id, state.run.dueAt, mark, acted);
     // Kept before the call: a restart while it runs finds it, and never makes it again (it may have reached the server).
     keep({ ok: false, detail: "cut off by a restart while it ran: it may or may not have been done; check before doing it again" });
     let acted: ActedStep;
@@ -520,13 +524,11 @@ export class RunExecutor {
         keep(json.length > MAX_RESULT_CHARS ? { ok: true, detail: acted.detail } : acted);
         return acted;
       }
-      acted = result.status === "held" ? { ok: false, waiting: true, detail: result.message } : { ok: false, detail: result.message };
+      acted = { ok: false, detail: result.message, ...(result.status === "held" && { end: "waiting" as const }) };
     } catch (error) {
       if (error instanceof SignInNeeded) {
         // Nothing reached the server: asked again once signed in.
-        const run = runs.get(state.agent.id, state.run.dueAt);
-        const { [mark]: _started, ...rest } = run?.detail.acted ?? {};
-        runs.update(state.agent.id, state.run.dueAt, { detail: { acted: rest } });
+        keep(undefined);
         throw error;
       }
       acted = { ok: false, detail: `failed: ${errorMessage(error)}` };
@@ -541,14 +543,16 @@ export class RunExecutor {
    */
   decided(agentId: string, dueAt: number, item: string, step: string, acted: ActedStep): boolean {
     const runs = this.#host.runs;
-    const run = runs.get(agentId, dueAt);
     const mark = `${item}:${step}`;
-    if (!run?.detail.acted?.[mark]?.waiting) return false;
-    runs.update(agentId, dueAt, { detail: { acted: { ...run.detail.acted, [mark]: acted } } });
+    if (runs.get(agentId, dueAt)?.detail.acted?.[mark]?.end !== "waiting") return false;
+    runs.setActed(agentId, dueAt, mark, acted);
     return runs.reopen(agentId, dueAt, item);
   }
 
-  /** Start a run once the start of it going now (if any) has ended: a run with an item reopened while it went. */
+  /**
+   * Start a run once the start of it going now (if any) has ended: an item reopened just as that one ended (after its
+   * last read of its items) is gone through by this one.
+   */
   async again(start: RunStart): Promise<RunEnd> {
     await this.#active.get(`${start.agent.id}:${start.dueAt}`)?.catch(() => undefined);
     return this.start(start);
@@ -641,8 +645,9 @@ export class RunExecutor {
 /**
  * A decided action as the do step that held it ends: approved and ran (its result, what later steps read as `done`),
  * approved but failed (the item goes on, as after any failed call), or declined or expired (the item stops there).
+ * Null while it has not ended.
  */
-export function actedOf(view: Pick<PendingActionView, "status" | "result">): ActedStep {
+export function actedOf(view: Pick<PendingActionView, "status" | "result">): ActedStep | null {
   switch (view.status) {
     case "done": {
       const result = view.result ?? "";
@@ -657,11 +662,12 @@ export function actedOf(view: Pick<PendingActionView, "status" | "result">): Act
     case "failed":
       return { ok: false, detail: `approved, but failed: ${view.result ?? "no reason given"}` };
     case "declined":
-      return { ok: false, stopped: true, detail: "you declined it" };
+      return { ok: false, end: "stopped", detail: "you declined it" };
     case "expired":
-      return { ok: false, stopped: true, detail: "it expired before you decided" };
+      return { ok: false, end: "stopped", detail: "it expired before you decided" };
     default:
-      return { ok: false, waiting: true, detail: "it waits for you" };
+      // Not decided yet (pending), or still running: nothing to go on with.
+      return null;
   }
 }
 

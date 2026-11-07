@@ -26,9 +26,17 @@ export function whyLabel(why: RunWhy): string {
   return WHY[why];
 }
 
+const ITEM_STATUS: Record<RunItemStatus, string> = {
+  running: "Running",
+  acted: "Acted",
+  not_today: "Not today",
+  failed: "Failed",
+  waiting: RUN_STATUS.waiting.text,
+};
+
 /** An item's status, in words. */
 export function itemStatusLabel(status: RunItemStatus): string {
-  return { running: "Running", acted: "Acted", not_today: "Not today", failed: "Failed", waiting: "Waits for you" }[status];
+  return ITEM_STATUS[status];
 }
 
 /** How a run's items went, when it had a scope: "3 of 6 acted · 3 not today". Empty for a run with one item. */

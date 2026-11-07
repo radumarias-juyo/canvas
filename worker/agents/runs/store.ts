@@ -64,10 +64,11 @@ export interface ActedStep {
   detail: string;
   /** The call's result, when it ran: what later steps read as `done`. */
   value?: unknown;
-  /** Held for its owner: the item stops here until they decide (AgentRunner.decided). */
-  waiting?: true;
-  /** Declined, or its wait expired: the item stops here, as at a condition that did not hold. */
-  stopped?: true;
+  /**
+   * Where the item ends at this step: `waiting` while it is held for its owner (until they decide, AgentRunner.decided),
+   * `stopped` once they declined it or it expired (as at a condition that did not hold).
+   */
+  end?: "waiting" | "stopped";
 }
 
 /** What an item's row keeps: its steps, its part of the report and why it stopped. */
@@ -217,6 +218,12 @@ export class AgentRuns {
       agentId,
       dueAt,
     );
+  }
+
+  /** Keep what a do step came to, by `<item>:<step key>` (undefined forgets it). */
+  setActed(agentId: string, dueAt: number, mark: string, acted: ActedStep | undefined): void {
+    const { [mark]: _before, ...rest } = this.get(agentId, dueAt)?.detail.acted ?? {};
+    this.update(agentId, dueAt, { detail: { acted: acted ? { ...rest, [mark]: acted } : rest } });
   }
 
   /**
