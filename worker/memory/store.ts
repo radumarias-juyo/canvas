@@ -141,7 +141,10 @@ export class MemoryStore {
     );
   }
 
-  /** Why there is no room for one more note (see add), if there is none: `waits` unconfirmed, saved by the owner or not, in `chatId`. */
+  /**
+   * Why there is no room for one more note (see add), if there is none: saved by the owner or not, in `chatId`, and
+   * `waits` to be confirmed there (within the chat's MAX_UNCONFIRMED, and the owner's own within MAX_UNCONFIRMED_ALL).
+   */
   #full(byOwner: boolean, waits: boolean, chatId: string | undefined): string | undefined {
     if ((byOwner ? this.#ownersCount() : this.#count()) >= MAX_NOTES)
       return `There are ${MAX_NOTES} memory notes, the most there can be; the owner deletes some first.`;
@@ -273,9 +276,10 @@ export class MemoryStore {
     const same = note.forgottenAt === undefined ? this.#same(note) : undefined;
     if (same) return { id: same.id, skipped: true };
     // One still waiting may have been saved in a turn the owner did not ask for: kept as such (add), so it takes
-    // nobody's room but its chat's, within all of them.
+    // nobody's room but its chat's, within all of them. One that keeps no chat (its chat did not come along) has no
+    // chat's room to wait in: only all of them.
     const waits = !note.confirmed && note.forgottenAt === undefined;
-    const full = this.#full(!waits, waits, note.chatId);
+    const full = this.#full(!waits, waits && note.chatId !== undefined, note.chatId);
     if (full) return { error: full };
     const id = NOTE_ID_PATTERN.test(note.id) && !this.get(note.id) ? note.id : randomHex(6);
     // Its times as exported (recency ranks the notes), never later than now.

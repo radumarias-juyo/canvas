@@ -416,6 +416,15 @@ describe("UserMemory", () => {
     expect(fact.note.confirmed).toBe(false);
   });
 
+  it("imports waiting notes whose chat did not come along within all notes only, not one chat's room", () => {
+    const { memory } = directory();
+    const waiting = Array.from({ length: MAX_UNCONFIRMED + 5 }, (_, i) =>
+      note({ id: i.toString(16).padStart(12, "0"), text: `Said ${i}.`, source: "learned", confirmed: false, scope: "user", chatId: "gone" }),
+    );
+    expect(memory.import(waiting).filter((result) => "error" in result)).toEqual([]);
+    expect(memory.list().filter((each) => !each.confirmed && each.chatId === undefined)).toHaveLength(MAX_UNCONFIRMED + 5);
+  });
+
   it("imports no more waiting notes into one chat than may wait there", () => {
     const { memory } = directory();
     const waiting = Array.from({ length: MAX_UNCONFIRMED + 1 }, (_, i) =>
