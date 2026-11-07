@@ -20,7 +20,8 @@ import { AgentAvatar } from "../chat/people.tsx";
 import { opensElsewhere } from "../layout.tsx";
 import { sentLabel } from "../chat/SentTime.tsx";
 import type { AgentSubject, AgentTabProps } from "./AgentPage.tsx";
-import { ASSUMED_FIELDS, isAssumed } from "./glance.ts";
+import { AssumedBadge } from "./AssumedBadge.tsx";
+import { ASSUMED_FIELDS, CONFLICT_NOTICE, isAssumed, isConflict, withoutAssumed } from "./glance.ts";
 import { goTo } from "./nav.ts";
 import { reloadAgents } from "./store.ts";
 
@@ -181,19 +182,10 @@ export function SetupTab({ subject, field, save, notice, onDirty }: AgentTabProp
   useEffect(() => () => onDirty?.(false), [onDirty]);
   const set = <K extends keyof Form>(key: K, value: Form[K], confirms = key) =>
     setForm((current) => ({ ...current, [key]: value, assumed: confirmed(current.assumed, confirms) }));
-  const confirmed = (assumed: string[], key: string) => assumed.filter((name) => !isAssumed([name], SETUP_ASSUMED[key] ?? [key]));
+  const confirmed = (assumed: string[], key: string) => withoutAssumed(assumed, SETUP_ASSUMED[key] ?? [key]);
   const assumedBadge = (key: string) =>
     isAssumed(form.assumed, SETUP_ASSUMED[key] ?? [key]) && (
-      <span className="agent-assumed">
-        <span className="pill assumed">Assumed</span>
-        <button
-          type="button"
-          className="link-button"
-          onClick={() => setForm((current) => ({ ...current, assumed: confirmed(current.assumed, key) }))}
-        >
-          Looks right
-        </button>
-      </span>
+      <AssumedBadge onConfirm={() => setForm((current) => ({ ...current, assumed: confirmed(current.assumed, key) }))} />
     );
 
   const submit = async (event: FormEvent) => {
@@ -221,14 +213,10 @@ export function SetupTab({ subject, field, save, notice, onDirty }: AgentTabProp
       });
     } catch (e) {
       const message = errorMessage(e);
-      if (subject.kind === "own" && /changed since you read it/.test(message)) {
+      if (subject.kind === "own" && isConflict(e)) {
         // The newer version shows in place of this one: the user makes their change again on it.
         setForm(start.form);
-        notice({
-          agentId: subject.agent.id,
-          text: "Someone changed this agent since you opened it, so it was reloaded with their changes. Make yours again.",
-          error: true,
-        });
+        notice({ agentId: subject.agent.id, text: CONFLICT_NOTICE, error: true });
         await reloadAgents();
       } else setError(message);
     } finally {

@@ -185,7 +185,7 @@ describe("publishing from a conversation apart from the chat", () => {
     const made = chat(ok);
     const published: { id: string; session?: string }[] = [];
     made.scope.chatArtifacts = async () => [artifact("s1", "Salaries", 2), artifact("w1", "Week", 1)];
-    made.scope.onPublished = async (meta, session) => void published.push({ id: meta.id, ...(session !== undefined && { session }) });
+    made.scope.onPublished = async (meta, _chatId, session) => void published.push({ id: meta.id, ...(session !== undefined && { session }) });
     made.scope.rulesFor = async (session) => ({
       hidden: new Set(["s1"]),
       hiddenVersion: () => false,
