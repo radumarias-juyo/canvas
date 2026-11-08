@@ -500,6 +500,8 @@ describe("allowedTools", () => {
   const signsIn = (server: string) => server === "mail";
   const agent = { servers: ["crm", "mail"] };
   const reads = ["artifact_read", "activate_skill", "tool_search"];
+  // A turn anyone asked for also makes new pages (CREATE_TOOLS), within what the asker may use.
+  const asked = ["artifact_write", ...reads];
 
   it("lets a turn its owner asked for use every tool of the agent's servers, but never react", () => {
     const appButReact = app.filter((name) => name !== "react");
@@ -512,9 +514,9 @@ describe("allowedTools", () => {
 
   it("lets a turn its owner did not give read its sign-in servers too when nobody but the owner is in the chat", () => {
     // A routed turn in the owner's private chat: "how are my open deals?" reads mail (signs in each user) as a run does.
-    expect(allowedTools(tools, mcp, agent, false, signsIn, { alone: true })).toEqual([...reads, "crm__list_deals", "mail__search"]);
+    expect(allowedTools(tools, mcp, agent, false, signsIn, { alone: true })).toEqual([...asked, "crm__list_deals", "mail__search"]);
     // With others in the chat, only the servers whose results everyone shares.
-    expect(allowedTools(tools, mcp, agent, false, signsIn)).toEqual([...reads, "crm__list_deals"]);
+    expect(allowedTools(tools, mcp, agent, false, signsIn)).toEqual([...asked, "crm__list_deals"]);
     // Never a write, alone or not.
     expect(allowedTools(tools, mcp, agent, false, signsIn, { alone: true })).not.toContain("crm__update_deal");
   });
@@ -540,11 +542,28 @@ describe("allowedTools", () => {
     expect(runTools(tools, mcp, {})).toEqual([...reads, "crm__list_deals", "mail__search", "vault__read"]);
   });
 
+  it("lets a turn anyone asked for make a new page, but not one nobody asked for, a Yes to an offer, nor a run", () => {
+    const pages = ["artifact_write", "artifact_check", "artifact_publish"];
+    const all = [...tools, "artifact_check", "artifact_publish", "artifact_drafts"];
+    // A member's message, or a hand-off from pi or another agent (byOwner false): it may make one.
+    expect(allowedTools(all, mcp, agent, false, signsIn).filter((name) => name.startsWith("artifact_"))).toEqual(["artifact_write", "artifact_read", "artifact_check", "artifact_publish"]);
+    // Not the drafts list: on someone else's ask a turn builds only on its own drafts.
+    expect(allowedTools(all, mcp, agent, false, signsIn)).not.toContain("artifact_drafts");
+    // Speaking up (nobody asked), the Yes to an offer (draftTools) and a run (runTools) make none.
+    for (const name of pages) {
+      expect(allowedTools(all, mcp, agent, false, signsIn, { unprompted: true })).not.toContain(name);
+      expect(draftTools(all, mcp, agent)).not.toContain(name);
+      expect(runTools(all, mcp, agent)).not.toContain(name);
+    }
+  });
+
   it("lets a turn someone asked for post its plan as a checklist card, but not one nobody asked for, nor a run", () => {
     expect(allowedTools([...tools, "checklist"], mcp, agent, false, signsIn)).toContain("checklist");
     expect(allowedTools([...tools, "checklist"], mcp, agent, true, signsIn)).toContain("checklist");
     // Speaking up, it may still PASS: then nothing of it may show.
-    expect(allowedTools([...tools, "checklist"], mcp, agent, false, signsIn, { unprompted: true })).toEqual(allowedTools(tools, mcp, agent, false, signsIn));
+    expect(allowedTools([...tools, "checklist"], mcp, agent, false, signsIn, { unprompted: true })).toEqual(
+      allowedTools(tools, mcp, agent, false, signsIn).filter((name) => name !== "artifact_write"),
+    );
     expect(runTools([...tools, "checklist"], mcp, agent)).not.toContain("checklist");
   });
 
@@ -555,23 +574,23 @@ describe("allowedTools", () => {
   });
 
   it("gives anyone else's turn only the app's read tools and read tools of servers that do not sign in each user", () => {
-    expect(allowedTools(tools, mcp, agent, false, signsIn)).toEqual([...reads, "crm__list_deals"]);
+    expect(allowedTools(tools, mcp, agent, false, signsIn)).toEqual([...asked, "crm__list_deals"]);
     // With no list of its own, every server that does not sign in is shared, for reading.
-    expect(allowedTools(tools, mcp, {}, false, signsIn)).toEqual([...reads, "crm__list_deals", "vault__read"]);
+    expect(allowedTools(tools, mcp, {}, false, signsIn)).toEqual([...asked, "crm__list_deals", "vault__read"]);
   });
 
   it("gives anyone else's turn only read tools of the servers it shares, when it lists them", () => {
     // The owner widened it to a server that signs in, and left one that does not out.
-    expect(allowedTools(tools, mcp, { ...agent, sharedServers: ["mail"] }, false, signsIn)).toEqual([...reads, "mail__search"]);
+    expect(allowedTools(tools, mcp, { ...agent, sharedServers: ["mail"] }, false, signsIn)).toEqual([...asked, "mail__search"]);
     // A shared server outside its own list stays out.
     expect(allowedTools(tools, mcp, { ...agent, sharedServers: ["crm", "vault"] }, false, signsIn)).not.toContain("vault__read");
     // Sharing none leaves out every MCP tool, but not the app's read tools.
-    expect(allowedTools(tools, mcp, { ...agent, sharedServers: [] }, false, signsIn)).toEqual(reads);
+    expect(allowedTools(tools, mcp, { ...agent, sharedServers: [] }, false, signsIn)).toEqual(asked);
   });
 
   it("never gives anyone else's turn a tool that writes, runs code, reads private files or lists sign-ins, nor one it does not know", () => {
     const allowed = allowedTools([...tools, "some_new_tool"], mcp, {}, false, signsIn);
-    for (const name of ["run_python", "artifact_write", "files_read", "mcp_discover", "skill_propose", "agent_propose", "react", "some_new_tool"]) {
+    for (const name of ["run_python", "files_read", "mcp_discover", "skill_propose", "agent_propose", "react", "some_new_tool"]) {
       expect(allowed).not.toContain(name);
     }
     // A turn its owner asked for gets a tool of the app it does not know yet.
