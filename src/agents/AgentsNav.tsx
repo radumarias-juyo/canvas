@@ -4,7 +4,7 @@ import { plural } from "../../shared/util.ts";
 import { UnreadDot } from "../chat/ChatList.tsx";
 import { AgentAvatar } from "../chat/people.tsx";
 import { isBoolean, opensElsewhere, SectionHead, useStoredState } from "../layout.tsx";
-import { agentPath, NEW_AGENT } from "./nav.ts";
+import { agentPath, NEW_AGENT, PI_PAGE } from "./nav.ts";
 import { useAgents } from "./store.ts";
 
 /**
@@ -29,6 +29,18 @@ export function AgentsNav({ openId, navigate }: { openId: string | undefined; na
       </SectionHead>
       {open && (
         <nav className="agent-list" aria-label="Your agents">
+          <a
+            href={agentPath({ id: PI_PAGE })}
+            className={openId === PI_PAGE ? "nav-item agent-item active" : "nav-item agent-item"}
+            onClick={go(agentPath({ id: PI_PAGE }))}
+            title="pi: your main assistant in every chat"
+          >
+            <AgentAvatar />
+            <span className="nav-title agent-item-text">
+              <span className="agent-item-name">pi</span>
+              <small className="agent-item-job">Your main assistant in every chat</small>
+            </span>
+          </a>
           {agents === null && error && <p className="nav-empty">Could not read your agents: {error}</p>}
           {list.map((agent) => (
             <AgentLink key={agent.id} agent={agent} active={agent.id === openId} onClick={go(agentPath({ id: agent.id }))} />

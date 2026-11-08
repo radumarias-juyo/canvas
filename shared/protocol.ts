@@ -602,7 +602,28 @@ export type ChatClientMessage =
   | { type: "react"; entry: number; emoji: string; on: boolean }
   // Run the chat on another model or effort (shared/models.ts), or on Auto (AUTO_MODEL). The change reaches every socket
   // as pi's agent_changed, and a turn to or from Auto as `auto`.
-  | { type: "model"; model: string; thinkingLevel?: string };
+  | { type: "model"; model: string; thinkingLevel?: string }
+  // The owner shows everyone pi's reply held for them that started at `from` (PiHeld).
+  | { type: "pi_show"; from: number };
+
+/**
+ * pi's replies held for the chat's owner, by the times its messages started (epoch ms): a run alone with the owner that
+ * read what only they see (their private servers or files) and ended after someone joined, as an agent's turn apart is
+ * held, or one in a shared chat with the owner's review before posting on (`review`; shared/pi-settings.ts).
+ * `through`: when it ended; none while it still runs. Nobody else sees them until the owner shows them.
+ */
+export type PiHeld = { from: number; through?: number; review?: true };
+
+/** Whether one of pi's messages, by when it started (epoch ms), is among its held replies. */
+export function heldIn(held: readonly PiHeld[] | undefined, at: number): boolean {
+  return !!held?.some((range) => at >= range.from && (range.through === undefined || at <= range.through));
+}
+
+/**
+ * The mark on the details of one of pi's tool results that came from what only the chat's owner sees (worker/agent/reach.ts),
+ * in a chat others are in: the source chip under pi's reply names `server` (none: the owner's private files).
+ */
+export type PrivateMark = { private: true; server?: string };
 
 /**
  * ChatAgent → browser. `events` carries pi-durable AgentEvents verbatim; `people` comes on connect and whenever the people or invites change.
@@ -635,6 +656,8 @@ export type ChatServerMessage =
   | { type: "agents"; agents: ChatAgentView[] }
   /** The replies of this person's agents held for them to review (reviewBeforePosting): only their sockets get it. */
   | { type: "agentDrafts"; drafts: AgentDraftView[] }
+  /** pi's replies held for the owner (PiHeld): only the owner's sockets get it, on connect and whenever it changes. */
+  | { type: "piHeld"; held: PiHeld[] }
   /** The chat's agent settings (shared/agent-settings.ts): on connect, and whenever its owner changes them or an agent is muted. */
   | { type: "agentSettings"; settings: ChatAgentSettingsView }
   /**

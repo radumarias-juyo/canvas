@@ -4,6 +4,7 @@ import { PAGE_STORAGE_LIMITS, SOCKET_PING, MAX_CHAT_TITLE, type ArtifactSummary,
 import type { ExportedAgent, ExportedChat, ExportedPageValues, ExportedSkill, ExportStart, ImportedSettings } from "../shared/data-export.ts";
 import type { SkillFileInfo } from "../shared/skill-files.ts";
 import { checkSystemPrompt, type ChatSystemPrompt } from "../shared/system-prompt.ts";
+import { checkPiSettings, type PiSettings } from "../shared/pi-settings.ts";
 import { checkSkill, MAX_SKILL_PROPOSALS, MAX_USER_SKILLS, SkillError, type SavedSkillOrigin, type SkillInfo, type SkillInput, type SkillResult } from "../shared/skills.ts";
 import { BUILTIN_SKILLS, builtinSkill, parseSkillFile } from "./skills/index.ts";
 import { titleFromMessage, UNNAMED_CHAT } from "./agent/title.ts";
@@ -77,6 +78,8 @@ export function mcpAuthStore(uid: string, server: string): McpAuthStore {
 
 /** Where a user's, or a chat's, own system prompt is kept, in its object's KV storage. */
 export const SYSTEM_PROMPT_KEY = "systemPrompt";
+/** Where pi's settings are kept (shared/pi-settings.ts). Not in an export: an import never widens what pi reads for others. */
+const PI_SETTINGS_KEY = "piSettings";
 
 /** The system prompt kept under SYSTEM_PROMPT_KEY in `kv`; "" for none. */
 export function readSystemPrompt(kv: SyncKvStorage): string {
@@ -1744,6 +1747,20 @@ export class UserDirectory extends DurableObject<Env> {
   setSystemPrompt(value: unknown): ChatSystemPrompt | { error: string } {
     const saved = saveSystemPrompt(this.ctx.storage.kv, value);
     return "error" in saved ? saved : { ...saved, editable: true };
+  }
+
+  /** pi's settings, for all the user's chats (shared/pi-settings.ts): its defaults when they set none. */
+  piSettings(): PiSettings {
+    return this.ctx.storage.kv.get<PiSettings>(PI_SETTINGS_KEY) ?? {};
+  }
+
+  /** Check and keep pi's settings (the whole of them: a field left out goes back to its default); the settings kept, or why not. */
+  setPiSettings(input: unknown): PiSettings | { error: string } {
+    const checked = checkPiSettings(input);
+    if ("error" in checked) return checked;
+    if (Object.keys(checked).length) this.ctx.storage.kv.put(PI_SETTINGS_KEY, checked);
+    else this.ctx.storage.kv.delete(PI_SETTINGS_KEY);
+    return checked;
   }
 }
 

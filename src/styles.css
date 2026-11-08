@@ -1613,6 +1613,7 @@ section.agent-runs, .agent-runs-note { margin-top: 20px; }
 .draft-note { color: var(--muted); font-size: 12.5px; }
 .draft-edit { width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: var(--text); font: inherit; resize: vertical; field-sizing: content; min-height: 4lh; max-height: 50vh; }
 .draft-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.held-note { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 6px 10px; border: 1px dashed var(--accent); border-radius: 10px; background: color-mix(in srgb, var(--accent) 5%, var(--surface)); }
 .agent-review { align-items: flex-start; }
 .agent-review > span { display: flex; flex-direction: column; gap: 2px; font-weight: 500; }
 .agent-review small { color: var(--muted); font-weight: 400; }

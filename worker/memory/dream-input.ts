@@ -1,5 +1,5 @@
 import type { EntryRecord } from "@earendil-works/pi-durable";
-import { CHAT_AGENT_KIND, type ChatAgentReplyData } from "../../shared/agents.ts";
+import { CHAT_AGENT_KIND, CHAT_TURN_KIND, type ChatAgentReplyData } from "../../shared/agents.ts";
 import { textOf } from "../../shared/canonical.ts";
 import type { ChatKind } from "../../shared/chat-kinds.ts";
 import { MAX_CHAT_ITEMS, MAX_ITEM_CHARS, type DreamItem } from "../../shared/dream.ts";
@@ -19,6 +19,17 @@ export interface ExcerptQuery {
   private: boolean;
   from: number;
   to: number;
+  /**
+   * Whether one of pi's tool results came from what only the chat's owner sees (worker/agent/reach.ts): a reply of pi's
+   * in a chat others are in that its run built on one is `fork`, as an agent's reply built on its owner's servers is.
+   */
+  privateResult?: (entry: EntryRecord) => boolean;
+}
+
+/** The entries that start one of pi's runs: a person's message (not an aside), a hand-off, an input from before chats were shared. */
+function startsPiRun(entry: EntryRecord): boolean {
+  if (entry.kind === CHAT_MESSAGE_KIND) return !(entry.data as Partial<ChatMessageData> | undefined)?.aside;
+  return entry.kind === CHAT_TURN_KIND || entry.kind === "pi.user";
 }
 
 /** How many lines before (older) and after (newer) each of the subject's replies the dream reads. */
@@ -46,6 +57,7 @@ function short(text: string): string {
  * sees it in its log. Nothing else: no tool calls or results, no turn apart (only its posted reply is in the log), and
  * nothing held for review (it never reached the log). A reply of the subject's that its turn built on servers only its
  * owner reads (`sources`) is `fork`, also in the owner's private chat: an agent's notes are read in chats others are in.
+ * pi's replies are `fork` as dreamLines finds their run read what only the owner sees (`privateResult`).
  */
 function lineOf(entry: EntryRecord, query: ExcerptQuery): Omit<DreamItem, "at"> | null {
   const origin = query.private ? "private" : "shared";
@@ -84,14 +96,21 @@ function lineOf(entry: EntryRecord, query: ExcerptQuery): Omit<DreamItem, "at"> 
 export async function dreamLines(pages: AsyncIterable<readonly EntryRecord[]>, query: ExcerptQuery): Promise<{ items: DreamItem[]; people: string[] }> {
   const lines: DreamItem[] = [];
   let read = 0;
+  // pi's replies of the run being read back (newest first: its results come after them here), until the input that started it.
+  let piRun: DreamItem[] = [];
   scan: for await (const page of pages) {
     if (++read > MAX_DREAM_PAGES) break;
     for (const entry of page) {
+      if (startsPiRun(entry)) piRun = [];
+      else if (!query.private && entry.kind === "pi.tool-result" && query.privateResult?.(entry)) for (const line of piRun) line.origin = "fork";
       const at = timeOf(entry);
       if (at === undefined || at >= query.to) continue;
       if (at < query.from) break scan;
       const line = lineOf(entry, query);
-      if (line) lines.push({ ...line, at });
+      if (!line) continue;
+      const item = { ...line, at };
+      lines.push(item);
+      if (entry.kind === "pi.assistant") piRun.push(item);
     }
   }
   // Newest first: the subject's replies, each with what came just before it (older, later in the list) and after.
