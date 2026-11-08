@@ -134,7 +134,7 @@ export interface TurnOutcome {
  * gives a turn to each agent it calls, whoever's they are: `byOwner` holds only for the agents of the person who asked
  * (calledBy.uid), and the ask may be labelled per agent by it ("your owner").
  */
-export type Caller = Omit<TurnRequest, "agentId" | "hop" | "ask"> & { hop?: number; ask: string | ((byOwner: boolean) => string) };
+export type Caller = Omit<TurnRequest, "agentId" | "hop" | "ask" | "ownersChain"> & { hop?: number; ask: string | ((byOwner: boolean) => string) };
 
 /**
  * The chat's turn controller for the agents of its roster (not pi, whose turns are pi's own inbox). Each agent takes
@@ -162,16 +162,20 @@ export class AgentTurns {
     const turns = agentIds.flatMap((agentId) => {
       // pi (PI_TURN) takes its place in the chain too: the chat's owner is its owner. `piPlaced`: its input is in already.
       const pi = agentId === PI_TURN;
-      const ownerUid = pi ? this.#host.chatOwner : this.#host.roster.get(agentId)?.ownerUid;
+      const entry = pi ? undefined : (this.#host.roster.get(agentId) ?? undefined);
+      const ownerUid = pi ? this.#host.chatOwner : entry?.ownerUid;
       if (ownerUid === undefined) return [];
       // Never in a chain no person started (a run's hand-over), whatever it says.
       const byOwner = caller.byOwner && !caller.unattended && (caller.calledBy.uid === undefined || caller.calledBy.uid === ownerUid);
+      // The chat owner's own (ownersChain): their message, to pi or an agent of theirs run here. A member's own message to
+      // their own agent is byOwner too, but never the chat owner's: it hands pi no more than any member's turn.
+      const owners = ownersTurn(this.#host.chatOwner, ownerUid, entry, { ...caller, byOwner });
       const ask = typeof caller.ask === "function" ? caller.ask(byOwner) : caller.ask;
       const by = caller.by ?? caller.calledBy.uid;
       // A Yes to an offer reads every server of the agent's (draftTools): only its owner's is one. Anyone else's (a
       // member's agent's offer the chat's owner answered) is a turn as any other they give it, which only reads.
       const calledBy = caller.calledBy.drafts && caller.calledBy.uid !== ownerUid ? withoutYes(caller.calledBy) : caller.calledBy;
-      const request = { ...caller, calledBy, agentId, byOwner, ask, hop: caller.hop ?? 0, root, ...(by !== undefined && { by }) };
+      const request = { ...caller, calledBy, agentId, byOwner, ask, hop: caller.hop ?? 0, root, ...(by !== undefined && { by }), ...(owners && { ownersChain: true as const }) };
       const turn = this.#host.roster.enqueue(request, pi && piPlaced);
       // What pi's answer to it costs counts from now (its tokens are read as it ends).
       if (pi && piPlaced) this.#host.piTokens?.();
@@ -795,6 +799,21 @@ export class AgentTurns {
       ...(chain.unattended && { unattended: true as const }),
     });
   }
+}
+
+/**
+ * Whether a turn is the chat owner's own (AgentTurn.ownersChain): on the chat owner's (`chatOwner`) own message, directly
+ * (`byOwner` as AgentTurns.call worked it out, never an agent's hand-off or a chain no person started), to pi or one of
+ * their own agents run in this object (`entry`: none for pi; never a member's seat).
+ */
+export function ownersTurn(
+  chatOwner: string,
+  agentOwner: string,
+  entry: Pick<RosterEntry, "ownerUid" | "seat"> | undefined,
+  caller: Pick<Caller, "byOwner" | "calledBy" | "unattended">,
+): boolean {
+  if (!caller.byOwner || caller.unattended || caller.calledBy.agentId !== undefined || caller.calledBy.uid !== chatOwner) return false;
+  return agentOwner === chatOwner && entry?.seat === undefined;
 }
 
 /**

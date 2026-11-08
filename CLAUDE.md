@@ -98,7 +98,9 @@ with `@cloudflare/vite-plugin`, pnpm; configured and deployed with the `cf` CLI 
   (`ChatRoster.startNext`), pi among them (`PI_TURN`, its place in the chain, which ends once its answer is in the log;
   pi alone with no agent called goes as ever); another message's chain may run alongside. `@name` hands off (MAX_HOPS
   per person's message, a hand-off to pi counted on the handing turn; the chain stops past the chat's token budget per
-  message, `messageTokens`, seats' spend counted); pi's own answers are read from its log for the
+  message, `messageTokens`, seats' spend counted); a hand-off gives the agent it names only reading, and pi the owner's
+  level and reach only from a turn of the chat owner's own (`ownersChain`: their own message to one of their own agents
+  run here, never a member's seat; `inputLevel`, `ownersInput`); pi's own answers are read from its log for the
   agents they name (`#piScan`, from a cursor). An agent speaks up unasked only through the funnel (`worker/agents/funnel.ts`):
   gates, then the limits the chat's owner and the agent's set, the stricter of each (`shared/speak-up.ts`; with others in
   the chat the router keeps to the messages limit too), a pause, interest (raised a while after a mute or a PASS), then a
