@@ -130,6 +130,8 @@ describe("queue lines and runs", () => {
     expect(turnLine(turn({ status: "running", endedAt: undefined }), 7_000)).toBe("Ana asked · 6s · working");
     expect(turnLine(turn({ status: "queued", startedAt: undefined, endedAt: undefined }), 0)).toBe("Ana asked · waiting");
     expect(turnLine(turn({ calledBy: { name: "x", schedule: true } }), 0)).toBe("on its schedule · 14s · done");
+    // Picked by the router for a message that named no agent.
+    expect(turnLine(turn({ calledBy: { name: "Ana", uid: "a", routed: true } }), 0)).toBe("picked for Ana's message, which named nobody · 14s · done");
   });
 });
 

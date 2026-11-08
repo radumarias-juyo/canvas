@@ -115,10 +115,30 @@ export function AgentWindow({
   const onKey = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) void send();
     if (event.key === "Enter" && !event.shiftKey) event.preventDefault();
-    if (event.key === "Escape") onClose();
   };
+  // Focus goes into the window as it opens (the menu that opened it is gone by then), and back to the agent's badge in
+  // the people bar, or else where it was, as it closes.
+  const box = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const before = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    box.current?.focus();
+    return () => {
+      const badge = document.querySelector<HTMLElement>(`.people-bar [data-agent="${CSS.escape(agent.id)}"]`);
+      (badge ?? (before?.isConnected ? before : null))?.focus();
+    };
+  }, [agent.id]);
   return (
-    <aside className="agent-window" role="dialog" aria-modal="false" aria-labelledby={title}>
+    <aside
+      className="agent-window"
+      role="dialog"
+      aria-modal="false"
+      aria-labelledby={title}
+      ref={box}
+      tabIndex={-1}
+      onKeyDown={(event) => {
+        if (event.key === "Escape" && !event.nativeEvent.isComposing) onClose();
+      }}
+    >
       <header className="agent-window-head">
         <AgentAvatar badge={agent} working={busy} off={agent.off} />
         <div className="agent-window-title">
@@ -135,7 +155,7 @@ export function AgentWindow({
         </button>
       </header>
       {sessions.length > 0 && (
-        <nav className="agent-window-sessions" aria-label="Its sessions in this chat">
+        <nav className="agent-window-sessions" aria-label="What it worked on in this chat">
           {sessions.map((session) => (
             <button
               key={session.id}
@@ -144,7 +164,7 @@ export function AgentWindow({
               aria-pressed={session.id === shownId}
               onClick={() => setPicked(session.id)}
             >
-              {session.running && <span className="agent-window-dot" aria-label="working" />}
+              {session.running && <span className="agent-window-dot" role="img" aria-label="working" />}
               {sessionLabel(session)}
             </button>
           ))}
@@ -152,15 +172,16 @@ export function AgentWindow({
       )}
       <div className="agent-window-body" ref={body}>
         {view === null && !error && <p className="agent-menu-empty">Loading…</p>}
+        {view && !view.shown && <p className="agent-menu-empty">It has no turns here yet: what you send starts one.</p>}
         {shownSession && (
           <p className="agent-window-about">
             {shownSession.kind === "shared"
-              ? "The session everyone's turns read: what the chat said, and the replies it posted."
+              ? "What every turn here reads: what the chat said, and the replies it posted."
               : "A turn apart from the chat: what it read here stays with you; only its reply went to the chat."}
           </p>
         )}
         {state && transcript(state)}
-        {state && state.entries.length === 0 && !state.partial && <p className="agent-menu-empty">Nothing in this session yet.</p>}
+        {state && state.entries.length === 0 && !state.partial && <p className="agent-menu-empty">Nothing here yet.</p>}
       </div>
       <form className="agent-window-composer" onSubmit={send}>
         {note && <p className="agent-window-note">{note}</p>}

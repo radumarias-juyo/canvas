@@ -553,13 +553,14 @@ function UsedIn({ agentId, version }: { agentId: string; version: number }) {
       await api.shareChatAgent(chatId, agentId, shared);
     } catch (e) {
       setError(errorMessage(e));
-      setChats(await api.agentChats(agentId).catch(() => null));
+      // As it was: the list stays, with the switch back where it was.
+      setChats((list) => list?.map((use) => (use.chatId === chatId ? { ...use, shared: !shared } : use)) ?? list);
     }
   };
   return (
     <footer className="agent-foot">
       <p>
-        Saved in your user directory · version {version} · used in {chats ? plural(chats.length, "chat") : "…"}
+        Saved in your account · version {version} · used in {chats ? plural(chats.length, "chat") : "…"}
       </p>
       {chats && chats.length > 0 && (
         <ul className="agent-chats">

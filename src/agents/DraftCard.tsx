@@ -23,7 +23,7 @@ import { putAgent, readServers, reloadAgents, useAgents } from "./store.ts";
  * Anyone else sees who drafted it, for whom.
  */
 export function DraftCard({ details, chatId, mine, by }: { details: AgentProposedDetails; chatId: string; mine: boolean; by?: string }) {
-  const { agents } = useAgents();
+  const { agents, error } = useAgents();
   const agent = mine ? agents?.find((known) => known.id === details.agentId) : undefined;
   const drafter = by ? `@${by}` : AGENT_NAME;
   if (!mine) {
@@ -36,6 +36,19 @@ export function DraftCard({ details, chatId, mine, by }: { details: AgentPropose
     );
   }
   if (!agent) {
+    // A failed read leaves the list unread: say so, rather than loading for good.
+    if (agents === null && error) {
+      return (
+        <div className="agent-card compact">
+          <p className="form-error">
+            Could not read the draft of @{details.name}: {error}{" "}
+            <button type="button" className="link-button" onClick={() => void reloadAgents()}>
+              Try again
+            </button>
+          </p>
+        </div>
+      );
+    }
     return (
       <div className="agent-card compact">
         <p>{agents === null ? `Loading the draft of @${details.name}…` : `The draft of @${details.name} was deleted.`}</p>

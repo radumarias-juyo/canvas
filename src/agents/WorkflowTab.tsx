@@ -329,7 +329,7 @@ function WorkflowForm({
         <legend className="agent-label">For each {assumedBadge("scope")}</legend>
         <label className="workflow-choice">
           <input type="checkbox" checked={form.each} onChange={(e) => change({ each: e.target.checked })} />
-          Run once for each item of a list (each region, each client), each in a session of its own
+          Run once for each item of a list (each region, each client), each apart from the others
         </label>
         {form.each && <LookFields look={form.list} onChange={(list) => change({ list })} id="scope" markInvalid={markInvalid} noName />}
       </fieldset>

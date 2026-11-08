@@ -1,7 +1,7 @@
 import { memo, useCallback, useId, useState } from "react";
 import { MAKE_CHOICES, type MakeKind } from "../../shared/make.ts";
 import { Icon } from "../Icon.tsx";
-import { useDismiss } from "../layout.tsx";
+import { rovingKeys, useDismiss } from "../layout.tsx";
 
 /** What each choice makes, drawn small: a speech bubble, a page, a helper, a wrench; Auto a spark. */
 const GLYPHS: Record<MakeKind, string> = {
@@ -24,7 +24,7 @@ export const MakePicker = memo(function MakePicker({ value, onChange, compact }:
   const menu = useId();
   const current = MAKE_CHOICES.find((choice) => choice.kind === value) ?? MAKE_CHOICES[0];
   return (
-    <div className="composer-more composer-make" ref={box}>
+    <div className="composer-more composer-make" ref={box} onKeyDown={rovingKeys}>
       <button
         type="button"
         className={`make-button${value === "auto" ? "" : " chosen"}`}

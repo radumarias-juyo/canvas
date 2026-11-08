@@ -44,7 +44,9 @@ export function turnLine(turn: AgentTurnView, now: number): string {
       ? "spoke up unasked"
       : turn.calledBy.unprompted === "follow-up"
         ? `followed up ${turn.calledBy.name}'s question`
-        : `${callerName(turn.calledBy)} ${turn.hop > 0 ? "handed it on" : turn.calledBy.routed ? "asked (picked: nobody named)" : "asked"}`;
+        : turn.calledBy.routed && !turn.hop
+          ? `picked for ${callerName(turn.calledBy)}'s message, which named nobody`
+          : `${callerName(turn.calledBy)} ${turn.hop > 0 ? "handed it on" : "asked"}`;
   const took =
     turn.startedAt === undefined ? undefined : turn.endedAt !== undefined ? tookFor(turn.endedAt - turn.startedAt) : formatElapsed(now - turn.startedAt);
   return [who, took, STATUS_WORDS[turn.status]].filter(Boolean).join(" · ");

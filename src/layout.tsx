@@ -72,6 +72,28 @@ export function useDismiss<T extends HTMLElement>(open: boolean, setOpen: (open:
   return box;
 }
 
+/**
+ * Up and Down (Home and End) move between a menu's items (`role="menuitem…"`), and Left and Right between a tab list's
+ * tabs, as screen readers say those roles take; Tab still goes through them too. Put on the tab list, or on the box that
+ * holds a menu and the button opening it (Down from the button goes into the menu); with the menu closed it does nothing.
+ */
+export function rovingKeys(event: KeyboardEvent<HTMLElement>): void {
+  const tabs = event.currentTarget.getAttribute("role") === "tablist";
+  const [back, forth] = tabs ? ["ArrowLeft", "ArrowRight"] : ["ArrowUp", "ArrowDown"];
+  if (![back, forth, "Home", "End"].includes(event.key)) return;
+  const items = [...event.currentTarget.querySelectorAll<HTMLElement>(tabs ? '[role="tab"]' : '[role^="menuitem"]')].filter(
+    (item) => !(item as HTMLButtonElement).disabled,
+  );
+  if (!items.length) return;
+  const last = items.length - 1;
+  const at = items.indexOf(document.activeElement as HTMLElement);
+  const step = event.key === forth ? 1 : -1;
+  // Round from either end; from outside the items, to the first or the last.
+  const next = event.key === "Home" ? 0 : event.key === "End" ? last : at === -1 ? (step > 0 ? 0 : last) : (at + step + items.length) % items.length;
+  event.preventDefault();
+  items[next].focus();
+}
+
 /** Each media query's list, made once and shared by every component that follows it. */
 const mediaLists = new Map<string, MediaQueryList>();
 const mediaList = (query: string): MediaQueryList => {

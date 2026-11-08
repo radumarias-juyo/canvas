@@ -13,7 +13,7 @@ import { useAgents } from "./store.ts";
  * says that proposals wait for review.
  */
 export function AgentsNav({ openId, navigate }: { openId: string | undefined; navigate: (path: string) => void }) {
-  const { agents } = useAgents();
+  const { agents, error } = useAgents();
   const [open, setOpen] = useStoredState("layout.agentsOpen", false, isBoolean);
   const list = agents ?? [];
   const drafts = list.filter(isDraftAgent).length;
@@ -41,6 +41,7 @@ export function AgentsNav({ openId, navigate }: { openId: string | undefined; na
               <small className="agent-item-job">Your main assistant in every chat</small>
             </span>
           </a>
+          {agents === null && error && <p className="nav-empty">Could not read your agents: {error}</p>}
           {list.map((agent) => (
             <AgentLink key={agent.id} agent={agent} active={agent.id === openId} onClick={go(agentPath({ id: agent.id }))} />
           ))}
