@@ -5331,8 +5331,8 @@ export class ChatAgent extends DurableObject<Env> {
 
   /**
    * pi's level: the lowest of the inputs its run answers. The owner's own message runs (not their Yes to an offer);
-   * anyone else's only proposes; a hand-off goes no further than the turn that handed it (turnLevel: a turn of an
-   * agent's the owner's message named, or else a proposal).
+   * anyone else's only proposes; a hand-off runs only from a turn of the chat owner's own (inputLevel: their own message
+   * to one of their own agents run here), never from a member's agent, else it proposes.
    */
   async #piCaller(): Promise<Caller> {
     const placed = await this.#piInputs();
