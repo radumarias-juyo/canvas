@@ -108,7 +108,7 @@ import {
 } from "./agent/reach.ts";
 import { deferredTools, MIN_TOOLS_TO_PICK, pickerId, pickFailure, pickTools, TOOL_PICK_MS, toolPicker, toolsToOffer, type PickableTool } from "./agent/tool-pick.ts";
 import { artifactExtension, filesExtension, filesIndexExtension, reactionsExtension, sandboxExtension, skillsExtension, type ChatScope } from "./agent/tools.ts";
-import { agentSandboxName, sandboxFor, sandboxName } from "./agent/sandbox-names.ts";
+import { agentSandboxName, sandboxFor, sandboxName, sandboxSession, type SandboxTarget } from "./agent/sandbox-names.ts";
 import type { SandboxFile } from "./sandbox.ts";
 import { formatSkillFile } from "./skills/index.ts";
 import { ChatReactions } from "./reactions.ts";
@@ -906,17 +906,20 @@ export class ChatAgent extends DurableObject<Env> {
   }
 
   /**
-   * The sandbox object a session runs code in (worker/agent/sandbox-names.ts): the chat's for pi's, one of its own for
-   * each agent's (its own session, its turns' forks, its runs', a seat's); null for one nobody is known of. Remembered,
-   * so deleting the chat stops and forgets every one of them.
+   * Where a session's run goes now (worker/agent/sandbox-names.ts): the chat's sandbox for pi's, one of its own for each
+   * agent's (its own session, its turns' forks, its runs', a seat's), keyed by whom the run answers (sandboxSession: pi's
+   * run on anyone but the owner's message never shares /workspace with one on theirs); null for a session nobody is
+   * known of. Remembered, so deleting the chat stops and forgets every one of them.
    */
-  #sandboxOf(session: string): string | null {
-    const name = sandboxFor(this.#memoryAgent(session), this.uid, this.chatId);
-    if (name !== null) {
-      const used = this.#sandboxesUsed();
-      if (!used.includes(name)) this.ctx.storage.kv.put(SANDBOXES_KEY, [...used, name]);
-    }
-    return name;
+  async #sandboxOf(session: string): Promise<SandboxTarget | null> {
+    const owner = this.#memoryAgent(session);
+    const name = sandboxFor(owner, this.uid, this.chatId);
+    if (name === null) return null;
+    const used = this.#sandboxesUsed();
+    if (!used.includes(name)) this.ctx.storage.kv.put(SANDBOXES_KEY, [...used, name]);
+    // As pi's reach reads it (worker/agent/reach.ts); a run whose inputs cannot be read answers someone else.
+    const answersOthers = owner === null && (await this.#answersOthers());
+    return { name, session: sandboxSession(owner, session, answersOthers) };
   }
 
   /** The sandboxes this chat's sessions ran code in: pi's always, with the agents' that did (#sandboxOf). */
@@ -5334,8 +5337,8 @@ export class ChatAgent extends DurableObject<Env> {
 
   /**
    * pi's level: the lowest of the inputs its run answers. The owner's own message runs (not their Yes to an offer);
-   * anyone else's only proposes; a hand-off goes no further than the turn that handed it (turnLevel: a turn of an
-   * agent's the owner's message named, or else a proposal).
+   * anyone else's only proposes; a hand-off runs only from a turn of the chat owner's own (inputLevel: their own message
+   * to one of their own agents run here), never from a member's agent, else it proposes.
    */
   async #piCaller(): Promise<Caller> {
     const placed = await this.#piInputs();

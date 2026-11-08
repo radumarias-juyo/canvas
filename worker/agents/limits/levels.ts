@@ -12,16 +12,17 @@ import type { SeatTurnIn } from "../seats/seat.ts";
 import type { Caller, GateCall } from "./gate.ts";
 
 /**
- * What one of pi's inputs allows: the owner's own message runs (4), but not their Yes to an offer, which only drafts
+ * What one of pi's inputs allows: the chat owner's own message runs (4), but not their Yes to an offer, which only drafts
  * (its tools are narrowed to reading and agent_propose; anything else that changes data only proposes); anyone else's
- * only proposes (2); a hand-off goes no further than the turn that handed it, which runs only when that turn did
- * (turnLevel) and was a turn a person gave, never one of a run's chains; an input of a kind the app does not know only
- * proposes.
+ * only proposes (2); an input of a kind the app does not know only proposes. A hand-off runs (4) only when the turn that
+ * handed it is the chat owner's own (`ownersChain`: their own message, directly, to one of their own agents run here,
+ * never a member's seat or a run's chain) and ran on it (turnLevel); a member's agent's hand-off, on its owner's own
+ * message too, only proposes: pi acts as the chat's owner, and a member never gives it their level.
  */
 export function inputLevel(
   entry: { kind: string; data?: unknown } | undefined,
   ownerUid: string,
-  turn: (id: number) => Pick<AgentTurn, "byOwner" | "calledBy" | "unattended"> | null,
+  turn: (id: number) => Pick<AgentTurn, "byOwner" | "calledBy" | "unattended" | "ownersChain"> | null,
 ): CallerLevel {
   if (entry?.kind === CHAT_MESSAGE_KIND) {
     const data = entry.data as ChatMessageData;
@@ -31,7 +32,9 @@ export function inputLevel(
   if (entry?.kind === CHAT_TURN_KIND) {
     const data = entry.data as ChatTurnData;
     const handing = turn(data.turn);
-    if (handing && !handing.unattended && turnLevel(handing).level === 4) return { level: 4, because: "handed over on your own message" };
+    if (handing?.ownersChain && !handing.unattended && handing.calledBy.uid === ownerUid && turnLevel(handing).level === 4) {
+      return { level: 4, because: "handed over on your own message" };
+    }
     return { level: 2, because: `handed over by ${data.calledBy.name}` };
   }
   return { level: 2, because: "on a message the app did not write down" };

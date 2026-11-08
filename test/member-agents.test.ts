@@ -1,6 +1,8 @@
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
-import { AGENT_PROPOSE_TOOL, CHAT_AGENT_KIND, checkAgent, type AgentDefinition, type ChatAgentReplyData, type ChatTurnData } from "../shared/agents.ts";
+import { AGENT_PROPOSE_TOOL, CHAT_AGENT_KIND, CHAT_TURN_KIND, checkAgent, type AgentDefinition, type ChatAgentReplyData, type ChatTurnData } from "../shared/agents.ts";
+import { inputLevel } from "../worker/agents/limits/levels.ts";
+import { ownersInput } from "../worker/agent/reach.ts";
 import { CHAT_MESSAGE_KIND, PUBLISH_TOOL } from "../shared/protocol.ts";
 import { FILES_WRITE_TOOL } from "../worker/chat-traces.ts";
 import type { McpToolInfo } from "../worker/agent/mcp.ts";
@@ -674,6 +676,43 @@ describe("Member agents: a seat in the member's own object", () => {
     expect(chat.roster.turn(plain.id)).toMatchObject({ session: "private-fork", forked: true });
     chat.roster.requeueUnsubmitted();
     expect(chat.roster.turn(plain.id)).toMatchObject({ status: "queued", session: "private-fork", forked: true });
+  });
+
+  it("hands pi no more than a member's turn from a member's own agent, on her own message too", async () => {
+    const chat = room();
+    const helper = chat.add(ANA, "helper", { servers: ["db", "calendar"] });
+    const [turn] = chat.turns.call([helper.agentId], chat.say(ANA, "@helper look, then ask pi"));
+    // Her own message to her own agent: byOwner (she owns it), never the chat owner's.
+    expect(turn).toMatchObject({ byOwner: true });
+    expect(turn).not.toHaveProperty("ownersChain");
+    await settle();
+    chat.member(ANA.uid).sessions.finish(turn.id, "@pi write it up for everyone.");
+    await settle();
+    expect(chat.handed).toEqual([expect.objectContaining({ turn: turn.id })]);
+    const handOff = { kind: CHAT_TURN_KIND, data: chat.handed[0] };
+    const turnOf = (id: number) => chat.roster.turn(id);
+    // pi only proposes on it, and reads only what the chat shares (its run answers someone else).
+    expect(inputLevel(handOff, RADU.uid, turnOf).level).toBe(2);
+    expect(ownersInput(handOff, RADU.uid, turnOf)).toBe(false);
+  });
+
+  it("hands pi the owner's level from the chat owner's own agent, on his own message", async () => {
+    const chat = room();
+    const planner = chat.add(RADU, "planner", { servers: ["db", "calendar"] });
+    const [turn] = chat.turns.call([planner.agentId], chat.say(RADU, "@planner look, then ask pi"));
+    expect(turn).toMatchObject({ byOwner: true, ownersChain: true });
+    await settle();
+    chat.sessions.finish(turn.id, "@pi write it up.");
+    await settle();
+    const handOff = { kind: CHAT_TURN_KIND, data: chat.handed[0] };
+    const turnOf = (id: number) => chat.roster.turn(id);
+    expect(inputLevel(handOff, RADU.uid, turnOf).level).toBe(4);
+    expect(ownersInput(handOff, RADU.uid, turnOf)).toBe(true);
+    // The owner's agent named on a member's message, or a hand-off between agents, is not his.
+    const [mias] = chat.turns.call([planner.agentId], chat.say(ANA, "@planner hi"));
+    expect(mias).not.toHaveProperty("ownersChain");
+    const [handed] = chat.turns.call([planner.agentId], { calledBy: { name: "helper", agentId: "h" }, ask: "go", byOwner: true, hop: 1 });
+    expect(handed).not.toHaveProperty("ownersChain");
   });
 
   it("keeps a chain no person started read-only, in a seat and with private servers, and never hands pi a turn", async () => {

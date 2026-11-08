@@ -69,9 +69,11 @@ describe("pi's servers for anyone in a shared chat", () => {
 
 describe("whose input pi's run answers", () => {
   const RADU = "radu";
-  const turns = new Map([
-    [1, { byOwner: true, calledBy: { name: "Radu", uid: RADU } }],
+  const turns = new Map<number, { byOwner: boolean; calledBy: { name: string; uid: string }; ownersChain?: true }>([
+    [1, { byOwner: true, calledBy: { name: "Radu", uid: RADU }, ownersChain: true }],
     [2, { byOwner: false, calledBy: { name: "Mia", uid: "mia" } }],
+    // Mia's own message to her own agent (a seat in her object): byOwner, as she owns it, but not the chat owner's.
+    [3, { byOwner: true, calledBy: { name: "Mia", uid: "mia" } }],
   ]);
   const turn = (id: number) => turns.get(id) ?? null;
   const message = (uid: string, drafts = false) => ({ kind: "chat.message", data: { uid, name: uid, text: "hi", ...(drafts && { drafts: true }) } });
@@ -89,6 +91,13 @@ describe("whose input pi's run answers", () => {
     expect(ownersInput(handOff(9), RADU, turn)).toBe(false);
     expect(ownersInput({ kind: "pi.user" }, RADU, turn)).toBe(false);
     expect(ownersInput(undefined, RADU, turn)).toBe(false);
+  });
+
+  it("is someone else's for a member's own agent's hand-off: pi then reaches no private server nor the owner's files", async () => {
+    expect(ownersInput(handOff(3), RADU, turn)).toBe(false);
+    // So the run answers someone else (ChatAgent's #answersOthers), and its calls go through othersCall.
+    expect(await othersCall({ name: "calendar__events", arguments: {} }, reach())).toEqual({ block: expect.stringContaining("calendar is not shared") });
+    expect(await othersCall({ name: "files_read", arguments: { path: "salary.xlsx" } }, reach())).toEqual({ block: expect.stringContaining("not among this chat's files") });
   });
 });
 
@@ -132,6 +141,7 @@ describe("a call of pi's on someone else's message", () => {
       block: expect.stringContaining("uploads"),
     });
     expect(await othersCall({ name: "run_python", arguments: { code: "1", files: ["sum.csv"] } }, reach())).toEqual({ arguments: { code: "1", files: [`out/${CHAT}/sum.csv`] } });
+    // A run with no files goes: it starts in a /workspace none of the owner's runs share (sandboxSession, test/sandbox-audience.test.ts).
     expect(await othersCall({ name: "run_python", arguments: { code: "1" } }, reach())).toBeUndefined();
   });
 

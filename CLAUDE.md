@@ -73,7 +73,9 @@ with `@cloudflare/vite-plugin`, pnpm; configured and deployed with the `cf` CLI 
   chat with the owner's review before posting on, has its replies held for the owner (Show to the chat), which no
   agent's catch-up, `chat_history`, dream or branch's context reads and which hand nothing on; a branch copies them only
   for the owner's own, marked held (`ChatCopyData.held`: shown to them alone there, read by no agent), and an export
-  keeps them held; a dream reads a reply of pi's built on what only the owner sees as theirs (`fork`). Keep it that way.
+  keeps them held; a dream reads a reply of pi's built on what only the owner sees as theirs (`fork`); a sandbox run on
+  anyone else's message never shares /workspace with one on the owner's (`sandboxSession`: keyed by audience, a fresh
+  container when it switches). Keep it that way.
 - Agents (`shared/agents.ts`, `worker/agents/`): definitions per user in `UserDirectory` (`AgentStore`); a chat's roster
   and durable turn queue (`ChatRoster`) and the turn controller (`AgentTurns`) run each roster agent in its own pi
   session of the chat object, configured per turn (`#configureAgent`: the session's tools are an allow-list,
@@ -99,7 +101,9 @@ with `@cloudflare/vite-plugin`, pnpm; configured and deployed with the `cf` CLI 
   (`ChatRoster.startNext`), pi among them (`PI_TURN`, its place in the chain, which ends once its answer is in the log;
   pi alone with no agent called goes as ever); another message's chain may run alongside. `@name` hands off (MAX_HOPS
   per person's message, a hand-off to pi counted on the handing turn; the chain stops past the chat's token budget per
-  message, `messageTokens`, seats' spend counted); pi's own answers are read from its log for the
+  message, `messageTokens`, seats' spend counted); a hand-off gives the agent it names only reading, and pi the owner's
+  level and reach only from a turn of the chat owner's own (`ownersChain`: their own message to one of their own agents
+  run here, never a member's seat; `inputLevel`, `ownersInput`); pi's own answers are read from its log for the
   agents they name (`#piScan`, from a cursor). An agent speaks up unasked only through the funnel (`worker/agents/funnel.ts`):
   gates, then the limits the chat's owner and the agent's set, the stricter of each (`shared/speak-up.ts`; with others in
   the chat the router keeps to the messages limit too), a pause, interest (raised a while after a mute or a PASS), then a

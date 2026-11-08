@@ -47,14 +47,15 @@ export function piShares(signsIn: (server: string) => boolean, list?: readonly s
 }
 
 /**
- * Whether one of pi's inputs is the owner's: their own message (also their Yes to an offer, which drafts), or a hand-off
- * from a turn that runs on their own message (inputLevel says 4). Anyone else's message, a hand-off from a turn someone
+ * Whether one of pi's inputs is the chat owner's: their own message (also their Yes to an offer, which drafts), or a
+ * hand-off from a turn of the chat owner's own (inputLevel says 4: their own message to one of their own agents run
+ * here). Anyone else's message, a hand-off from a member's agent (on that member's own message too), from a turn someone
  * else gave or nobody asked for, and an input the app did not write down are not.
  */
 export function ownersInput(
   entry: Pick<EntryRecord, "kind" | "data"> | undefined,
   ownerUid: string,
-  turn: (id: number) => Pick<AgentTurn, "byOwner" | "calledBy" | "unattended"> | null,
+  turn: (id: number) => Pick<AgentTurn, "byOwner" | "calledBy" | "unattended" | "ownersChain"> | null,
 ): boolean {
   if (entry?.kind === CHAT_MESSAGE_KIND) return (entry.data as Partial<ChatMessageData> | undefined)?.uid === ownerUid;
   return entry?.kind === CHAT_TURN_KIND && inputLevel(entry, ownerUid, turn).level === 4;
