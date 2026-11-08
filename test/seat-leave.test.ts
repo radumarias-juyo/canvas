@@ -36,11 +36,17 @@ describe("what a seat keeps when its agent leaves the room", () => {
   });
 
   it("removes what its sessions made that no posted reply named: a page held for review and discarded, a scratch file", () => {
-    const made = { pages: ["p1", "p2", "draft-only"], files: ["out/plan.csv", "out/scratch.txt"] };
-    expect(seatLeftovers(made, { pages: ["p1", "p2"], files: ["out/plan.csv"] })).toEqual({ pages: ["draft-only"], files: ["out/scratch.txt"] });
+    const folder = "out/seat-a/";
+    const made = { pages: ["p1", "p2", "draft-only"], files: ["out/seat-a/plan.csv", "out/seat-a/scratch.txt"] };
+    expect(seatLeftovers(made, { pages: ["p1", "p2"], files: ["out/seat-a/plan.csv"] }, folder)).toEqual({ pages: ["draft-only"], files: ["out/seat-a/scratch.txt"] });
     // Nothing posted: all of it goes; everything posted: nothing does.
-    expect(seatLeftovers(made, { pages: [], files: [] })).toEqual(made);
-    expect(seatLeftovers(made, made)).toEqual({ pages: [], files: [] });
+    expect(seatLeftovers(made, { pages: [], files: [] }, folder)).toEqual(made);
+    expect(seatLeftovers(made, made, folder)).toEqual({ pages: [], files: [] });
+  });
+
+  it("never removes a file outside the seat chat's own folder: it may be one of its owner's it wrote over", () => {
+    const made = { pages: [], files: ["notes/plan.md", "out/seat-a/scratch.txt", "out/seat-b/other.txt", "out/seat-a"] };
+    expect(seatLeftovers(made, { pages: [], files: [] }, "out/seat-a/").files).toEqual(["out/seat-a/scratch.txt"]);
   });
 });
 
