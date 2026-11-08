@@ -79,7 +79,7 @@ with `@cloudflare/vite-plugin`, pnpm; configured and deployed with the `cf` CLI 
   reply goes back, and one built on a private server is held for the owner when someone joined meanwhile. A call such a
   fork or a run holds shows anyone else only who asks for which tool (`shownToMembers`). A member's agent runs as a seat
   in the member's own object, one per room (`seatChatId`: what a chat object keeps, its pages, drafts, files, sandbox and
-  held actions, never passes between rooms) (`worker/agents/seats/`): the member's own turns and anyone's Yes to its offer run in a fork
+  held actions, never passes between rooms) (`worker/agents/seats/`): the member's own turns and their Yes to its offer (offerOwner: only theirs) run in a fork
   of the seat's session, its calls go through the member's write gate (`seatCaller`: only the member's own message
   changes data), what it holds has its card in the room for the member alone, it reads as the room's kind, and it keeps to the servers the room lets agents use (`SeatTurn.servers`). An
   agent's owner alone opens its window (`shared/agent-window.ts`, `worker/agents/window.ts`; a seat's is read in the

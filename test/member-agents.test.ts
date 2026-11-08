@@ -963,6 +963,27 @@ describe("Member agents: private turns run apart", () => {
     expect(chat.sessions.forks.get(chat.sessions.sessionOf(drafting.id))).toBe(planner.session);
   });
 
+  it("takes a Yes to a member's agent's offer only from that member: anyone else's is a plain turn, not apart", async () => {
+    const chat = room();
+    const planner = chat.add(ANA, "planner", { servers: ["db", "calendar"] });
+    // Radu, the room's owner, answers Ana's agent's offer: a Yes would read every server of hers (draftTools) and post
+    // what it found in the room. His is a turn as any other he gives her agent: it reads, in the seat's shared session.
+    const radu = { ...chat.say(RADU, "Yes"), calledBy: { name: RADU.name, uid: RADU.uid, drafts: true as const }, unattended: true as const };
+    const [his] = chat.turns.call([planner.agentId], radu);
+    await settle();
+    expect(chat.roster.turn(his.id)?.calledBy).toEqual({ name: RADU.name, uid: RADU.uid });
+    const ana = chat.member(ANA.uid);
+    expect(ana.sessions.forks.has(ana.sessions.sessionOf(his.id))).toBe(false);
+    ana.sessions.finish(his.id, "Noted.");
+    await settle();
+    // Ana's own Yes is one: apart, in a fork of the seat's session.
+    const own = { ...chat.say(ANA, "Yes"), calledBy: { name: ANA.name, uid: ANA.uid, drafts: true as const }, unattended: true as const };
+    const [hers] = chat.turns.call([planner.agentId], own);
+    await settle();
+    expect(chat.roster.turn(hers.id)?.calledBy).toEqual({ name: ANA.name, uid: ANA.uid, drafts: true });
+    expect(ana.sessions.forks.has(ana.sessions.sessionOf(hers.id))).toBe(true);
+  });
+
   it("does the same in a member's seat: the fork is in their object, and the reply carries their source chip", async () => {
     const chat = room();
     const planner = chat.add(ANA, "planner", { servers: ["db", "calendar"] });

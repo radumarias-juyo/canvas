@@ -1,7 +1,7 @@
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
 import { AGENT_PROPOSE_TOOL, CHAT_AGENT_KIND } from "../shared/agents.ts";
-import { assistantOffer, entryOffer, MAX_OFFER, OFFER_PREFIX, OFFER_RULE, OFFER_YES, offerOf } from "../shared/offers.ts";
+import { assistantOffer, entryOffer, MAX_OFFER, OFFER_PREFIX, OFFER_RULE, OFFER_YES, offerOf, offerOwner, withoutYes } from "../shared/offers.ts";
 import { CHAT_MESSAGE_KIND } from "../shared/protocol.ts";
 import { liveOffer } from "../src/chat/entries.ts";
 
@@ -125,5 +125,17 @@ describe("offers in the transcript", () => {
     expect(liveOffer([first, second, replyTo(second.id as number)])).toBeUndefined();
     expect(liveOffer([first, second, replyTo(first.id as number)])).toBe(second.id);
     expect(liveOffer([after])).toBeUndefined();
+  });
+
+  it("is answered by the owner of the agent that offered it: pi's and the chat owner's agents' by them, a member's agent's by that member", () => {
+    const owned = (value: string, ownerUid: string) =>
+      ({ id: nextId++, conversationId: 0, kind: CHAT_AGENT_KIND, data: { text: value, ownerUid } }) as unknown as EntryRecord;
+    expect(offerOwner(pi(text(OFFERED)), "radu")).toBe("radu");
+    expect(offerOwner(owned(OFFERED, "radu"), "radu")).toBe("radu");
+    // A member's agent's offer: its Yes reads every server of hers, so the chat's owner does not answer it.
+    expect(offerOwner(owned(OFFERED, "ana"), "radu")).toBe("ana");
+    expect(offerOwner(owned("No offer here.", "ana"), "radu")).toBeUndefined();
+    expect(offerOwner(pi(text("Nothing offered.")), "radu")).toBeUndefined();
+    expect(withoutYes({ name: "Radu", uid: "radu", drafts: true as const })).toEqual({ name: "Radu", uid: "radu" });
   });
 });
