@@ -9,7 +9,7 @@ import { DEMO_COOKIE, identify } from "./auth/index.ts";
 import { dataRoute } from "./data-routes.ts";
 import { dictationRoute } from "./dictation.ts";
 import { filesRoute } from "./files-routes.ts";
-import { json, readJson } from "./http.ts";
+import { answerJson, json, readJson } from "./http.ts";
 import type { UserDirectory } from "./users.ts";
 import type { MemoryKind, MemoryScope, ServerCoverage } from "../shared/memory.ts";
 import { chatRoute, discussRoute } from "./chat-routes.ts";
@@ -266,6 +266,13 @@ async function route(request: Request, env: Env): Promise<Response> {
     } catch (error) {
       return json({ error: errorMessage(error) }, 400);
     }
+  }
+
+  // The speak-up funnel's latest stages in one of the caller's chats, for the e2e suite. Needs DEV_TOOLS=true.
+  const devFunnel = path.match(/^\/api\/dev\/chats\/([a-z0-9]+)\/funnel$/);
+  if (devFunnel && method === "GET" && env.DEV_TOOLS === "true") {
+    if (!(await directory.hasChat(devFunnel[1]))) return json({ error: "No such chat" }, 404);
+    return answerJson(await exports.ChatAgent.getByName(chatAgentName(uid, devFunnel[1])).devFunnel(uid));
   }
 
   // Save an agent as the model proposes one (off, for review), to try its draft card and page without the model.

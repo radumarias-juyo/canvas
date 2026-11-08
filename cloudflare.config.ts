@@ -136,6 +136,9 @@ export default defineConfig({
       // With DEV_MODEL=script only: how long, in milliseconds, a chat stays quiet before an agent may speak up in it (the
       // e2e suite's few seconds; worker/dev-model.ts). Empty: the usual pause.
       DEV_PAUSE_MS: bindings.text(process.env.DEV_MODEL === "script" ? (process.env.DEV_PAUSE_MS ?? "") : ""),
+      // With DEV_MODEL=script only: the shortest time, in milliseconds, between two of an agent's unprompted posts in a
+      // chat (the e2e suite's second; worker/dev-model.ts). Empty: the limits' minutes.
+      DEV_GAP_MS: bindings.text(process.env.DEV_MODEL === "script" ? (process.env.DEV_GAP_MS ?? "") : ""),
       // The MCP servers every chat connects to: just a name and a URL each (see mcpServerList above). The agent learns
       // what a server offers from the server, and you name servers and tools in chat. "oauth": each user signs in, from
       // a link the agent gives. A Cloudflare MCP portal is one entry for every server behind it.

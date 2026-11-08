@@ -51,6 +51,8 @@ export default defineConfig({
         DEV_MODEL: "script",
         // Agents speak up after a pause of seconds, not minutes (worker/dev-model.ts: scriptPauseMs).
         DEV_PAUSE_MS: "1500",
+        // And may speak up again a second after their last post, not half an hour (scriptGapMs).
+        DEV_GAP_MS: "1000",
         PI_STATE_DIR: STATE,
         PI_MCP_SERVERS: JSON.stringify(servers),
         // A fixed key for the local state only: each run starts it afresh.
