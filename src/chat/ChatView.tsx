@@ -46,6 +46,7 @@ import { MenuButton } from "../layout.tsx";
 import { AutoPicked, ToolsPicked } from "./AutoPick.tsx";
 import { ChatCost, PromptCost } from "./Cost.tsx";
 import { ContextMeter } from "./Context.tsx";
+import { AllowanceRing } from "./Allowance.tsx";
 import { ChatPromptButton } from "../SystemPrompt.tsx";
 import { SharePanel } from "./SharePanel.tsx";
 import { promptSpend, totalTime } from "./spend.ts";
@@ -657,6 +658,7 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
                     onChange={setModel}
                   />
                   <ContextMeter entries={state.entries} model={state.model} />
+                  <AllowanceRing working={working} />
                 </div>
               </div>
             </form>
