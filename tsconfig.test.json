@@ -25,6 +25,7 @@
   "include": [
     "test",
     "e2e",
+    "deploy",
     "src/artifact/broker.ts",
     "src/chat/useChat.ts",
     "src/chat/spend.ts",

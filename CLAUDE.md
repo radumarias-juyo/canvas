@@ -129,4 +129,5 @@ with `@cloudflare/vite-plugin`, pnpm; configured and deployed with the `cf` CLI 
   raw.githubusercontent.com serves only the LFS pointer.
 - Deploy with `cf deploy` from the repository root (Worker `pi-artifacts` on the custom domain `pi.oxfer.app`, workers.dev
   and Preview URLs off; R2 bucket, Artifacts namespace and AI Gateway all named `pi-artifacts`). The sandbox image build
-  needs Docker.
+  needs Docker. `PI_PREVIEW=<name>` deploys a separate preview Worker with its own resources instead (`deploy/preview.ts`,
+  `docs/preview-deploy.md`); without it the config is production's, held by `test/fixtures/production-config.json`.
