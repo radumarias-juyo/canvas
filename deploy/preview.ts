@@ -40,6 +40,7 @@ export type PreviewEnv = {
   DEV_TOOLS?: string;
   DEV_MODEL?: string;
   DEV_PAUSE_MS?: string;
+  DEV_GAP_MS?: string;
   PI_OFFLINE?: string;
 };
 
@@ -57,7 +58,7 @@ export function deployTarget(production: DeployTarget, env: PreviewEnv): DeployT
   };
   if (!NAME.test(name)) refuse("the name takes 3 to 48 lowercase letters, digits and dashes, starting and ending with a letter or digit");
   if (name === production.name) refuse("the name is production's");
-  for (const flag of ["AUTH_MODE", "DEV_TOOLS", "DEV_MODEL", "DEV_PAUSE_MS", "PI_OFFLINE"] as const) {
+  for (const flag of ["AUTH_MODE", "DEV_TOOLS", "DEV_MODEL", "DEV_PAUSE_MS", "DEV_GAP_MS", "PI_OFFLINE"] as const) {
     if (env[flag]) refuse(`${flag} is for local development; unset it`);
   }
   const accessAud = env.PI_PREVIEW_ACCESS_AUD?.trim();

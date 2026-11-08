@@ -17,6 +17,7 @@ const READS = [
   "DEV_TOOLS",
   "DEV_MODEL",
   "DEV_PAUSE_MS",
+  "DEV_GAP_MS",
   "PI_PREVIEW",
   "PI_PREVIEW_DOMAIN",
   "PI_PREVIEW_ACCESS_AUD",
@@ -117,6 +118,7 @@ describe("a preview deploy", () => {
       DEV_TOOLS: { value: "false" },
       DEV_MODEL: { value: "" },
       DEV_PAUSE_MS: { value: "" },
+      DEV_GAP_MS: { value: "" },
     });
   });
 
@@ -131,6 +133,7 @@ describe("a preview deploy", () => {
     [{ DEV_TOOLS: "true" }, /DEV_TOOLS is for local development/],
     [{ DEV_MODEL: "script" }, /DEV_MODEL is for local development/],
     [{ DEV_PAUSE_MS: "10" }, /DEV_PAUSE_MS is for local development/],
+    [{ DEV_GAP_MS: "10" }, /DEV_GAP_MS is for local development/],
     [{ AUTH_MODE: "demo" }, /AUTH_MODE is for local development/],
     [{ PI_OFFLINE: "1" }, /PI_OFFLINE is for local development/],
   ])("is refused with %o", async (env, why) => {

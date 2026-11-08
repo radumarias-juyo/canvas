@@ -167,7 +167,13 @@ export class UserDreams {
     }
     this.#deps.kv.put(NOW_KEY + key, now);
     this.#scripted = scripted;
-    const record = await this.#dreamer.dream(subject, { day: `now:${new Date(now).toISOString().slice(0, 16)}`, from: now - 86_400_000, to: now });
+    let record: DreamRecord;
+    try {
+      record = await this.#dreamer.dream(subject, { day: `now:${new Date(now).toISOString().slice(0, 16)}`, from: now - 86_400_000, to: now });
+    } finally {
+      // A dream that called no model (nothing to learn from) leaves no scripted answer behind for a later one.
+      this.#scripted = undefined;
+    }
     this.#ended(subject, record);
     return record;
   }

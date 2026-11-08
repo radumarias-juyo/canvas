@@ -73,13 +73,26 @@ function wordVector(text: string): number[] {
   return vector;
 }
 
+/** A DEV_* setting's milliseconds, on the scripted model only; undefined anywhere else, or for one that is no whole number. */
+function scriptMs(env: { DEV_MODEL?: string; DEV_TOOLS?: string }, value: string | undefined): number | undefined {
+  const ms = Number(value || NaN);
+  return scriptOn(env) && Number.isSafeInteger(ms) && ms >= 0 ? ms : undefined;
+}
+
 /**
  * How long a chat stays quiet before an agent may speak up in it, on the scripted model with DEV_PAUSE_MS set (the e2e
  * suite's, so it waits seconds, not minutes); undefined anywhere else: PAUSE_MS.
  */
 export function scriptPauseMs(env: { DEV_MODEL?: string; DEV_TOOLS?: string; DEV_PAUSE_MS?: string }): number | undefined {
-  const ms = Number(env.DEV_PAUSE_MS || NaN);
-  return scriptOn(env) && Number.isSafeInteger(ms) && ms >= 0 ? ms : undefined;
+  return scriptMs(env, env.DEV_PAUSE_MS);
+}
+
+/**
+ * The shortest time between two of an agent's unprompted posts in a chat, on the scripted model with DEV_GAP_MS set (the
+ * e2e suite's, so an agent may speak up again within seconds); undefined anywhere else: the limits' gapMinutes.
+ */
+export function scriptGapMs(env: { DEV_MODEL?: string; DEV_TOOLS?: string; DEV_GAP_MS?: string }): number | undefined {
+  return scriptMs(env, env.DEV_GAP_MS);
 }
 
 /** A script's step: a reply, a recall, or one tool call. A /tool line that cannot be read is a reply saying why. */

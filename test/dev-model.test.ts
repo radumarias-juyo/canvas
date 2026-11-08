@@ -2,7 +2,7 @@ import { createModels, fauxAssistantMessage, fauxToolCall, type Message } from "
 import { describe, expect, it } from "vitest";
 import { assistantText as said } from "../worker/agents/turns.ts";
 import { agentProfile, cosine, INTEREST_THRESHOLD } from "../worker/agents/funnel.ts";
-import { scriptEmbedder, scriptModel, scriptOn, scriptPauseMs, scriptReply, scriptSteps, scriptWorkflow, stepsFor } from "../worker/dev-model.ts";
+import { scriptEmbedder, scriptGapMs, scriptModel, scriptOn, scriptPauseMs, scriptReply, scriptSteps, scriptWorkflow, stepsFor } from "../worker/dev-model.ts";
 import { compilePrompt, compileWorkflow, type ServerTools } from "../worker/agents/runs/compile.ts";
 import type { AgentDefinition } from "../shared/agents.ts";
 
@@ -141,6 +141,8 @@ describe("the scripted dev model", () => {
     expect(scriptPauseMs({ DEV_MODEL: "script", DEV_TOOLS: "false", DEV_PAUSE_MS: "1500" })).toBeUndefined();
     expect(scriptPauseMs({ DEV_MODEL: "script", DEV_TOOLS: "true" })).toBeUndefined();
     expect(scriptPauseMs({ DEV_MODEL: "script", DEV_TOOLS: "true", DEV_PAUSE_MS: "soon" })).toBeUndefined();
+    expect(scriptGapMs({ DEV_MODEL: "script", DEV_TOOLS: "true", DEV_GAP_MS: "1000" })).toBe(1000);
+    expect(scriptGapMs({ DEV_MODEL: "", DEV_TOOLS: "true", DEV_GAP_MS: "1000" })).toBeUndefined();
   });
 });
 

@@ -32,7 +32,7 @@ const production: DeployTarget = {
 // (deploy/preview.ts, docs/preview-deploy.md). Without it, this is production, unchanged (test/deploy-config.test.ts).
 const target = deployTarget(production, process.env);
 // What only local development reads from the environment: never for a preview, which refuses it being set.
-const local: Partial<Record<"AUTH_MODE" | "DEV_TOOLS" | "DEV_MODEL" | "DEV_PAUSE_MS", string>> = target.preview ? {} : process.env;
+const local: Partial<Record<"AUTH_MODE" | "DEV_TOOLS" | "DEV_MODEL" | "DEV_PAUSE_MS" | "DEV_GAP_MS", string>> = target.preview ? {} : process.env;
 
 /**
  * The MCP servers every chat connects to, as [{ name, url, auth?, cacheScope? }]. Each deployment keeps its own list out of the
@@ -160,6 +160,9 @@ export default defineConfig({
       // With DEV_MODEL=script only: how long, in milliseconds, a chat stays quiet before an agent may speak up in it (the
       // e2e suite's few seconds; worker/dev-model.ts). Empty: the usual pause.
       DEV_PAUSE_MS: bindings.text(local.DEV_MODEL === "script" ? (local.DEV_PAUSE_MS ?? "") : ""),
+      // With DEV_MODEL=script only: the shortest time, in milliseconds, between two of an agent's unprompted posts in a
+      // chat (the e2e suite's second; worker/dev-model.ts). Empty: the limits' minutes.
+      DEV_GAP_MS: bindings.text(local.DEV_MODEL === "script" ? (local.DEV_GAP_MS ?? "") : ""),
       // The MCP servers every chat connects to: just a name and a URL each (see mcpServerList above). The agent learns
       // what a server offers from the server, and you name servers and tools in chat. "oauth": each user signs in, from
       // a link the agent gives. A Cloudflare MCP portal is one entry for every server behind it.
