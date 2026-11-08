@@ -132,6 +132,25 @@ export function chatAllowsServer(settings: Pick<ChatAgentSettings, "servers">, s
   return !settings.servers || settings.servers.includes(server);
 }
 
+/**
+ * An agent's definition as it may run in a chat whose owner names the servers agents may use there (`settings.servers`):
+ * only the servers both name (`all`, the deployment's, stand for an agent that names none). Every reader of `servers`
+ * follows it: a turn's tools, a run's, and what is shared with the chat. The agent itself when the chat names none.
+ */
+export function inChatServers<T extends { servers?: string[]; sharedServers?: string[] }>(
+  agent: T,
+  settings: Pick<ChatAgentSettings, "servers">,
+  all: readonly string[],
+): T {
+  if (!settings.servers) return agent;
+  const here = (server: string) => chatAllowsServer(settings, server);
+  return {
+    ...agent,
+    servers: (agent.servers ?? all).filter(here),
+    ...(agent.sharedServers && { sharedServers: agent.sharedServers.filter(here) }),
+  };
+}
+
 /** The day (UTC) a time falls on, as the budgets count it: "2026-11-07". */
 export function budgetDay(at: number): string {
   return new Date(at).toISOString().slice(0, 10);
