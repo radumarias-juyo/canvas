@@ -6,8 +6,7 @@
 
 import { createAssistantMessageEventStream, type AssistantMessage, type Models, type Usage } from "@earendil-works/pi-ai";
 import { defineExtension, GenerationTask, hook, ProviderDoc, type Extension } from "@earendil-works/pi-durable";
-import { calculateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
-import { budgetDay, budgetNotice } from "../../shared/agent-settings.ts";
+import { budgetDay, budgetNotice, processedTokens } from "../../shared/agent-settings.ts";
 import { NO_USAGE } from "../agent/route.ts";
 import { tapStream } from "../streams.ts";
 import type { Kv } from "../chat-kind.ts";
@@ -121,9 +120,12 @@ export class ChatSpend {
     if (this.#sessions.size > MAX_TAGGED) this.#sessions.delete(this.#sessions.keys().next().value!);
   }
 
-  /** Count one answer's usage (and its tool calls), for the session it was for when known. */
+  /**
+   * Count one answer's usage (and its tool calls), for the session it was for when known: the tokens it processed
+   * (processedTokens), not the cached context it read again, so a long conversation's tool calls do not count it each time.
+   */
   record(usage: Usage, conversation?: string, toolCalls = 0): void {
-    const tokens = calculateContextTokens(usage);
+    const tokens = processedTokens(usage);
     const costUsd = usage.cost.total;
     if (!tokens && !costUsd) return;
     this.#add(tokens, costUsd);
