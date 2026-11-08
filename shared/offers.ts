@@ -1,6 +1,6 @@
 // One offered next step at the end of an answer, such as "Next step: Send this summary every Monday at 09:00?". The
 // model ends a reply with it when doing the work again would help; the app shows it under the reply as a question with
-// Yes and No thanks for the chat's owner, and Yes replies to that message asking its agent to set it up (for something
+// Yes and No thanks for the owner of the agent that offered it (offerOwner), and Yes replies to that message asking its agent to set it up (for something
 // to repeat, a routine: a draft agent with a schedule, saved off until its owner turns it on).
 
 import type { AssistantMessage } from "@earendil-works/pi-ai";
@@ -77,6 +77,22 @@ export function assistantOffer(content: AssistantMessage["content"]): { block: n
     return found && { block: i, ...found };
   }
   return null;
+}
+
+/**
+ * Who answers the next step an entry offers: the owner of the agent that made it, the chat's owner for pi's and their
+ * own agents', a member for their agent's. Its Yes starts a turn that reads every server of that agent's (draftTools),
+ * their private ones too, and posts its reply in the chat: nobody else may give it. Undefined when it offers nothing.
+ */
+export function offerOwner(entry: EntryRecord, chatOwner: string): string | undefined {
+  if (entryOffer(entry) === undefined) return undefined;
+  return entry.kind === CHAT_AGENT_KIND ? (entry.data as unknown as ChatAgentReplyData).ownerUid : chatOwner;
+}
+
+/** A turn's caller without the mark of a Yes to an offer (calledBy.drafts): what anyone's but the agent's owner's is. */
+export function withoutYes<T extends { drafts?: true }>(calledBy: T): Omit<T, "drafts"> {
+  const { drafts: _drafts, ...rest } = calledBy;
+  return rest;
 }
 
 /** The next step an entry offers: in one of pi's replies, or in another agent's (a `chat.agent` entry). */

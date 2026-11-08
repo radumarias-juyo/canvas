@@ -232,7 +232,7 @@ import {
   speakersFor,
   turnSources,
 } from "./agents/turns.ts";
-import { entryOffer, OFFER_YES } from "../shared/offers.ts";
+import { offerOwner, OFFER_YES } from "../shared/offers.ts";
 import {
   answersEveryMessage,
   CHAT_BUDGET_KIND,
@@ -1657,15 +1657,18 @@ export class ChatAgent extends DurableObject<Env> {
   }
 
   /**
-   * The owner's Yes to the next step the reply `entryId` offers (shared/offers.ts): a reply to it the chat writes
-   * (OFFER_YES, never the offer's words as the owner's), whose turn may only read and draft the routine (draftTools).
+   * The Yes to the next step the reply `entryId` offers (shared/offers.ts), by the owner of the agent that offered it
+   * (offerOwner: the chat's owner for pi's and their agents', a member for their own agent's): a reply to it the chat
+   * writes (OFFER_YES, never the offer's words as theirs), whose turn may only read and draft the routine (draftTools).
    * pi's tools change for its whole run, so not while it works on another (#piTools refuses it then).
    */
   async takeOffer(author: Person, entryId: unknown): Promise<void> {
-    if (author.uid !== this.uid) throw new Error("Only the chat's owner answers an offer.");
     const entry = await this.#entryAt(entryId);
     // The offer as the app shows it (entryOffer), so Yes is taken only where it is offered.
-    if (!entry || entryOffer(entry) === undefined) throw new Error("That message offers no next step.");
+    const owner = entry && offerOwner(entry, this.uid);
+    if (!entry || owner === undefined) throw new Error("That message offers no next step.");
+    // Its turn reads every server of the agent's, private ones too: only the agent's owner says Yes to that.
+    if (author.uid !== owner) throw new Error("Only the owner of the agent that offered it answers an offer.");
     this.signals.offerTaken(author.uid, replyAgent(entry) ?? AGENT_NAME, entry.id as number);
     await this.prompt(OFFER_YES, author, [], [], entry.id, true);
   }

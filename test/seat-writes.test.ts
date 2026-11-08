@@ -226,15 +226,24 @@ describe("Seat turns through the write gate", () => {
     await expect(callerWith({ ...PLANNER, servers: ["db"] })).rejects.toThrow("not one of the servers");
   });
 
-  it("runs anyone's Yes to an offer in a fork of the seat's session, so only its posted reply reaches it", async () => {
+  it("runs only its owner's Yes to an offer apart, with draftTools; anyone else's is a turn that reads as any other", async () => {
     const ana = new AnasObject();
-    // Radu says Yes to the planner's offer: draftTools reads every server of Ana's agent, her own ones too.
+    // Radu (the room's owner) says Yes to the planner's offer: a Yes reads every server of Ana's agent (draftTools), her
+    // own ones too, and its reply is posted in the room. It is not his to give: it runs as a turn of his, in the shared
+    // session, never as a Yes.
     await ana.seats.give(ROOM, "p", seatTurn(1, { ...RADU, drafts: true }, false));
     await settle();
-    const fork = ana.sessionOf(1);
-    expect(fork).toMatch(/^s1-fork/);
-    // It is not Ana's turn for all that: her memory notes do not take its words as hers, and it changes nothing.
-    expect(ana.seats.memoryAgent(fork)).toMatchObject({ byOwner: false });
+    const shared = ana.sessionOf(1);
+    expect(shared).not.toMatch(/fork/);
+    expect(ana.seats.turnIn(shared)?.turn.calledBy).toEqual(RADU);
+    expect(ana.seats.memoryAgent(shared)).toMatchObject({ byOwner: false });
+    expect(seatLevel(ana.seats.turnIn(shared)!.turn).level).toBe(1);
+    // Ana's own Yes is one: apart, in a fork of the seat's session, so only its posted reply reaches it; it changes nothing.
+    await ana.seats.give(ROOM, "p", seatTurn(2, { ...ANA, drafts: true }, false));
+    await settle();
+    const fork = ana.sessionOf(2);
+    expect(fork).toMatch(/-fork/);
+    expect(ana.seats.turnIn(fork)?.turn.calledBy).toEqual({ ...ANA, drafts: true });
     expect(seatLevel(ana.seats.turnIn(fork)!.turn).level).toBe(1);
   });
 });
