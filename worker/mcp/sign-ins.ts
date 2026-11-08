@@ -63,7 +63,7 @@ export type SignInNeededContext = {
  *   when tokens or a grant are written; records from before the table all count.
  * - `mcp_missing`: since when each server with rows here has been missing from the deployment's list (`#forgetMissing`).
  *
- * Rows of a server the deployment does not list now are kept but never read (every read keeps to `#oauthServers`), so
+ * Rows of a server the deployment does not list now are kept but never read (every read keeps to `#configured`), so
  * they work again when it is listed again; they are forgotten only after FORGET_MISSING_MS missing, and never while the
  * list has no server that signs in each user (a deploy without its list must not sign everyone out).
  *
@@ -115,12 +115,17 @@ export class McpSignIns {
     if (!configured.size) return;
     const sql = this.#host.sql;
     const now = this.#now();
-    const held = sql
-      .exec(SERVER_TABLES.map((table) => `SELECT server FROM ${table}`).join(" UNION "))
-      .toArray()
-      .map((row) => row.server as string);
+    // One query per table: a Durable Object's SQLite allows only 5 terms in a compound SELECT, so no UNION of all six.
+    const held = new Set(
+      SERVER_TABLES.flatMap((table) =>
+        sql
+          .exec(`SELECT DISTINCT server FROM ${table}`)
+          .toArray()
+          .map((row) => row.server as string),
+      ),
+    );
     for (const server of configured) sql.exec("DELETE FROM mcp_missing WHERE server = ?", server);
-    for (const server of held.filter((name) => !configured.has(name))) {
+    for (const server of [...held].filter((name) => !configured.has(name))) {
       sql.exec("INSERT OR IGNORE INTO mcp_missing (server, since) VALUES (?, ?)", server, now);
     }
     const gone = sql

@@ -44,7 +44,7 @@ export async function devRoute(
   const inChat = path.match(/^\/api\/dev\/chats\/([a-z0-9]+)\/(publish|funnel)$/);
   if (inChat) {
     const [, chatId, what] = inChat;
-    if ((what === "publish") !== (method === "POST") || (what === "funnel" && method !== "GET")) return json({ error: "Not found" }, 404);
+    if (method !== (what === "publish" ? "POST" : "GET")) return json({ error: "Not found" }, 404);
     if (!(await directory.hasChat(chatId))) return json({ error: "No such chat" }, 404);
     const chat = reach.chat(chatId);
     if (what === "funnel") return answerJson(await chat.devFunnel(uid));
