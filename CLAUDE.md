@@ -72,7 +72,8 @@ with `@cloudflare/vite-plugin`, pnpm; configured and deployed with the `cf` CLI 
   screens; a run that started alone with the owner, read such a result and ends after someone joined, or one in a shared
   chat with the owner's review before posting on, has its replies held for the owner (Show to the chat), which no
   agent's catch-up, `chat_history` or dream reads and which hand nothing on; a dream reads a reply of pi's built on what
-  only the owner sees as theirs (`fork`). Keep it that way.
+  only the owner sees as theirs (`fork`); a sandbox run on anyone else's message never shares /workspace with one on the
+  owner's (`sandboxSession`: keyed by audience, a fresh container when it switches). Keep it that way.
 - Agents (`shared/agents.ts`, `worker/agents/`): definitions per user in `UserDirectory` (`AgentStore`); a chat's roster
   and durable turn queue (`ChatRoster`) and the turn controller (`AgentTurns`) run each roster agent in its own pi
   session of the chat object, configured per turn (`#configureAgent`: the session's tools are an allow-list,

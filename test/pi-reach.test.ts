@@ -129,6 +129,7 @@ describe("a call of pi's on someone else's message", () => {
       block: expect.stringContaining("uploads"),
     });
     expect(await othersCall({ name: "run_python", arguments: { code: "1", files: ["sum.csv"] } }, reach())).toEqual({ arguments: { code: "1", files: [`out/${CHAT}/sum.csv`] } });
+    // A run with no files goes: it starts in a /workspace none of the owner's runs share (sandboxSession, test/sandbox-audience.test.ts).
     expect(await othersCall({ name: "run_python", arguments: { code: "1" } }, reach())).toBeUndefined();
   });
 
