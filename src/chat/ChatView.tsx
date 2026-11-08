@@ -836,16 +836,37 @@ const Entry = memo(function Entry({
  */
 function HeldNote({ held, onShow }: { held: PiHeld; onShow: (from: number) => boolean }) {
   const [sent, setSent] = useState(false);
+  const [offline, setOffline] = useState(false);
+  const box = useRef<HTMLDivElement>(null);
+  // Shown, the note goes away under the button pressed: focus stays on the reply it was under, not on the page.
+  useEffect(() => {
+    const reply = box.current?.closest<HTMLElement>(".assistant");
+    return () => {
+      if (!reply?.isConnected || document.activeElement !== document.body) return;
+      reply.tabIndex = -1;
+      reply.focus({ preventScroll: true });
+    };
+  }, []);
+  const show = () => {
+    const ok = onShow(held.from);
+    setSent(ok);
+    setOffline(!ok);
+  };
   return (
-    <div className="held-note" role="note">
+    <div className="held-note" role="note" ref={box}>
       <span className="draft-note">
         {held.review
           ? `Only you see this reply until you show it: it is built on your private servers or files, and you review ${AGENT_NAME}'s replies in shared chats first.`
           : `Only you see this reply: ${AGENT_NAME} read your private servers or files while you were alone here, and someone joined before it finished.`}
       </span>
-      <button type="button" onClick={() => setSent(onShow(held.from))} disabled={sent}>
-        Show to the chat
+      <button type="button" onClick={show} disabled={sent}>
+        {sent ? "Showing…" : "Show to the chat"}
       </button>
+      {offline && (
+        <span className="form-error" role="alert">
+          Not connected: try again once the chat is back.
+        </span>
+      )}
     </div>
   );
 }
@@ -1260,7 +1281,12 @@ function Assistant({
       {message.stopReason === "aborted" && <div className="tool-call">Stopped.</div>}
       {items && <ItemChips items={items} />}
       {source && (
-        <div className="source-chip" title="Read with the chat owner's own sign-ins or files, which the others in the chat do not get">
+        <div
+          className="source-chip"
+          role="note"
+          aria-label={`${source}: read with the chat owner's own sign-ins or files, which the others in the chat do not get`}
+          title="Read with the chat owner's own sign-ins or files, which the others in the chat do not get"
+        >
           {source}
         </div>
       )}
