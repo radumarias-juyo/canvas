@@ -3481,7 +3481,9 @@ export class ChatAgent extends DurableObject<Env> {
     const data = last?.data as Partial<ChatMessageData> | undefined;
     if (!data?.text || data.uid === undefined || data.sentAt === undefined) return;
     const line = askOf({ name: data.name ?? "someone", kind: "person" }, data.text, MAX_ASK_CHARS);
-    await this.speakUp.afterPause(recent, { line, askKey: messageAskKey({ uid: data.uid, sentAt: data.sentAt }) }, Date.now() - kept.after);
+    // How long it was quiet, for the agents' pause limits; with DEV_PAUSE_MS the dev pause just waited stands for them.
+    const quietMs = scriptPauseMs(this.env) === undefined ? Date.now() - kept.after : undefined;
+    await this.speakUp.afterPause(recent, { line, askKey: messageAskKey({ uid: data.uid, sentAt: data.sentAt }) }, quietMs);
   }
 
   /**
