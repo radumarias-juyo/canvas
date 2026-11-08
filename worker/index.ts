@@ -24,6 +24,7 @@ import { runsRoute } from "./runs-routes.ts";
 import { limitsRoute } from "./limits-routes.ts";
 import { feedRoute } from "./feed-routes.ts";
 import type { FeedInput } from "../shared/feed.ts";
+import { dollars, type Allowance } from "../shared/allowance.ts";
 import { chatAgentName } from "./chat-agent.ts";
 import { newestShown } from "./agents/roster.ts";
 import { newId, PathError, Storage } from "./storage/index.ts";
@@ -203,6 +204,19 @@ async function route(request: Request, env: Env): Promise<Response> {
   // POST asks the providers again now, for a key added since.
   if (path === "/api/models" && (method === "GET" || method === "POST")) {
     return json(await loadCatalog(catalogSource(env, storage.models, waitUntil), { refresh: method === "POST" }), 200, { "cache-control": "private, no-cache" });
+  }
+
+  // The user's daily allowance (shared/allowance.ts): what their model calls cost today against the deployment's limits.
+  if (path === "/api/me/allowance" && method === "GET") {
+    const [{ costUsd, tokens }, pages] = await Promise.all([directory.modelSpentToday(), directory.pageAiSpentToday()]);
+    const allowance: Allowance = {
+      day: new Date().toISOString().slice(0, 10),
+      spent: costUsd,
+      tokens,
+      limit: dollars(env.RUNS_DAILY_USD),
+      pages: { spent: pages, limit: dollars(env.PAGE_AI_DAILY_USD) },
+    };
+    return json(allowance, 200, { "cache-control": "private, no-store" });
   }
 
   // The user's own system prompt, added to the built-in one in all their chats. PUT {text}; empty clears it. readJson

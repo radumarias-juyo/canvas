@@ -1,4 +1,5 @@
 import type { EntryRecord } from "@earendil-works/pi-durable";
+import type { Allowance } from "../shared/allowance.ts";
 import type { ChatAgentSettings, ChatAgentSettingsView } from "../shared/agent-settings.ts";
 import type { AgentWindowView, SteerResult } from "../shared/agent-window.ts";
 import type {
@@ -160,6 +161,8 @@ export const api = {
   signIn: (name: string) => request<{ uid: string }>("/api/session", post({ name })),
   signOut: () => request<object>("/api/session", { method: "DELETE" }),
   chats: () => request<ChatSummary[]>("/api/chats"),
+  /** What the user's model calls cost today against their daily limit (shared/allowance.ts): the composer's allowance ring. */
+  allowance: () => request<Allowance>("/api/me/allowance"),
   createChat: () => request<ChatSummary>("/api/chats", { method: "POST" }),
   /** The user has seen the chat: it is no longer unread in their sidebar. `seenAt`: when they had last seen it, if something came in since. */
   markSeen: (chatId: string) => request<{ seenAt?: number }>(`/api/chats/${chatId}/seen`, { method: "POST" }),
