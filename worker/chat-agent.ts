@@ -4229,12 +4229,13 @@ export class ChatAgent extends DurableObject<Env> {
   }
 
   /**
-   * What this seat object made for the room it served, that the room never saw: the pages and files no reply posted
-   * there (seatLeftovers), and all its drafts, saved tool results and sandbox. What was posted stays its owner's.
+   * What this seat object made for the room it served, that the room never saw: the pages no reply posted there, and
+   * the files its sandbox saved in its own folder that none named (seatLeftovers), and all its drafts, saved tool
+   * results and sandbox. What was posted stays its owner's, and so does any other file of theirs.
    */
   async #cleanSeatChat(keeps: SeatKeeps): Promise<void> {
     const made = await this.#traces();
-    const gone = seatLeftovers({ pages: made.artifacts, files: made.files }, keeps);
+    const gone = seatLeftovers({ pages: made.artifacts, files: made.files }, keeps, chatOutFolder(this.chatId));
     await Promise.all([
       ...gone.pages.map(async (id) => {
         // One gone already (an earlier ask that did not answer) is not deleted again.
