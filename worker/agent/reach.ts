@@ -8,6 +8,7 @@ import type { AssistantMessage, Message, ToolCall, ToolResultMessage } from "@ea
 import { defineExtension, GenerationTask, hook, ToolTask, type AgentEvent, type EntryRecord, type Extension, type JsonObject } from "@earendil-works/pi-durable";
 import type { JsonValue } from "@earendil-works/chord";
 import { CHAT_TURN_KIND } from "../../shared/agents.ts";
+import { CHAT_COPY_KIND } from "../../shared/chat-kinds.ts";
 import {
   CHAT_MESSAGE_KIND,
   CHECK_TOOL,
@@ -325,6 +326,10 @@ function shownResult(message: Message | undefined, reach: Reach, owner: boolean)
 }
 
 function shownEntry(entry: EntryRecord, reach: Reach, owner: boolean): EntryRecord {
+  // A copy in a branch of one of pi's replies held for the owner where it came from (ChatCopyData.held).
+  if (!owner && entry.kind === CHAT_COPY_KIND && (entry.data as Partial<{ held: unknown }> | undefined)?.held === true) {
+    return { ...entry, data: { from: "pi", text: HELD_OUT.shown, held: true } };
+  }
   const [first, ...rest] = entry.model ?? [];
   if (!owner && first?.role === "assistant" && heldIn(reach.held, first.timestamp)) return { ...entry, model: [heldMessage(first, HELD_OUT.shown), ...rest] };
   const shown = shownResult(first, reach, owner);

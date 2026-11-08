@@ -3,7 +3,7 @@
 // people of its own.
 
 import { expect, test, type Page } from "@playwright/test";
-import { newChat, piReply, send, shot, signIn, type Person } from "./app.ts";
+import { call, newChat, piReply, send, shot, signIn, type Person } from "./app.ts";
 
 test.describe.configure({ mode: "serial" });
 
@@ -124,4 +124,44 @@ test("p3. on pi's page the owner turns on review, then shares vault: a held repl
   // What pi read for dora before stays hers: that result is still left out for eli.
   await expect(member.locator(".assistant", { hasText: "Shown only to the chat's owner" }).first()).toBeVisible();
   await shot(owner, "p3-pi-page");
+});
+
+test("p4. a branch never copies a reply held for the owner to anyone else; the owner's own branch keeps it", async () => {
+  const owner = dora.page;
+  // Back to pi's defaults: vault is dora's alone again.
+  await call(owner, "PUT", "/api/me/pi", {});
+  const chat = await newChat(owner);
+  await send(owner, "/say Hi.");
+  await expect(piReply(owner, "Hi.")).toBeVisible();
+  const link = await inviteLink(owner);
+  // With no /say, the scripted reply quotes the start of what vault returned: NOTE is in pi's reply, in no one's message.
+  await send(owner, '/tool vault.read_notes_slowly {"ms":6000}');
+  await join(eli, link, chat);
+  const member = eli.page;
+  await expect(owner.getByRole("button", { name: "Show to the chat" })).toBeVisible({ timeout: 30_000 });
+  await send(member, "@pi /say Later.");
+  await expect(piReply(member, "Later.")).toBeVisible();
+
+  const branchFrom = async (page: Page) => {
+    const before = page.url();
+    const reply = piReply(page, "Later.");
+    await reply.hover();
+    await reply.getByRole("button", { name: "More" }).click();
+    await page.getByRole("menuitem", { name: "Branch off from here" }).click();
+    await expect(page).not.toHaveURL(before);
+    await expect(piReply(page, "Later.")).toBeVisible();
+  };
+  // eli branches off after the held reply: his branch has no copy of it, and its pi was told none of it.
+  await branchFrom(member);
+  await expect(member.getByText(NOTE)).toHaveCount(0);
+  await send(member, "@pi /tool chat_history {}");
+  await expect(member.locator(".assistant", { hasText: "chat_history" }).last()).toBeVisible();
+  await expect(member.getByText(NOTE)).toHaveCount(0);
+  await shot(member, "p4-member-branch");
+
+  // dora's own branch keeps it, saying it is hers alone.
+  await owner.goto(`/c/${chat}`);
+  await branchFrom(owner);
+  await expect(piReply(owner, NOTE)).toBeVisible();
+  await expect(owner.getByText("Only you see this reply: it was held for you in the chat this one branched off from.")).toBeVisible();
 });

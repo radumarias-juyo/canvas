@@ -26,6 +26,9 @@ import {
 import { text } from "../worker/agent/output.ts";
 import { dreamLines } from "../worker/memory/dream-input.ts";
 import { heldReplies, PRIVATE_FILES, replySources } from "../src/chat/entries.ts";
+import { branchContext, branchCopies } from "../worker/branch.ts";
+import { askLine } from "../worker/agents/turns.ts";
+import { CHAT_COPY_KIND } from "../shared/chat-kinds.ts";
 
 // The chat's servers: "db" every member shares; "calendar" signs in each user (the owner's alone).
 const signsIn = (server: string) => server === "calendar";
@@ -391,5 +394,42 @@ describe("what a dream of pi's reads of a shared chat", () => {
     const { items } = await dreamLines(withoutHeld(newestFirst(log), () => [{ from: at(2), through: at(2) }]), query);
     expect(JSON.stringify(items)).not.toContain("bank");
     expect(items.some((item) => item.seq === 4)).toBe(true);
+  });
+});
+
+describe("a branch of a chat with one of pi's replies held for the owner", () => {
+  const OWNER = { uid: "radu", name: "Radu" };
+  const at = (id: number) => 2_000 + id;
+  const person = (id: number, uid: string, said: string) =>
+    ({ id, conversationId: 0, kind: "chat.message", data: { uid, name: uid, text: said, sentAt: at(id) } }) as unknown as EntryRecord;
+  const piSays = (id: number, said: string) =>
+    ({ id, conversationId: 0, kind: "pi.assistant", model: [{ ...fauxAssistantMessage(said), timestamp: at(id) }] }) as unknown as EntryRecord;
+  const log = [person(1, "radu", "my calendar?"), piSays(2, "Board dinner with the bank on Friday."), person(3, "mia", "hello"), piSays(4, "Hi Mia.")];
+  const held: PiHeld[] = [{ from: at(2), through: at(2) }];
+
+  it("gives a member's branch no copy of it, and its agents' context none", async () => {
+    const copies = branchCopies(log, OWNER, held, false);
+    expect(JSON.stringify(copies)).not.toContain("bank");
+    expect(copies.some((copy) => JSON.stringify(copy.data).includes("Hi Mia."))).toBe(true);
+    const context = await branchContext(log, OWNER.uid, "Plans", undefined, held);
+    expect(context).not.toContain("bank");
+    expect(context).toContain("Hi Mia.");
+  });
+
+  it("keeps it in the owner's own branch, marked held: anyone let in later sees a note, and no agent reads it", async () => {
+    const copies = branchCopies(log, OWNER, held, true);
+    const copy = copies.find((one) => JSON.stringify(one.data).includes("bank"));
+    expect(copy?.data).toMatchObject({ from: "pi", held: true });
+    // Not in the branch's agents' context either: they answer whoever the branch lets in.
+    expect(await branchContext(log, OWNER.uid, "Plans", undefined, held)).not.toContain("bank");
+    const entry = { id: 9, conversationId: 0, kind: CHAT_COPY_KIND, data: copy!.data } as unknown as EntryRecord;
+    expect(askLine(entry, "a1", OWNER.uid)).toBeUndefined();
+    const member = JSON.stringify(shownPiEvent({ type: "entry_appended", entry } as AgentEvent, reach(), false));
+    expect(member).not.toContain("bank");
+    expect(member).toContain("shown only to the chat's owner");
+    expect(JSON.stringify(shownPiEvent({ type: "entry_appended", entry } as AgentEvent, reach(), true))).toContain("bank");
+    // A branch of that branch: a member's has none of it; the owner's keeps it held.
+    expect(JSON.stringify(branchCopies([entry], OWNER, [], false))).not.toContain("bank");
+    expect(branchCopies([entry], OWNER, [], true)[0].data).toMatchObject({ held: true });
   });
 });

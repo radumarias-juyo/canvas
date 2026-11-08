@@ -414,7 +414,8 @@ const OWNER_SPEND_MS = 2_000;
 /** The day the owner was last told their runs stopped at the spend cap, and the day the chat's budget ran out. */
 const CAP_TOLD_KEY = "spendCapTold";
 const BUDGET_TOLD_KEY = "budgetTold";
-const EXPORTED_KV = [AUTO_KEY, SHOWN_SKILLS_KEY, BROUGHT_IN_KEY, SYSTEM_PROMPT_KEY, AGENT_SETTINGS_KEY, ...KIND_KV];
+// pi's held replies and since when it read what only the owner sees go too: an imported chat shared later keeps them so.
+const EXPORTED_KV = [AUTO_KEY, SHOWN_SKILLS_KEY, BROUGHT_IN_KEY, SYSTEM_PROMPT_KEY, AGENT_SETTINGS_KEY, PI_HELD_KEY, PI_PRIVATE_KEY, ...KIND_KV];
 
 /** The pause check's state: the newest person's message it waits behind, how often it waited on work, and whether it is set. */
 type PauseState = { after: number; tries: number; armed: boolean };
@@ -2825,7 +2826,9 @@ export class ChatAgent extends DurableObject<Env> {
       const entries = pages.flat().reverse();
       const title = (await this.#directory.chatTitle(this.chatId)) ?? "";
       const summarize = (older: string) => summaryFor(this.#oneShotModels, this.ai(this.env.TITLE_MODEL), older);
-      const context = await branchContext(entries, this.uid, title, summarize);
+      // pi's replies held for the owner: in no branch's context, and copied only into the owner's own (marked held).
+      const held = this.#piHeld(true);
+      const context = await branchContext(entries, this.uid, title, summarize, held);
       // After the awaits: the chat may be gone, the one branching out of it, or its kind changed. What the branch is
       // made of is read here, in one step.
       const now = this.#mayBranch(by);
@@ -2844,7 +2847,7 @@ export class ChatAgent extends DurableObject<Env> {
       started = true;
       await branch.startBranch({ owner, from, kind, ...(page && { page }) });
       await this.#directory.createChat(chatId, { title: branchTitle, kind });
-      const copies = branchCopies(entries, owner);
+      const copies = branchCopies(entries, owner, held, asOwner);
       for (let i = 0; i < copies.length; i += BRANCH_COPY_BATCH) await branch.copyIntoBranch(copies.slice(i, i + BRANCH_COPY_BATCH));
       await branch.finishBranch({ by, title: branchTitle, context, ...(member && { member }) });
       this.#notice({ kind: CHAT_EVENT_KIND, data: { event: "branch", chatId, title: branchTitle, entry: from.entry, by: personOf(by) } satisfies ChatEventData });

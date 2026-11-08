@@ -783,6 +783,15 @@ const Entry = memo(function Entry({
     const data = entry.data as unknown as ChatCopyData;
     if (data.from === "artifact") return <ArtifactCard artifact={{ artifactId: data.artifactId, title: data.title, version: data.version }} onOpen={onOpen} />;
     const copied = { role: "assistant", content: [{ type: "text", text: data.text }], timestamp: data.sentAt ?? 0, stopReason: "stop" } as unknown as AssistantMessage;
+    // One held for its owner where it came from: only they see it here too (anyone else's socket gets a note instead).
+    if (data.held && (!people || people.owner.uid === uid)) {
+      return (
+        <>
+          <Assistant message={copied} reactions={reactions} onReply={answer} />
+          <div className="draft-note">Only you see this reply: it was held for you in the chat this one branched off from.</div>
+        </>
+      );
+    }
     return <Assistant message={copied} reactions={reactions} onReply={answer} />;
   }
   // A checklist's later entries draw nothing: its card, where it was first posted, shows what they say.
