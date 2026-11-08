@@ -71,7 +71,7 @@ export function PeopleBar({
   return (
     <div className="people-area" ref={box}>
       {bar && (
-      <div className="people-bar" aria-label={`${all.length} ${all.length === 1 ? "person" : "people"}, ${here} here now; ${agents.length + 1} agents`}>
+      <div className="people-bar" role="group" aria-label={`${all.length} ${all.length === 1 ? "person" : "people"}, ${here} here now; ${agents.length + 1} agents`}>
         {all.map((person) => {
           const count = windows.get(person.uid) ?? 0;
           const you = person.uid === uid;
@@ -99,6 +99,7 @@ export function PeopleBar({
             key={view.id}
             type="button"
             className={view.off ? "person agent off" : "person agent"}
+            data-agent={view.id}
             title={`@${view.name} · ${view.job} · ${ownerLabel(view, uid)} · ${agentState(view)}`}
             aria-expanded={open === view.id}
             onClick={() => setOpen(open === view.id ? null : view.id)}
@@ -236,7 +237,7 @@ function AgentMenu({
         </AppLink>
       )}
       {mine && onWindow && (
-        <button type="button" className="agent-menu-window" onClick={onWindow} title="See its sessions here, and steer it as it works: only you">
+        <button type="button" className="agent-menu-window" onClick={onWindow} title="See what it does here, and steer it as it works: only you">
           Open its window
         </button>
       )}
@@ -244,7 +245,7 @@ function AgentMenu({
         {/* Keyed by its turn: a new turn counts from its own start, not the one before's. */}
         {agent.running ? <Working key={agent.running.turn} running={agent.running} startedAt={startedAt} /> : agentState(agent)}
       </p>
-      <div className="section-head">Runs</div>
+      <div className="section-head">Turns</div>
       {turns === null && !error && <p className="agent-menu-empty">Loading…</p>}
       {turns?.length === 0 && <p className="agent-menu-empty">No turns yet: call it with @{agent.name}.</p>}
       {turns && turns.length > 0 && (

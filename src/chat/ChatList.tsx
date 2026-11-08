@@ -3,7 +3,7 @@ import { MAX_CHAT_TITLE, type ChatSummary } from "../../shared/protocol.ts";
 import { errorMessage } from "../../shared/util.ts";
 import { api } from "../api.ts";
 import { Icon } from "../Icon.tsx";
-import { isBoolean, useDismiss, useStoredState } from "../layout.tsx";
+import { isBoolean, rovingKeys, useDismiss, useStoredState } from "../layout.tsx";
 import { AgentAvatar } from "./people.tsx";
 import { useLatest, useVisible } from "../sidebar.ts";
 import { GROUPINGS, hasUnread, isGrouping, orderChats, type ChatGrouping } from "./chat-order.ts";
@@ -265,7 +265,7 @@ function ChatRow({ chat, open, uid, navigate, onDelete }: { chat: ChatSummary; o
   };
   const unread = hasUnread(chat) && !open;
   return (
-    <div ref={box} className={["chat-link", open && "active", menu && "menu-open"].filter(Boolean).join(" ")}>
+    <div ref={box} className={["chat-link", open && "active", menu && "menu-open"].filter(Boolean).join(" ")} onKeyDown={rovingKeys}>
       {renaming ? (
         <RenameChat chat={chat} onDone={(title) => (setRenaming(false), title !== undefined && change({ title }))} />
       ) : (
@@ -305,7 +305,7 @@ function ChatRow({ chat, open, uid, navigate, onDelete }: { chat: ChatSummary; o
         </button>
       )}
       {menu && (
-        <div className="row-menu" role="menu">
+        <div className="row-menu" role="menu" aria-label={`More for ${chat.title}`}>
           <button type="button" role="menuitem" onClick={() => change({ pinned: !chat.pinnedAt })}>
             {chat.pinnedAt ? "Unpin" : "Pin"}
           </button>

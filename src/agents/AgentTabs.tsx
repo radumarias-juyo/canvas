@@ -1,3 +1,4 @@
+import { rovingKeys } from "../layout.tsx";
 import { SAVE_FIRST } from "./glance.ts";
 
 /** The agent page's tab bar. While the open tab has changes not saved, the others are held, so switching never drops them. */
@@ -14,7 +15,7 @@ export function AgentTabs({
 }) {
   if (tabs.length < 2) return null;
   return (
-    <nav className="agent-tabs" role="tablist" aria-label="Agent">
+    <nav className="agent-tabs" role="tablist" aria-label="Agent" onKeyDown={rovingKeys}>
       {tabs.map((each) => {
         const held = dirty && each.id !== current;
         return (

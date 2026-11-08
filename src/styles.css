@@ -585,10 +585,11 @@ button.reaction:hover { border-color: var(--muted); }
 .chat-title { flex: 0 100 auto; min-width: 0; margin: 0; font: 600 16px/1.3 var(--font-display); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .chat-people { flex: 1; min-width: 0; color: var(--muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* Everyone in a shared chat as badges in their colours (a dot for who has it open now), a rule, then the agent's. */
-/* The chat's name before it gives way (to an ellipsis) first; with many people the bar is cut too, so that the buttons
-   after it stay on screen. */
+/* The chat's name before it gives way (to an ellipsis) first; with many people the bar narrows too (and scrolls), so
+   that the buttons after it stay on screen. */
 .people-area { flex: 0 1 auto; min-width: 0; display: flex; align-items: center; gap: 2px; margin-left: auto; }
-.people-bar { flex: 0 1 auto; min-width: 0; overflow: hidden; display: flex; align-items: center; gap: 4px; padding: 3px; }
+/* Scrolls sideways when it does not fit (a phone): an agent's badge is the way to its menu, so none may be cut off. */
+.people-bar { flex: 0 1 auto; min-width: 0; overflow: auto hidden; scrollbar-width: none; display: flex; align-items: center; gap: 4px; padding: 3px; }
 .people-bar .person { display: inline-flex; flex: none; }
 /* An agent's badge opens its menu. */
 .people-bar button.person { padding: 0; border: 0; border-radius: 30%; background: none; cursor: pointer; }
@@ -603,6 +604,8 @@ button.reaction:hover { border-color: var(--muted); }
 .agent-menu p { margin: 0; }
 .agent-menu-job { color: var(--text); }
 .agent-menu-page { align-self: flex-start; font-size: 13px; }
+/* Links the theme colours, not the browser: in the agent's menu, a chat's notices, and an error that links a sign-in. */
+.agent-menu-page, .chat-notice a, .form-error a { color: var(--accent); }
 .agent-menu-state, .agent-menu-empty { color: var(--muted); font-size: 13px; }
 .agent-menu .section-head { padding: 4px 0 0; }
 .agent-menu .danger { align-self: flex-start; }
@@ -612,6 +615,8 @@ button.reaction:hover { border-color: var(--muted); }
   position: fixed; top: 0; right: 0; bottom: 0; z-index: 20; display: flex; flex-direction: column; width: min(560px, 100vw);
   border-left: 1px solid var(--border); background: var(--bg); box-shadow: -18px 0 40px -30px rgb(0 0 0 / 0.55);
 }
+/* It takes focus as it opens, to be announced and take Escape; its controls show their own rings. */
+.agent-window:focus { outline: none; }
 .agent-window-head { display: flex; align-items: center; gap: 10px; min-height: var(--header-h); padding: 8px 12px 8px 16px; border-bottom: 1px solid var(--border); background: var(--surface); }
 .agent-window-head .avatar { --size: 30px; flex: none; }
 .agent-window-title { display: flex; flex-direction: column; min-width: 0; flex: 1; }
@@ -945,6 +950,11 @@ a.mention-chip:hover { text-decoration: underline; }
 .make-button:hover, .make-button[aria-expanded="true"] { background: var(--surface-2); color: var(--text); }
 .make-button.chosen { border-color: color-mix(in srgb, var(--accent) 35%, transparent); background: var(--accent-soft); color: var(--accent); }
 .make-menu { min-width: 260px; }
+/* On a phone the button sits mid-row: the menu spans the composer instead, above it, so it never runs off the screen. */
+@media (max-width: 640px) {
+  .composer-make { position: static; }
+  .make-menu { left: 12px; right: 12px; width: auto; min-width: 0; max-width: none; }
+}
 .make-menu button[aria-checked="true"] { background: var(--accent-soft); }
 .make-menu button[aria-checked="true"] .composer-more-glyph { color: var(--accent); }
 .make-choice { display: flex; flex-direction: column; gap: 1px; }
@@ -1304,8 +1314,8 @@ a.mention-chip:hover { text-decoration: underline; }
 .pill.agent-state.draft, .pill.run-state.draft { border-color: transparent; background: var(--working-soft); color: var(--working); }
 .pill.assumed { padding: 0 7px; border: 1px dashed var(--working); background: none; color: var(--working); font-size: 11px; }
 .agent-notice { margin: 12px 0 0; }
-.agent-tabs { display: flex; gap: 4px; margin-top: 18px; border-bottom: 1px solid var(--border); }
-.agent-tab { padding: 8px 12px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; color: var(--muted); font-weight: 500; }
+.agent-tabs { display: flex; gap: 4px; margin-top: 18px; overflow-x: auto; border-bottom: 1px solid var(--border); scrollbar-width: none; }
+.agent-tab { flex: none; padding: 8px 12px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; color: var(--muted); font-weight: 500; }
 .agent-tab.active { border-bottom-color: var(--accent); color: var(--text); }
 
 .agent-form { display: flex; flex-direction: column; gap: 18px; margin-top: 20px; padding: 20px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-card); }
@@ -1431,7 +1441,8 @@ a.mention-chip:hover { text-decoration: underline; }
 .sidebar nav .nav-contact-text small { color: var(--muted); font-size: 12px; font-weight: 400; }
 .run-marker { display: inline-block; margin-top: 6px; color: var(--muted); font-size: 12px; text-decoration: none; }
 a.run-marker:hover { color: var(--accent); text-decoration: underline; }
-.agent-runs, .agent-runs-note { margin-top: 20px; }
+/* The Runs tab's section; the people bar's menus use .agent-runs for their lists too. */
+section.agent-runs, .agent-runs-note { margin-top: 20px; }
 .agent-runs-head { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .agent-runs-when { display: flex; flex-direction: column; gap: 2px; }
 .agent-runs-when small { color: var(--muted); font-size: 13px; }
@@ -1512,6 +1523,9 @@ a.run-marker:hover { color: var(--accent); text-decoration: underline; }
 .workflow-add { display: flex; flex-wrap: wrap; gap: 8px; }
 @media (max-width: 640px) {
   .agent-page { padding: 16px 14px 40px; }
+  /* All five tabs in a phone's width; past that the row scrolls. */
+  .agent-tabs { gap: 0; }
+  .agent-tab { padding: 8px 7px; }
   .agent-form { padding: 14px; }
   .agent-card { margin-left: 0; }
   .agent-glance-row { grid-template-columns: minmax(0, 1fr) auto; }

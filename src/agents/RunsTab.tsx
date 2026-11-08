@@ -404,7 +404,7 @@ const RunTrace = memo(function RunTrace({ agentId, dueAt, item, live }: { agentI
   const entries = value?.entries;
   if (error && !entries) return <p className="form-error">Could not read its trace: {error}</p>;
   if (!entries) return <p className="skills-note">Reading its trace…</p>;
-  if (!entries.length) return <p className="skills-note">Its session has nothing yet.</p>;
+  if (!entries.length) return <p className="skills-note">Nothing in it yet.</p>;
   return (
     <div className="run-trace">
       <StepsProvider entries={entries} tools={[]} busy={false}>
