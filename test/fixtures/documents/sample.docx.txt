@@ -1,0 +1,24 @@
+Title: Quarter &lt;plan&gt;
+Heading1: Plan
+p: Plain, bold, italic, gone, x = 1 and a link. [link] [mono]
+p: Not a link *stars* and | pipes
+p: @Ada on 2026-11-08: Done
+Heading2: Lists
+ListParagraph list=1.0: one
+ListParagraph list=1.0: two
+ListParagraph list=1.1: two-a
+ListParagraph list=2.0: first
+ListParagraph list=2.0: second
+p: ☑ done
+p: ☐ to do
+Heading3: Data
+row: *Name | *Status
+row: Alpha | Open
+p: const a = 1; [mono]
+p: console.log(a); [mono]
+row: *city | *people
+row: Paris, FR | 2100000
+p: e^{i\pi} + 1 = 0 [mono]
+p: [picture]
+p: [Owner&apos;s file]
+p: A section only the document&apos;s owner sees.

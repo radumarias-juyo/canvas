@@ -64,6 +64,8 @@
     "worker/agents",
     "worker/memory",
     "worker/feed",
+    "worker/documents/docx.ts",
+    "worker/documents/pdf.ts",
     "worker/agent/mcp.ts",
     "worker/agent/checklist.ts",
     "worker/agent/reach.ts",
