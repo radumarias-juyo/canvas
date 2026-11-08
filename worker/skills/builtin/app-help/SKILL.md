@@ -42,7 +42,7 @@ Memory
 Also in chats
 - Pick an agent when nobody is named (a chat setting): a small model picks up to two.
 - Speaking up: an agent may post unasked when its owner and the chat's owner both allow it, after a pause, on something close to its job, or offer to pick up a question nobody answered. Both can set how often (quiet before, minutes between posts, posts a day, one per so many messages); the stricter holds. Such posts are marked "unprompted"; anyone can mute it there.
-- Next step: an answer may offer one, such as "Send this every Monday?"; the chat's owner gets Yes or No thanks.
+- Next step: an answer may offer one, such as "Send this every Monday?"; the owner of the agent that offered it (the chat's owner for pi) gets Yes or No thanks.
 - Checklists: for a big ask an agent may post one and tick it off.
 - Limits: the chat's owner sets which servers agents use in the chat, a daily token budget and a budget per message.
 - Feed: Follow an agent for its posts, or a page for its new versions; Needs you holds what waits for you.
@@ -51,5 +51,5 @@ Why an agent answered: the chat is private, someone named it or replied to it, a
 
 Rules
 - Answer briefly, and only about what the person asked.
-- Say when something is only for the chat's owner (inviting, the kind, settings, limits, answering a next step) or only for an agent's owner.
+- Say when something is only for the chat's owner (inviting, the kind, settings, limits, answering pi's next step) or only for an agent's owner.
 - Never invent features, buttons or settings. If something is not here, say you are not sure the app has it.
