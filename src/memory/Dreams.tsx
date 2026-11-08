@@ -58,7 +58,8 @@ function OvernightNote({ note }: { note: MemoryNoteView }) {
   const save = async (event: FormEvent) => {
     event.preventDefault();
     if (editing === null) return;
-    if (editing.trim() === note.text || (await run(() => api.changeNote(note.id, { text: editing, ...(waiting && { confirmed: true }) })))) setEditing(null);
+    const change = { text: editing, ...(waiting && { confirmed: true as const }) };
+    if (editing.trim() === note.text || (await run(() => api.changeNote(note.id, change)))) setEditing(null);
   };
   return (
     <li className={waiting ? "memory-note unconfirmed" : "memory-note"}>
@@ -99,7 +100,12 @@ function OvernightNote({ note }: { note: MemoryNoteView }) {
             </button>
           ) : (
             !note.pinned && (
-              <button type="button" disabled={busy} title="Kept for good: never retired" onClick={() => void run(() => api.changeNote(note.id, { pinned: true }))}>
+              <button
+                type="button"
+                disabled={busy}
+                title="Kept for good: never retired"
+                onClick={() => void run(() => api.changeNote(note.id, { pinned: true }))}
+              >
                 Keep
               </button>
             )
@@ -159,7 +165,8 @@ export function LearnedOvernight({
   }, [after]);
   const records = dreams?.dreams[subject] ?? [];
   const last = records[0];
-  const mine = notes.filter((note) => note.source === "overnight" && (subject === "pi" ? !note.agentId && note.learnedBy === "pi" : note.agentId === subject));
+  const subjects = (note: MemoryNoteView) => (subject === "pi" ? !note.agentId && note.learnedBy === "pi" : note.agentId === subject);
+  const mine = notes.filter((note) => note.source === "overnight" && subjects(note));
   const used = mine.filter(inUse).sort((a, b) => Number(a.confirmed) - Number(b.confirmed) || b.updatedAt - a.updatedAt);
   const retired = last ? mine.filter((note) => !inUse(note) && last.retired.includes(note.id)) : [];
   const waitNow = after !== undefined && after > now;
@@ -210,7 +217,7 @@ export function LearnedOvernight({
       ) : (
         <p className="skills-note">
           {learns
-            ? `No dream yet: ${who} dreams around 03:00 your time after a day it worked${dreams?.settings.timeZone ? ` (${dreams.settings.timeZone})` : ""}.`
+            ? `No dream yet: ${who} dreams around 03:00 your time (${dreams?.settings.timeZone ?? "UTC"}) after a day it worked.`
             : `${who} does not learn overnight.`}
         </p>
       )}

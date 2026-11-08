@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { AgentInput } from "../../shared/agents.ts";
+import type { MemoryNoteView } from "../../shared/memory.ts";
 import type { AgentTabProps } from "../agents/AgentPage.tsx";
 import { useAgents } from "../agents/store.ts";
 import { LearnedOvernight } from "./Dreams.tsx";
@@ -26,7 +27,8 @@ export function KnowsTab({ subject, save }: AgentTabProps) {
   const targets: NoteTargets = { agents: agents ?? [], chats: [] };
   // Its own notes and those it learned in chats, and the user's own, which it reads in private chats. Those its dreams
   // wrote show under Learned overnight.
-  const known = (notes ?? []).filter((note) => (note.agentId === agent.id || note.scope === "user") && !(note.source === "overnight" && note.agentId === agent.id));
+  const overnight = (note: MemoryNoteView) => note.source === "overnight" && note.agentId === agent.id;
+  const known = (notes ?? []).filter((note) => (note.agentId === agent.id || note.scope === "user") && !overnight(note));
   return (
     <div className="memory knows">
       <div className="knows-head">
