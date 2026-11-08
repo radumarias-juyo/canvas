@@ -30,7 +30,7 @@ function detail(deliveries: RunDelivery[]): AgentRunDetail {
     startedAt: 1_000,
     endedAt: 2_000,
     cost: 0.04,
-    items: { total: 7, acted: 5, notToday: 2, failed: 0, waiting: 0 },
+    items: { total: 7, acted: 5, notToday: 2, blocked: 0, failed: 0, waiting: 0 },
     summary: "Private: the owner's summary",
     when: "Every day at 07:00 (UTC)",
     itemsList: [{ item: "west", label: "West", status: "acted", steps: [{ kind: "look", label: "Look at vault.deals", detail: "secret rows", ok: true, ms: 1 }], text: "secret", cost: 0.01, startedAt: 1_000, session: "s1" }],

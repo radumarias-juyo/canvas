@@ -4,7 +4,7 @@ import { CHAT_AGENT_KIND, CHAT_TURN_KIND, proposedBy, type ChatAgentReplyData } 
 import { entryItems, mergeItems, type ItemRef } from "../../shared/items.ts";
 import { CHAT_MESSAGE_KIND, CHAT_PEOPLE_KIND, publishedBy, type ChatMessageData, type ChatPeopleData } from "../../shared/protocol.ts";
 import { CHAT_BUDGET_KIND, CHAT_COPY_KIND, CHAT_EVENT_KIND, type ChatCopyData } from "../../shared/chat-kinds.ts";
-import { CHAT_ACTION_KIND, type ChatActionData } from "../../shared/limits.ts";
+import { CHAT_ACTION_KIND, type ChatActionData, type PendingActionView } from "../../shared/limits.ts";
 import { CHAT_CHECKLIST_KIND, checklistOf, type ChatChecklistData } from "../../shared/checklist.ts";
 import { entryOffer } from "../../shared/offers.ts";
 
@@ -178,4 +178,28 @@ export function liveOffer(entries: readonly EntryRecord[]): number | undefined {
     } else if (entryOffer(entry) !== undefined) return replied.has(entry.id as number) ? undefined : (entry.id as number);
   }
   return undefined;
+}
+
+/** A seat's card that ended (ran, failed, declined, expired): its outcome line, not its card. */
+export function endedSeat(action: PendingActionView): boolean {
+  return action.status !== "pending" && action.status !== "running";
+}
+
+/**
+ * Ended cards by the entry they show after: the last one shown at or before they were decided. One decided before the
+ * first entry loaded waits until the older entries are.
+ */
+export function outcomesAfter(entries: readonly EntryRecord[], ended: readonly PendingActionView[]): Map<number, PendingActionView[]> {
+  const after = new Map<number, PendingActionView[]>();
+  if (!ended.length) return after;
+  const timed = entries.flatMap((entry) => {
+    const at = shown(entry) ? sentAt(entry) : undefined;
+    return at === undefined ? [] : [{ id: entry.id as number, at }];
+  });
+  for (const action of ended) {
+    const when = action.decidedAt ?? action.expiresAt;
+    const place = timed.findLast((entry) => entry.at <= when);
+    if (place) after.set(place.id, [...(after.get(place.id) ?? []), action]);
+  }
+  return after;
 }

@@ -238,7 +238,8 @@ function RunPage({ agent, dueAt, chat, shared, navigate }: { agent: RunsAgent; d
           from there; declined or expired, that item stops.
         </p>
       )}
-      {run.status === "failed" && run.summary && <p className="form-error">{run.summary}</p>}
+      {/* A write the gate refused (its level, a rule that blocks): that item stopped there, nothing of it changed or went out. */}
+      {(run.status === "failed" || run.status === "blocked") && run.summary && <p className="form-error">{run.summary}</p>}
       {/* Why nothing went: a condition, or a sign-in that let a newer run go instead. */}
       {run.status === "not_today" && run.summary && <p className="skills-note">{run.summary}</p>}
 
