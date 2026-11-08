@@ -3,6 +3,7 @@ import {
   AGENT_COLORS,
   AGENT_NAME_PATTERN,
   AgentError,
+  allSteps,
   MAX_AGENT_INSTRUCTIONS,
   MAX_AGENT_JOB,
   MAX_AGENT_SERVERS,
@@ -652,5 +653,17 @@ describe("speakerLabel", () => {
     expect(runServers({ servers: ["crm", "calendar"], workflow: [look, tell] }, ["calendar"])).toEqual(["crm"]);
     // No workflow: its instructions run as one work step, whose tools may come from any of its servers.
     expect(runServers({}, ["calendar"])).toEqual(["calendar"]);
+  });
+});
+
+describe("allSteps", () => {
+  it("lists every step of a workflow, those inside an if's branches too, each if before its then and else", () => {
+    const look: AgentStep = { kind: "look", server: "crm", tool: "list", input: {} };
+    const work: AgentStep = { kind: "work", prompt: "Sum up." };
+    const tell: AgentStep = { kind: "tell", to: ["owner"], via: "chat" };
+    const inner: AgentStep = { kind: "if", condition: "x > 1", then: [work], else: [tell] };
+    const outer: AgentStep = { kind: "if", condition: "y > 1", then: [inner], else: [] };
+    expect(allSteps([look, outer, tell])).toEqual([look, outer, inner, work, tell, tell]);
+    expect(allSteps(undefined)).toEqual([]);
   });
 });

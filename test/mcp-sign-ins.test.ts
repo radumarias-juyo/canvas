@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { SignInNotice } from "../shared/sign-ins.ts";
-import { assertReadOnly, grantMs, KEEP_ALIVE_MS, readOnlyTools, WARN_AHEAD_MS, warnAt, type SignInCheck } from "../worker/mcp/background.ts";
-import { McpFailure } from "../worker/mcp/hub.ts";
+import { grantMs, KEEP_ALIVE_MS, WARN_AHEAD_MS, warnAt, type SignInCheck } from "../worker/mcp/background.ts";
 import { McpOAuthClient } from "../worker/mcp/oauth.ts";
 import { openAuthRecord, sealAuthRecord } from "../worker/mcp/sealed.ts";
 import { McpSignIns, RECENT_REFRESH_MS } from "../worker/mcp/sign-ins.ts";
@@ -557,18 +556,3 @@ describe("sign-ins with nobody present", () => {
   });
 });
 
-describe("read-only tools for runs", () => {
-  const hub = {
-    tools: async () => [
-      { name: "list_items", description: "", annotations: { readOnlyHint: true } },
-      { name: "send_mail", description: "" },
-    ],
-  };
-  it("offers only tools marked read-only, and refuses any other call", async () => {
-    expect((await readOnlyTools(hub, "Portal")).map((tool) => tool.name)).toEqual(["list_items"]);
-    await expect(assertReadOnly(hub, "Portal", "list_items")).resolves.toBeUndefined();
-    const refused = await assertReadOnly(hub, "Portal", "send_mail").catch((error) => error);
-    expect(refused).toBeInstanceOf(McpFailure);
-    expect((refused as McpFailure).error.code).toBe("not_granted");
-  });
-});

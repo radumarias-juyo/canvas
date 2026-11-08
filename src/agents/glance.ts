@@ -2,7 +2,7 @@
 // the "at a glance" rows (scope, runs, reads, tells, knows), each with the field a Change opens and whether the model
 // guessed it (Assumed). Plain functions, so the tests read them without a browser.
 
-import { WEEKDAYS, type AgentDefinition, type AgentStep, type AgentTrigger, type Weekday } from "../../shared/agents.ts";
+import { allSteps, WEEKDAYS, type AgentDefinition, type AgentTrigger, type Weekday } from "../../shared/agents.ts";
 
 /**
  * What the header's pill says of an agent. `drafter`: who proposed it (pi, or "@name" for a roster agent), where the
@@ -70,11 +70,6 @@ export function runsLabel(trigger: AgentTrigger | undefined): { value: string; n
   if (!trigger) return null;
   if (trigger.kind === "schedule") return { value: `${daysLabel(trigger.days)} at ${trigger.at}`, note: trigger.tz };
   return { value: `Checks ${trigger.step.server} ${everyLabel(trigger.everyMinutes)}`, note: `when ${trigger.when}` };
-}
-
-/** Every step of a workflow, those inside an if's branches too. */
-function allSteps(steps: readonly AgentStep[] | undefined): AgentStep[] {
-  return (steps ?? []).flatMap((step) => (step.kind === "if" ? [step, ...allSteps(step.then), ...allSteps(step.else)] : [step]));
 }
 
 const unique = (items: readonly string[]) => [...new Set(items)];

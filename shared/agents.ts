@@ -316,6 +316,11 @@ export function* walkSteps(steps: readonly AgentStep[], path = ""): Generator<{ 
   }
 }
 
+/** Every step of a workflow, those inside ifs too, in walkSteps' order. */
+export function allSteps(steps: readonly AgentStep[] | undefined): AgentStep[] {
+  return [...walkSteps(steps ?? [])].map(({ step }) => step);
+}
+
 /**
  * The servers a definition's trigger, scope and steps name, nested steps included: those it reads (`reads`: look
  * steps, its scope's and its watch's), else those it calls too (do steps, a tell through a tool).
