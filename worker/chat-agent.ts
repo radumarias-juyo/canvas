@@ -4103,11 +4103,17 @@ export class ChatAgent extends DurableObject<Env> {
   /**
    * The newest version of another person's page conversation `session` may read as posted in its chat: in a seat's
    * session, as its room shows it to this seat's owner (seatPage); else as a member's agent's replies posted it here.
+   * With what the page's own chat withholds from this object's owner (postedPage): the log only says what was posted.
    */
-  async #chatPage(meta: Pick<ArtifactMeta, "id" | "ownerUid">, session: string): Promise<number> {
+  async #chatPage(meta: Pick<ArtifactMeta, "id" | "ownerUid" | "chatId">, session: string): Promise<{ upTo: number; held: HeldPage }> {
     const seated = this.seats.turnIn(session);
-    if (seated) return exports.ChatAgent.getByName(chatAgentName(seated.room.ownerUid, seated.room.chatId)).seatPage(this.uid, seated.agentId, meta.id);
-    return meta.ownerUid === this.uid ? 0 : this.#postedVersion(meta);
+    const upTo = seated
+      ? await exports.ChatAgent.getByName(chatAgentName(seated.room.ownerUid, seated.room.chatId)).seatPage(this.uid, seated.agentId, meta.id)
+      : meta.ownerUid === this.uid
+        ? 0
+        : await this.#postedVersion(meta);
+    const held = upTo ? await exports.ChatAgent.getByName(chatAgentName(meta.ownerUid, meta.chatId)).withheldFrom(meta.id, this.uid) : NOTHING_HELD;
+    return { upTo, held };
   }
 
   /** The newest version of `meta` the replies of its owner's agents posted in this chat's log (postedVersion), within MAX_POSTED_PAGES. */
