@@ -142,6 +142,10 @@
         "type": "text",
         "value": ""
       },
+      "DEV_GAP_MS": {
+        "type": "text",
+        "value": ""
+      },
       "MCP_SERVERS": {
         "type": "json",
         "value": []

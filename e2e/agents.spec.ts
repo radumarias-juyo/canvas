@@ -2,7 +2,7 @@
 // message carries the script its agent follows (/say, /tool: worker/dev-model.ts). The flows run in order and build on
 // each other; each ends on a screenshot in e2e/screens/.
 
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { addToChat, agentReply, call, crmState, newChat, piReply, send, shot, signIn, type Person } from "./app.ts";
 
 test.describe.configure({ mode: "serial" });
@@ -499,4 +499,319 @@ test("m. agents speak up after a pause in the chat, and a muted one does not", a
   await trackerPost.getByRole("button", { name: "Mute @tracker here" }).click();
   await expect(trackerPost).toContainText("@tracker won't speak up unasked here again.");
   await expect(agentReply(page, "dispatch", /./)).toHaveCount(1);
+});
+
+/** One stage of the speak-up funnel, as a chat kept it (DEV_TOOLS: GET /api/dev/chats/:id/funnel). */
+type FunnelStage = { agent: string; stage: "gates" | "interest" | "turn"; passed: boolean; refusal?: string; score?: number; at: number };
+
+/** The first stage of `agentId`'s in `chatId` since `since` (epoch ms) that `match` takes, once the chat has kept one. */
+async function weighed(page: Page, chatId: string, agentId: string, since: number, match: (stage: FunnelStage) => boolean): Promise<FunnelStage> {
+  let found: FunnelStage | undefined;
+  await expect
+    .poll(async () => {
+      const stages = await call<FunnelStage[]>(page, "GET", `/api/dev/chats/${chatId}/funnel`);
+      found = stages.find((stage) => stage.agent === agentId && stage.at >= since && match(stage));
+      return found !== undefined;
+    })
+    .toBe(true);
+  return found!;
+}
+
+/** The owner lets agents speak up in the open chat, from its agent settings, and sets `limits` there (label: value). */
+async function letSpeakUp(page: Page, limits: Record<string, string> = {}): Promise<void> {
+  await page.getByRole("button", { name: "Agents in this chat" }).click();
+  const settings = page.getByRole("dialog", { name: "Add agents to this chat" });
+  const speakUp = settings.getByRole("checkbox", { name: /Let agents speak up/ });
+  await speakUp.click();
+  await expect(speakUp).toBeChecked();
+  for (const [label, value] of Object.entries(limits)) {
+    const form = settings.locator("form").filter({ hasText: label });
+    await form.getByLabel(label).fill(value);
+    await form.getByRole("button", { name: "Save" }).click();
+    await expect(form.getByRole("button", { name: "Save" })).toBeDisabled();
+  }
+  await settings.getByRole("button", { name: "Close" }).click();
+}
+
+test("n. speaking-up limits: the stricter of the chat's and the agent's holds, and a PASS raises its bar", async () => {
+  const { page } = ada;
+  const PER_MESSAGES = "One post per this many messages";
+  // ada's own limit for courier (one post per 3 messages) is stricter than the one she sets for the chat (per 2).
+  const courier = await call<{ id: string }>(page, "POST", "/api/agents", {
+    name: "courier",
+    job: "Parcel route updates",
+    instructions: "/say Courier note: parcel route checked.",
+    speaksUp: true,
+  });
+  await page.goto(`/agents/${courier.id}`);
+  await page.getByLabel(PER_MESSAGES).fill("3");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
+  const chat = await newChat(page);
+  await addToChat(page, "courier");
+  await letSpeakUp(page, { [PER_MESSAGES]: "2" });
+
+  const posts = page.locator(".agent-reply").filter({ has: page.getByText("@courier", { exact: true }) });
+  // Its first post needs no messages before it; after it, the second and third messages are not enough for its own
+  // limit (they would be for the chat's), and the fourth is.
+  let since = Date.now();
+  await send(page, "Parcel route");
+  await expect(posts).toHaveCount(1);
+  for (let i = 0; i < 2; i++) {
+    since = Date.now();
+    await send(page, "Parcel route");
+    await weighed(page, chat, courier.id, since, (stage) => stage.refusal === "messages");
+    await expect(posts).toHaveCount(1);
+  }
+  await send(page, "Parcel route");
+  await expect(posts).toHaveCount(2);
+  await expect(posts.last()).toContainText("Courier note: parcel route checked.");
+  await shot(page, "n-limits");
+
+  // sentry answers PASS when it is given a turn: nothing is posted, and its bar goes up in this chat, so the same
+  // conversation, which reached it the first time, no longer does. On the scripted model the interest is the words two
+  // texts share (worker/dev-model.ts): 0.577 for these, past the threshold (0.55), not past it raised by a PASS (0.58).
+  const sentry = await call<{ id: string }>(page, "POST", "/api/agents", {
+    name: "sentry",
+    job: "Pallet audit night watcher",
+    instructions: "/say PASS",
+    speaksUp: true,
+    speakUpLimits: { perMessages: 1 },
+  });
+  const quiet = await newChat(page);
+  await addToChat(page, "sentry");
+  await letSpeakUp(page);
+  since = Date.now();
+  await send(page, "Pallet audit");
+  const first = await weighed(page, quiet, sentry.id, since, (stage) => stage.stage === "interest");
+  expect(first).toMatchObject({ passed: true });
+  expect(first.score).toBeGreaterThanOrEqual(0.55);
+  await weighed(page, quiet, sentry.id, since, (stage) => stage.stage === "turn");
+  // Its turn ends with PASS: nothing posted.
+  await expect
+    .poll(async () => {
+      const { turns } = await call<{ turns: Record<string, { status: string }[]> }>(page, "GET", `/api/chats/${quiet}/agents`);
+      return turns[sentry.id]?.[0]?.status;
+    })
+    .toBe("done");
+  since = Date.now();
+  await send(page, "Pallet audit");
+  const again = await weighed(page, quiet, sentry.id, since, (stage) => stage.stage === "interest");
+  expect(again).toMatchObject({ passed: false, score: first.score });
+  await expect(page.locator(".agent-reply").filter({ has: page.getByText("@sentry", { exact: true }) })).toHaveCount(0);
+});
+
+test("o. an agent learns overnight: in use with why, facts to confirm, nothing from what it never read, nothing off the record", async () => {
+  const { page } = ada;
+  const research = await call<{ id: string }>(page, "POST", "/api/agents", { name: "research", job: "Looks the deals up", instructions: "Answer about the deals." });
+  // A private chat: research answers, and ada replies to it with a correction (a "corrected" signal).
+  await newChat(page);
+  await addToChat(page, "research");
+  await send(page, "@research /say Three deals are open.");
+  const answer = agentReply(page, "research", "Three deals are open.");
+  await expect(answer).toBeVisible();
+  await answer.hover();
+  await answer.getByRole("button", { name: "Reply" }).click();
+  await send(page, "No, that's wrong: only the won deals.");
+  await expect(agentReply(page, "research", "ok: [Replying to research")).toBeVisible();
+
+  // Its dream, with the model's answer scripted (DEV_TOOLS): a wide preference and a fact citing what it read, and a
+  // note citing a chat it never read. Where each goes is the app's to decide (placeDreamNote).
+  const dream = (notes: object[]) => JSON.stringify({ summary: "Learned to keep to the won deals.", notes, retire: [] });
+  const learned = "Lists only the won deals unless asked for more.";
+  const fact = "The pipeline review is on Fridays.";
+  const madeUp = "Always copy the finance team.";
+  const record = await call<{ status: string; learned: string[]; waiting: string[] }>(page, "POST", "/api/dev/dream", {
+    subject: research.id,
+    answer: dream([
+      { text: learned, kind: "preference", scope: "wide", cites: ["c0.s0", "c0.s1"], why: "corrected to the won deals", confidence: 0.9 },
+      { text: fact, kind: "fact", scope: "wide", cites: ["c0.s1"], why: "said in passing", confidence: 0.8 },
+      { text: madeUp, kind: "preference", scope: "wide", cites: ["c5.s0"], why: "never said", confidence: 0.9 },
+    ]),
+  });
+  expect(record).toMatchObject({ status: "dreamt" });
+  // One in use at once (the preference), one waiting (the fact); the third cites nothing it read and is not kept.
+  expect(record.learned).toHaveLength(1);
+  expect(record.waiting).toHaveLength(1);
+
+  // The fact waits in Needs you, as "Learned"; it opens research's Knows tab.
+  await page.goto("/feed");
+  await page.getByRole("tab", { name: /^Needs you/ }).click();
+  const item = page.locator(".feed-item").filter({ hasText: "@research learned something overnight to confirm" });
+  await expect(item).toContainText("Learned");
+  await shot(page, "o-needs-you");
+  await item.getByRole("link").first().click();
+  await expect(page).toHaveURL(new RegExp(`/agents/${research.id}\\?tab=knows`));
+  const overnight = page.getByRole("region", { name: "Learned overnight" });
+  const note = (text: string) => overnight.locator("li").filter({ hasText: text });
+  await expect(note(learned)).toContainText("corrected to the won deals");
+  await expect(note(learned)).not.toContainText("To confirm");
+  await expect(note(fact)).toContainText("To confirm");
+  await expect(note(fact)).toContainText("Fact");
+  await expect(page.getByText(madeUp)).toHaveCount(0);
+  // It just dreamt: Dream now waits.
+  await expect(overnight.getByRole("button", { name: "Dream now" })).toBeDisabled();
+  await shot(page, "o-knows");
+
+  // Keep: the fact is in use, and Needs you has nothing left of it.
+  await note(fact).getByRole("button", { name: "Keep" }).click();
+  await expect(note(fact)).not.toContainText("To confirm");
+  await page.goto("/feed");
+  await page.getByRole("tab", { name: /^Needs you/ }).click();
+  await expect(page.locator(".feed-item").filter({ hasText: "@research learned something overnight to confirm" })).toHaveCount(0);
+
+  // Forget it, then bring it back from the forgotten notes.
+  await page.goto(`/agents/${research.id}?tab=knows`);
+  await note(learned).getByRole("button", { name: "Forget" }).click();
+  await expect(note(learned)).toHaveCount(0);
+  await page.goto("/memory");
+  await page.getByRole("button", { name: /^Show forgotten/ }).click();
+  await page.locator("li.memory-note").filter({ hasText: learned }).getByRole("button", { name: "Bring back" }).click();
+  await page.goto(`/agents/${research.id}?tab=knows`);
+  await expect(note(learned)).toBeVisible();
+
+  type Note = { text: string; scope: string; chatId?: string; agentId?: string; confirmed: boolean };
+  const notes = async () => (await call<{ notes: Note[] }>(page, "GET", "/api/memory")).notes;
+
+  // In the chat ada shares with bob: what is learned there stays with that chat, and a lesson for everywhere waits.
+  const minutes = await call<{ id: string }>(page, "POST", "/api/agents", { name: "minutes", job: "Keeps the meeting notes", instructions: "Note what was said." });
+  await page.goto(`/c/${sharedChat}`);
+  await addToChat(page, "minutes");
+  await send(page, "@minutes /say Noted the agenda.");
+  await expect(agentReply(page, "minutes", "Noted the agenda.")).toBeVisible();
+  const here = "Keeps the agenda notes short in this chat.";
+  const lesson = "Ends a note with the next step.";
+  expect(
+    await call(page, "POST", "/api/dev/dream", {
+      subject: minutes.id,
+      answer: dream([
+        { text: here, kind: "preference", scope: "chat", cites: ["c0.s0"], why: "the room's habit", confidence: 0.9 },
+        { text: lesson, kind: "preference", scope: "wide", cites: ["c0.s0"], why: "a way of working", confidence: 0.9 },
+      ]),
+    }),
+  ).toMatchObject({ status: "dreamt" });
+  const kept = await notes();
+  expect(kept.find((one) => one.text === here)).toMatchObject({ scope: "chat", chatId: sharedChat });
+  expect(kept.find((one) => one.text === lesson)).toMatchObject({ scope: "agent", agentId: minutes.id, confirmed: false });
+
+  // Off the record: nothing is recorded, so the dream has nothing to learn from and keeps nothing.
+  const ghost = await call<{ id: string }>(page, "POST", "/api/agents", { name: "ghost", job: "Answers off the record", instructions: "Answer briefly." });
+  await newChat(page);
+  const chip = page.locator("button.kind-chip");
+  await chip.click();
+  const kinds = page.getByRole("dialog", { name: "What kind of chat this is" });
+  await kinds.getByRole("button", { name: /^Off the record/ }).click();
+  await kinds.getByRole("button", { name: "Change", exact: true }).click();
+  await expect(chip).toHaveText(/^Off the record/);
+  await addToChat(page, "ghost");
+  await send(page, "@ghost /say Kept here only.");
+  await expect(agentReply(page, "ghost", "Kept here only.")).toBeVisible();
+  const offRecord = await call<{ status: string; learned: string[] }>(page, "POST", "/api/dev/dream", {
+    subject: ghost.id,
+    answer: dream([{ text: "Answers in one line.", kind: "preference", scope: "wide", cites: ["c0.s0"], why: "off the record", confidence: 0.9 }]),
+  });
+  expect(offRecord).toMatchObject({ status: "quiet", learned: [] });
+  expect((await notes()).filter((one) => one.agentId === ghost.id)).toEqual([]);
+});
+
+test("p. a member sees only what a shared agent's runs posted in their chat; Make, the allowance ring and run groups", async () => {
+  const owner = ada.page;
+  const member = bob.page;
+  // A run that reads crm and posts its digest in the chat ada shares with bob, where she shares the agent.
+  const digest = await call<{ id: string }>(owner, "POST", "/api/agents", {
+    name: "digest",
+    job: "Posts the weekly digest in the deals room",
+    instructions: "1. List the deals.\n2. Post the digest in the deals room.",
+    servers: ["crm"],
+    trigger: { kind: "schedule", at: "08:30", tz: "UTC" },
+    workflow: [
+      { kind: "look", server: "crm", tool: "list_deals", input: {}, as: "deals" },
+      { kind: "work", prompt: "/say Weekly digest: three deals are open." },
+      { kind: "tell", to: [sharedChat], via: "chat" },
+    ],
+  });
+  await owner.goto(`/c/${sharedChat}`);
+  await addToChat(owner, "digest");
+  await call(owner, "PATCH", `/api/chats/${sharedChat}/agents/${digest.id}`, { shared: true });
+  await call(owner, "POST", `/api/dev/agents/${digest.id}/run`, {});
+  await expect(agentReply(owner, "digest", "Weekly digest: three deals are open.")).toBeVisible();
+
+  // bob, from the chat: the run's post, and only that.
+  await member.goto(`/agents/${digest.id}?chat=${sharedChat}&tab=runs`);
+  await expect(member.getByText("The runs that posted in", { exact: false })).toBeVisible();
+  const row = member.locator(".run-row").first();
+  await expect(row).toContainText("Weekly digest: three deals are open.");
+  await row.click();
+  await expect(member.getByText("Only ada sees how a run got there", { exact: false })).toBeVisible();
+  await expect(member.locator(".run-items")).toHaveCount(0);
+  await expect(member.getByText(/Look at crm\.list_deals/)).toHaveCount(0);
+  await shot(member, "p-member-run");
+  // ada sees all of it.
+  await owner.goto(`/agents/${digest.id}?tab=runs`);
+  await owner.locator(".run-row").first().click();
+  await expect(owner.getByText(/Look at crm\.list_deals/).first()).toBeVisible();
+
+  // The composer's Make, on Auto: "every morning…" reads as an agent to draft; a question about last week does not.
+  const page = owner;
+  await newChat(page);
+  await expect(page.getByRole("button", { name: "Make: Auto" })).toBeVisible();
+  await send(page, "Every morning, the deals.");
+  await expect(piReply(page, "This reads as something to run on its own")).toBeVisible();
+  await send(page, "What were the deals every day last week?");
+  const past = piReply(page, "What were the deals every day last week?");
+  await expect(past).toBeVisible();
+  await expect(past).not.toContainText("This reads as something to run on its own");
+  // pi follows the line with agent_propose (here from the owner's system prompt, the scripted model's way): a draft.
+  await call(page, "PUT", "/api/me/system-prompt", {
+    text: propose({
+      name: "morning-deals",
+      job: "Lists the deals at proposal every morning",
+      instructions: "1. List the deals at proposal.",
+      servers: ["crm"],
+      trigger: { kind: "schedule", at: "08:00", tz: "UTC" },
+    }),
+  });
+  try {
+    await send(page, "Every morning, list the deals at proposal.");
+    await expect(page.getByRole("article", { name: "Agent @morning-deals" })).toContainText("Proposed by pi");
+    await shot(page, "p-make-auto");
+  } finally {
+    await call(page, "PUT", "/api/me/system-prompt", { text: "" });
+  }
+
+  // The allowance ring beside the context ring, and its panel.
+  const ring = page.getByRole("button", { name: /^Today's allowance: \$[\d.]+ of \$5\.00/ });
+  await expect(ring).toBeVisible();
+  await ring.click();
+  const allowance = page.getByRole("dialog", { name: "Today's allowance" });
+  await expect(allowance).toContainText("of $5.00");
+  await expect(allowance).toContainText("tokens");
+  await shot(page, "p-allowance");
+  await page.keyboard.press("Escape");
+  await expect(allowance).toBeHidden();
+
+  // A scoped run's detail groups its items: two acted on, one a rule blocked, with the rule's reason.
+  const sweeper = await call<{ id: string }>(page, "POST", "/api/agents", {
+    name: "sweeper",
+    job: "Saves each deal's stage again",
+    instructions: "For each deal, save its stage again.",
+    servers: ["crm"],
+    trigger: { kind: "schedule", at: "11:00", tz: "UTC" },
+    autonomy: 4,
+    guardrails: [{ id: "nod2", server: "crm", tool: "update_deal", arg: "id", kind: "never", value: ["d2"], effect: "block", note: "Globex is frozen." }],
+    scope: { list: { kind: "look", server: "crm", tool: "list_deals", input: {} }, each: true },
+    workflow: [{ kind: "do", server: "crm", tool: "update_deal", input: { id: "{{item.id}}", stage: "{{item.stage}}" } }],
+  });
+  await call(page, "POST", `/api/dev/agents/${sweeper.id}/run`, {});
+  await page.goto(`/agents/${sweeper.id}?tab=runs`);
+  const run = page.locator(".run-row").first();
+  await expect(run).toContainText("2 of 3 acted · 1 blocked, not acted on");
+  await run.click();
+  const acted = page.getByRole("region", { name: /^Acted on/ });
+  const blocked = page.getByRole("region", { name: /^Blocked/ });
+  await expect(acted).toContainText("2 of 3");
+  await expect(acted).toContainText("Northwind renewal");
+  await expect(blocked).toContainText("Globex pilot");
+  await expect(blocked).toContainText(/crm\.update_deal was refused: Not run: a rule blocks it: id of crm\.update_deal is "d2"/);
+  await shot(page, "p-run-groups");
 });

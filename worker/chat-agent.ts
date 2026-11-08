@@ -163,7 +163,7 @@ import {
   type Catalog,
 } from "./models.ts";
 import { withFailuresReported } from "./model-health.ts";
-import { scriptEmbedder, scriptModel, scriptOn, scriptPauseMs, SCRIPT_MODEL } from "./dev-model.ts";
+import { scriptEmbedder, scriptGapMs, scriptModel, scriptOn, scriptPauseMs, SCRIPT_MODEL } from "./dev-model.ts";
 import { chatAgentName, parseChatAgentName } from "./chat-name.ts";
 import { inboxIds, queuedIdsOf, queuedMessages } from "./queue.ts";
 import { readSystemPrompt, saveSystemPrompt, SYSTEM_PROMPT_KEY, type Tag } from "./users.ts";
@@ -403,6 +403,8 @@ const BROUGHT_IN_KEY = "broughtIn";
 const AGENT_SETTINGS_KEY = "agentSettings";
 /** The newest person's message a pause check waits behind (its sentAt), and whether a check is scheduled. */
 const PAUSE_KEY = "speakUpPause";
+/** With DEV_TOOLS, how many of the speak-up funnel's stages a chat keeps for devFunnel. */
+const MAX_FUNNEL_LOG = 200;
 /** The questions nobody answered yet, oldest first, and whether a follow-up check is scheduled. */
 const ASKS_KEY = "openAsks";
 /** Open questions a chat keeps, at most: the oldest go first. */
@@ -585,7 +587,8 @@ export class ChatAgent extends DurableObject<Env> {
   /** Agents that speak up (worker/agents/speak-up.ts). */
   readonly speakUp = new SpeakUp({
     roster: this.roster,
-    ...(scriptPauseMs(this.env) !== undefined && { devPauseMs: scriptPauseMs(this.env) }),
+    // On the scripted model, its pause and gap (worker/dev-model.ts): the e2e suite's seconds.
+    dev: { pauseMs: scriptPauseMs(this.env), gapMs: scriptGapMs(this.env) },
     settings: () => this.#agentSettings(),
     definition: async (entry) => this.#inThisChat(await this.#index(entry.ownerUid).getAgent(entry.agentId)),
     budgetLeft: () => this.spend.refusal() === undefined,
@@ -595,7 +598,11 @@ export class ChatAgent extends DurableObject<Env> {
     give: (agentId, request) => {
       this.turns.call([agentId], request);
     },
-    observe: (event: FunnelEvent) => this.metrics.funnel({ ...event, stage: event.refusal ? `${event.stage}:${event.refusal}` : event.stage }),
+    observe: (event: FunnelEvent) => {
+      this.metrics.funnel({ ...event, stage: event.refusal ? `${event.stage}:${event.refusal}` : event.stage });
+      // With DEV_TOOLS, kept a while for GET /api/dev/chats/:id/funnel (devFunnel).
+      if (this.env.DEV_TOOLS === "true") this.#funnelLog.splice(0, this.#funnelLog.push({ ...event, at: Date.now() }) - MAX_FUNNEL_LOG);
+    },
     now: () => Date.now(),
     messagesSince: (at, max) => countMessagesSince(this.#log({ order: "descending" }), at, max),
     penalties: this.ctx.storage.kv,
@@ -607,6 +614,8 @@ export class ChatAgent extends DurableObject<Env> {
   get #pauseMs(): number {
     return scriptPauseMs(this.env) ?? (this.#agentSettings().speakUpLimits?.pauseMinutes ?? SPEAK_UP_DEFAULTS.pauseMinutes) * 60_000;
   }
+  /** With DEV_TOOLS, the speak-up funnel's latest stages, oldest first (devFunnel); empty anywhere else. */
+  readonly #funnelLog: (FunnelEvent & { at: number })[] = [];
   /** The spend not yet sent to each payer's directory, by uid (#spent). */
   readonly #ownerSpend = new Map<string, { calls: number; tokens: number; cost: number }>();
   /** What each session's model calls came to since its turn started, for the turn's metrics: tokens, dollars, tool calls. */
@@ -4067,6 +4076,16 @@ export class ChatAgent extends DurableObject<Env> {
       kind: (kind) => seat.seatKind(room, kind),
       decide: (id, decision) => seat.seatDecide(room, id, decision),
     };
+  }
+
+  /**
+   * (DEV_TOOLS only, the chat's owner) The speak-up funnel's latest stages here, oldest first, each with when: what the
+   * e2e suite reads to know an agent was weighed and why it stayed quiet. Nothing is kept without DEV_TOOLS.
+   */
+  devFunnel(uid: string): (FunnelEvent & { at: number })[] | ChatRefusal {
+    if (this.env.DEV_TOOLS !== "true") return refuse(404, "Not found.");
+    if (uid !== this.uid) return refuse(403, "Only the chat's owner reads its funnel.");
+    return [...this.#funnelLog];
   }
 
   /**
