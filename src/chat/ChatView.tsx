@@ -67,6 +67,7 @@ import { CHAT_ACTION_KIND, type ChatActionData } from "../../shared/limits.ts";
 import { ChecklistCard } from "./ChecklistCard.tsx";
 import { CHAT_CHECKLIST_KIND, checklistAt, foldChecklists, type ChatChecklistData } from "../../shared/checklist.ts";
 import { ArtifactCard } from "./ArtifactCard.tsx";
+import { DocumentCard, documentOf } from "../documents/DocumentCard.tsx";
 import { Markdown } from "./Markdown.tsx";
 import { MentionList, MentionText, useMentions } from "./Mentions.tsx";
 import { NotifyButton } from "./notify.tsx";
@@ -831,6 +832,8 @@ const Entry = memo(function Entry({
   if (entry.kind === "pi.tool-result" && message?.role === "toolResult") {
     const artifact = published(entry);
     if (artifact) return <ArtifactCard artifact={artifact} onOpen={onOpen} />;
+    const document = documentOf(entry);
+    if (document) return <DocumentCard details={document} />;
     const drafted = proposedBy(entry);
     // Only the owner has the draft: pi saves it in their directory. A chat nobody else is in is the viewer's own.
     if (drafted) return <DraftCard details={drafted} chatId={chatId} mine={!people || people.owner.uid === uid} />;

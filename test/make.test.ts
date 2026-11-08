@@ -50,6 +50,7 @@ describe("the composer's Make choice", () => {
     expect(makeNote("auto", "every morning tell me the numbers")).toContain("agent_propose");
     expect(makeNote("page", "x")).toContain("artifact_publish");
     expect(makeNote("tool", "x")).toContain("skill_propose");
+    expect(makeNote("document", "x")).toContain("document_create");
     expect(makeNote("answer", "x")).toMatch(/reply here/);
     expect(makeNote("auto", "hello")).toBe("");
     expect(makeNote(undefined, "every morning tell me")).toBe("");
@@ -58,6 +59,6 @@ describe("the composer's Make choice", () => {
   it("reads only its own kinds from a client, and lists each once with Auto first", () => {
     expect(MAKE_KINDS.map(parseMake)).toEqual([...MAKE_KINDS]);
     for (const value of ["Agent", "workflow", 3, null, undefined, {}]) expect(parseMake(value)).toBeUndefined();
-    expect(MAKE_CHOICES.map((choice) => choice.kind)).toEqual(["auto", "answer", "page", "agent", "tool"]);
+    expect(MAKE_CHOICES.map((choice) => choice.kind)).toEqual(["auto", "answer", "page", "document", "agent", "tool"]);
   });
 });

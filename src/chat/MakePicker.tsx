@@ -8,6 +8,7 @@ const GLYPHS: Record<MakeKind, string> = {
   auto: "M12 3v3M12 18v3M3 12h3M18 12h3M6 6l2 2M16 16l2 2M18 6l-2 2M8 16l-2 2",
   answer: "M5 5h14v10H9l-4 4z",
   page: "M7 3h7l4 4v14H7zM14 3v4h4M10 12h5M10 16h5",
+  document: "M6 3h12v18H6zM9 8h6M9 12h6M9 16h4",
   agent: "M4 5h16v14H4zM9 11v1M15 11v1M12 2v3",
   tool: "M14.5 6.5a4 4 0 0 0 5 5l-8 8a2 2 0 0 1-3-3l8-8a4 4 0 0 0-2-2z",
 };
