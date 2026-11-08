@@ -200,3 +200,71 @@ test("6. a member removes their agent from the room: its posted reply stays, its
   await expect(member.locator("nav.artifact-list")).not.toContainText("Scratch notes");
   await shot(member, "more-6-seat-left");
 });
+
+test("7. anyone may ask an agent for a new page, calling only what the chat shares; pi too, on a member's agent's hand-off", async () => {
+  const owner = eve.page;
+  const member = finn.page;
+  await owner.goto(`/c/${room}`);
+  await member.goto(`/c/${room}`);
+  const crm = JSON.stringify([{ server: "crm", tools: ["list_deals"] }]);
+  const vault = JSON.stringify([{ server: "vault", tools: ["read_notes"] }]);
+  // eve's maker may use crm and vault; vault signs in each user, so it is hers alone. Asked with no script of its own,
+  // it builds the pipeline page (its instructions).
+  await agent(owner, "maker", "Builds pages", {
+    servers: ["crm", "vault"],
+    instructions: [
+      `/tool artifact_write {"html":"Pipeline for the room","mcp":${crm}}`,
+      '/tool artifact_publish {"title":"Pipeline","draft_id":"{{draft}}","new_artifact":true}',
+    ].join("\n"),
+  });
+  await addToChat(owner, "maker");
+
+  // finn asks eve's agent for a page on vault: refused before anything is saved, saying why.
+  await send(member, `@maker /tool artifact_write {"html":"Notes for finn","mcp":${vault}}`);
+  await expect(agentReply(member, "maker", /artifact_write failed: .*Not saved: the page calls vault/)).toBeVisible();
+  // On crm it is made and published, a new page of eve's.
+  await send(
+    member,
+    `@maker /tool artifact_write {"html":"Deals for finn","mcp":${crm}}\n/tool artifact_publish {"title":"Deals for finn","draft_id":"{{draft}}","new_artifact":true}`,
+  );
+  await expect(agentReply(owner, "maker", /artifact_publish: Published/)).toContainText("Deals for finn");
+  const made = (await call<{ id: string; title: string }[]>(owner, "GET", "/api/artifacts")).find((artifact) => artifact.title === "Deals for finn");
+  expect(made).toBeTruthy();
+  // Its live calls reach only crm, whatever it declares.
+  const live = await call<{ ok: boolean; error?: { code: string; message: string } }>(member, "POST", `/api/artifacts/${made!.id}/mcp`, {
+    version: 1,
+    mode: "read",
+    server: "vault",
+    tool: "read_notes",
+    input: {},
+  });
+  expect(live).toMatchObject({ ok: false, error: { code: "not_granted", message: expect.stringContaining("not one of the servers this page may call") } });
+  // A new version of it, on finn's ask, is refused: changing a page the chat has is for eve's own message.
+  await send(
+    member,
+    `@maker /tool artifact_write {"html":"Deals, finn's way"}\n/tool artifact_publish {"title":"Deals for finn","draft_id":"{{draft}}","artifact_id":"${made!.id}"}`,
+  );
+  await expect(agentReply(member, "maker", /artifact_publish failed: .*changing a page the chat already has/)).toBeVisible();
+  expect((await call<{ latest: number }>(owner, "GET", `/api/artifacts/${made!.id}`)).latest).toBe(1);
+
+  // A hand-off: finn's own agent asks maker, which builds the pipeline page.
+  await agent(member, "relay", "Passes asks on", { instructions: "/say @maker please build the pipeline page" });
+  await addToChat(member, "relay");
+  await send(member, "@relay go");
+  await expect(agentReply(owner, "maker", /artifact_publish: Published/).filter({ hasText: "Pipeline" })).toBeVisible();
+
+  // pi too, on finn's agent's hand-off: with no script in the hand-off, pi follows eve's system prompt.
+  await call(owner, "PUT", "/api/me/system-prompt", {
+    text: [`/tool artifact_write {"html":"Summary by pi","mcp":${crm}}`, '/tool artifact_publish {"title":"Summary by pi","draft_id":"{{draft}}","new_artifact":true}'].join("\n"),
+  });
+  try {
+    await agent(member, "asker", "Asks pi", { instructions: "/say @pi please sum it up as a page" });
+    await addToChat(member, "asker");
+    await send(member, "@asker go");
+    await expect.poll(() => artifactTitles(owner), { timeout: 30_000 }).toContain("Summary by pi");
+  } finally {
+    await call(owner, "PUT", "/api/me/system-prompt", { text: "" });
+  }
+  expect(await artifactTitles(owner)).toEqual(expect.arrayContaining(["Deals for finn", "Pipeline", "Summary by pi"]));
+  await shot(member, "more-7-pages-for-anyone");
+});

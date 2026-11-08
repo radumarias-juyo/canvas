@@ -448,7 +448,8 @@ describe("Member agents: tools follow who asks", () => {
   it("gives its owner every server, and anyone else only the shared ones, read-only", () => {
     expect(allowedTools(ALL_TOOLS, MCP, planner, true, SIGNS_IN)).toEqual([...APP_TOOLS, "db_query", "db_insert", "calendar_events"]);
     // Another member's question can't use the calendar, which signs in each user.
-    expect(allowedTools(ALL_TOOLS, MCP, planner, false, SIGNS_IN)).toEqual(["artifact_read", "db_query"]);
+    // It may make a new page for them (artifact_write), within what they may use; never write files or call the calendar.
+    expect(allowedTools(ALL_TOOLS, MCP, planner, false, SIGNS_IN)).toEqual(["artifact_read", "artifact_write", "db_query"]);
   });
 
   it("counts a result by the server its call recorded, and one no one can tell as private", () => {

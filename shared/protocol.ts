@@ -136,6 +136,11 @@ export const ARTIFACT_SANDBOX = "allow-scripts allow-popups allow-popups-to-esca
 /** What a page may call. Fixed per version at publish time; the page cannot widen it. */
 export interface ArtifactManifest {
   mcp?: { servers: { server: string; tools: string[] }[] };
+  /**
+   * Set on a version made on the ask of someone other than its owner (worker/agent/create-reach.ts): the only servers its
+   * live calls may reach, those shared with the chat it was made in. Absent: the owner's own page, which calls what it declares.
+   */
+  reach?: string[];
 }
 
 export interface ArtifactVersion {

@@ -80,7 +80,11 @@ with `@cloudflare/vite-plugin`, pnpm; configured and deployed with the `cf` CLI 
   and durable turn queue (`ChatRoster`) and the turn controller (`AgentTurns`) run each roster agent in its own pi
   session of the chat object, configured per turn (`#configureAgent`: the session's tools are an allow-list,
   `allowedTools`, and a turn its owner did not ask for gets only read tools: the shared servers' (all its servers' when it runs apart in a chat with nobody else in it) and `READ_TOOLS`, plus
-  `DISPLAY_TOOLS`, which only show something (a checklist card, no data; not for an unprompted turn); the owner's files
+  `DISPLAY_TOOLS`, which only show something (a checklist card, no data; not for an unprompted turn), and `CREATE_TOOLS`,
+  which make a new page (not for an unprompted turn): on anyone's ask but its owner's own (pi's too, on a run that answers
+  someone else) a page calls only the servers shared with the chat (a seat's within `SeatTurn.servers`), builds only on
+  the turn's own drafts and changes no page the chat has (`PublishScope.createReach`, `worker/agent/create-reach.ts`), and
+  its version keeps those servers (`ArtifactManifest.reach`), which its live calls go by (`artifactCall`); the owner's files
   (`FILE_TOOLS`) only as the agent's `files` allows, `own` for its owner's turns, `shared` for others' (reading only, never
   unprompted, a run or a Yes), and the prompt names them only to a request that may read them; the owner's Yes to an
   offered next step (`offer_yes`, `ChatAgent.takeOffer`) gets only `draftTools`, reading and `agent_propose`, pi's run too; the
