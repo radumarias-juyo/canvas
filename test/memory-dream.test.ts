@@ -533,6 +533,19 @@ describe("a user's dreams", () => {
     expect(u.dreams.view().nowAfter[AGENT]).toBe(u.now() + DREAM_NOW_MS);
     expect(await u.dreams.dreamNow({ kind: "agent", agentId: "f".repeat(16) })).toEqual({ error: "No such agent." });
   });
+
+  it("leaves no scripted answer behind after a dream with nothing to learn from", async () => {
+    const u = user();
+    u.dreams.setSettings({ timeZone: TZ });
+    const scripted = answer([note({ text: "Left over.", kind: "preference", scope: "wide", cites: ["c0.1"] })]);
+    expect(await u.dreams.dreamNow({ kind: "agent", agentId: AGENT }, scripted)).toMatchObject({ status: "quiet" });
+    // The night after a day of work asks the model, not the answer scripted for the quiet dream before it.
+    u.signals.record([signalIn(PRIVATE, { at: NOON })]);
+    u.at(DUE + 1000);
+    await u.dreams.alarm();
+    expect(u.calls).toEqual([AGENT]);
+    expect(u.memory.list().map((each) => each.text)).not.toContain("Left over.");
+  });
 });
 
 describe("learning overnight, as an agent's setting", () => {
