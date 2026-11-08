@@ -9,6 +9,7 @@ import {
   type PointerEvent,
   type ReactNode,
 } from "react";
+import { goTo } from "./agents/nav.ts";
 import { Icon } from "./Icon.tsx";
 
 /**
@@ -71,6 +72,28 @@ export function useDismiss<T extends HTMLElement>(open: boolean, setOpen: (open:
   return box;
 }
 
+/**
+ * Up and Down (Home and End) move between a menu's items (`role="menuitem…"`), and Left and Right between a tab list's
+ * tabs, as screen readers say those roles take; Tab still goes through them too. Put on the tab list, or on the box that
+ * holds a menu and the button opening it (Down from the button goes into the menu); with the menu closed it does nothing.
+ */
+export function rovingKeys(event: KeyboardEvent<HTMLElement>): void {
+  const tabs = event.currentTarget.getAttribute("role") === "tablist";
+  const [back, forth] = tabs ? ["ArrowLeft", "ArrowRight"] : ["ArrowUp", "ArrowDown"];
+  if (![back, forth, "Home", "End"].includes(event.key)) return;
+  const items = [...event.currentTarget.querySelectorAll<HTMLElement>(tabs ? '[role="tab"]' : '[role^="menuitem"]')].filter(
+    (item) => !(item as HTMLButtonElement).disabled,
+  );
+  if (!items.length) return;
+  const last = items.length - 1;
+  const at = items.indexOf(document.activeElement as HTMLElement);
+  const step = event.key === forth ? 1 : -1;
+  // Round from either end; from outside the items, to the first or the last.
+  const next = event.key === "Home" ? 0 : event.key === "End" ? last : at === -1 ? (step > 0 ? 0 : last) : (at + step + items.length) % items.length;
+  event.preventDefault();
+  items[next].focus();
+}
+
 /** Each media query's list, made once and shared by every component that follows it. */
 const mediaLists = new Map<string, MediaQueryList>();
 const mediaList = (query: string): MediaQueryList => {
@@ -99,6 +122,33 @@ export function useMediaQuery(query: string): boolean {
 /** A click that should open a link the browser's way (a new tab or window), not in the app. */
 export const opensElsewhere = (event: ReactMouseEvent) => event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey;
 
+/** A link inside the app: it follows `navigate` (else the history, as `goTo`), and opens in a new tab or window as asked. */
+export function AppLink({
+  path,
+  navigate = goTo,
+  className,
+  children,
+}: {
+  path: string;
+  navigate?: (path: string) => void;
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <a
+      href={path}
+      className={className}
+      onClick={(event) => {
+        if (opensElsewhere(event)) return;
+        event.preventDefault();
+        navigate(path);
+      }}
+    >
+      {children}
+    </a>
+  );
+}
+
 /** The check for a stored open/closed (or on/off) setting. */
 export const isBoolean = (value: unknown): value is boolean => typeof value === "boolean";
 
@@ -112,6 +162,7 @@ export function SectionHead({
   open,
   onToggle,
   upward = false,
+  what = `your ${name.toLowerCase()}`,
   children,
 }: {
   name: string;
@@ -120,6 +171,8 @@ export function SectionHead({
   onToggle: (open: boolean) => void;
   /** The section opens above its heading (a panel at the bottom of the sidebar). */
   upward?: boolean;
+  /** What its button's title says it shows or hides: "your artifacts" by default. */
+  what?: string;
   children?: ReactNode;
 }) {
   // In a heading, so moving through the page by headings still finds the section.
@@ -130,7 +183,7 @@ export function SectionHead({
         className="section-head"
         aria-expanded={open}
         onClick={() => onToggle(!open)}
-        title={`${open ? "Hide" : "Show"} your ${name.toLowerCase()}`}
+        title={`${open ? "Hide" : "Show"} ${what}`}
       >
         {name} <small>{count.toLocaleString("en")}</small>
         {children}

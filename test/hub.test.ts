@@ -133,6 +133,55 @@ describe("McpHub.read", () => {
     expect(server.calls).toHaveLength(1);
   });
 
+  it("tells its observer of each read's hit or miss, by owner, and keeps what it stores as the owner's", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const server = fakeServer(async () => {
+      await gate;
+      return text({ ok: true });
+    });
+    const events: string[] = [];
+    const observer = {
+      hit: (owner: string) => events.push(`hit ${owner}`),
+      miss: (owner: string) => events.push(`miss ${owner}`),
+      evict: (owner: string, _bytes: number, reason: string) => events.push(`evict ${owner} ${reason}`),
+    };
+    const hub = new McpHub([sharedScoped], server.connector, Date.now, { observer });
+    // Two reads join one call in flight: both missed the cache.
+    const reads = [hub.read("Public", "price", {}, { staleMs: 30_000, viewer: "ann", owner: "pages" })];
+    reads.push(hub.read("Public", "price", {}, { staleMs: 30_000, viewer: "ann", owner: "agent-1" }));
+    release();
+    await Promise.all(reads);
+    await hub.read("Public", "price", {}, { staleMs: 30_000, viewer: "ann", owner: "agent-1" });
+    await hub.read("Public", "price", {}, { staleMs: 30_000, viewer: "ann" });
+    expect(server.calls).toHaveLength(1);
+    expect(events).toEqual(["miss pages", "miss agent-1", "hit agent-1", "hit "]);
+    expect([...hub.cacheStats().keys()]).toEqual(["pages"]);
+
+    hub.observe(undefined);
+    await hub.read("Public", "price", {}, { staleMs: 0, viewer: "ann", owner: "pi" });
+    expect(events).toHaveLength(4);
+    expect([...hub.cacheStats().keys()]).toEqual(["pi"]);
+  });
+
+  it("tells its observer of results evicted to make room, as their owner's", async () => {
+    // A cached result holds the text and the parsed payload: about 3.5 MB each here.
+    const big = "x".repeat(1.75 * 1024 * 1024);
+    const server = fakeServer((_name, args) => text({ id: (args as { id: number }).id, big }));
+    const evictions: [string, string][] = [];
+    const observer = { hit: () => {}, miss: () => {}, evict: (owner: string, _bytes: number, reason: string) => evictions.push([owner, reason]) };
+    const hub = new McpHub([viewerScoped], server.connector, Date.now, { observer });
+    const read = (id: number, owner: string) => hub.read("Prices", "price", { id }, { staleMs: 60_000, viewer: "ann", owner });
+    await read(1, "pages");
+    for (const id of [2, 3, 4]) await read(id, "agent-1");
+    expect(evictions).toEqual([]);
+    await read(5, "agent-1"); // agent-1 would hold about 14 MB of an 8 MB share: its own oldest goes, not the page's older one
+    expect(evictions).toEqual([["agent-1", "over-share"]]);
+    expect(hub.cacheStats().get("agent-1")?.entries).toBe(3);
+    await read(1, "pages");
+    expect(server.calls).toHaveLength(5);
+  });
+
   it("does not cache a tool error", async () => {
     const server = fakeServer(() => ({ content: [{ type: "text", text: "bad coin" }], isError: true }));
     const hub = new McpHub([viewerScoped], server.connector);
@@ -172,7 +221,11 @@ describe("McpHub with signed-in servers", () => {
 
   it("connects afresh after a sign-in, instead of keeping the failed connection", async () => {
     let signedIn = false;
-    const connection: McpConnection = { listTools: async () => [], callTool: async () => text({ ok: true }), close: async () => {} };
+    const connection: McpConnection = {
+      listTools: async () => [{ name: "price", description: "", annotations: { readOnlyHint: true } }],
+      callTool: async () => text({ ok: true }),
+      close: async () => {},
+    };
     const hub = new McpHub([viewerScoped], async (server) => {
       if (!signedIn) throw new McpFailure({ code: "auth_required", server: server.name, message: "Not signed in." });
       return connection;

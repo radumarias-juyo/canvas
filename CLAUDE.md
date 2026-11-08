@@ -13,6 +13,9 @@ with `@cloudflare/vite-plugin`, pnpm; configured and deployed with the `cf` CLI 
 - `pnpm test` (hub, broker, Access tokens, storage rules; `LIVE=1` also hits CoinGecko), `pnpm typecheck`,
   `AUTH_MODE=demo pnpm dev`. Without a Cloudflare login or Docker: `AUTH_MODE=demo PI_OFFLINE=1 PI_NO_DOCKER=1 pnpm dev`. Everything but the model and the sandbox (`run_python`, `run_bash`) then works, and
   `POST /api/dev/chats/:id/publish` (with `DEV_TOOLS=true` in the environment) publishes a page without the model.
+  `DEV_MODEL=script` with it puts a scripted model in (`worker/dev-model.ts`: `/say`, `/tool` lines; nothing in
+  production reads it unset). `pnpm e2e` (not in `pnpm test`) drives the agents feature in Playwright on that model
+  against stand-in MCP servers (`e2e/`); keep its flows passing when changing what they click.
 - Pages also get `pi.use("storage")` (values per viewer, the author's as defaults, in `UserDirectory`; it replaces the
   frame's missing `localStorage`) and `pi.use("ai")` (one model answer, no tools, paid from the typing viewer's daily
   allowance): `worker/artifacts/page-routes.ts`, `page-features.ts`. Both run as the viewer, never the author.
@@ -37,13 +40,92 @@ with `@cloudflare/vite-plugin`, pnpm; configured and deployed with the `cf` CLI 
   its files in `SkillFiles` (`worker/storage/skill-files.ts`); pages name them as `skill:<name>/<path>`, inlined
   from the set pinned in the draft at check and publish (`shared/skill-files.ts`), and `run_python`/`run_bash` copy
   a skill's folder to `./skills/<name>/` when named in `skills`.
+- Memory notes (`shared/memory.ts`, `worker/memory/`): a `memory` table in the owner's `UserDirectory`, scoped just me /
+  this agent / this chat. Who reads a note is `reads`, where a learned note goes is `placeNote`: the owner's own notes
+  only in a private chat with nobody else in it; nothing from or into a chat off the record (`mayLeave`); a learned fact,
+  and anything pi saves in a chat others are in or in an agent's hand-off, waits unconfirmed until the owner confirms it.
+  A run's sessions never read the owner's own notes (their reports reach other chats). A prompt stays in the transcript:
+  once one held the owner's own notes and the chat is shared, its conversation starts the prompt afresh
+  (`worker/memory/fresh.ts`, `ChatMemory.audienceChanged`): a compaction going then is stopped, or, when a turn waits
+  for it, its summary is left out of each request (the memory extension's `beforeRequest` hook) until the edits are in.
+  How people work with an agent or pi (corrections, drafts, decisions, mutes, reactions, repeats) is recorded as signals,
+  with no model call and never what anyone said (`shared/signals.ts`, `worker/memory/chat-signals.ts`), in the agent's
+  owner's directory (pi's: the chat owner's; `SignalStore`), tagged with the chat and its kind; nothing from a chat off
+  the record, checked at both ends. Each night at 03:00 in the owner's time zone (`worker/memory/user-dreams.ts`, one
+  alarm with the sign-ins'), pi (account setting, on) and each agent with `learns` (on for new agents) dream once per day
+  (`Dreamer`, `worker/memory/dream.ts`): one cheap call (`internalModel(DREAM_MODEL)`, on the owner's meter and runs' cap) per audience,
+  the owner's private chats together and each shared chat alone, over the day's signals and the log's lines (never a
+  reply built on private servers). The model only proposes; `placeDreamNote` (`shared/dream.ts`) puts
+  each note from where what it cites came from: a shared chat's into that chat, a "how to work" lesson for wider use
+  off until confirmed, a fact off until confirmed. Notes left waiting are a Needs you item (`lesson`).
+  Keep those rules in code.
 - Shared chats (`worker/chat-routes.ts`, `worker/members.ts`): the owner invites people by single-use link; they share
   the one conversation and the one agent, which always acts as the owner (owner's MCP sign-ins, files, skills; artifacts
   owned by the owner). The chat object checks membership on every socket and prompt; keep it that way. Once a chat
   has members, the agent (named `pi`) runs only for a message with `@pi` or a reply to it (`summonsAgent`); other
   messages are asides the model reads as context (`chat.aside` writes). `@name` tags a person in the chat: they get a
   notice over their sidebar socket (a `Tag` on `UserDirectory.touchChat`/`touchSharedChat`), and a browser notification when allowed. Members see and name only the chat's files
-  and artifacts of the owner's (`ChatAgent.chatFiles`, `contents`), plus their own files.
+  and artifacts of the owner's (`ChatAgent.chatFiles`, `contents`), plus their own files. The person who asks decides
+  pi's reach too (`worker/agent/reach.ts`): a run that answers anyone but the owner reads only pi's servers for shared
+  chats (the owner's list on pi's page, `shared/pi-settings.ts`, else those that do not sign in each user) and the chat's
+  files, and what pi read for the owner alone is left out of its requests and, with its calls' output, of others'
+  screens; such a run makes new pages only (calling the servers pi shares, kept on the version), never changes a page the
+  chat has, and lists and builds on only the drafts of that run (`piCreateReach`, `CreateReach.drafts`); a run that started alone with the owner, read such a result and ends after someone joined, or one in a shared
+  chat with the owner's review before posting on, has its replies held for the owner (Show to the chat), which no
+  agent's catch-up, `chat_history`, dream or branch's context reads and which hand nothing on; a branch copies them only
+  for the owner's own, marked held (`ChatCopyData.held`: shown to them alone there, read by no agent), and an export
+  keeps them held; a dream reads a reply of pi's built on what only the owner sees as theirs (`fork`); a sandbox run on
+  anyone else's message never shares /workspace with one on the owner's (`sandboxSession`: keyed by audience, a fresh
+  container when it switches). Keep it that way.
+- Agents (`shared/agents.ts`, `worker/agents/`): definitions per user in `UserDirectory` (`AgentStore`); a chat's roster
+  and durable turn queue (`ChatRoster`) and the turn controller (`AgentTurns`) run each roster agent in its own pi
+  session of the chat object, configured per turn (`#configureAgent`: the session's tools are an allow-list,
+  `allowedTools`, and a turn its owner did not ask for gets only read tools: the shared servers' (all its servers' when it runs apart in a chat with nobody else in it) and `READ_TOOLS`, plus
+  `DISPLAY_TOOLS`, which only show something (a checklist card, no data; not for an unprompted turn), and `CREATE_TOOLS`,
+  which make a new page (not for an unprompted turn): on anyone's ask but its owner's own (pi's too, on a run that answers
+  someone else) a page calls only the servers shared with the chat (a seat's within `SeatTurn.servers`), builds only on
+  drafts of that turn or run (`CreateReach.drafts`, never an earlier one's) and changes no page the chat has
+  (`PublishScope.createReach`, `worker/agent/create-reach.ts`), and its version keeps those servers
+  (`ArtifactManifest.reach`), which its live calls go by (`artifactCall`); the owner's files
+  (`FILE_TOOLS`) only as the agent's `files` allows, `own` for its owner's turns, `shared` for others' (reading only, never
+  unprompted, a run or a Yes), and the prompt names them only to a request that may read them; the owner's Yes to an
+  offered next step (`offer_yes`, `ChatAgent.takeOffer`) gets only `draftTools`, reading and `agent_propose`, pi's run too; the
+  harness offers and runs no tool off that list); keep it that way. A turn its owner asked for, their Yes, and any turn that
+  starts with nobody but the owner in the chat run apart, in a fork of the agent's session (`runsApart`): only the posted
+  reply goes back, and one built on a private server is held for the owner when someone joined meanwhile. A call such a
+  fork or a run holds shows anyone else only who asks for which tool (`shownToMembers`). A member's agent runs as a seat
+  in the member's own object, one per room (`seatChatId`: what a chat object keeps, its pages, drafts, files, sandbox and
+  held actions, never passes between rooms) (`worker/agents/seats/`): the member's own turns and their Yes to its offer (offerOwner: only theirs) run in a fork
+  of the seat's session, its calls go through the member's write gate (`seatCaller`: only the member's own message
+  changes data), what it holds has its card in the room for the member alone, it reads as the room's kind, and it keeps to the servers the room lets agents use (`SeatTurn.servers`). An
+  agent's owner alone opens its window (`shared/agent-window.ts`, `worker/agents/window.ts`; a seat's is read in the
+  member's own object): its sessions and transcripts, and steering (`AgentTurns.instruct`): into their own turn running
+  apart, else a turn of theirs, apart, whose ask is in no log or shared session. A turn
+  ends with its reply in its row (an outbox),
+  together with the hand-offs it queues; the reply is then posted as a `chat.agent` entry. The agents one person's message
+  names (in order), then their hand-offs, go one after another, each once the reply before it is in the log
+  (`ChatRoster.startNext`), pi among them (`PI_TURN`, its place in the chain, which ends once its answer is in the log;
+  pi alone with no agent called goes as ever); another message's chain may run alongside. `@name` hands off (MAX_HOPS
+  per person's message, a hand-off to pi counted on the handing turn; the chain stops past the chat's token budget per
+  message, `messageTokens`, seats' spend counted); a hand-off gives the agent it names only reading, and pi the owner's
+  level and reach only from a turn of the chat owner's own (`ownersChain`: their own message to one of their own agents
+  run here, never a member's seat; `inputLevel`, `ownersInput`); pi's own answers are read from its log for the
+  agents they name (`#piScan`, from a cursor). An agent speaks up unasked only through the funnel (`worker/agents/funnel.ts`):
+  gates, then the limits the chat's owner and the agent's set, the stricter of each (`shared/speak-up.ts`; with others in
+  the chat the router keeps to the messages limit too), a pause, interest (raised a while after a mute or a PASS), then a
+  read-only turn that may PASS.
+  Agents that run on their own (`worker/agents/runs/`): each has a home conversation (a chat marked with it in
+  `UserDirectory`) whose chat object schedules its runs (agents' `Scheduler`) and runs its workflow step by step
+  (`RunExecutor`); only `work` steps call the model, and conditions are parsed by `shared/conditions.ts`, never eval'd.
+  A run reads as its owner with nobody else in it: its sessions get only `runTools` (the app's read tools and the
+  read-only MCP tools of the agent's own servers), and a page rebuild only the artifact tools, for the report it is
+  given; `do` steps wait for approvals; keep it that way. Shared watches poll once for all through a `Source` object
+  (`worker/source.ts`), only for servers whose results everyone shares and nobody signs in to.
+  The editor is `src/agents/` (sidebar section, agent page with its `TABS`, the draft card an `agent_propose` result
+  shows); `AgentStore`'s `agent_chats` is the used-in index the chats keep. A chat's owner can share a roster agent
+  there: members see it read-only and saving makes their own copy (`copiedFrom`, off). With `DEV_TOOLS=true`,
+  `POST /api/dev/agents/propose` saves a proposal as the model would.
+  A DO method's return type must not contain `unknown` (the RPC type turns `never`) or recursive JSON types (too deep).
 - Before a page becomes a version it is checked in a headless browser (`BROWSER` binding, `worker/artifacts/check.ts`):
   the agent saves a page with `artifact_write` (then changes it only by edits), and `artifact_check` and `artifact_publish` take it by draft id and report console errors, failed calls, a screenshot and the agent's tests, and
   publish refuses a page with errors, or one no browser checked (except with `AUTH_MODE=demo`); keep it that way. A check
@@ -65,4 +147,5 @@ with `@cloudflare/vite-plugin`, pnpm; configured and deployed with the `cf` CLI 
   raw.githubusercontent.com serves only the LFS pointer.
 - Deploy with `cf deploy` from the repository root (Worker `pi-artifacts` on the custom domain `pi.oxfer.app`, workers.dev
   and Preview URLs off; R2 bucket, Artifacts namespace and AI Gateway all named `pi-artifacts`). The sandbox image build
-  needs Docker.
+  needs Docker. `PI_PREVIEW=<name>` deploys a separate preview Worker with its own resources instead (`deploy/preview.ts`,
+  `docs/preview-deploy.md`); without it the config is production's, held by `test/fixtures/production-config.json`.

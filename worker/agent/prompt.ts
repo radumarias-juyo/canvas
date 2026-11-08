@@ -1,6 +1,7 @@
-import { defineExtension, section, type AgentEvent, type EntryRecord, type Extension } from "@earendil-works/pi-durable";
+import { defineExtension, section, type AgentEvent, type AgentState, type EntryRecord, type Extension } from "@earendil-works/pi-durable";
 import type { Message } from "@earendil-works/pi-ai";
 import { AGENT_NAME, AGENT_TOKEN } from "../../shared/mentions.ts";
+import { OFFER_RULE } from "../../shared/offers.ts";
 import type { ChatPeople } from "../../shared/protocol.ts";
 import RUNTIME_CONTRACT from "../../runtime/runtime.d.ts?raw";
 import { MAX_FAILED_CHECKS } from "./publish.ts";
@@ -8,6 +9,7 @@ import { MAX_FAILED_CHECKS } from "./publish.ts";
 const PREAMBLE = `You are the assistant in pi-artifacts, a chat that builds live, interactive web pages ("artifacts") for the user.
 Prefer an artifact whenever a page would show something better than text: dashboards, charts, comparisons, tools.
 Keep chat replies short; the page is the deliverable. Never paste a page's HTML into the chat.
+${OFFER_RULE}
 Users can attach files to a message; they come before its text, each named by its path in the user's files: an image as an image, a text file or document (PDF, Word, Excel) as its text in an <attachment> tag, cut when long, and any other file by name only. Answer questions about them directly; build a page from them only when asked or when it clearly helps. To read the rest of a long file, or to work with one shown by name only, use your file tools on its path. If an image reaches you as a placeholder, you cannot see images: say so, and suggest a model that can.`;
 
 const DASHBOARDS = `How to build a live dashboard:
@@ -81,47 +83,111 @@ export function userSystemPrompt({ user, chat }: UserPrompts): string {
   return parts.join("\n\n");
 }
 
-/** Who is in the chat, so the model can tell the people apart. */
-export function peopleExtension(people: () => ChatPeople): Extension {
+/** The agents of a chat's roster, as the people section names them to pi and to each other. */
+export interface PromptAgent {
+  name: string;
+  job: string;
+  /** Its pi session (PiSessionId): the conversation the section is rendered for tells which agent reads it. */
+  session: string;
+}
+
+/**
+ * Who is in the chat, so the model can tell the people apart, and which agents it holds. Rendered per conversation:
+ * pi (the root) reads that it may hand work to the agents, and each agent's session reads who it is among them.
+ */
+export function peopleExtension(people: () => ChatPeople, agents: () => readonly PromptAgent[] = () => []): Extension {
   return defineExtension({
     name: "people",
     sections: [
-      section("people", () => {
-        const { owner, members } = people();
-        // The same text whether or not the chat was ever shared: the prefix outlives the members who left.
-        const about = 'In a shared chat, each user message starts with its author\'s name ("name: text"); one without a name is the owner\'s.';
-        if (members.length === 0) return about;
-        return (
-          `${about} ${owner.name} owns this chat; ${members.map((m) => m.name).join(", ")} joined it by invite. ` +
-          `Here your name is ${AGENT_NAME}. The people also talk among themselves: you are called only by a message with ${AGENT_TOKEN} in it, and the others reach you only as context, ` +
-          "possibly while you work. Answer the message that called you, using the talk around it where it helps, and never reply to the talk itself. " +
-          "People tag each other with @ and a name; such a tag is for that person, not a call to you. " +
-          "Everyone sees the same conversation and previews, and answers go to all of them: address someone by name when it helps. " +
-          "Whoever asks, you work with the owner's MCP connections, files and skills, and artifacts you publish belong to the owner."
-        );
+      section("people", ({ conversationId }) => {
+        const roster = agents();
+        const self = roster.find((agent) => agent.session === String(conversationId));
+        return self ? agentPeople(people(), roster, self) : piPeople(people(), roster);
       }),
     ],
   });
 }
 
+/** The people section as pi reads it. */
+function piPeople({ owner, members }: ChatPeople, roster: readonly PromptAgent[]): string {
+  // The same text whether or not the chat was ever shared: the prefix outlives the members who left.
+  const about = "In a shared chat, each user message starts with its author's name (\"name: text\"); one without a name is the owner's.";
+  const others = roster.length
+    ? ` Other agents in this chat: ${roster.map((agent) => `@${agent.name} (${agent.job})`).join(", ")}. Each answers only when a message names it, and its replies reach you as context. ` +
+      "To hand work to one, name it with @ and its name in your reply, only when its help is needed."
+    : "";
+  if (members.length === 0) return `${about}${others}`;
+  return (
+    `${about} ${owner.name} owns this chat; ${members.map((m) => m.name).join(", ")} joined it by invite. ` +
+    `Here your name is ${AGENT_NAME}. The people also talk among themselves: you are called only by a message with ${AGENT_TOKEN} in it, and the others reach you only as context, ` +
+    "possibly while you work. Answer the message that called you, using the talk around it where it helps, and never reply to the talk itself. " +
+    "People tag each other with @ and a name; such a tag is for that person, not a call to you. " +
+    "Everyone sees the same conversation and previews, and answers go to all of them: address someone by name when it helps. " +
+    "Whoever asks, you work with the owner's MCP connections, files and skills, and artifacts you publish belong to the owner. " +
+    "A change to data someone else asks for does not run: it is proposed to the owner as a card they press." +
+    others
+  );
+}
+
+/** The people section as one of the roster's agents reads it. */
+function agentPeople({ owner, members }: ChatPeople, roster: readonly PromptAgent[], self: PromptAgent): string {
+  const agents = [`@${AGENT_NAME} (the chat's main assistant)`, ...roster.filter((agent) => agent !== self).map((agent) => `@${agent.name} (${agent.job})`)];
+  const people = members.length
+    ? `${owner.name} owns this chat, and ${members.map((m) => m.name).join(", ")} joined it.`
+    : `${owner.name} owns this chat and is alone in it.`;
+  return (
+    `${people} The other agents here: ${agents.join(", ")}. ` +
+    "Whoever asks, you work with the owner's MCP connections, files and skills, as far as your turn allows, and artifacts you publish belong to the owner."
+  );
+}
+
 /**
- * An event for a browser: each `pi.system` entry in it keeps its place, but not the prompt's sections and tools. Nobody's
- * app shows them, and they are the owner's (their system prompt, the list of their files, their MCP tools): this keeps
- * them off the browsers of the people they share the chat with. Only hygiene, not a boundary: the agent acts as the
- * owner, and may tell anyone in the chat what it was told. Entries come only in these four events; copies only what changes.
+ * An event for a browser: each `pi.system` entry in it keeps its place, but not the prompt's sections and tools, and the
+ * session's state only its model and effort (never its instructions or tool lists). Nobody's app shows them, and they
+ * are the owner's (their system prompt, the list of their files, their MCP tools): this keeps them off the browsers of
+ * the people they share the chat with. Only hygiene, not a boundary: the agent acts as the owner, and may tell anyone in
+ * the chat what it was told. Every event type is named, so a new one fails the typecheck until it is placed here;
+ * copies only what changes.
  */
 export function withoutSystemPrompt(event: AgentEvent): AgentEvent {
   switch (event.type) {
     case "snapshot":
-      return event.entries.some(isSystem) ? { ...event, entries: event.entries.map(promptless) } : event;
+      return { ...event, agent: shownAgent(event.agent), ...(event.entries.some(isSystem) && { entries: event.entries.map(promptless) }) };
+    case "agent_changed":
+      return { ...event, agent: shownAgent(event.agent) };
     case "message_end":
     case "entry_appended":
       return isSystem(event.entry) ? { ...event, entry: promptless(event.entry) } : event;
     case "tool_execution_end":
       return event.entry && isSystem(event.entry) ? { ...event, entry: promptless(event.entry) } : event;
-    default:
+    // The system message starts as an event of its own before its entry lands, with all of it.
+    case "message_start":
+      return event.message.role === "system" ? { ...event, message: { role: "system", content: "", timestamp: event.message.timestamp } as Message } : event;
+    case "run_start":
+    case "run_end":
+    case "turn_start":
+    case "turn_end":
+    case "message_update":
+    case "tool_execution_start":
+    case "tool_execution_update":
+    case "inbox_update":
+    case "submission":
+    case "auto_retry_start":
+    case "auto_retry_end":
+    case "deferred_poll":
+    case "usage_changed":
+    case "task_failed":
+    case "compaction_start":
+    case "compaction_end":
       return event;
+    default:
+      return event satisfies never;
   }
+}
+
+/** What a browser reads of a session's state: its model and effort. */
+function shownAgent(agent: AgentState): AgentState {
+  return { ...(agent.model && { model: agent.model }), ...(agent.thinkingLevel && { thinkingLevel: agent.thinkingLevel }) };
 }
 
 const isSystem = (entry: EntryRecord) => entry.kind === "pi.system";

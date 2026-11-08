@@ -1,6 +1,11 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode, type RefObject } from "react";
+import { assistantOffer, offerOwner } from "../../shared/offers.ts";
+import { CHAT_AGENT_KIND, CHAT_TURN_KIND, proposedBy, type ChatAgentReplyData, type ChatAgentView } from "../../shared/agents.ts";
+import { AgentWindow } from "./AgentWindow.tsx";
+import { DraftCard } from "../agents/DraftCard.tsx";
+import type { ItemRef } from "../../shared/items.ts";
 import { baseName, imageBudget, MAX_ATTACHMENTS, type Attachment } from "../../shared/attachments.ts";
 import { MAX_FILE_BYTES } from "../../shared/uploads.ts";
 import { errorMessage, formatBytes } from "../../shared/util.ts";
@@ -9,6 +14,7 @@ import { Icon } from "../Icon.tsx";
 import { carriesFiles } from "../files/pick.ts";
 import { attachmentInput, pastedName, type Pending } from "./attach.ts";
 import {
+  CHAT_ASIDE_KIND,
   CHAT_MESSAGE_KIND,
   CHAT_PEOPLE_KIND,
   everyone,
@@ -21,40 +27,84 @@ import {
   type IncomingAttachment,
   type IncomingMessage,
   type Person,
+  type PiHeld,
   type Presence,
   type PublishedDetails,
   type QueuedMessage,
   type ReplyQuote,
 } from "../../shared/protocol.ts";
 import { textOf } from "../../shared/canonical.ts";
-import { AGENT_NAME, AGENT_TOKEN, type Mention } from "../../shared/mentions.ts";
+import type { MakeKind } from "../../shared/make.ts";
+import { AGENT_NAME, AGENT_TOKEN, summonsAgent, type Mention } from "../../shared/mentions.ts";
 import { replyQuote } from "../../shared/replies.ts";
 import { MessageActions } from "./MessageActions.tsx";
 import { Compact, useCompact, useSwipeReveal } from "./gestures.ts";
 import { calendarDay, DaySeparator, SentTime } from "./SentTime.tsx";
 import { ReactionChips, ReactionsContext, useMessageReactions, type MessageReactions } from "./Reactions.tsx";
 import { isReactable, type EntryReactions } from "../../shared/reactions.ts";
-import { AgentAvatar, AgentByline, Avatar, SharedChat, tintOf, tintStyle, useSharedChat } from "./people.tsx";
+import { AgentAvatar, AgentByline, Avatar, ChatAgents, SharedChat, tintOf, tintStyle, toneStyle, useChatAgents, useSharedChat } from "./people.tsx";
 import { MenuButton } from "../layout.tsx";
 import { AutoPicked, ToolsPicked } from "./AutoPick.tsx";
 import { ChatCost, PromptCost } from "./Cost.tsx";
 import { ContextMeter } from "./Context.tsx";
+import { AllowanceRing } from "./Allowance.tsx";
 import { ChatPromptButton } from "../SystemPrompt.tsx";
 import { SharePanel } from "./SharePanel.tsx";
 import { promptSpend, totalTime } from "./spend.ts";
-import { useChat, waitingOnModel } from "./useChat.ts";
+import { shownLive, useChat, waitingOnModel, type AgentLive, type ChatState } from "./useChat.ts";
+import { PeopleBar, Since } from "./AgentsBar.tsx";
+import { queueLines } from "./agentLines.ts";
+import { Fold, FoldScope, ItemChips } from "./Fold.tsx";
+import { workingPhrase } from "./phrase.ts";
 import { ComposerMore } from "./ComposerMore.tsx";
+import { MakePicker } from "./MakePicker.tsx";
 import { Dictation } from "./Dictation.tsx";
 import { ownMessages, useHistory } from "./history.ts";
+import { AgentDraft } from "./AgentDraft.tsx";
+import { AgentReply, sourceLine } from "./AgentReply.tsx";
+import { ActionCard, ActionOutcome, ChatActions } from "./ActionCard.tsx";
+import { CHAT_ACTION_KIND, type ChatActionData } from "../../shared/limits.ts";
+import { ChecklistCard } from "./ChecklistCard.tsx";
+import { CHAT_CHECKLIST_KIND, checklistAt, foldChecklists, type ChatChecklistData } from "../../shared/checklist.ts";
+import { ArtifactCard } from "./ArtifactCard.tsx";
 import { Markdown } from "./Markdown.tsx";
 import { MentionList, MentionText, useMentions } from "./Mentions.tsx";
 import { NotifyButton } from "./notify.tsx";
 import { ModelPicker } from "./ModelPicker.tsx";
-import { OrphanResult, StepRun, StepsProvider } from "./Steps.tsx";
+import { OrphanResult, StepRun, StepsProvider, stepLabel } from "./Steps.tsx";
 import { endedEarly, stepRuns, streamingSteps, type MessageSteps, type StepRuns, type StreamingSteps } from "./stepRuns.ts";
 import { Thinking } from "./Thinking.tsx";
 import { useRevealedText } from "./reveal.ts";
-import { blocks, firstNew, isAgent, openHints, published, sentAt, shown, userText } from "./entries.ts";
+import {
+  blocks,
+  endedSeat,
+  firstNew,
+  heldReplies,
+  inReply,
+  isAgent,
+  liveOffer,
+  openHints,
+  outcomesAfter,
+  published,
+  replyItems,
+  replySources,
+  sentAt,
+  shown,
+  showsAsCard,
+  userText,
+} from "./entries.ts";
+import { OfferRow } from "./Offer.tsx";
+import {
+  answersEveryMessage,
+  CHAT_BUDGET_KIND,
+  CHAT_COPY_KIND,
+  CHAT_EVENT_KIND,
+  legacyKind,
+  type ChatBudgetData,
+  type ChatCopyData,
+  type ChatEventData,
+} from "../../shared/chat-kinds.ts";
+import { BranchOff, ChatEventNotice, EntryOf, KindChip, TagCard } from "./ChatKinds.tsx";
 
 interface Props {
   chatId: string;
@@ -71,6 +121,8 @@ interface Props {
   onLeft: () => void;
   /** Opens the app's menu (the sidebar), on a phone or a narrow window, where the header has a button for it. */
   onMenu?: () => void;
+  /** Go to another chat: a branch, or the chat a branch came from. */
+  onOpenChat?: (chatId: string) => void;
 }
 
 const GROWS_ITSELF = CSS.supports("field-sizing", "content");
@@ -78,11 +130,18 @@ const GROWS_ITSELF = CSS.supports("field-sizing", "content");
 /** Whether the conversation is scrolled to (near) its end, where new output is followed. */
 const atBottom = (el: HTMLElement) => el.scrollHeight - el.scrollTop - el.clientHeight < 80;
 
-export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity, onLeft, onMenu }: Props) {
-  const { state, connected, people, online, prompt, abort, setModel, auto, reactions, react, hints, dropHint } = useChat(chatId);
+export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity, onLeft, onMenu, onOpenChat }: Props) {
+  const { state, connected, people, online, prompt, takeOffer: sendYes, abort, setModel, auto, reactions, react, hints, dropHint, agents, agentSettings, live, drafts, setDrafts, actions, piHeld, showPiHeld } =
+    useChat(chatId);
+  // pi, or an agent of the chat, is working or has turns waiting: Stop stops them all.
+  const working = state.busy || agents.some((agent) => agent.busy || agent.queued);
   const chatReactions = useMemo(() => ({ uid, react }), [uid, react]);
   const [draft, setDraft] = useState("");
+  // What the next message should come to (MakePicker): Auto until the viewer picks, and again once it is sent.
+  const [make, setMake] = useState<MakeKind>("auto");
   const [sharing, setSharing] = useState(false);
+  // The agent whose window its owner has open (AgentWindow), by id.
+  const [windowOf, setWindowOf] = useState<string | null>(null);
   const shareButton = useRef<HTMLButtonElement>(null);
   // Closed from inside the panel: back to the button that opens it, so the keyboard does not lose its place.
   const closeSharing = () => {
@@ -93,10 +152,18 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
   const list = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const shared = people && people.members.length > 0 ? people : null;
-  const mentions = useMentions(chatId, draft, setDraft, input, shared, uid);
+  // A chat with other people or other agents: every message shows its author's badge, and the people bar lists them.
+  const group = shared ?? (people && agents.length > 0 ? people : null);
+  const isOwner = people?.owner.uid === uid;
+  // The people the viewer shares other chats with, whom "@" offers to add (TagCard).
+  const [known, setKnown] = useState<Person[]>([]);
+  useEffect(() => void api.people().then(setKnown, () => {}), []);
+  // Agents answer only messages that call them, unless the chat is private.
+  const callsOnly = !answersEveryMessage(people?.kind ?? legacyKind(shared !== null));
+  const around = useMemo(() => ({ known, canInvite: isOwner, inChat: people ? everyone(people) : [], callsOnly }), [known, isOwner, people, callsOnly]);
+  const mentions = useMentions(chatId, draft, setDraft, input, shared, uid, agents, around);
   // The viewer's own earlier messages, to bring back into the composer (Up, or the "more" menu). Who owns the chat must be
   // known first: a plain `pi.user` entry is the owner's.
-  const isOwner = people?.owner.uid === uid;
   const history = useMemo(() => (people ? ownMessages(state.entries, uid, isOwner) : []), [people, state.entries, uid, isOwner]);
   const recalling = useHistory(history, draft, setDraft, input, (message) => mentions.restore(message.text, message.mentions));
   // The message the next one answers, quoted above the composer until it is sent or let go.
@@ -114,6 +181,39 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
     },
     [prompt, dropHint],
   );
+  // The latest next step a reply offered (shared/offers.ts), which only the owner of the agent that offered it answers
+  // (offerOwner: the chat's owner for pi's and their agents'): Yes replies to that message, which calls the agent that
+  // wrote it, asking it to set the step up.
+  const offered = useMemo(() => {
+    const live = people ? liveOffer(state.entries) : undefined;
+    const entry = live === undefined ? undefined : state.entries.find((one) => one.id === live);
+    return entry && offerOwner(entry, people!.owner.uid) === uid ? live : undefined;
+  }, [people, state.entries, uid]);
+  const takeOffer = useCallback(
+    (entry: number) => {
+      if (!sendYes(entry)) return false;
+      following.current = true;
+      return true;
+    },
+    [sendYes],
+  );
+  // Branch off a new chat from a message, and go to it.
+  // One branch at a time: a second click while one is made does nothing.
+  const branching = useRef(false);
+  const branchOff = useCallback(
+    (entry: number) => {
+      if (branching.current) return;
+      branching.current = true;
+      api
+        .branch(chatId, entry)
+        .then(
+          (made) => onOpenChat?.(made.chatId),
+          (error) => alert(`Could not branch off: ${errorMessage(error)}`),
+        )
+        .finally(() => (branching.current = false));
+    },
+    [chatId, onOpenChat],
+  );
   const picker = useRef<HTMLInputElement>(null);
   const lastArtifact = useRef<string>("");
   // Whether the conversation so far has arrived: publishes in it are not new.
@@ -130,7 +230,7 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
     const el = list.current;
     if (el && following.current) el.scrollTop = el.scrollHeight;
   }, []);
-  useEffect(follow, [follow, state.entries.length, state.partial, state.tools, state.queued.length, state.incoming.length]);
+  useEffect(follow, [follow, state.entries.length, state.partial, state.tools, state.queued.length, state.incoming.length, live]);
   // On a phone, dragging the conversation left shows when each message was sent.
   const compact = useCompact();
   const track = useRef<HTMLDivElement>(null);
@@ -165,10 +265,12 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
     const named = mentions.take(text);
     const replyTo = replying?.id;
     if (attachments.pending.length === 0) {
-      if (!prompt(text, undefined, named, replyTo)) return;
-    } else if (!(await attachments.send((inputs) => prompt(text, inputs, named, replyTo)))) return;
+      if (!prompt(text, undefined, named, replyTo, make)) return;
+    } else if (!(await attachments.send((inputs) => prompt(text, inputs, named, replyTo, make)))) return;
     following.current = true;
     setDraft("");
+    // A choice is for one message: the next goes back to Auto.
+    setMake("auto");
     setReplying(null);
     mentions.clear();
     recalling.reset();
@@ -208,6 +310,22 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
     event.preventDefault();
     void submit();
   };
+
+  // What the next message should come to (shared/make.ts): Auto, or an answer, a page, an agent (pi drafts it with
+  // agent_propose, and its card shows here) or a tool. In a shared chat a choice other than Auto calls pi, which only
+  // answers a message that calls it: the message starts with "@pi". Then the viewer says what they want.
+  const pickMake = useCallback(
+    (kind: MakeKind) => {
+      setMake(kind);
+      if (kind !== "auto" && shared) setDraft((current) => (summonsAgent(current) ? current : `${AGENT_TOKEN} ${current.trimStart()}`));
+      requestAnimationFrame(() => {
+        const el = input.current;
+        el?.focus();
+        el?.setSelectionRange(el.value.length, el.value.length);
+      });
+    },
+    [shared],
+  );
 
   // Dictated words join the draft with a space between them.
   // Stable, so the memoized Dictation skips the re-render on every streamed token.
@@ -256,209 +374,317 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
   // A hint comes in after its message: keep it in view for a reader at the bottom.
   useEffect(follow, [follow, hinted]);
   const thinking = state.runStartedAt !== undefined && waitingOnModel(state);
+  const phrase = useMemo(() => (thinking ? workingPhrase(state.entries, state.partial, stepLabel) : undefined), [thinking, state.entries, state.partial]);
+  // pi's replies' item chips: the records its tool results held, under the reply built on them.
+  const itemsBefore = useRef<ReadonlyMap<number, ItemRef[]>>(undefined);
+  const items = useMemo(() => (itemsBefore.current = replyItems(state.entries, itemsBefore.current)), [state.entries]);
+  // What only the owner sees that each of pi's replies is built on, as the chat marked its results: its source chip.
+  const sourcesBefore = useRef<ReadonlyMap<number, string[]>>(undefined);
+  const sources = useMemo(() => (sourcesBefore.current = replySources(state.entries, sourcesBefore.current)), [state.entries]);
+  // pi's replies held for the owner: under each, the owner shows it to the chat.
+  const held = useMemo(() => heldReplies(state.entries, piHeld), [state.entries, piHeld]);
+  // Each plan an agent posted, as its latest entry says, drawn where it was first posted: only that entry draws again.
+  const checklists = useMemo(() => foldChecklists(state.entries), [state.entries]);
+  // The agents working now, each with its live steps, its time and its own Stop; then who waits for a turn.
+  const liveTurns = useMemo(() => shownLive(live, agents, state.entries), [live, agents, state.entries]);
+  const waiting = useMemo(() => queueLines(agents), [agents]);
+  // The held calls' cards: their live state, and whether the viewer decides them.
+  const chatActions = useMemo(() => ({ actions, isOwner, ownerName: people?.owner.name }), [actions, isOwner, people]);
+  // Only an agent of the viewer's own has a window for them (the server checks too).
+  const windowAgent = windowOf === null ? undefined : agents.find((agent) => agent.id === windowOf && agent.ownerUid === uid);
+  // What the viewer's own agents held in their seats here, which no one else gets: the cards that wait, under the
+  // transcript; those that ended, as a line after the entry they were decided after.
+  const seatActions = useMemo(() => [...actions.values()].filter((action) => action.seat).sort((a, b) => a.createdAt - b.createdAt), [actions]);
+  const seatOpen = useMemo(() => seatActions.filter((action) => !endedSeat(action)), [seatActions]);
+  const seatOutcomes = useMemo(() => outcomesAfter(state.entries, seatActions.filter(endedSeat)), [state.entries, seatActions]);
   return (
-    <SharedChat.Provider value={shared}>
-      <ReactionsContext.Provider value={chatReactions}>
-        <section className="chat">
-          <header className="chat-header">
-            {onMenu && <MenuButton onClick={onMenu} />}
-            <h1 className="chat-title" title={title}>
-              {title}
-            </h1>
-            {shared ? (
-              <PeopleBar people={shared} online={online} uid={uid} working={state.busy} />
-            ) : (
-              <span className="chat-people">{mine > 1 && `Open in ${mine} of your windows`}</span>
-            )}
-            <ChatCost usage={state.usage} entries={state.entries} time={time} />
-            {shared && <NotifyButton />}
-            {people && <ChatPromptButton chatId={chatId} />}
-            {people && (
-              <button type="button" ref={shareButton} className="share-button" onClick={() => setSharing(!sharing)} aria-expanded={sharing}>
-                {/* The owner shares from here also once people have joined; the people bar beside it shows who is in. */}
-                {isOwner ? "Share" : "People"}
-              </button>
-            )}
-          </header>
-          {sharing && people && <SharePanel chatId={chatId} uid={uid} isOwner={isOwner} people={people} onLeft={onLeft} onClose={closeSharing} />}
-          <StepsProvider entries={state.entries} tools={state.tools} busy={state.busy}>
-            <Compact.Provider value={compact}>
-              <div className="messages" ref={list} onScroll={onScroll} data-compact={compact || undefined}>
-                <div className="transcript" ref={track}>
-                  {state.entries.length === 0 && !state.busy && !state.incoming.length && (
-                    <div className="empty-chat">
-                      <h2>What should we build?</h2>
-                      <p>Try: “A live crypto dashboard for BTC, ETH and SOL with 24 h change and a 7-day price chart, refreshing every 30 seconds.”</p>
-                    </div>
-                  )}
-                  {state.entries.map((entry) => {
-                    const spend = prompts.get(entry.id);
-                    const dayStart = dayStarts.get(entry.id);
-                    return (
-                      <Fragment key={entry.id}>
-                        {dayStart !== undefined && <DaySeparator at={dayStart} />}
-                        {entry.id === newAt && <NewDivider />}
-                        {bylines.has(entry.id) && <AgentByline />}
-                        <Entry
-                          entry={entry}
-                          steps={streamed?.grown?.entry === entry.id ? streamed.grown.steps : runs.byEntry.get(entry.id as number)}
-                          reactions={reactions[entry.id]}
-                          uid={uid}
-                          ownerName={ownerName}
-                          onOpen={onArtifact}
-                          onReply={reply}
-                          hinted={hinted.has(entry.id as number)}
-                          onAskAgent={askAgent}
-                          onNoHint={dropHint}
-                        />
-                        {spend && <PromptCost spend={spend} />}
-                      </Fragment>
-                    );
-                  })}
-                  {!agentLast && (state.partial || thinking) && <AgentByline />}
-                  {state.partial && <Assistant message={state.partial} steps={streamed?.steps} streaming onGrow={follow} />}
-                  {thinking && <Thinking since={state.runStartedAt!} />}
-                  {state.error && <div className="chat-error">{state.error}</div>}
-                  <Queue queued={state.queued} incoming={state.incoming} uid={uid} />
-                </div>
-              </div>
-            </Compact.Provider>
-          </StepsProvider>
-          <form className="composer" onSubmit={submit} onDragOver={onDragOver} onDrop={onDrop}>
-            {attachments.error && <div className="chat-error">{attachments.error}</div>}
-            <MentionList mentions={mentions} />
-            {replying && (
-              <div className="replying">
-                <ReplyQuoteView quote={replying} />
-                <button type="button" className="icon-button" onClick={() => setReplying(null)} title="Do not reply to it" aria-label="Do not reply to it">
-                  ×
+    <ChatActions.Provider value={chatActions}>
+    <SharedChat.Provider value={group}>
+      <ChatAgents.Provider value={agents}>
+        <FoldScope.Provider value={chatId}>
+        <BranchOff.Provider value={onOpenChat ? branchOff : null}>
+        <ReactionsContext.Provider value={chatReactions}>
+          <section className="chat">
+            <header className="chat-header">
+              {onMenu && <MenuButton onClick={onMenu} />}
+              <h1 className="chat-title" title={title}>
+                {title}
+              </h1>
+              {people?.kind && <KindChip chatId={chatId} kind={people.kind} page={people.page} isOwner={isOwner} />}
+              {!group && <span className="chat-people">{mine > 1 && `Open in ${mine} of your windows`}</span>}
+              {people && (group || isOwner) && (
+                <PeopleBar
+                  chatId={chatId}
+                  people={people}
+                  online={online}
+                  uid={uid}
+                  piWorking={state.busy}
+                  agents={agents}
+                  live={live}
+                  settings={agentSettings}
+                  bar={group !== null}
+                  onWindow={setWindowOf}
+                />
+              )}
+              <ChatCost usage={state.usage} entries={state.entries} time={time} />
+              {shared && <NotifyButton />}
+              {people && <ChatPromptButton chatId={chatId} />}
+              {people && (
+                <button type="button" ref={shareButton} className="share-button" onClick={() => setSharing(!sharing)} aria-expanded={sharing}>
+                  {/* The owner shares from here also once people have joined; the people bar beside it shows who is in. */}
+                  {isOwner ? "Share" : "People"}
                 </button>
-              </div>
+              )}
+            </header>
+            {sharing && people && <SharePanel chatId={chatId} uid={uid} isOwner={isOwner} people={people} onLeft={onLeft} onClose={closeSharing} />}
+            {windowAgent && (
+              <AgentWindow
+                key={windowAgent.id}
+                chatId={chatId}
+                agent={windowAgent}
+                onClose={() => setWindowOf(null)}
+                onStop={connected ? () => abort(windowAgent.id) : undefined}
+                transcript={windowTranscript}
+              />
             )}
-            {/* A click anywhere in the box but a button puts the cursor in the input. */}
-            <div className="composer-box" onClick={(e) => (e.target as Element).closest("button") || input.current?.focus()}>
-              {attachments.pending.length > 0 && (
-                <div className="pending-attachments">
-                  {attachments.pending.map((item) => (
-                    <span key={item.id} className="pending-attachment" title={`${item.file.name} · ${formatBytes(item.file.size)}`}>
-                      {item.preview ? <img src={item.preview} alt="" /> : <span className="file-icon">▤</span>}
-                      <span className="pending-name">{item.file.name}</span>
-                      <button type="button" onClick={() => attachments.remove(item.id)} disabled={attachments.sending} aria-label={`Remove ${item.file.name}`}>
-                        ×
-                      </button>
-                    </span>
-                  ))}
+            <StepsProvider entries={state.entries} tools={state.tools} busy={state.busy}>
+              <Compact.Provider value={compact}>
+                <div className="messages" ref={list} onScroll={onScroll} data-compact={compact || undefined}>
+                  <div className="transcript" ref={track}>
+                    {state.entries.length === 0 && !state.busy && !state.incoming.length && (
+                      <div className="empty-chat">
+                        <h2>What should we build?</h2>
+                        <p>Try: “A live crypto dashboard for BTC, ETH and SOL with 24 h change and a 7-day price chart, refreshing every 30 seconds.”</p>
+                      </div>
+                    )}
+                    {state.entries.map((entry) => {
+                      const spend = prompts.get(entry.id);
+                      const dayStart = dayStarts.get(entry.id);
+                      return (
+                        <Fragment key={entry.id}>
+                          {dayStart !== undefined && <DaySeparator at={dayStart} />}
+                          {entry.id === newAt && <NewDivider />}
+                          {bylines.has(entry.id) && <AgentByline />}
+                          {/* A message's actions branch off from it (BranchOff). */}
+                          <EntryOf.Provider value={entry.id as number}>
+                            <Entry
+                              entry={entry}
+                              steps={streamed?.grown?.entry === entry.id ? streamed.grown.steps : runs.byEntry.get(entry.id as number)}
+                              reactions={reactions[entry.id]}
+                              uid={uid}
+                              ownerName={ownerName}
+                              onOpen={onArtifact}
+                              onReply={reply}
+                              hinted={hinted.has(entry.id as number)}
+                              onAskAgent={askAgent}
+                              onOffer={entry.id === offered ? takeOffer : undefined}
+                              onNoHint={dropHint}
+                              onOpenChat={onOpenChat}
+                              chatId={chatId}
+                              items={items.get(entry.id as number)}
+                              sources={sources.get(entry.id as number)}
+                              held={held.get(entry.id as number)}
+                              onShowHeld={showPiHeld}
+                              checklist={checklistAt(checklists, entry)}
+                            />
+                          </EntryOf.Provider>
+                          {spend && <PromptCost spend={spend} />}
+                          {seatOutcomes.get(entry.id as number)?.map((action) => <ActionOutcome key={action.id} action={action} />)}
+                        </Fragment>
+                      );
+                    })}
+                    {!agentLast && (state.partial || thinking) && <AgentByline />}
+                    {state.partial && <Assistant message={state.partial} steps={streamed?.steps} streaming onGrow={follow} />}
+                    {thinking && <Thinking since={state.runStartedAt!} phrase={phrase} />}
+                    {state.error && <div className="chat-error">{state.error}</div>}
+                    {liveTurns.map((turn) => (
+                      <AgentTurnLive
+                        key={`${turn.agent.id}:${turn.turn}`}
+                        live={turn}
+                        onStop={connected ? () => abort(turn.agent.id) : undefined}
+                        onGrow={follow}
+                        onWindow={turn.agent.ownerUid === uid ? () => setWindowOf(turn.agent.id) : undefined}
+                      />
+                    ))}
+                    {waiting.map((line) => (
+                      <div key={line.agentId} className="agent-queue-line">
+                        {line.text}
+                      </div>
+                    ))}
+                    {drafts.map((draft) => (
+                      <AgentDraft key={draft.turn} chatId={chatId} draft={draft} onDone={setDrafts} />
+                    ))}
+                    {seatOpen.map((action) => (
+                      <ActionCard key={action.id} action={action} />
+                    ))}
+                    <Queue queued={state.queued} incoming={state.incoming} uid={uid} />
+                  </div>
+                </div>
+              </Compact.Provider>
+            </StepsProvider>
+            <form className="composer" onSubmit={submit} onDragOver={onDragOver} onDrop={onDrop}>
+              {attachments.error && <div className="chat-error">{attachments.error}</div>}
+              <MentionList mentions={mentions} uid={uid} />
+              {mentions.outsider && (
+                <TagCard
+                  key={mentions.outsider.name}
+                  person={mentions.outsider}
+                  isOwner={isOwner}
+                  onNotNow={mentions.dismissOutsider}
+                  onAdd={async () => {
+                    const outsider = mentions.outsider;
+                    if (outsider && "uid" in outsider) await api.addMember(chatId, outsider.uid);
+                    mentions.dismissOutsider();
+                  }}
+                  onNewChat={async () => {
+                    const outsider = mentions.outsider;
+                    if (!outsider || !("uid" in outsider)) return;
+                    const made = await api.createChat();
+                    await api.addMember(made.id, outsider.uid);
+                    mentions.dismissOutsider();
+                    onOpenChat?.(made.id);
+                  }}
+                  onInvite={async () => (await api.createInvite(chatId)).url}
+                />
+              )}
+              {replying && (
+                <div className="replying">
+                  <ReplyQuoteView quote={replying} />
+                  <button type="button" className="icon-button" onClick={() => setReplying(null)} title="Do not reply to it" aria-label="Do not reply to it">
+                    ×
+                  </button>
                 </div>
               )}
-              <div className="composer-row">
-                <textarea
-                  ref={input}
-                  // Each chat mounts its own view, so a new or opened chat starts with the cursor here.
-                  autoFocus
-                  value={draft}
-                  onChange={(e) => {
-                    setDraft(e.target.value);
-                    mentions.track();
-                  }}
-                  onSelect={mentions.track}
-                  onKeyDown={onKey}
-                  onPaste={onPaste}
-                  placeholder={
-                    !connected
-                      ? "Connecting…"
-                      : shared
-                        ? `Message everyone; ${AGENT_TOKEN} asks ${AGENT_NAME}, and @ names someone, a file or an artifact…`
-                        : "Describe a dashboard, or type @ to name a file or artifact…"
-                  }
-                  rows={1}
-                />
-                {/* While the agent works Stop is here. Once something is typed or attached, Send joins it: a message for the
-                    agent waits its turn in the queue, and stopping needs no clearing of the box. */}
-                {state.busy && (
-                  // Stop lands where Send was when a run starts, or when sending empties the box and takes Send away:
-                  // a double click's second click (detail 2) is not a Stop. It goes once the run ends, so the cursor goes
-                  // back to the input, as after Send, rather than to nowhere.
-                  <button
-                    type="button"
-                    className="icon-button composer-stop"
-                    disabled={!connected}
-                    onClick={(e) => {
-                      if (e.detail > 1) return;
-                      abort();
-                      input.current?.focus();
+              {/* A click anywhere in the box but a button puts the cursor in the input. */}
+              <div className="composer-box" onClick={(e) => (e.target as Element).closest("button") || input.current?.focus()}>
+                {attachments.pending.length > 0 && (
+                  <div className="pending-attachments">
+                    {attachments.pending.map((item) => (
+                      <span key={item.id} className="pending-attachment" title={`${item.file.name} · ${formatBytes(item.file.size)}`}>
+                        {item.preview ? <img src={item.preview} alt="" /> : <span className="file-icon">▤</span>}
+                        <span className="pending-name">{item.file.name}</span>
+                        <button type="button" onClick={() => attachments.remove(item.id)} disabled={attachments.sending} aria-label={`Remove ${item.file.name}`}>
+                          ×
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+                <div className="composer-row">
+                  <textarea
+                    ref={input}
+                    // Each chat mounts its own view, so a new or opened chat starts with the cursor here.
+                    autoFocus
+                    value={draft}
+                    onChange={(e) => {
+                      setDraft(e.target.value);
+                      mentions.track();
                     }}
-                    title="Stop"
-                    aria-label="Stop"
-                  >
-                    <Icon>
-                      <rect x="6.5" y="6.5" width="11" height="11" rx="2" fill="currentColor" stroke="none" />
-                    </Icon>
-                  </button>
-                )}
-                {(!state.busy || hasMessage) && (
-                  <button
-                    type="submit"
-                    className="icon-button primary"
-                    disabled={!connected || attachments.sending || !hasMessage}
-                    title={sendLabel}
-                    aria-label={sendLabel}
-                  >
-                    <Icon stroke={2.2}>
-                      <path d="M12 19V5M6 11l6-6 6 6" />
-                    </Icon>
-                  </button>
-                )}
+                    onSelect={mentions.track}
+                    onKeyDown={onKey}
+                    onPaste={onPaste}
+                    placeholder={
+                      !connected
+                        ? "Connecting…"
+                        : callsOnly
+                          ? `Message everyone; ${AGENT_TOKEN} asks ${AGENT_NAME}, and @ names someone, a file or an artifact…`
+                          : "Describe a dashboard, or type @ to name a file or artifact…"
+                    }
+                    rows={1}
+                  />
+                  {/* While the agent works Stop is here. Once something is typed or attached, Send joins it: a message for the
+                      agent waits its turn in the queue, and stopping needs no clearing of the box. */}
+                  {working && (
+                    // Stop lands where Send was when a run starts, or when sending empties the box and takes Send away:
+                    // a double click's second click (detail 2) is not a Stop. It goes once the run ends, so the cursor goes
+                    // back to the input, as after Send, rather than to nowhere.
+                    <button
+                      type="button"
+                      className="icon-button composer-stop"
+                      disabled={!connected}
+                      onClick={(e) => {
+                        if (e.detail > 1) return;
+                        abort();
+                        input.current?.focus();
+                      }}
+                      title="Stop"
+                      aria-label="Stop"
+                    >
+                      <Icon>
+                        <rect x="6.5" y="6.5" width="11" height="11" rx="2" fill="currentColor" stroke="none" />
+                      </Icon>
+                    </button>
+                  )}
+                  {(!working || hasMessage) && (
+                    <button
+                      type="submit"
+                      className="icon-button primary"
+                      disabled={!connected || attachments.sending || !hasMessage}
+                      title={sendLabel}
+                      aria-label={sendLabel}
+                    >
+                      <Icon stroke={2.2}>
+                        <path d="M12 19V5M6 11l6-6 6 6" />
+                      </Icon>
+                    </button>
+                  )}
+                </div>
               </div>
-            </div>
-            <div className="composer-tools">
-              <button
-                type="button"
-                className="icon-button"
-                onClick={() => picker.current?.click()}
-                disabled={attachments.sending || attachments.pending.length >= MAX_ATTACHMENTS}
-                title="Attach images or files"
-                aria-label="Attach images or files"
-              >
-                <Icon>
-                  <path d="M12 4v16M4 12h16" />
-                </Icon>
-              </button>
-              <input
-                ref={picker}
-                type="file"
-                multiple
-                hidden
-                onChange={(e) => {
-                  attachments.add([...(e.target.files ?? [])]);
-                  e.target.value = "";
-                }}
-              />
-              <Dictation disabled={!connected} onText={dictated} />
-              <ComposerMore
-                mentionLabel={shared ? `Ask ${AGENT_NAME}, or name someone, a file or an artifact` : "Name a file or artifact"}
-                onMention={mentions.insertAt}
-                history={history}
-                onRecall={recalling.recall}
-                compact={compact}
-              />
-              {/* The model and the context ring at the right. Stop and the transcript show a run; only an upload needs the spinner. */}
-              <div className="composer-model">
-                {attachments.sending && <span className="spinner" aria-hidden="true" />}
-                <ModelPicker
-                  model={state.model}
-                  thinkingLevel={state.thinkingLevel}
-                  auto={auto}
-                  disabled={!connected}
-                  attachingImages={attachments.pending.some((item) => item.preview)}
-                  onChange={setModel}
+              <div className="composer-tools">
+                <button
+                  type="button"
+                  className="icon-button"
+                  onClick={() => picker.current?.click()}
+                  disabled={attachments.sending || attachments.pending.length >= MAX_ATTACHMENTS}
+                  title="Attach images or files"
+                  aria-label="Attach images or files"
+                >
+                  <Icon>
+                    <path d="M12 4v16M4 12h16" />
+                  </Icon>
+                </button>
+                <input
+                  ref={picker}
+                  type="file"
+                  multiple
+                  hidden
+                  onChange={(e) => {
+                    attachments.add([...(e.target.files ?? [])]);
+                    e.target.value = "";
+                  }}
                 />
-                <ContextMeter entries={state.entries} model={state.model} />
+                <Dictation disabled={!connected} onText={dictated} />
+                <ComposerMore
+                  mentionLabel={shared ? `Ask ${AGENT_NAME}, or name someone, a file or an artifact` : "Name a file or artifact"}
+                  onMention={mentions.insertAt}
+                  history={history}
+                  onRecall={recalling.recall}
+                  compact={compact}
+                />
+                <MakePicker value={make} onChange={pickMake} compact={compact} />
+                {/* The model and the context ring at the right. Stop and the transcript show a run; only an upload needs the spinner. */}
+                <div className="composer-model">
+                  {attachments.sending && <span className="spinner" aria-hidden="true" />}
+                  <ModelPicker
+                    model={state.model}
+                    thinkingLevel={state.thinkingLevel}
+                    auto={auto}
+                    disabled={!connected}
+                    attachingImages={attachments.pending.some((item) => item.preview)}
+                    onChange={setModel}
+                  />
+                  <ContextMeter entries={state.entries} model={state.model} />
+                  <AllowanceRing working={working} />
+                </div>
               </div>
-            </div>
-          </form>
-        </section>
-      </ReactionsContext.Provider>
+            </form>
+          </section>
+        </ReactionsContext.Provider>
+        </BranchOff.Provider>
+        </FoldScope.Provider>
+      </ChatAgents.Provider>
     </SharedChat.Provider>
+    </ChatActions.Provider>
   );
 }
 
@@ -474,6 +700,14 @@ const Entry = memo(function Entry({
   hinted,
   onAskAgent,
   onNoHint,
+  onOpenChat,
+  chatId,
+  items,
+  checklist,
+  onOffer,
+  sources,
+  held,
+  onShowHeld,
 }: {
   entry: EntryRecord;
   /** Where an agent message's steps show (stepRuns.ts). */
@@ -489,8 +723,23 @@ const Entry = memo(function Entry({
   hinted: boolean;
   onAskAgent: (entry: number) => void;
   onNoHint: (entry: number) => void;
+  onOpenChat?: (chatId: string) => void;
+  /** The chat it is in: where an agent pi drafted is brought when its owner turns it on from its card. */
+  chatId: string;
+  /** For one of pi's replies: the records its tool results held, as chips under it. */
+  items?: ItemRef[];
+  /** For the entry a checklist was first posted at: its latest state (the same object until it changes). */
+  checklist?: ChatChecklistData;
+  /** Set on the reply with the chat's latest offer, for its owner: Yes under it replies to it (false when not sent). */
+  onOffer?: (entry: number) => boolean;
+  /** For one of pi's replies in a chat others are in: what only the owner sees it is built on (replySources). */
+  sources?: string[];
+  /** For one of pi's replies held for the owner (heldReplies): its hold, which onShowHeld shows to the chat by when it started. */
+  held?: PiHeld;
+  onShowHeld?: (from: number) => boolean;
 }) {
   const people = useSharedChat();
+  const offerYes = onOffer && (() => onOffer(entry.id as number));
   const reactions = useMessageReactions(isReactable(entry) ? entry.id : undefined, byEmoji);
   const message = entry.model?.[0];
   // What a reply to it quotes: none for a message from before replies (pi.user).
@@ -523,29 +772,113 @@ const Entry = memo(function Entry({
   }
   if (entry.kind === CHAT_PEOPLE_KIND) {
     const data = entry.data as unknown as ChatPeopleData;
-    const [them, you] = PEOPLE_EVENTS[data.event];
+    // A Stop of one agent names it; one of everything names pi, whose run it stopped with the agents' turns.
+    const agent = data.agent ? `@${data.agent}` : data.event === "stopped" ? AGENT_NAME : "an agent";
+    const [them, you] = PEOPLE_EVENTS[data.event].map((said) => said.replace("{agent}", agent).replace("{by}", data.by ?? "the owner"));
     return <div className="chat-notice">{data.uid === uid ? `You ${you}` : `${data.name} ${them}`}</div>;
   }
+  if (entry.kind === CHAT_BUDGET_KIND) return <div className="chat-notice budget-notice">{(entry.data as unknown as ChatBudgetData).text}</div>;
+  if (entry.kind === CHAT_EVENT_KIND) return <ChatEventNotice data={entry.data as unknown as ChatEventData} uid={uid} onOpenChat={onOpenChat} />;
+  if (entry.kind === CHAT_COPY_KIND) {
+    const data = entry.data as unknown as ChatCopyData;
+    if (data.from === "artifact") return <ArtifactCard artifact={{ artifactId: data.artifactId, title: data.title, version: data.version }} onOpen={onOpen} />;
+    const copied = { role: "assistant", content: [{ type: "text", text: data.text }], timestamp: data.sentAt ?? 0, stopReason: "stop" } as unknown as AssistantMessage;
+    // One held for its owner where it came from: only they see it here too (anyone else's socket gets a note instead).
+    if (data.held && (!people || people.owner.uid === uid)) {
+      return (
+        <>
+          <Assistant message={copied} reactions={reactions} onReply={answer} />
+          <div className="draft-note">Only you see this reply: it was held for you in the chat this one branched off from.</div>
+        </>
+      );
+    }
+    return <Assistant message={copied} reactions={reactions} onReply={answer} />;
+  }
+  // A checklist's later entries draw nothing: its card, where it was first posted, shows what they say.
+  if (entry.kind === CHAT_CHECKLIST_KIND) return checklist ? <ChecklistCard data={checklist} /> : null;
+  if (entry.kind === CHAT_AGENT_KIND) {
+    return (
+      <AgentReply
+        data={entry.data as unknown as ChatAgentReplyData}
+        chatId={chatId}
+        viewerUid={uid}
+        reactions={reactions}
+        onReply={answer}
+        onOpen={onOpen}
+        entry={entry.id as number}
+        onOfferYes={offerYes}
+      />
+    );
+  }
+  if (entry.kind === CHAT_ACTION_KIND) return <ActionCard action={(entry.data as unknown as ChatActionData).action} />;
   if (entry.kind === "pi.assistant" && message?.role === "assistant") {
-    return <Assistant message={message} steps={steps} reactions={reactions} onReply={answer} />;
+    return (
+      <Assistant
+        message={message}
+        steps={steps}
+        reactions={reactions}
+        onReply={answer}
+        items={items}
+        foldKey={String(entry.id)}
+        entry={entry.id as number}
+        onOfferYes={offerYes}
+        source={sources && sourceLine({ sources }, people && people.owner.uid !== uid ? people.owner.name : undefined)}
+        held={held}
+        onShowHeld={onShowHeld}
+      />
+    );
   }
   if (entry.kind === "pi.tool-result" && message?.role === "toolResult") {
     const artifact = published(entry);
-    if (artifact) {
-      return (
-        <button type="button" className="artifact-card" onClick={() => onOpen(artifact)}>
-          <span className="artifact-card-icon">▦</span>
-          <span>
-            <strong>{artifact.title}</strong>
-            <small>Artifact · version {artifact.version} · open preview</small>
-          </span>
-        </button>
-      );
-    }
+    if (artifact) return <ArtifactCard artifact={artifact} onOpen={onOpen} />;
+    const drafted = proposedBy(entry);
+    // Only the owner has the draft: pi saves it in their directory. A chat nobody else is in is the viewer's own.
+    if (drafted) return <DraftCard details={drafted} chatId={chatId} mine={!people || people.owner.uid === uid} />;
     return <OrphanResult message={message} />;
   }
   return null;
 });
+
+/**
+ * Under one of pi's replies held for the owner (PiHeld): why only they see it, and Show to the chat. Keeping it held
+ * needs nothing: the others see that pi's reply is the owner's alone.
+ */
+function HeldNote({ held, onShow }: { held: PiHeld; onShow: (from: number) => boolean }) {
+  const [sent, setSent] = useState(false);
+  const [offline, setOffline] = useState(false);
+  const box = useRef<HTMLDivElement>(null);
+  // Shown, the note goes away under the button pressed: focus stays on the reply it was under, not on the page.
+  useEffect(() => {
+    const reply = box.current?.closest<HTMLElement>(".assistant");
+    return () => {
+      if (!reply?.isConnected || document.activeElement !== document.body) return;
+      reply.tabIndex = -1;
+      reply.focus({ preventScroll: true });
+    };
+  }, []);
+  const show = () => {
+    const ok = onShow(held.from);
+    setSent(ok);
+    setOffline(!ok);
+  };
+  return (
+    <div className="held-note" role="note" ref={box}>
+      <span className="draft-note">
+        {held.review
+          ? `Only you see this reply until you show it: it is built on your private servers or files, and you review ${AGENT_NAME}'s replies in shared chats first.`
+          : `Only you see this reply: ${AGENT_NAME} read your private servers or files while you were alone here, and someone joined before it finished.`}
+      </span>
+      <button type="button" onClick={show} disabled={sent}>
+        {sent ? "Showing…" : "Show to the chat"}
+      </button>
+      {offline && (
+        <span className="form-error" role="alert">
+          Not connected: try again once the chat is back.
+        </span>
+      )}
+    </div>
+  );
+}
 
 /** The entries that start a day, the first of each day the conversation has messages on, with their time. */
 function dayStartsOf(entries: readonly EntryRecord[]): Map<number, number> {
@@ -591,12 +924,16 @@ function useNewInView(list: RefObject<HTMLDivElement | null>, following: RefObje
   }, [list, following, newAt, since]);
 }
 
-/** The agent's entries that start one of its replies: the first of its own after anything else the chat shows. */
+/**
+ * The agent's entries that start one of its replies: the first of its own after anything else the chat shows. Its own
+ * plan, and a plan's later entries, which draw nothing, do not end a reply (inReply).
+ */
 function agentTurns(entries: readonly EntryRecord[]): Set<number> {
   const starts = new Set<number>();
+  const posted = new Set<string>();
   let inTurn = false;
   for (const entry of entries) {
-    if (!shown(entry)) continue;
+    if (!shown(entry) || inReply(entry, posted)) continue;
     if (isAgent(entry) && !inTurn) starts.add(entry.id as number);
     inTurn = isAgent(entry);
   }
@@ -604,54 +941,25 @@ function agentTurns(entries: readonly EntryRecord[]): Set<number> {
 }
 
 function endsInAgentTurn(entries: readonly EntryRecord[]): boolean {
-  const last = entries.findLast(shown);
+  const posted = new Set<string>();
+  let last: EntryRecord | undefined;
+  for (const entry of entries) if (shown(entry) && !inReply(entry, posted)) last = entry;
   return last !== undefined && isAgent(last);
 }
 
 /**
- * Who is in a shared chat: everyone's badge in their colour, with a dot for those who have it open now, then the agent's,
- * marked while it works. Names show on hover (and to screen readers).
+ * Each notice as said of someone else, and of the viewer (who may have been removed and invited back). `{agent}` is
+ * the agent an owner added or removed, or the one someone stopped.
  */
-function PeopleBar({ people, online, uid, working }: { people: ChatPeople; online: Presence[]; uid: string; working: boolean }) {
-  // Each open window is a socket; someone no longer in the chat may still show for a moment, so only people in it count.
-  const windows = new Map(online.map((presence) => [presence.uid, presence.windows]));
-  const all = everyone(people);
-  const here = all.filter((person) => windows.has(person.uid)).length;
-  return (
-    <div className="people-bar" aria-label={`${all.length} people, ${here} here now`}>
-      {all.map((person) => {
-        const count = windows.get(person.uid) ?? 0;
-        const you = person.uid === uid;
-        const state = count === 0 ? "away" : count > 1 ? `here now, in ${count} windows` : "here now";
-        return (
-          <span key={person.uid} className={count ? "person online" : "person"} title={`${person.name}${you ? " (you)" : ""}: ${state}`}>
-            <Avatar name={person.name} tint={tintOf(people, person.uid)} online={count > 0} />
-            <span className="sr-only">
-              {you ? "You" : person.name}
-              {count > 1 && <small> ×{count}</small>}
-            </span>
-          </span>
-        );
-      })}
-      <span className="people-divider" aria-hidden="true" />
-      <span className="person agent" title={`${AGENT_NAME}, the agent: ${working ? "working" : "idle"}`}>
-        <AgentAvatar working={working} />
-        <span className="sr-only">
-          {AGENT_NAME}
-          {working && <small> working</small>}
-        </span>
-      </span>
-    </div>
-  );
-}
-
-/** Each notice as said of someone else, and of the viewer (who may have been removed and invited back). */
 const PEOPLE_EVENTS: Record<ChatPeopleData["event"], readonly [string, string]> = {
   joined: ["joined the chat", "joined the chat"],
   rejoined: ["joined again from another window or device", "joined again from another window or device"],
   left: ["left the chat", "left the chat"],
   removed: ["was removed from the chat", "were removed from the chat"],
-  stopped: [`stopped ${AGENT_NAME}`, `stopped ${AGENT_NAME}`],
+  stopped: ["stopped {agent}", "stopped {agent}"],
+  "agent-added": ["added {agent} to the chat", "added {agent} to the chat"],
+  "agent-removed": ["removed {agent} from the chat", "removed {agent} from the chat"],
+  added: ["was added by {by}", "were added by {by}"],
 };
 
 /**
@@ -793,12 +1101,23 @@ function Byline({ author }: { author: Person }) {
   );
 }
 
-/** The message a reply answers: who wrote it, in their colour, and the start of it. */
+/**
+ * The message a reply answers: who wrote it, in their colour (an agent of the chat's in its own, as "@name"), and the
+ * start of it.
+ */
 function ReplyQuoteView({ quote }: { quote: ReplyQuote }) {
   const people = useSharedChat();
-  const style = "agent" in quote || !people ? undefined : tintStyle(tintOf(people, quote.uid));
+  const agents = useChatAgents();
+  if ("agent" in quote) {
+    const agent = quote.agentId === undefined ? undefined : agents.find((view) => view.id === quote.agentId);
+    return (
+      <div className={quote.agentId ? "reply-quote agent toned" : "reply-quote agent"} style={agent && toneStyle(agent.color)}>
+        <strong>{quote.agentId ? `@${quote.name}` : quote.name}</strong> <span>{quote.text}</span>
+      </div>
+    );
+  }
   return (
-    <div className={"agent" in quote ? "reply-quote agent" : "reply-quote"} style={style}>
+    <div className="reply-quote" style={people ? tintStyle(tintOf(people, quote.uid)) : undefined}>
       <strong>{quote.name}</strong> <span>{quote.text}</span>
     </div>
   );
@@ -902,6 +1221,14 @@ function Assistant({
   onGrow,
   reactions = null,
   onReply,
+  items,
+  foldKey,
+  bare = false,
+  entry,
+  onOfferYes,
+  source,
+  held,
+  onShowHeld,
 }: {
   message: AssistantMessage;
   steps?: MessageSteps;
@@ -909,18 +1236,46 @@ function Assistant({
   onGrow?: () => void;
   reactions?: MessageReactions | null;
   onReply?: () => void;
+  /** The records its tool results held, as chips under it. */
+  items?: readonly ItemRef[];
+  /** Names it for its "Show more": a long text folds once it is in the transcript, never while it streams. */
+  foldKey?: string;
+  /** Without reactions, actions and its time: a live agent's message, whose reply the chat shows once it is posted. */
+  bare?: boolean;
+  /** Its entry in the transcript, which the answer to its offered next step is remembered by. */
+  entry?: number;
+  /** On the chat's latest offer, for its owner: what Yes does (OfferRow). */
+  onOfferYes?: () => boolean;
+  /** Where a reply built on what only the owner sees came from (sourceLine): "from Radu's calendar". */
+  source?: string | null;
+  /** One held for the owner: its hold, and what shows it to everyone in the chat. */
+  held?: PiHeld;
+  onShowHeld?: (from: number) => boolean;
 }) {
   const content = useRef<HTMLDivElement>(null);
   // What a copy pastes as plain text: its Markdown. Not while it streams, when it has no actions.
   const text = streaming ? "" : textOf(blocks(message.content), "\n\n");
+  // The next step its answer offers, shown under it without its line in the text; not before the answer is whole.
+  const offered = streaming || bare ? null : assistantOffer(message.content);
   const parts = message.content.map((block, i) => {
     if (!block) return null;
-    if (block.type === "text")
-      return block.text ? (
-        <div key={i} className="bubble markdown">
-          {streaming ? <RevealedMarkdown text={block.text} onGrow={onGrow} /> : <Markdown text={block.text} />}
-        </div>
+    if (block.type === "text") {
+      const said = offered?.block === i ? offered.body : block.text;
+      // The fold goes round the bubble, so a copy (the bubbles' HTML) holds neither "Show more" nor the fold's height.
+      return said ? (
+        !streaming && foldKey ? (
+          <Fold key={i} foldKey={`${foldKey}:${i}`}>
+            <div className="bubble markdown">
+              <Markdown text={said} />
+            </div>
+          </Fold>
+        ) : (
+          <div key={i} className="bubble markdown">
+            {streaming ? <RevealedMarkdown text={said} onGrow={onGrow} /> : <Markdown text={said} />}
+          </div>
+        )
       ) : null;
+    }
     // A step shows in its run, at the run's first step.
     const run = steps?.get(i);
     return run ? <StepRun key={i} items={run} /> : null;
@@ -933,7 +1288,20 @@ function Assistant({
       {parts}
       {message.stopReason === "error" && <div className="chat-error">The model failed: {message.errorMessage ?? "unknown error"}</div>}
       {message.stopReason === "aborted" && <div className="tool-call">Stopped.</div>}
-      {text && (
+      {items && <ItemChips items={items} />}
+      {source && (
+        <div
+          className="source-chip"
+          role="note"
+          aria-label={`${source}: read with the chat owner's own sign-ins or files, which the others in the chat do not get`}
+          title="Read with the chat owner's own sign-ins or files, which the others in the chat do not get"
+        >
+          {source}
+        </div>
+      )}
+      {held && onShowHeld && <HeldNote held={held} onShow={onShowHeld} />}
+      {offered && <OfferRow offer={offered.offer} entry={entry} onYes={onOfferYes} />}
+      {text && !bare && (
         <>
           <ReactionChips reactions={reactions} />
           <div className="message-foot">
@@ -945,3 +1313,114 @@ function Assistant({
     </div>
   );
 }
+
+/** No breaks: an agent's live turn draws no day or "New" line between its steps. */
+const NO_BREAKS: ReadonlySet<number> = new Set();
+
+/** An agent's window draws a session's state (AgentWindow's `transcript`). */
+const windowTranscript = (state: ChatState) => <WindowTranscript state={state} />;
+
+/** What an input in an agent's session was, as its window labels it. */
+function inputLabel(entry: EntryRecord, text: string): string {
+  if (entry.kind === CHAT_TURN_KIND) return "Its turn";
+  if (entry.kind === CHAT_ASIDE_KIND) return text.includes("steering this turn from your window") ? "You, steering" : "What it was told";
+  return "Input";
+}
+
+/**
+ * A session's whole transcript, for its agent's owner (AgentWindow): what came in (its turns, the chat's lines, their own
+ * steering), and its thoughts, tool calls and replies as the chat's steps draw them, with the reply it is writing now.
+ */
+function WindowTranscript({ state }: { state: ChatState }) {
+  const runs = useMemo(() => stepRuns(state.entries, NO_BREAKS), [state.entries]);
+  const streamed = useMemo(() => state.partial && streamingSteps(runs, state.partial), [runs, state.partial]);
+  return (
+    <StepsProvider entries={state.entries} tools={state.tools} busy={state.busy}>
+      {state.entries.map((entry) => {
+        const message = entry.model?.[0];
+        if (entry.kind === "pi.assistant" && message?.role === "assistant") {
+          const steps = streamed?.grown?.entry === entry.id ? streamed.grown.steps : runs.byEntry.get(entry.id as number);
+          return <Assistant key={entry.id} message={message} steps={steps} bare />;
+        }
+        if (entry.kind === "pi.tool-result" && message?.role === "toolResult" && !showsAsCard(entry)) return <OrphanResult key={entry.id} message={message} />;
+        if (message?.role !== "user") return null;
+        const text = userText(message);
+        if (!text.trim()) return null;
+        return (
+          <div key={entry.id} className="agent-window-input">
+            <small>{inputLabel(entry, text)}</small>
+            <Fold foldKey={`window:${entry.id}`}>
+              <div className="bubble">{text}</div>
+            </Fold>
+          </div>
+        );
+      })}
+      {state.partial && <Assistant message={state.partial} steps={streamed?.steps} bare />}
+    </StepsProvider>
+  );
+}
+
+/**
+ * An agent working on a turn, under the conversation, as pi's run shows: a working line with its badge, how long it has
+ * worked and its step's short phrase, and its own Stop (`onStop`, absent while not connected); then its steps and text
+ * as they come, from its own session. Once its reply is posted the reply shows instead (shownLive).
+ */
+function AgentTurnLive({
+  live,
+  onStop,
+  onGrow,
+  onWindow,
+}: {
+  live: AgentLive & { agent: ChatAgentView };
+  onStop?: () => void;
+  onGrow?: () => void;
+  /** Open its window, to steer it: for its owner. */
+  onWindow?: () => void;
+}) {
+  const { agent, state, startedAt, endedAt, ended } = live;
+  const running = endedAt === undefined;
+  const runs = useMemo(() => stepRuns(state.entries, NO_BREAKS), [state.entries]);
+  const streamed = useMemo(() => state.partial && streamingSteps(runs, state.partial), [runs, state.partial]);
+  const phrase = workingPhrase(state.entries, state.partial, stepLabel);
+  return (
+    <div className="agent-live" aria-live="off">
+      <div className="byline agent working-line">
+        <AgentAvatar badge={agent} working={running} />
+        <strong>@{agent.name}</strong>
+        <small className="working-what">
+          {running ? "working" : ended === "stopped" ? "stopped" : "posting its reply"}
+          {startedAt !== undefined && running && (
+            <>
+              {" · "}
+              <Since at={startedAt} />
+            </>
+          )}
+          {phrase && ` · ${phrase}`}
+        </small>
+        {running && onWindow && (
+          <button type="button" className="working-stop" onClick={onWindow} title={`Open @${agent.name}'s window, to see and steer it: only you`}>
+            Steer
+          </button>
+        )}
+        {running && onStop && (
+          <button type="button" className="working-stop" onClick={onStop} title={`Stop @${agent.name} only`}>
+            Stop
+          </button>
+        )}
+      </div>
+      <StepsProvider entries={state.entries} tools={state.tools} busy={running}>
+        {state.entries.map((entry) => {
+          const message = entry.model?.[0];
+          if (entry.kind === "pi.assistant" && message?.role === "assistant") {
+            const steps = streamed?.grown?.entry === entry.id ? streamed.grown.steps : runs.byEntry.get(entry.id as number);
+            return <Assistant key={entry.id} message={message} steps={steps} bare />;
+          }
+          if (entry.kind === "pi.tool-result" && message?.role === "toolResult" && !showsAsCard(entry)) return <OrphanResult key={entry.id} message={message} />;
+          return null;
+        })}
+        {state.partial && <Assistant message={state.partial} steps={streamed?.steps} streaming onGrow={onGrow} bare />}
+      </StepsProvider>
+    </div>
+  );
+}
+

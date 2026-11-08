@@ -18,6 +18,7 @@ import {
 import { errorMessage } from "../shared/util.ts";
 import type { CacheWarmer } from "./cache-warmer.ts";
 import { discoverModels, GATEWAY_PROVIDERS, ROUTED_APIS, SNAPSHOT, type Discovery, type GatewayFetcher, type GatewayOptions, type GatewayProviderId, type ListedModel } from "./gateway-models.ts";
+import { scriptModel, scriptOn, SCRIPT_MODEL } from "./dev-model.ts";
 import { GeminiCompat } from "./gemini.ts";
 import { failureOf, tryModels, type ModelFailures } from "./model-health.ts";
 import prices from "./prices.json";
@@ -25,21 +26,40 @@ import { tapStream } from "./streams.ts";
 import type { ModelCache } from "./storage/model-cache.ts";
 
 /**
- * The Workers AI models the picker offers, best first. Workers AI runs on Cloudflare, within the account's free daily
- * allowance, and needs no provider key. Picked for building pages with tools: tool calling, a context of 128k tokens
- * or more (the system prompt carries the page runtime), and room to write a whole HTML page in one reply. A model
- * pi-ai no longer lists is left out.
+ * The Workers AI models the picker (and the agent editor) offers, best first. Workers AI runs on Cloudflare, within the
+ * account's free daily allowance, and needs no provider key. Picked for building pages with tools: tool calling, a
+ * context of 128k tokens or more (the system prompt carries the page runtime), and room to write a whole HTML page in
+ * one reply. A model pi-ai no longer lists is left out. Reasoning models with tool calling left out on purpose:
+ * Qwen3 30B A3B (32k context) and QwQ 32B (24k, no tool calling), too small for the system prompt; GLM 5.2 and DeepSeek
+ * V4 Flash (0731), each replaced by a newer one here; DeepSeek R1 Distill Qwen 32B (no tool calling). Their efforts are
+ * pi-ai's Workers AI catalog's, sent as `reasoning_effort` (gpt-oss: low, medium, high; Kimi K2.6: none or high).
  */
 const WORKERS_AI_MODELS = [
   "@cf/moonshotai/kimi-k2.7-code",
   "@cf/zai-org/glm-5.3",
   "@cf/deepseek-ai/deepseek-v4-pro-0813",
+  "@cf/moonshotai/kimi-k2.6",
   "@cf/qwen/qwen3.8-27b",
+  "@cf/nvidia/nemotron-3-120b-a12b",
   "@cf/zai-org/glm-5.3-flash",
   "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
   "@cf/openai/gpt-oss-120b",
+  "@cf/openai/gpt-oss-20b",
+  "@cf/zai-org/glm-4.7-flash",
   "@cf/google/gemma-4-26b-a4b-it",
 ];
+
+/**
+ * The model background jobs run on when the deployment names none (DREAM_MODEL): small, cheap, tool calling, and on
+ * Workers AI, so it needs no provider key. The interactive small jobs keep their own (a System One classifier for the
+ * routers and pickers, an embeddings model for interest); an agent's speak-up PASS is a turn on the agent's own model.
+ */
+export const DEFAULT_BACKGROUND_MODEL = "@cf/openai/gpt-oss-20b";
+
+/** The model a background job runs on: the deployment's (trimmed), else DEFAULT_BACKGROUND_MODEL. */
+export function internalModel(configured: string | undefined, fallback = DEFAULT_BACKGROUND_MODEL): string {
+  return configured?.trim() || fallback;
+}
 
 const PROVIDER_ORDER = Object.keys(PROVIDERS) as ProviderId[];
 
@@ -251,7 +271,7 @@ export class Catalog {
     const byCatalogId = new Map(base.map((entry) => [entry.info.id, entry]));
     const entries = new Map<string, ModelEntry>();
     for (const provider of PROVIDER_ORDER) {
-      const listed = provider === "workers-ai" ? undefined : discovery?.providers[provider]?.models;
+      const listed = Object.hasOwn(GATEWAY_PROVIDERS, provider) ? discovery?.providers[provider as GatewayProviderId]?.models : undefined;
       // A provider with no models listed (Workers AI, and before or without a list) shows what AI Gateway's catalog
       // has of it: Anthropic and OpenAI can be reached without a key of the deployment's own (unified billing).
       if (!listed?.length) {
@@ -320,6 +340,16 @@ export function baseCatalog(): Catalog {
   return (fallback ??= new Catalog(baseEntries(), null));
 }
 
+let scripted: Catalog | undefined;
+
+/** The scripted dev model's catalog (worker/dev-model.ts): the picker's only choice when it is on. */
+function scriptCatalog(): Catalog {
+  return (scripted ??= (() => {
+    const { model } = scriptModel();
+    return new Catalog([{ info: infoOf(model, model, "script", SCRIPT_MODEL, false), model, metadata: model }], null);
+  })());
+}
+
 /** The catalog from a discovery. */
 export function catalogFrom(discovery: Discovery | null): Catalog {
   return discovery ? new Catalog(baseEntries(), discovery) : baseCatalog();
@@ -381,6 +411,8 @@ export interface CatalogSource extends GatewayOptions {
   waitUntil?: (promise: Promise<unknown>) => void;
   /** Tries the models that must answer (Auto's) after each discovery: those that cannot be called, with why. */
   tryModels?: (catalog: Catalog) => Promise<ModelFailures>;
+  /** The scripted dev model is on (worker/dev-model.ts): the catalog is its own, and no provider is asked. */
+  scripted?: boolean;
 }
 
 /** What a Worker or chat object reaches AI Gateway with: the AI binding, the gateway's id, and the key alias. */
@@ -397,9 +429,14 @@ export function gatewayAI(env: GatewayEnv, gemini: GeminiCompat, warmer?: CacheW
 }
 
 /** Where a Worker or chat object finds the catalog, from its environment. */
-export function catalogSource(env: GatewayEnv & { AUTO_MODELS?: unknown }, cache: ModelCache, waitUntil?: (promise: Promise<unknown>) => void): CatalogSource {
+export function catalogSource(
+  env: GatewayEnv & { AUTO_MODELS?: unknown; DEV_MODEL?: string; DEV_TOOLS?: string; AUTH_MODE?: string },
+  cache: ModelCache,
+  waitUntil?: (promise: Promise<unknown>) => void,
+): CatalogSource {
   const auto = (env.AUTO_MODELS as AutoCandidate[] | undefined)?.map(({ id }) => id) ?? [];
   return {
+    ...(scriptOn(env) && { scripted: true }),
     cache,
     ai: env.AI as unknown as GatewayFetcher,
     gateway: env.AI_GATEWAY_ID,
@@ -409,7 +446,7 @@ export function catalogSource(env: GatewayEnv & { AUTO_MODELS?: unknown }, cache
       tryModels: (catalog: Catalog) => {
         const gemini = new GeminiCompat();
         const targets = auto.flatMap((id) => catalog.model(id) ?? []);
-        return tryModels(piModels(gatewayAI(env, gemini).provider, gemini, () => catalog), targets);
+        return tryModels(piModels(gatewayAI(env, gemini).provider, gemini, { catalog: () => catalog }), targets);
       },
     }),
   };
@@ -516,6 +553,11 @@ export function modelsNamed(list: string, catalog: Catalog): Model<Api>[] {
  * in the background while the old one serves. `refresh` asks again now, unless the last ask was under a minute ago.
  */
 export async function loadCatalog(source: CatalogSource, { refresh = false } = {}): Promise<Catalog> {
+  if (source.scripted) {
+    const catalog = scriptCatalog();
+    if (held?.catalog !== catalog) held = { catalog, discovery: null, readAt: Date.now() };
+    return catalog;
+  }
   if (held && !refresh && Date.now() - held.readAt < REREAD_MS) return held.catalog;
   const discovery = await readCached(source.cache);
   const age = discovery ? Date.now() - discovery.checkedAt : Infinity;
@@ -565,11 +607,12 @@ export function forgetCatalog(): void {
 /**
  * pi-ai's models, through the chat's AI Gateway, at the vendors' current prices, each reply marked with its effort and
  * Gemini's tool calls signed: AI Gateway's catalog and Workers AI's through `provider`, and the models the providers list
- * (as this isolate's catalog has them now) through one pi provider each.
+ * (as this isolate's catalog has them now) through one pi provider each. `scripted`: and the scripted dev model.
  */
-export function piModels(provider: Provider, gemini: GeminiCompat, catalog: () => Catalog = currentCatalog) {
+export function piModels(provider: Provider, gemini: GeminiCompat, { catalog = currentCatalog, scripted = false }: { catalog?: () => Catalog; scripted?: boolean } = {}) {
   const models = createModels();
   models.setProvider(withCurrentPrices(provider));
   for (const listed of listedProviders(provider, catalog)) models.setProvider(listed);
+  if (scripted) models.setProvider(scriptModel().provider);
   return gemini.models(withEffortRecorded(models));
 }

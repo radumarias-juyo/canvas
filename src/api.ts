@@ -1,7 +1,23 @@
+import type { EntryRecord } from "@earendil-works/pi-durable";
+import type { Allowance } from "../shared/allowance.ts";
+import type { ChatAgentSettings, ChatAgentSettingsView } from "../shared/agent-settings.ts";
+import type { AgentWindowView, SteerResult } from "../shared/agent-window.ts";
+import type {
+  AgentChanges,
+  AgentChatUse,
+  AgentDefinition,
+  AgentDraftView,
+  AgentInput,
+  AgentServerInfo,
+  ChatAgents,
+  ChatAgentView,
+  SharedAgentView,
+} from "../shared/agents.ts";
 import type {
   ArtifactVersionImport,
   ChatDumpCursor,
   ChatImportStart,
+  ExportedAgent,
   ExportedChat,
   ExportedPageValues,
   ExportedSkill,
@@ -13,9 +29,17 @@ import type {
 } from "../shared/data-export.ts";
 import { formatCursor, NEXT_PART_HEADER, parseCursor } from "../shared/data-export.ts";
 import { DICTATION_ROUTE, DICTATION_TYPE } from "../shared/dictation.ts";
+import type { AgentRunDetail, AgentRunList } from "../shared/runs.ts";
 import type { MentionOptions } from "../shared/mentions.ts";
+import type { ChatKind } from "../shared/chat-kinds.ts";
+import type { CallLogView, GuardrailRule, PendingActionView } from "../shared/limits.ts";
+import type { FeedList, FollowKind, FollowView } from "../shared/feed.ts";
 import type { ModelCatalog } from "../shared/models.ts";
+import type { McpSignInView } from "../shared/sign-ins.ts";
+import type { MemoryNote, MemoryNoteView, NoteChange, NoteInput, ServerCoverage } from "../shared/memory.ts";
+import type { DreamRecord, DreamSettings, DreamsView } from "../shared/dream.ts";
 import type { ChatSystemPrompt } from "../shared/system-prompt.ts";
+import type { PiSettings } from "../shared/pi-settings.ts";
 import { skillPath, type SkillInfo, type SkillInput } from "../shared/skills.ts";
 import { FILE_ROUTE, VIEW_PARAM, ZIP_ROUTE } from "../shared/uploads.ts";
 import {
@@ -27,6 +51,9 @@ import {
   type ArtifactView,
   type ChatContents,
   type ChatDeletion,
+  type ChatPeopleView,
+  type ChatRowChange,
+  type Person,
   type ChatSummary,
   type CloneAccess,
   type CreatedInvite,
@@ -37,6 +64,7 @@ import {
   type ProxyRequest,
   type ProxyResponse,
   type DeclaredTool,
+  type ToolInfo,
 } from "../shared/protocol.ts";
 
 export type { ArtifactSummary };
@@ -134,6 +162,8 @@ export const api = {
   signIn: (name: string) => request<{ uid: string }>("/api/session", post({ name })),
   signOut: () => request<object>("/api/session", { method: "DELETE" }),
   chats: () => request<ChatSummary[]>("/api/chats"),
+  /** What the user's model calls cost today against their daily limit (shared/allowance.ts): the composer's allowance ring. */
+  allowance: () => request<Allowance>("/api/me/allowance"),
   createChat: () => request<ChatSummary>("/api/chats", { method: "POST" }),
   /** The user has seen the chat: it is no longer unread in their sidebar. `seenAt`: when they had last seen it, if something came in since. */
   markSeen: (chatId: string) => request<{ seenAt?: number }>(`/api/chats/${chatId}/seen`, { method: "POST" }),
@@ -147,6 +177,34 @@ export const api = {
   revokeInvite: (chatId: string, inviteId: string) => request<object>(`/api/chats/${chatId}/invites/${inviteId}`, { method: "DELETE" }),
   /** The owner removes a member; a member passes their own uid to leave. */
   removeMember: (chatId: string, uid: string) => request<object>(chatPath(chatId, `/members/${uid}`), { method: "DELETE" }),
+  /** (owner) Add someone they share another chat with, directly: they see the whole conversation. */
+  addMember: (chatId: string, uid: string) => request<ChatPeopleView>(chatPath(chatId, "/members"), post({ uid })),
+  /** The people the user shares chats with: whom "@" offers to add. */
+  people: () => request<Person[]>("/api/me/people"),
+  /** This user's own sidebar row for a chat: pinned, closed, marked unread, their own name for it. */
+  changeChatRow: (chatId: string, change: ChatRowChange) =>
+    request<object>(`/api/chats/${chatId}`, send("PATCH", change)),
+  /** (owner) Who would lose access if the chat became `kind`. */
+  kindPreview: (chatId: string, kind: ChatKind) => {
+    const path = chatPath(chatId, "/kind");
+    return request<{ loses: Person[] }>(`${path}${path.includes("?") ? "&" : "?"}to=${kind}`);
+  },
+  /** (owner) Make the chat `kind`, removing exactly `loses` (uids, as kindPreview listed them); a 409 carries the new list. */
+  changeKind: async (chatId: string, kind: ChatKind, loses: readonly string[]): Promise<ChatPeopleView> => {
+    const { response, body } = await fetchJson(chatPath(chatId, "/kind"), send("PUT", { kind, loses }));
+    if (response.ok) return body as ChatPeopleView;
+    const changed = (body as { loses?: Person[] } | null)?.loses;
+    throw Object.assign(responseError(response, body), changed && { loses: changed });
+  },
+  /** Branch off a new chat that carries the conversation up to transcript entry `entry`. */
+  branch: (chatId: string, entry: number) => request<{ chatId: string }>(chatPath(chatId, "/branch"), post({ entry })),
+  /** The chat that discusses an artifact: its owner opens or makes it, anyone else joins it. */
+  discuss: async (artifactId: string, create = false): Promise<{ chatId: string } | { canStart: true }> => {
+    const { response, body } = await fetchJson(`/api/artifacts/${artifactId}/discuss`, post({ create }));
+    if (response.ok) return body as { chatId: string };
+    if ((body as { canStart?: unknown } | null)?.canStart === true) return { canStart: true };
+    throw responseError(response, body);
+  },
   /** The owner joins their chat a second time, as a member (secondSeat); open it at secondSeatPath. */
   joinSecondSeat: (chatId: string) => request<object>(`/api/chats/${chatId}/seat`, post({})),
   acceptInvite: (token: string) => request<{ chatId: string }>("/api/invites/accept", post({ token })),
@@ -183,9 +241,115 @@ export const api = {
   systemPrompt: () => request<ChatSystemPrompt>("/api/me/system-prompt"),
   /** Save it; empty clears it. */
   setSystemPrompt: (text: string) => request<ChatSystemPrompt>("/api/me/system-prompt", send("PUT", { text })),
+  /** pi's settings for all the user's chats (shared/pi-settings.ts). */
+  piSettings: () => request<PiSettings>("/api/me/pi"),
+  /** Save them, the whole of them: a field left out goes back to its default. */
+  setPiSettings: (settings: PiSettings) => request<PiSettings>("/api/me/pi", send("PUT", settings)),
   /** A chat's system prompt, which adds to its owner's own: everyone in the chat reads it, only the owner changes it. */
   chatSystemPrompt: (chatId: string) => request<ChatSystemPrompt>(chatPath(chatId, "/system-prompt")),
   setChatSystemPrompt: (chatId: string, text: string) => request<ChatSystemPrompt>(chatPath(chatId, "/system-prompt"), send("PUT", { text })),
+  /** The user's agents, which they bring into any of their chats. */
+  agents: () => request<AgentDefinition[]>("/api/agents"),
+  /** A new agent, turned on unless `enabled` is false. */
+  createAgent: (agent: AgentInput & { enabled?: boolean }) => request<AgentDefinition>("/api/agents", post(agent)),
+  /** Change one; `version` is the one the user read, and the server refuses when it changed since. */
+  saveAgent: (id: string, agent: AgentInput & { enabled?: boolean; version?: number }) => request<AgentDefinition>(`/api/agents/${id}`, send("PUT", agent)),
+  setAgentEnabled: (agent: Pick<AgentDefinition, "id" | "version">, enabled: boolean) =>
+    request<AgentDefinition>(`/api/agents/${agent.id}`, send("PATCH", { enabled, version: agent.version })),
+  deleteAgent: (id: string) => request<object>(`/api/agents/${id}`, { method: "DELETE" }),
+  /** A chat's agents besides pi, and each one's latest turns. */
+  chatAgents: (chatId: string) => request<ChatAgents>(chatPath(chatId, "/agents")),
+  /** (owner) Bring one of their agents into the chat. */
+  addChatAgent: (chatId: string, agentId: string) => request<ChatAgentView[]>(chatPath(chatId, "/agents"), post({ agentId })),
+  removeChatAgent: (chatId: string, agentId: string) => request<ChatAgentView[]>(chatPath(chatId, `/agents/${agentId}`), { method: "DELETE" }),
+  /** (the agent's owner) Post a reply of theirs held for review, as edited (`text`), or discard it: the drafts left. */
+  reviewAgentDraft: (chatId: string, draft: Pick<AgentDraftView, "agentId" | "turn">, action: "post" | "discard", text?: string) =>
+    request<AgentDraftView[]>(chatPath(chatId, `/agents/${draft.agentId}/draft`), post({ turn: draft.turn, action, ...(text !== undefined && { text }) })),
+  /** (the agent's owner) Its window: its sessions in the chat, and one's transcript (`session`, else the busy one). */
+  agentWindow: (chatId: string, agentId: string, session?: string) =>
+    request<AgentWindowView>(chatPath(chatId, `/agents/${agentId}/window${session ? `?session=${encodeURIComponent(session)}` : ""}`)),
+  /** (the agent's owner) Their words to it from its window: a steer into their running turn, or a turn of their own. */
+  steerAgent: (chatId: string, agentId: string, text: string) => request<SteerResult>(chatPath(chatId, `/agents/${agentId}/steer`), post({ text })),
+  /** Mute an agent in a chat (it posts nothing unprompted there), or unmute it (its owner, or the chat's). */
+  muteChatAgent: (chatId: string, agentId: string, muted: boolean) => request<ChatAgentView[]>(chatPath(chatId, `/agents/${agentId}/mute`), post({ muted })),
+  /** (owner) Change a chat's agent settings (router, speaking up, servers, daily budget): each field given replaces the stored one, null clears it. */
+  setAgentSettings: (chatId: string, change: { [K in keyof ChatAgentSettings]?: ChatAgentSettings[K] | null }) =>
+    request<ChatAgentSettingsView>(chatPath(chatId, "/agent-settings"), send("PUT", change)),
+  /** The user's sign-ins to servers that sign in each user: which, since when, and any notice about them. */
+  signIns: () => request<McpSignInView[]>("/api/mcp/sign-ins"),
+  /** Forget the stored sign-in to `server`: the next use asks for a new one. */
+  disconnect: (server: string) => request<McpSignInView[]>(`/api/mcp/sign-ins/${encodeURIComponent(server)}`, { method: "DELETE" }),
+  dismissSignInNotice: (server: string) => request<McpSignInView[]>(`/api/mcp/notices/${encodeURIComponent(server)}`, { method: "DELETE" }),
+  /** The key to subscribe to push with, or null when this deployment sends none. */
+  pushKey: async (): Promise<string | null> => {
+    const { response, body } = await fetchJson("/api/push/key");
+    // 404: this deployment sends none. Any other failure throws, so the next call asks again instead of keeping null.
+    if (response.status === 404) return null;
+    if (!response.ok) throw responseError(response, body);
+    return (body as { publicKey?: string } | null)?.publicKey ?? null;
+  },
+  subscribePush: (subscription: PushSubscriptionJSON) => request<object>("/api/push/subscribe", post(subscription)),
+  unsubscribePush: (endpoint: string) => request<object>("/api/push/unsubscribe", post({ endpoint })),
+  /** The user's memory notes, forgotten ones too, and what each MCP server covers. */
+  memory: () => request<{ notes: MemoryNoteView[]; coverage: ServerCoverage[]; dreams?: DreamsView }>("/api/memory"),
+  /** The nightly dreams' settings: whether pi learns overnight, and the time zone the night keeps to. */
+  setDreamSettings: (settings: Partial<DreamSettings>) => request<DreamSettings>("/api/memory/dreams/settings", send("PUT", settings)),
+  /** pi ("pi") or one of the user's agents dreams over the last day now (once an hour). */
+  dreamNow: (subject: string) => request<DreamRecord>(`/api/memory/dreams/${subject}/now`, post({})),
+  addNote: (note: NoteInput) => request<MemoryNote>("/api/memory", post(note)),
+  changeNote: (id: string, change: NoteChange) => request<MemoryNote>(`/api/memory/${id}`, send("PATCH", change)),
+  forgetNote: (id: string) => request<MemoryNote>(`/api/memory/${id}/forget`, post({})),
+  restoreNote: (id: string) => request<MemoryNote>(`/api/memory/${id}/restore`, post({})),
+  deleteNote: (id: string) => request<object>(`/api/memory/${id}`, { method: "DELETE" }),
+  /** The MCP servers an agent may use, and which this user signed in to. */
+  agentServers: () => request<AgentServerInfo[]>("/api/agents/servers"),
+  /** The chats one of the user's agents is in, with whether it is shared in each. */
+  agentChats: (id: string) => request<AgentChatUse[]>(`/api/agents/${id}/chats`),
+  /** One agent of a chat, read-only: the owner's own, or one its owner shares with the chat. */
+  sharedAgent: (chatId: string, agentId: string) => request<SharedAgentView>(chatPath(chatId, `/agents/${agentId}`)),
+  /** (owner) Share one of the chat's agents with its people, or stop. */
+  shareChatAgent: (chatId: string, agentId: string, shared: boolean) => request<ChatAgentView[]>(chatPath(chatId, `/agents/${agentId}`), send("PATCH", { shared })),
+  /** The user's own copy of an agent shared in a chat, with their changes: saved off, with where it came from. */
+  copyAgent: (chatId: string, agentId: string, changes: AgentChanges & { version: number }) => request<AgentDefinition>(chatPath(chatId, `/agents/${agentId}/copy`), post(changes)),
+  /** (the chat's owner) Run or approve an action, or decline it: the action after, as it ended (or as it already had). */
+  decideAction: (chatId: string, id: string, decision: "approve" | "decline") =>
+    request<PendingActionView>(`/api/needs-you/${chatId}/${encodeURIComponent(id)}`, post({ decision })),
+  /** The user's rules for all their agents: pi's, their agents' and their pages' calls. */
+  guardrails: () => request<GuardrailRule[]>("/api/limits/rules"),
+  saveGuardrails: (rules: readonly GuardrailRule[]) => request<GuardrailRule[]>("/api/limits/rules", send("PUT", { rules })),
+  /** The calls the gate let through, refused or held, newest first: one agent's, or with no `agent` all of them. */
+  callLog: (agent?: string, limit = 50) =>
+    request<CallLogView[]>(`/api/limits/calls?${new URLSearchParams({ ...(agent && { agent }), limit: String(limit) })}`),
+  /** A server's tools as this user sees them, for the rule editor. */
+  serverTools: (server: string) => request<ToolInfo[]>(`/api/limits/tools?server=${encodeURIComponent(server)}`),
+  /** A dry run of an agent on today's data, nothing sent or changed: the due time of the run it started. */
+  testAgent: (id: string) => request<{ dueAt: number }>(`/api/agents/${id}/test`, post({})),
+  /**
+   * An agent's runs, newest first, when it runs next, and its own chat (null before its first run). Someone else's agent
+   * shared in chat `from`: only the runs that posted there.
+   */
+  agentRuns: (id: string, from?: string) => request<AgentRunList>(`/api/agents/${id}/runs${from ? `?${new URLSearchParams({ chat: from })}` : ""}`),
+  /** One run of an agent in full: its items and their steps, what it sent, what it used; from a chat, only its post there. */
+  agentRun: (id: string, dueAt: number, from?: string) =>
+    request<AgentRunDetail>(`/api/agents/${id}/runs/${dueAt}${from ? `?${new URLSearchParams({ chat: from })}` : ""}`),
+  /** The entries of one item's session in a run, oldest first: the full trace. */
+  agentRunTrace: (id: string, dueAt: number, item: string) =>
+    request<{ entries: EntryRecord[] }>(`/api/agents/${id}/runs/${dueAt}/trace?${new URLSearchParams({ item })}`),
+  /** Its instructions compiled to a workflow again, saved: the definition as it is now. */
+  compileAgent: (id: string) => request<AgentDefinition>(`/api/agents/${id}/compile`, post({})),
+  /** The feed's newest items: all, only unread ones, only those needing the user; with the counts. */
+  feed: (filter: { unread?: boolean; needsYou?: boolean } = {}) =>
+    request<FeedList>(`/api/feed?${new URLSearchParams({ ...(filter.unread && { unread: "1" }), ...(filter.needsYou && { needs: "1" }) })}`),
+  feedCounts: () => request<Pick<FeedList, "unread" | "needsYou">>("/api/feed/counts"),
+  /** Mark feed items read (or with `read` false, unread again): by id, or all of them. */
+  markFeed: (ids: readonly number[] | "all", read = true) =>
+    request<Pick<FeedList, "unread" | "needsYou">>("/api/feed/read", post(ids === "all" ? { all: true, read } : { ids, read })),
+  follows: () => request<FollowView[]>("/api/follows"),
+  /** Follow someone else's page, or an agent shared in a chat (`chatId`). */
+  follow: (kind: FollowKind, id: string, chatId?: string) => request<FollowView[]>("/api/follows", post({ kind, id, ...(chatId && { chatId }) })),
+  /** Stop following; for an agent, `ownerUid` names whose (two people's agents may share an id). */
+  unfollow: ({ kind, id, ownerUid }: Pick<FollowView, "kind" | "id" | "ownerUid">) =>
+    request<FollowView[]>(`/api/follows/${kind}/${id}${ownerUid ? `?${new URLSearchParams({ owner: ownerUid })}` : ""}`, { method: "DELETE" }),
   skills: () => request<SkillInfo[]>("/api/skills"),
   /** Save one of the user's skills, from its fields or from a SKILL.md file's text. */
   saveSkill: (skill: (SkillInput | { markdown: string }) & { enabled?: boolean }) => request<SkillInfo>("/api/skills", post(skill)),
@@ -258,6 +422,8 @@ export const dataApi = {
   plan: (body: ImportPlanRequest) => request<ImportPlan>("/api/me/import/plan", post(body)),
   importSettings: (settings: ImportedSettings) => request<{ applied: string[] }>("/api/me/import/account", post(settings)),
   importSkill: (skill: ExportedSkill, files: ExportedSkillFiles["files"]) => request<{ skipped?: string }>("/api/me/import/skills", post({ skill, files })),
+  /** One agent; the id it has here, `skipped` when the user has one of its name (which a chat's roster then points at). */
+  importAgent: (agent: ExportedAgent) => request<{ id: string; skipped?: true }>("/api/me/import/agents", post({ agent })),
   /** One file at its own path; `skipped` when there is one there already. */
   importFile: (path: string, body: Blob) => request<{ skipped?: true }>(`/api/me/import/files/${encodePath(path)}`, { method: "PUT", body }),
   importChatBegin: (chatId: string, start: ChatImportStart) => request<object>(`/api/me/import/chats/${chatId}/begin`, post(start)),
@@ -269,4 +435,6 @@ export const dataApi = {
     request<object>(`/api/me/import/chats/${chatId}/finish`, post(chat)),
   importArtifactVersion: (id: string, version: ArtifactVersionImport) => request<{ latest: number }>(`/api/me/import/artifacts/${id}/versions`, post(version)),
   importPageValues: (values: ExportedPageValues[]) => request<{ imported: number }>("/api/me/import/page-values", post(values)),
+  importNotes: (notes: readonly unknown[], agents: Record<string, string>) =>
+    request<({ id: string; skipped?: true } | { error: string })[]>("/api/me/import/memory", post({ notes, agents })),
 };

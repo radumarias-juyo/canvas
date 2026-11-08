@@ -2,10 +2,16 @@
 // The MCP shapes mirror the contract Claude's artifacts use, so pages written
 // for one read naturally against the other.
 
-import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
+import type { ModelThinkingLevel, ToolResultMessage } from "@earendil-works/pi-ai";
+import type { EntryRecord } from "@earendil-works/pi-durable";
 import type { EntryReactions, Reactions } from "./reactions.ts";
 import type { Attachment, AttachmentInput } from "./attachments.ts";
 import type { Mention, MentionInput } from "./mentions.ts";
+import type { AgentColor, AgentDraftView, ChatAgentView } from "./agents.ts";
+import type { ChatKind, ChatPage } from "./chat-kinds.ts";
+import type { ChatAgentSettingsView } from "./agent-settings.ts";
+import type { PendingActionView } from "./limits.ts";
+import type { MakeKind } from "./make.ts";
 
 export type McpErrorCode =
   | "server_not_connected"
@@ -130,6 +136,11 @@ export const ARTIFACT_SANDBOX = "allow-scripts allow-popups allow-popups-to-esca
 /** What a page may call. Fixed per version at publish time; the page cannot widen it. */
 export interface ArtifactManifest {
   mcp?: { servers: { server: string; tools: string[] }[] };
+  /**
+   * Set on a version made on the ask of someone other than its owner (worker/agent/create-reach.ts): the only servers its
+   * live calls may reach, those shared with the chat it was made in. Absent: the owner's own page, which calls what it declares.
+   */
+  reach?: string[];
 }
 
 export interface ArtifactVersion {
@@ -209,6 +220,27 @@ export type PublishedDetails = {
   title: string;
   check?: CheckedDetails;
 };
+
+/** The artifact a publish's result made (pi's, or an agent's in its own session), which shows as a card. */
+export function publishedBy(entry: EntryRecord): PublishedDetails | undefined {
+  if (entry.kind !== "pi.tool-result") return undefined;
+  const message = entry.model?.[0] as ToolResultMessage | undefined;
+  if (message?.toolName !== PUBLISH_TOOL || message.isError) return undefined;
+  const details = message.details as Partial<PublishedDetails> | undefined;
+  return details?.artifactId && details.version ? (details as PublishedDetails) : undefined;
+}
+
+/** What a draft's save returns besides its text: the draft it saved (what a run's rebuild publishes, writtenBy). */
+export type WrittenDetails = { draftId: string };
+
+/** The draft a save's result made, read from the session that saved it. */
+export function writtenBy(entry: EntryRecord): string | undefined {
+  if (entry.kind !== "pi.tool-result") return undefined;
+  const message = entry.model?.[0] as ToolResultMessage | undefined;
+  if (message?.toolName !== WRITE_TOOL || message.isError) return undefined;
+  const id = (message.details as Partial<WrittenDetails> | undefined)?.draftId;
+  return typeof id === "string" ? id : undefined;
+}
 
 /** The tool that renders a page in a headless browser before it is published, and what its result shows in the chat. */
 export const CHECK_TOOL = "artifact_check";
@@ -293,13 +325,41 @@ export interface ChatSummary {
   unread?: true;
   /** Set when someone tagged this user ("@name") in a message they have not seen yet. */
   mentioned?: true;
+  /** Set on an agent's own conversation: the agent, shown like a contact (its badge and its last post). */
+  agent?: { id: string; name: string; avatar: string; color: AgentColor; preview?: string };
+  /** Who sees it, when its agents answer, what may leave it (shared/chat-kinds.ts). */
+  kind: ChatKind;
+  /** When this user pinned it to the top of their list. */
+  pinnedAt?: number;
+  /** This user closed it: hidden from their list until someone tags them in it again. */
+  closed?: true;
+}
+
+/** The longest name someone gives a chat for themselves. */
+export const MAX_CHAT_TITLE = 200;
+
+/** What one person changes about a chat in their own sidebar (PATCH /api/chats/:id); each field left out stays as it is. */
+export interface ChatRowChange {
+  pinned?: boolean;
+  /** Hidden from their list until someone tags them in it again (or they open it from the closed ones). */
+  closed?: boolean;
+  /** Bold again, as if something new came in, until they next look at it. */
+  unread?: boolean;
+  /** Their own name for it; empty goes back to the chat's own. */
+  title?: string;
 }
 
 /**
  * What the sidebar's socket (GET /api/me/ws) sends: the name of a list that changed, so the app reads it again. A
- * MentionNotice comes as JSON.
+ * MentionNotice, a RunsNotice, or a SignInNotice (shared/sign-ins.ts), comes as JSON.
  */
-export type SidebarList = "chats" | "artifacts" | "skills";
+export type SidebarList = "chats" | "artifacts" | "skills" | "agents" | "sign-ins" | "feed" | "follows" | "memory";
+
+/** A run of one of the user's agents started, moved on or ended: an open Runs tab of that agent reads it again. */
+export interface RunsNotice {
+  type: "runs";
+  agentId: string;
+}
 
 /** Someone tagged this user in a shared chat: the app shows it, and the browser too when it may and the app is not in view. */
 export interface MentionNotice {
@@ -313,6 +373,8 @@ export interface MentionNotice {
   text: string;
   /** When it was sent: one message's notices share it, so windows can show it once. */
   at: number;
+  /** Not a tag: `from` added this user to the chat, which shows them everything said in it so far. */
+  added?: true;
 }
 
 /** Someone in a chat: a verified uid, and the name the others see (their email, or the demo name). */
@@ -363,8 +425,11 @@ export interface ChatInvite {
   expiresAt: number;
 }
 
-/** What one person's app is told about a chat's people: everyone in it, and for its owner the invites still open. */
-export type ChatPeopleView = ChatPeople & { invites?: ChatInvite[] };
+/**
+ * What one person's app is told about a chat's people: everyone in it, and for its owner the invites still open; the
+ * chat's kind, the page it discusses, and the chat it branched off from, if any.
+ */
+export type ChatPeopleView = ChatPeople & { invites?: ChatInvite[]; kind?: ChatKind; page?: ChatPage };
 
 /** POST /api/chats/:id/invites: a single-use link to the chat. */
 export interface CreatedInvite extends ChatInvite {
@@ -398,6 +463,8 @@ export interface ChatMessageData extends Person {
   auto?: AutoPick;
   /** Which MCP tools were offered to answer it, when the chat has enough of them to pick (worker/agent/tool-pick.ts). */
   tools?: ToolPickNote;
+  /** The owner's Yes to an offered next step (`offer_yes`): its run only reads and drafts, and the agents it names never hand pi a turn. */
+  drafts?: true;
 }
 
 /**
@@ -453,8 +520,11 @@ export function autoPickFailed(pick: AutoPick): boolean {
 /** A router call: the router's picker id, what the call cost, in dollars and tokens, and how long the call alone took (`ms`, absent on older picks). */
 export type RouterSpend = { model: string; cost: number; input: number; output: number; ms?: number };
 
-/** A message a reply quotes: its transcript entry, who wrote it (the agent, or a person) and the start of its text. */
-export type ReplyQuote = { id: number; name: string; text: string } & ({ agent: true } | { uid: string });
+/**
+ * A message a reply quotes: its transcript entry, who wrote it (pi, another agent of the chat by `agentId`, or a person)
+ * and the start of its text.
+ */
+export type ReplyQuote = { id: number; name: string; text: string } & ({ agent: true; agentId?: string } | { uid: string });
 
 /** How much of the message a reply quotes. */
 export const REPLY_QUOTE_CHARS = 280;
@@ -483,7 +553,11 @@ export interface ChatPeopleData extends Person {
    * `rejoined`: someone already in the chat opened an invite link to it, in another window or on another device.
    * `stopped`: they stopped the agent mid-run.
    */
-  event: "joined" | "rejoined" | "left" | "removed" | "stopped";
+  event: "joined" | "rejoined" | "left" | "removed" | "stopped" | "agent-added" | "agent-removed" | "added";
+  /** For `added`: who added them (the owner). */
+  by?: string;
+  /** For agent-added and agent-removed, and a stopped that stopped one agent only: the agent's handle. */
+  agent?: string;
 }
 
 /** A message waiting for the agent: sent while it was busy, in the order it will be answered. `id` is pi's submission id. */
@@ -523,13 +597,38 @@ export type ChatClientMessage =
   // `attachments` were uploaded first, with POST /api/chats/:id/attachments; `text` may then be empty.
   // `mentions` are the files, artifacts and people picked with "@" whose text is still in `text`.
   // `replyTo` is the transcript entry of the message it answers: a person's message, or one of the agent's replies.
-  | { type: "prompt"; text: string; attachments?: AttachmentInput[]; mentions?: MentionInput[]; replyTo?: number }
-  | { type: "abort" }
+  | { type: "prompt"; text: string; attachments?: AttachmentInput[]; mentions?: MentionInput[]; replyTo?: number; make?: MakeKind }
+  // The owner's Yes to the next step that the reply `entry` offers (shared/offers.ts): the chat writes the reply, and
+  // the turn it starts may only read and draft the routine.
+  | { type: "offer_yes"; entry: number }
+  // Stop the chat: pi and every agent, with what waits for them; with `agent`, only that agent of the roster.
+  | { type: "abort"; agent?: string }
   // Add (`on`) or take back a reaction (shared/reactions.ts) to a transcript entry: a person's message or the agent's reply.
   | { type: "react"; entry: number; emoji: string; on: boolean }
   // Run the chat on another model or effort (shared/models.ts), or on Auto (AUTO_MODEL). The change reaches every socket
   // as pi's agent_changed, and a turn to or from Auto as `auto`.
-  | { type: "model"; model: string; thinkingLevel?: string };
+  | { type: "model"; model: string; thinkingLevel?: string }
+  // The owner shows everyone pi's reply held for them that started at `from` (PiHeld).
+  | { type: "pi_show"; from: number };
+
+/**
+ * pi's replies held for the chat's owner, by the times its messages started (epoch ms): a run alone with the owner that
+ * read what only they see (their private servers or files) and ended after someone joined, as an agent's turn apart is
+ * held, or one in a shared chat with the owner's review before posting on (`review`; shared/pi-settings.ts).
+ * `through`: when it ended; none while it still runs. Nobody else sees them until the owner shows them.
+ */
+export type PiHeld = { from: number; through?: number; review?: true };
+
+/** Whether one of pi's messages, by when it started (epoch ms), is among its held replies. */
+export function heldIn(held: readonly PiHeld[] | undefined, at: number): boolean {
+  return !!held?.some((range) => at >= range.from && (range.through === undefined || at <= range.through));
+}
+
+/**
+ * The mark on the details of one of pi's tool results that came from what only the chat's owner sees (worker/agent/reach.ts),
+ * in a chat others are in: the source chip under pi's reply names `server` (none: the owner's private files).
+ */
+export type PrivateMark = { private: true; server?: string };
 
 /**
  * ChatAgent → browser. `events` carries pi-durable AgentEvents verbatim; `people` comes on connect and whenever the people or invites change.
@@ -558,6 +657,25 @@ export type ChatServerMessage =
    * its transcript entry, under which the app offers to call the agent on it.
    */
   | { type: "callHint"; entry: number }
+  /** The chat's agents besides pi (shared/agents.ts): on connect, and whenever one is added, removed, starts or ends a turn. */
+  | { type: "agents"; agents: ChatAgentView[] }
+  /** The replies of this person's agents held for them to review (reviewBeforePosting): only their sockets get it. */
+  | { type: "agentDrafts"; drafts: AgentDraftView[] }
+  /** pi's replies held for the owner (PiHeld): only the owner's sockets get it, on connect and whenever it changes. */
+  | { type: "piHeld"; held: PiHeld[] }
+  /** The chat's agent settings (shared/agent-settings.ts): on connect, and whenever its owner changes them or an agent is muted. */
+  | { type: "agentSettings"; settings: ChatAgentSettingsView }
+  /**
+   * One agent's session while it has a turn (`agent`, by its id; `turn`, the turn's id): pi-durable AgentEvents as for
+   * pi's, only those of that turn. A snapshot first (its entries from the turn's input on), with how long each running
+   * call has run; then one batch per commit, until the turn ends (the `agents` message says so).
+   */
+  | { type: "agentEvents"; agent: string; turn: number; events: unknown[]; toolsElapsedMs?: Record<string, number> }
+  /**
+   * The chat's actions that wait, or waited, for its owner (shared/limits.ts), newest first: on connect, and whenever one
+   * is made or ends. The cards in the log (CHAT_ACTION_KIND entries) show their state from it.
+   */
+  | { type: "actions"; actions: PendingActionView[] }
   /** Sent just before the chat closes a removed person's socket, in case the close code is lost on the way. */
   | { type: "removed" }
   /** Sent to everyone just before the chat closes their sockets, when its owner deleted it. */
@@ -585,5 +703,10 @@ export const MIN_REFETCH_MS = 30_000;
 
 /** Lowercase hex ids: artifact ids and chat ids. */
 export const ID_PATTERN = /^[a-z0-9]{8,32}$/;
+/**
+ * The chat of a member's agent's seat for one room (seatChatId in worker/agents/seats/names.ts): its agent's id and a
+ * hash of the room. No route takes it (ID_PATTERN has no hyphen); what the seat keeps per chat (drafts) does.
+ */
+export const SEAT_CHAT_PATTERN = /^seat-[a-f0-9]{16}-[a-f0-9]{16}$/;
 /** User ids: the hashed Cloudflare Access subject, or in demo mode a slug of the name typed at sign-in. */
 export const UID_PATTERN = /^[a-z0-9][a-z0-9-]{1,31}$/;

@@ -1,6 +1,7 @@
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { textOf } from "./canonical.ts";
 import { AGENT_NAME } from "./mentions.ts";
+import { CHAT_AGENT_KIND, type ChatAgentReplyData } from "./agents.ts";
 import { CHAT_MESSAGE_KIND, REPLY_QUOTE_CHARS, type ChatMessageData, type ReplyQuote } from "./protocol.ts";
 
 /**
@@ -14,6 +15,11 @@ export function replyQuote(entry: EntryRecord | undefined): ReplyQuote | null {
     const data = entry.data as unknown as ChatMessageData | undefined;
     const text = excerpt(data?.text ?? "");
     return data && text ? { id: entry.id as number, name: data.name, uid: data.uid, text } : null;
+  }
+  if (entry.kind === CHAT_AGENT_KIND) {
+    const data = entry.data as unknown as ChatAgentReplyData | undefined;
+    const text = excerpt(data?.text ?? "");
+    return data && text ? { id: entry.id as number, name: data.name, agent: true, agentId: data.agentId, text } : null;
   }
   const message = entry.model?.[0];
   if (entry.kind !== "pi.assistant" || message?.role !== "assistant") return null;
@@ -30,4 +36,9 @@ export function replyLine(quote: ReplyQuote): string {
 export function excerpt(text: string, max = REPLY_QUOTE_CHARS): string {
   const flat = text.trim().replace(/\s+/g, " ");
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+/** The first line of a text with something on it, as an excerpt. */
+export function firstLine(text: string, max = 140): string {
+  return excerpt(text.split("\n").find((part) => part.trim()) ?? "", max);
 }

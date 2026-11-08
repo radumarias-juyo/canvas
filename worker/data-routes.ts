@@ -12,6 +12,7 @@ import {
   type ChatDumpPage,
   type ChatDumpPart,
   type ChatImportStart,
+  type ExportedAgent,
   type ExportedChat,
   type ExportedPageValues,
   type ExportedSkill,
@@ -21,6 +22,8 @@ import {
   type ImportPlan,
   type ImportPlanRequest,
 } from "../shared/data-export.ts";
+import { AGENT_ID_PATTERN } from "../shared/agents.ts";
+import { MAX_NOTES } from "../shared/memory.ts";
 import { ID_PATTERN, isOwnedBy } from "../shared/protocol.ts";
 import { MAX_SKILL_FILE_BYTES, MAX_SKILL_FILES } from "../shared/skill-files.ts";
 import { SKILL_NAME_PATTERN } from "../shared/skills.ts";
@@ -52,12 +55,16 @@ type Directory = DurableObjectStub<UserDirectory>;
  *   POST /api/me/import/plan                  what importing the zip's chats and artifacts does here (ImportPlan)
  *   POST /api/me/import/account               the settings, where the user has none of their own yet
  *   POST /api/me/import/skills                one skill with its files; skipped when the user has one of that name
+ *   POST /api/me/import/agents                {agent}: one agent; skipped when the user has one of that name. Answers
+ *                                             the id it has here, for the chats' rosters (ChatImportStart.agents)
  *   PUT  /api/me/import/files/<path>          one file, as the body; skipped when there is one at that path
  *   POST /api/me/import/chats/:id/begin|rows|drafts|finish
  *                                             a chat: begin (ChatImportStart), each part, its drafts, then finish, which
  *                                             puts it in the user's list
  *   POST /api/me/import/artifacts/:id/versions one version, in order (ArtifactVersionImport)
  *   POST /api/me/import/page-values           what pages saved ([ExportedPageValues]), for pages that saved nothing here
+ *   POST /api/me/import/memory                {notes, agents}: the memory notes, after the chats and agents they name;
+ *                                             `agents` maps the export's agent ids to theirs here. Answers each one's result
  * Imports add to what is here and never replace it, so an import that stopped part way is run again from the start.
  * JSON bodies take a JSON content type only, and a file comes by PUT: neither can be sent by another site's form.
  * Returns null for any other path.
@@ -87,7 +94,18 @@ export async function dataRoute(request: Request, uid: string, directory: Direct
     return json({ applied: await directory.importSettings(body) });
   }
   if (path === "/api/me/import/skills") return importSkill(request, uid, directory, storage);
+  if (path === "/api/me/import/agents") {
+    const agent = (await readJson<{ agent?: ExportedAgent }>(request))?.agent;
+    if (!isObject(agent) || typeof agent.name !== "string") return json({ error: "Expected {agent}." }, 400);
+    const result = await directory.importAgent(agent as unknown as ExportedAgent);
+    return json(result, "error" in result ? 400 : 200);
+  }
   if (path === "/api/me/import/page-values") return importPageValues(request, uid, directory, storage);
+  if (path === "/api/me/import/memory") {
+    const body = await readJson<{ notes?: unknown; agents?: unknown }>(request);
+    if (!Array.isArray(body?.notes) || body.notes.length > MAX_NOTES) return json({ error: `Expected {notes: [up to ${MAX_NOTES} notes], agents?}.` }, 400);
+    return json(await directory.importNotes(body.notes, idMap(body.agents, AGENT_ID_PATTERN)));
+  }
   return null;
 }
 
@@ -176,6 +194,15 @@ async function importPlan(body: ImportPlanRequest, uid: string, directory: Direc
   return { chats: Object.fromEntries(chatIds.map((id) => [id, has.has(id) ? "exists" : "new"])), artifacts: Object.fromEntries(artifacts) };
 }
 
+/** An export's id → this account's id map: only ids on both sides, since they are put in place of one another. */
+function idMap(pairs: unknown, pattern: RegExp): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(isObject(pairs) ? pairs : {}).filter(
+      (pair): pair is [string, string] => pattern.test(pair[0]) && typeof pair[1] === "string" && pattern.test(pair[1]),
+    ),
+  );
+}
+
 /** One step of a chat's import: begin, each part (rows), its drafts, then finish. */
 async function importChat(request: Request, uid: string, directory: Directory, storage: Storage, chatId: string, step: string): Promise<Response | null> {
   // A chat in the user's list is theirs already: an import never writes over one.
@@ -186,12 +213,7 @@ async function importChat(request: Request, uid: string, directory: Directory, s
   if (step === "begin") {
     const start = body as Partial<ChatImportStart> | null;
     if (typeof start?.from !== "string" || !isObject(start.artifacts)) return json({ error: "Expected {from, artifacts}." }, 400);
-    const artifacts = Object.fromEntries(
-      Object.entries(start.artifacts).filter(
-        (pair): pair is [string, string] => ID_PATTERN.test(pair[0]) && typeof pair[1] === "string" && ID_PATTERN.test(pair[1]),
-      ),
-    );
-    return answer(await chat.importBegin({ from: start.from, artifacts }));
+    return answer(await chat.importBegin({ from: start.from, artifacts: idMap(start.artifacts, ID_PATTERN), agents: idMap(start.agents, AGENT_ID_PATTERN) }));
   }
   if (step === "rows") {
     if (!isObject(body) || !Array.isArray(body.tables)) return json({ error: "Expected a part of a chat's export." }, 400);
@@ -214,9 +236,9 @@ async function importChat(request: Request, uid: string, directory: Directory, s
   // finish
   const info = body as Partial<ExportedChat> | null;
   if (typeof info?.title !== "string") return json({ error: "Expected {title, createdAt, updatedAt}." }, 400);
-  const refused = await chat.importFinish();
-  if (refused) return answer(refused);
-  await directory.importChat({ id: chatId, title: info.title, createdAt: Number(info.createdAt) || 0, updatedAt: Number(info.updatedAt) || 0 });
+  const finished = await chat.importFinish();
+  if ("error" in finished) return answer(finished);
+  await directory.importChat({ id: chatId, title: info.title, createdAt: Number(info.createdAt) || 0, updatedAt: Number(info.updatedAt) || 0 }, finished.kind);
   return json({});
 }
 

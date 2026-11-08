@@ -1,128 +1,12 @@
-import { createHash } from "node:crypto";
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { createServer, type Server } from "node:http";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { checkSignIn } from "../worker/mcp/background.ts";
 import { connectStreamableHttp } from "../worker/mcp/connect.ts";
-import { McpFailure } from "../worker/mcp/hub.ts";
+import { McpFailure, McpHub } from "../worker/mcp/hub.ts";
 import { applyAuthChange, finishSignIn, McpOAuthClient, serverOfState, startSignIn, type McpAuthChange, type McpAuthRecord, type McpAuthStore } from "../worker/mcp/oauth.ts";
 import type { McpServerConfig } from "../worker/mcp/servers.ts";
+import { FakePortal } from "./fake-portal.ts";
 import { listen } from "./fakes.ts";
-
-// A stand-in for the MCP portal: an OAuth authorization server (discovery,
-// dynamic registration, PKCE, refresh) in front of an MCP server whose one
-// tool says who the bearer token belongs to. The browser part of a sign-in is
-// played by the test: it reads the authorization URL and "approves" it.
-
-interface Grant {
-  user: string;
-  challenge: string;
-  redirectUri: string;
-  clientId: string;
-}
-
-class FakePortal {
-  readonly clients = new Map<string, string[]>();
-  readonly codes = new Map<string, Grant>();
-  readonly access = new Map<string, { user: string; expires: number }>();
-  readonly refresh = new Map<string, string>();
-  ttlMs = 3_600_000;
-  refreshAllowed = true;
-  /** Answer the token endpoint the way the edge did in production: a bare 403 "error code: 1014". */
-  tokenBlocked = false;
-  origin = "";
-
-  issue(user: string) {
-    const accessToken = `at-${crypto.randomUUID()}`;
-    const refreshToken = `rt-${crypto.randomUUID()}`;
-    this.access.set(accessToken, { user, expires: Date.now() + this.ttlMs });
-    this.refresh.set(refreshToken, user);
-    return { access_token: accessToken, token_type: "Bearer", expires_in: Math.floor(this.ttlMs / 1000), refresh_token: refreshToken };
-  }
-
-  /** The user approves the sign-in in the browser: the portal redirects back with a code. */
-  approve(authorizationUrl: string, user: string): { code: string; state: string } {
-    const url = new URL(authorizationUrl);
-    const code = `code-${crypto.randomUUID()}`;
-    this.codes.set(code, {
-      user,
-      challenge: url.searchParams.get("code_challenge")!,
-      redirectUri: url.searchParams.get("redirect_uri")!,
-      clientId: url.searchParams.get("client_id")!,
-    });
-    return { code, state: url.searchParams.get("state")! };
-  }
-
-  async handle(req: IncomingMessage, res: ServerResponse) {
-    const url = new URL(req.url!, this.origin);
-    const send = (status: number, body: unknown, headers: Record<string, string> = {}) =>
-      res.writeHead(status, { "content-type": "application/json", ...headers }).end(JSON.stringify(body));
-
-    if (url.pathname.startsWith("/.well-known/oauth-protected-resource")) {
-      return send(200, { resource: `${this.origin}/mcp`, authorization_servers: [this.origin] });
-    }
-    if (url.pathname === "/.well-known/oauth-authorization-server") {
-      return send(200, {
-        issuer: this.origin,
-        authorization_endpoint: `${this.origin}/authorize`,
-        token_endpoint: `${this.origin}/token`,
-        registration_endpoint: `${this.origin}/register`,
-        response_types_supported: ["code"],
-        grant_types_supported: ["authorization_code", "refresh_token"],
-        code_challenge_methods_supported: ["S256"],
-        token_endpoint_auth_methods_supported: ["none"],
-      });
-    }
-    const body = await new Promise<string>((resolve) => {
-      let data = "";
-      req.on("data", (c) => (data += c));
-      req.on("end", () => resolve(data));
-    });
-    if (url.pathname === "/register") {
-      const metadata = JSON.parse(body);
-      const clientId = `client-${this.clients.size + 1}`;
-      this.clients.set(clientId, metadata.redirect_uris);
-      return send(201, { ...metadata, client_id: clientId });
-    }
-    if (url.pathname === "/token" && this.tokenBlocked) {
-      return res.writeHead(403, { "content-type": "text/plain", "cf-ray": "abc123-ARN" }).end("error code: 1014");
-    }
-    if (url.pathname === "/token") {
-      const form = new URLSearchParams(body);
-      if (form.get("grant_type") === "authorization_code") {
-        const grant = this.codes.get(form.get("code")!);
-        this.codes.delete(form.get("code")!);
-        const challenge = createHash("sha256").update(form.get("code_verifier") ?? "").digest("base64url");
-        const ok = grant && grant.challenge === challenge && grant.redirectUri === form.get("redirect_uri") && grant.clientId === form.get("client_id");
-        return ok ? send(200, this.issue(grant.user)) : send(400, { error: "invalid_grant" });
-      }
-      if (form.get("grant_type") === "refresh_token") {
-        const user = this.refresh.get(form.get("refresh_token")!);
-        if (!user || !this.refreshAllowed) return send(400, { error: "invalid_grant" });
-        this.refresh.delete(form.get("refresh_token")!);
-        return send(200, this.issue(user));
-      }
-      return send(400, { error: "unsupported_grant_type" });
-    }
-    if (url.pathname === "/mcp") {
-      const token = req.headers.authorization?.replace(/^Bearer /, "");
-      const session = token ? this.access.get(token) : undefined;
-      if (!session || session.expires < Date.now()) {
-        return send(401, { error: "invalid_token" }, { "www-authenticate": `Bearer resource_metadata="${this.origin}/.well-known/oauth-protected-resource/mcp"` });
-      }
-      const server = new McpServer({ name: "stand-in", version: "1.0.0" });
-      server.registerTool("data_whoami", { description: "Who am I", annotations: { readOnlyHint: true } }, async () => ({
-        content: [{ type: "text", text: JSON.stringify({ user: session.user }) }],
-      }));
-      server.registerTool("portal_list_servers", { description: "Portal tool" }, async () => ({ content: [{ type: "text", text: "[]" }] }));
-      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
-      await server.connect(transport);
-      await transport.handleRequest(req, res, body ? JSON.parse(body) : undefined);
-      return;
-    }
-    send(404, { error: "not_found" });
-  }
-}
 
 class MemoryStore implements McpAuthStore {
   record: McpAuthRecord = {};
@@ -267,6 +151,63 @@ describe("per-user MCP sign-in", () => {
     await chatB.tokens();
     await chatB.invalidateCredentials("tokens");
     expect(ada.record.tokens).toBeUndefined();
+  });
+
+  it("sends a call made across a new sign-in again on a fresh connection, as the new sign-in", async () => {
+    const ada = new MemoryStore();
+    await signIn(ada, "ada@example.com");
+    const hub = new McpHub([config], (server) =>
+      connectStreamableHttp(server, new McpOAuthClient(ada, "Portal", { redirectUrl: REDIRECT, interactive: false })),
+    );
+    const whoamiNow = async () => JSON.parse((await hub.call("Portal", "data_whoami", {})).content[0].text as string).user as string;
+    expect(await whoamiNow()).toBe("ada@example.com");
+    await signIn(ada, "ada+new@example.com");
+    expect(await whoamiNow()).toBe("ada+new@example.com");
+  });
+});
+
+describe("checking a sign-in before a scheduled run", () => {
+  it("is ok when signed in, and the refresh renews the tokens", async () => {
+    const ada = new MemoryStore();
+    await signIn(ada, "ada@example.com");
+    const before = ada.record.tokens!;
+    expect(await checkSignIn(config, ada)).toBe("ok");
+    expect(ada.record.tokens!.refresh_token).not.toBe(before.refresh_token);
+    // The renewed tokens work, and the old refresh token is spent.
+    expect(await whoami(ada)).toBe("ada@example.com");
+    expect(portal.refresh.has(before.refresh_token!)).toBe(false);
+  });
+
+  it("needs a sign-in when the refresh is refused, and opens none", async () => {
+    const ada = new MemoryStore();
+    await signIn(ada, "ada@example.com");
+    portal.refreshAllowed = false;
+    expect(await checkSignIn(config, ada)).toBe("needs_sign_in");
+    expect(ada.record.tokens).toBeUndefined();
+    expect(ada.record.state).toBeUndefined();
+    expect(ada.record.verifier).toBeUndefined();
+  });
+
+  it("needs a sign-in when there was none, without registering a client", async () => {
+    const ada = new MemoryStore();
+    expect(await checkSignIn(config, ada)).toBe("needs_sign_in");
+    expect(portal.clients.size).toBe(0);
+  });
+
+  it("checks a sign-in without a refresh token by connecting", async () => {
+    const ada = new MemoryStore();
+    await signIn(ada, "ada@example.com");
+    delete ada.record.tokens!.refresh_token;
+    expect(await checkSignIn(config, ada)).toBe("ok");
+    portal.access.get(ada.record.tokens!.access_token)!.expires = 0;
+    expect(await checkSignIn(config, ada)).toBe("needs_sign_in");
+  });
+
+  it("is unavailable, not a sign-in, when the server does not answer", async () => {
+    const ada = new MemoryStore();
+    await signIn(ada, "ada@example.com");
+    expect(await checkSignIn({ ...config, url: "http://127.0.0.1:1/mcp" }, ada)).toBe("unavailable");
+    expect(ada.record.tokens).toBeDefined();
   });
 });
 

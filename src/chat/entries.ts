@@ -1,30 +1,85 @@
-import type { ToolResultMessage, UserMessage } from "@earendil-works/pi-ai";
+import type { UserMessage } from "@earendil-works/pi-ai";
 import type { EntryRecord } from "@earendil-works/pi-durable";
-import { CHAT_MESSAGE_KIND, CHAT_PEOPLE_KIND, PUBLISH_TOOL, type ChatMessageData, type ChatPeopleData, type PublishedDetails } from "../../shared/protocol.ts";
+import { CHAT_AGENT_KIND, CHAT_TURN_KIND, proposedBy, type ChatAgentReplyData } from "../../shared/agents.ts";
+import { entryItems, mergeItems, type ItemRef } from "../../shared/items.ts";
+import {
+  CHAT_MESSAGE_KIND,
+  CHAT_PEOPLE_KIND,
+  heldIn,
+  publishedBy,
+  type ChatMessageData,
+  type ChatPeopleData,
+  type PiHeld,
+  type PrivateMark,
+} from "../../shared/protocol.ts";
+import { CHAT_BUDGET_KIND, CHAT_COPY_KIND, CHAT_EVENT_KIND, type ChatCopyData } from "../../shared/chat-kinds.ts";
+import { CHAT_ACTION_KIND, type ChatActionData, type PendingActionView } from "../../shared/limits.ts";
+import { CHAT_CHECKLIST_KIND, checklistOf, type ChatChecklistData } from "../../shared/checklist.ts";
+import { entryOffer } from "../../shared/offers.ts";
 
 /** When an entry was sent, for one that has a time: messages from before chats kept `sentAt` have only the time pi wrote them, and asides not even that. */
 export function sentAt(entry: EntryRecord): number | undefined {
+  if (entry.kind === CHAT_AGENT_KIND) return (entry.data as unknown as ChatAgentReplyData).endedAt;
+  if (entry.kind === CHAT_ACTION_KIND) return (entry.data as unknown as ChatActionData).action.createdAt;
+  if (entry.kind === CHAT_COPY_KIND) {
+    const data = entry.data as unknown as ChatCopyData;
+    return data.from === "pi" ? data.sentAt : undefined;
+  }
   const at = entry.kind === CHAT_MESSAGE_KIND ? (entry.data as unknown as ChatMessageData).sentAt : undefined;
   return at ?? entry.model?.[0]?.timestamp;
 }
 
-/** Entries the app shows something for; the others (such as asides for the model) do not end an agent's reply, or start one. */
+/**
+ * Entries the app shows something for; the others (such as asides for the model) do not end an agent's reply, or start
+ * one. Another agent's reply (`chat.agent`) shows as its own message, and a held call (`chat.action`) as its card. A
+ * checklist's entries show as one card, where it was first posted (inReply says which of them end a reply).
+ */
 export function shown(entry: EntryRecord): boolean {
-  return entry.kind === CHAT_MESSAGE_KIND || entry.kind === CHAT_PEOPLE_KIND || entry.kind === "pi.user" || isAgent(entry);
+  return (
+    entry.kind === CHAT_MESSAGE_KIND ||
+    entry.kind === CHAT_PEOPLE_KIND ||
+    entry.kind === CHAT_AGENT_KIND ||
+    entry.kind === CHAT_CHECKLIST_KIND ||
+    entry.kind === CHAT_EVENT_KIND ||
+    entry.kind === CHAT_BUDGET_KIND ||
+    entry.kind === CHAT_COPY_KIND ||
+    entry.kind === CHAT_ACTION_KIND ||
+    entry.kind === "pi.user" ||
+    isAgent(entry)
+  );
 }
 
 export function isAgent(entry: EntryRecord): boolean {
   return entry.kind === "pi.assistant" || entry.kind === "pi.tool-result";
 }
 
-/** The artifact a publish's result made, which shows as a card. */
-export function published(entry: EntryRecord): PublishedDetails | undefined {
-  if (entry.kind !== "pi.tool-result") return undefined;
-  const message = entry.model?.[0] as ToolResultMessage | undefined;
-  if (message?.toolName !== PUBLISH_TOOL || message.isError) return undefined;
-  const details = message.details as Partial<PublishedDetails> | undefined;
-  return details?.artifactId && details.version ? (details as PublishedDetails) : undefined;
+/**
+ * For a checklist entry, met in the log's order: the checklist it first posts, whose card shows there, or null for one
+ * that draws nothing (a later entry updates the card drawn earlier). `posted` holds the checklists met so far.
+ */
+export function checklistPost(entry: Pick<EntryRecord, "kind" | "data">, posted: Set<string>): ChatChecklistData | null {
+  const data = checklistOf(entry);
+  if (!data || posted.has(data.id)) return null;
+  posted.add(data.id);
+  return data;
 }
+
+/**
+ * Whether a shown entry sits in pi's reply without ending it (or starting one): a checklist's later entry, which draws
+ * nothing, and pi's own plan, a part of its reply. Another agent's plan shows as a card of its own, as its reply would.
+ * `posted` as for checklistPost.
+ */
+export function inReply(entry: Pick<EntryRecord, "kind" | "data">, posted: Set<string>): boolean {
+  if (entry.kind !== CHAT_CHECKLIST_KIND) return false;
+  const post = checklistPost(entry, posted);
+  return post === null || post.by.agentId === undefined;
+}
+
+/** The artifact a publish's result made, which shows as a card. */
+export const published = publishedBy;
+
+/** A tool result that shows as a card of its own (a published artifact, a drafted agent), not as a step of its call. */
+export const showsAsCard = (entry: EntryRecord): boolean => published(entry) !== undefined || proposedBy(entry) !== undefined;
 
 /** Whether the viewer `uid` wrote the entry, or caused it (joined, left). A plain `pi.user` entry is the owner's (`isOwner`). */
 export function byViewer(entry: EntryRecord, uid: string, isOwner: boolean): boolean {
@@ -74,4 +129,138 @@ export function userText(message: UserMessage): string {
     : blocks(message.content)
         .map((b) => (b.type === "text" ? b.text : ""))
         .join("");
+}
+
+const STARTS_RUN: ReadonlySet<string> = new Set(["pi.user", CHAT_MESSAGE_KIND, CHAT_TURN_KIND]);
+
+/**
+ * Whether `entry` starts a run of pi's, and so ends the reply before it: a person's message, or a turn an agent handed
+ * pi. An aside does not (it can be written while pi works), nor another agent's reply posted meanwhile.
+ */
+export function startsRun(entry: Pick<EntryRecord, "kind" | "data">): boolean {
+  return STARTS_RUN.has(entry.kind) && !(entry.kind === CHAT_MESSAGE_KIND && (entry.data as Partial<ChatMessageData> | undefined)?.aside);
+}
+
+/**
+ * The item chips under each of pi's replies, by the entry they show under (its last message with text): the records its
+ * MCP results held (shared/items.ts), from the tool results' details, never from its text. A reply ends where the
+ * next run starts (startsRun).
+ */
+export function replyItems(entries: readonly EntryRecord[], previous?: ReadonlyMap<number, ItemRef[]>): ReadonlyMap<number, ItemRef[]> {
+  const byEntry = new Map<number, ItemRef[]>();
+  let found: ItemRef[][] = [];
+  let lastText: number | undefined;
+  const flush = () => {
+    const items = lastText === undefined ? [] : mergeItems(found);
+    // The same chips as `previous` gave keep its array, so a memoized reply does not draw again for each new entry.
+    const known = lastText === undefined ? undefined : previous?.get(lastText);
+    if (items.length) byEntry.set(lastText!, known && sameItems(known, items) ? known : items);
+    found = [];
+    lastText = undefined;
+  };
+  for (const entry of entries) {
+    const message = entry.model?.[0];
+    if (startsRun(entry)) flush();
+    else if (entry.kind === "pi.tool-result") found.push(entryItems(entry));
+    else if (entry.kind === "pi.assistant" && message?.role === "assistant" && blocks(message.content).some((block) => block.type === "text" && block.text.trim()))
+      lastText = entry.id as number;
+  }
+  flush();
+  return byEntry;
+}
+
+/** The source chip's name for a result from the owner's private files: no server says where it came from. */
+export const PRIVATE_FILES = "private files";
+
+/**
+ * What each of pi's replies in a chat others are in is built on of what only the chat's owner sees, by the entry it
+ * shows under (its last message with text, as replyItems): the servers its results came from, as the chat marked them
+ * (PrivateMark, never from its text), PRIVATE_FILES for the owner's files. Each reply's array stays the same while its
+ * sources do (`previous`).
+ */
+export function replySources(entries: readonly EntryRecord[], previous?: ReadonlyMap<number, string[]>): ReadonlyMap<number, string[]> {
+  const byEntry = new Map<number, string[]>();
+  let found = new Set<string>();
+  let lastText: number | undefined;
+  const flush = () => {
+    if (lastText !== undefined && found.size) {
+      const sources = [...found];
+      const known = previous?.get(lastText);
+      byEntry.set(lastText, known && known.join("\n") === sources.join("\n") ? known : sources);
+    }
+    found = new Set();
+    lastText = undefined;
+  };
+  for (const entry of entries) {
+    const message = entry.model?.[0];
+    if (startsRun(entry)) flush();
+    else if (entry.kind === "pi.tool-result" && message?.role === "toolResult") {
+      const mark = message.details as Partial<PrivateMark> | undefined;
+      if (mark?.private === true) found.add(typeof mark.server === "string" ? mark.server : PRIVATE_FILES);
+    } else if (entry.kind === "pi.assistant" && message?.role === "assistant" && blocks(message.content).some((block) => block.type === "text" && block.text.trim()))
+      lastText = entry.id as number;
+  }
+  flush();
+  return byEntry;
+}
+
+/**
+ * The entry each of pi's held replies (PiHeld) shows its "Show to the chat" under, for the owner: its last message with
+ * text, once its run has ended, with the hold it is under.
+ */
+export function heldReplies(entries: readonly EntryRecord[], held: readonly PiHeld[]): ReadonlyMap<number, PiHeld> {
+  const at = new Map<number, PiHeld>();
+  for (const range of held) {
+    if (range.through === undefined) continue;
+    const last = entries.findLast((entry) => {
+      const message = entry.model?.[0];
+      return entry.kind === "pi.assistant" && message?.role === "assistant" && heldIn([range], message.timestamp) && blocks(message.content).some((block) => block.type === "text");
+    });
+    if (last) at.set(last.id as number, range);
+  }
+  return at;
+}
+
+function sameItems(a: readonly ItemRef[], b: readonly ItemRef[]): boolean {
+  return a.length === b.length && a.every((item, i) => item.server === b[i].server && item.id === b[i].id && item.title === b[i].title && item.url === b[i].url);
+}
+
+/**
+ * The entry whose offer still takes an answer (Yes, No thanks): the latest offer in the chat, until someone replied to
+ * it. Older offers show as text only, so a long chat is not full of buttons.
+ */
+export function liveOffer(entries: readonly EntryRecord[]): number | undefined {
+  const replied = new Set<number>();
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (entry.kind === CHAT_MESSAGE_KIND) {
+      const to = (entry.data as unknown as ChatMessageData).replyTo?.id;
+      if (to !== undefined) replied.add(to);
+    } else if (entryOffer(entry) !== undefined) return replied.has(entry.id as number) ? undefined : (entry.id as number);
+  }
+  return undefined;
+}
+
+/** A seat's card that ended (ran, failed, declined, expired): its outcome line, not its card. */
+export function endedSeat(action: PendingActionView): boolean {
+  return action.status !== "pending" && action.status !== "running";
+}
+
+/**
+ * Ended cards by the entry they show after: the last one shown at or before they were decided. One decided before the
+ * first entry loaded waits until the older entries are.
+ */
+export function outcomesAfter(entries: readonly EntryRecord[], ended: readonly PendingActionView[]): Map<number, PendingActionView[]> {
+  const after = new Map<number, PendingActionView[]>();
+  if (!ended.length) return after;
+  const timed = entries.flatMap((entry) => {
+    const at = shown(entry) ? sentAt(entry) : undefined;
+    return at === undefined ? [] : [{ id: entry.id as number, at }];
+  });
+  for (const action of ended) {
+    const when = action.decidedAt ?? action.expiresAt;
+    const place = timed.findLast((entry) => entry.at <= when);
+    if (place) after.set(place.id, [...(after.get(place.id) ?? []), action]);
+  }
+  return after;
 }
