@@ -31,6 +31,7 @@ import {
   checkDraft,
   draftLine,
   draftNamed,
+  diffVersions,
   draftsListed,
   FailedChecks,
   publishDraft,
@@ -685,9 +686,8 @@ export function artifactExtension(scope: ChatScope): Extension {
         execute: async (args, api) => {
           const rules = await rulesOf(scope, api);
           const meta = await ownArtifact(scope, args.artifact_id, String(api.conversationId), rules);
-          const to = versionToRead(meta, args.to, rules);
-          // By default the newest version before `to` this conversation sees.
-          const from = args.from === undefined ? versionToRead(meta, undefined, rules, to - 1) : versionToRead(meta, args.from, rules);
+          // Only versions `meta` lists (another chat's page lists only what its chat shows), by name and by default.
+          const { from, to } = diffVersions(meta, args, rules);
           const [before, after] = await Promise.all([readPageSource(scope, meta.id, from), readPageSource(scope, meta.id, to)]);
           if (before === null || after === null) throw new Error(`Artifact ${meta.id} has versions 1 to ${versionToRead(meta, undefined, rules)}.`);
           const patch = createTwoFilesPatch(`v${from}/index.html`, `v${to}/index.html`, before, after, undefined, undefined, { context: 3 });

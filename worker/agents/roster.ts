@@ -86,6 +86,12 @@ export interface AgentTurn extends AgentTurnView {
   unattended?: true;
   /** The person whose message started its chain, also when an agent or pi handed it on: whom its rate limit counts. */
   by?: string;
+  /**
+   * The chat owner's own: on their own message, directly, to one of their own agents run here (not a member's seat) or
+   * pi (AgentTurns.call works it out; no caller says it). Only such a turn hands pi the owner's level and reach
+   * (inputLevel, ownersInput): `byOwner` says only that the turn's agent's owner asked, a member for their own agent.
+   */
+  ownersChain?: true;
 }
 
 /**
@@ -93,7 +99,7 @@ export interface AgentTurn extends AgentTurnView {
  * leaves out what its input already says; absent when it is no entry of the log. Without a `root`, the turn starts a
  * chain of hand-offs of its own.
  */
-export type TurnRequest = Pick<AgentTurn, "agentId" | "hop" | "calledBy" | "byOwner" | "ask" | "session" | "run" | "unattended" | "by"> & {
+export type TurnRequest = Pick<AgentTurn, "agentId" | "hop" | "calledBy" | "byOwner" | "ask" | "session" | "run" | "unattended" | "by" | "ownersChain"> & {
   root?: number;
   askKey?: string;
 };
@@ -218,6 +224,7 @@ type TurnRow = {
   run: string | null;
   unattended: number;
   by_uid: string | null;
+  owners_chain: number;
 };
 
 function entryOf(row: RosterRow): RosterEntry {
@@ -259,6 +266,7 @@ function turnOf(row: TurnRow): AgentTurn {
     ...(row.run !== null && { run: JSON.parse(row.run) as RunRef }),
     ...(row.unattended === 1 && { unattended: true }),
     ...(row.by_uid !== null && { by: row.by_uid }),
+    ...(row.owners_chain === 1 && { ownersChain: true }),
   };
 }
 
@@ -360,6 +368,8 @@ export class ChatRoster {
       by_uid: "TEXT",
       alone: "INTEGER NOT NULL DEFAULT 0",
       held_why: "TEXT",
+      // The chat owner's own turn (AgentTurn.ownersChain); a row from before it is no one's (fail closed).
+      owners_chain: "INTEGER NOT NULL DEFAULT 0",
       // What its model calls came to, a seat's in its owner's object too: its chain's budget counts it (chainTokens).
       tokens: "INTEGER NOT NULL DEFAULT 0",
     });
@@ -521,8 +531,8 @@ export class ChatRoster {
     const row = this.#sql
       .exec(
         `INSERT INTO chat_agent_turns (agent_id, status, hop, called_by, by_owner, root, ask, ask_key, created_at, session, run, unattended, by_uid,
-           started_at, submitted_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
+           started_at, submitted_at, owners_chain)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
         turn.agentId,
         placed ? "running" : "queued",
         turn.hop,
@@ -538,6 +548,7 @@ export class ChatRoster {
         turn.by ?? null,
         now,
         now,
+        turn.ownersChain ? 1 : 0,
       )
       .toArray()[0] as TurnRow;
     return turnOf(row);
