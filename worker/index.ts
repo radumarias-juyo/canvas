@@ -283,6 +283,12 @@ async function route(request: Request, env: Env): Promise<Response> {
 
   // Save notes as agents learn them in a chat, and what servers cover, to try the Memory view without the model. Needs DEV_TOOLS=true.
   if (path === "/api/dev/memory" && method === "POST" && env.DEV_TOOLS === "true") return devMemory(request, directory);
+  // A dream with a scripted answer (the model's JSON), as Dream now runs it: {subject: "pi" | agentId, answer}.
+  if (path === "/api/dev/dream" && method === "POST" && env.DEV_TOOLS === "true") {
+    const body = await readJson<{ subject?: unknown; answer?: unknown }>(request);
+    if (typeof body?.subject !== "string" || typeof body.answer !== "string") return json({ error: "Expected {subject, answer}." }, 400);
+    return json(await directory.dreamNow(body.subject, body.answer));
+  }
   // Add an item to the caller's own feed, to try the feed without runs or a model. Needs DEV_TOOLS=true.
   if (path === "/api/dev/feed" && method === "POST" && env.DEV_TOOLS === "true") {
     const item = await readJson<FeedInput>(request);

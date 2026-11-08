@@ -16,7 +16,10 @@ const MAX_COMPILE_TOKENS = 6_000;
 /** How much of a tool's description and input schema the model reads. */
 const TOOL_CHARS = 600;
 
-const INSTRUCTIONS = `You turn an agent's plain-language instructions into the workflow an app runs for it, step by step. Reply with a JSON array of steps and nothing else.
+/** How the compile request's system prompt starts: the scripted dev model knows the request by it (worker/dev-model.ts). */
+export const COMPILE_PROMPT_START = "You turn an agent's plain-language instructions into the workflow an app runs for it";
+
+const INSTRUCTIONS = `${COMPILE_PROMPT_START}, step by step. Reply with a JSON array of steps and nothing else.
 
 Step kinds (only "work" calls a model; the rest run in code):
 - {"kind":"look","server":S,"tool":T,"input":{...},"as":NAME}: read data with a read-only tool of a server listed below. NAME is the result's name for later steps (letters, digits, underscores).

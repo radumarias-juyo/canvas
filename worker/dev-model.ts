@@ -11,6 +11,8 @@
 // step), where it may follow other text ("@helper /say hi"); with none there, lines that start with /say or /tool
 // in the instructions (an agent's own, the owner's system prompt, a work step's); with none at all, "ok: <the message,
 // cut to 80 characters>". Each model call of a turn takes the next step: those done are its assistant messages so far.
+// The one request it answers on its own is compiling an agent's instructions to a workflow (scriptWorkflow), so a
+// draft edited in dev gets steps that follow its words.
 
 import {
   contentText,
@@ -29,6 +31,7 @@ import { modelKey } from "../shared/models.ts";
 import { excerpt } from "../shared/replies.ts";
 import { mcpToolName } from "./agent/mcp.ts";
 import type { Embedder } from "./agents/funnel.ts";
+import { COMPILE_PROMPT_START } from "./agents/runs/compile.ts";
 
 export const SCRIPT_PROVIDER = "script";
 const SCRIPT_ID = "scripted";
@@ -130,8 +133,52 @@ function messageText(message: Said): string {
   return message.role === "system" ? getSystemMessageText(message) : contentText(message.content);
 }
 
+/** Each server's read-only tools, by name, as the compile request lists them ("- name (read-only): …"). */
+function listedTools(section: string): Map<string, string[]> {
+  const servers = new Map<string, string[]>();
+  let current: string[] | undefined;
+  for (const line of section.split("\n")) {
+    const server = /^Server (\S+):$/.exec(line.trim());
+    if (server) servers.set(server[1], (current = []));
+    const tool = /^- (\S+) \(read-only\)/.exec(line.trim());
+    if (tool && current) current.push(tool[1]);
+  }
+  return servers;
+}
+
+/** A name as a whole word of a text: not part of a longer name. */
+const namesWord = (text: string, name: string) => new RegExp(`(?<![\\w-])${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w-])`, "i").test(text);
+
+/**
+ * The scripted answer to a compile request (worker/agents/runs/compile.ts): steps from the instructions' words, as a JSON
+ * array. A look step for each listed server the instructions name (its first read-only tool), one work step with the
+ * numbered steps that name no server (or the whole instructions), and a tell: by a notification when the instructions
+ * say "notif", else in the chat. Null for a request it cannot read.
+ */
+export function scriptWorkflow(request: string): string | null {
+  const section = (tag: string) => new RegExp(`<${tag}>\\n([\\s\\S]*?)\\n</${tag}>`).exec(request)?.[1];
+  const instructions = section("instructions");
+  const tools = section("tools");
+  if (instructions === undefined || tools === undefined) return null;
+  const servers = listedTools(tools);
+  const looks = [...servers]
+    .filter(([server, names]) => names.length && namesWord(instructions, server))
+    .map(([server, names]) => ({ kind: "look", server, tool: names[0], input: {} }));
+  const numbered = instructions.split("\n").flatMap((line) => /^\s*\d+[.)]\s+(.*)$/.exec(line)?.[1] ?? []);
+  const work = numbered.filter((line) => ![...servers.keys()].some((server) => namesWord(line, server)));
+  const prompt = (work.length ? work.join("\n") : instructions).trim().slice(0, 4_000) || "Sum up what the steps before found.";
+  const via = /notif/i.test(instructions) ? "notify" : "chat";
+  return JSON.stringify([...looks, { kind: "work", prompt }, { kind: "tell", to: ["owner"], via }]);
+}
+
 /** The scripted model's answer to a conversation, as a model message. */
 export function scriptReply(messages: readonly Message[]): AssistantMessage {
+  const system = messages.find((message): message is Said => message.role === "system");
+  const user = messages.find((message): message is Said => message.role === "user");
+  if (system && user && messageText(system).startsWith(COMPILE_PROMPT_START)) {
+    const steps = scriptWorkflow(messageText(user));
+    if (steps) return fauxAssistantMessage(steps);
+  }
   // The turn's message is the last user message: an agent's catch-up on the chat, before it, is only context.
   const from = messages.findLastIndex((message) => message.role === "user");
   const text = from >= 0 ? messageText(messages[from] as Said) : "";

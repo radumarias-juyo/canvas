@@ -2,7 +2,9 @@ import { createModels, fauxAssistantMessage, fauxToolCall, type Message } from "
 import { describe, expect, it } from "vitest";
 import { assistantText as said } from "../worker/agents/turns.ts";
 import { agentProfile, cosine, INTEREST_THRESHOLD } from "../worker/agents/funnel.ts";
-import { scriptEmbedder, scriptGapMs, scriptModel, scriptOn, scriptPauseMs, scriptReply, scriptSteps } from "../worker/dev-model.ts";
+import { scriptEmbedder, scriptGapMs, scriptModel, scriptOn, scriptPauseMs, scriptReply, scriptSteps, scriptWorkflow } from "../worker/dev-model.ts";
+import { compilePrompt, compileWorkflow, type ServerTools } from "../worker/agents/runs/compile.ts";
+import type { AgentDefinition } from "../shared/agents.ts";
 
 const user = (text: string): Message => ({ role: "user", content: text, timestamp: 0 });
 const system = (text: string, sections?: Record<string, string>): Message => ({ role: "system", content: text, ...(sections && { sections }), timestamp: 0 });
@@ -113,5 +115,62 @@ describe("the scripted dev model", () => {
     expect(scriptPauseMs({ DEV_MODEL: "script", DEV_TOOLS: "true", DEV_PAUSE_MS: "soon" })).toBeUndefined();
     expect(scriptGapMs({ DEV_MODEL: "script", DEV_TOOLS: "true", DEV_GAP_MS: "1000" })).toBe(1000);
     expect(scriptGapMs({ DEV_MODEL: "", DEV_TOOLS: "true", DEV_GAP_MS: "1000" })).toBeUndefined();
+  });
+});
+
+describe("the scripted dev model compiles a workflow", () => {
+  const agent: AgentDefinition = {
+    id: "a1b2c3d4e5f60718",
+    name: "brief",
+    avatar: "br",
+    color: "blue",
+    job: "Where the deals stand",
+    instructions: "1. Every weekday at 07:00, look at the deals in crm.\n2. Work out which deals moved.\n3. Say why they moved.\n\nTells: You, in the chat.",
+    servers: ["crm", "vault"],
+    autonomy: 1,
+    origin: "agent",
+    enabled: false,
+    version: 1,
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const listed: ServerTools[] = [
+    {
+      server: "crm",
+      tools: [
+        { name: "update_deal", description: "Move a deal.", inputSchema: { type: "object" } },
+        { name: "list_deals", description: "List deals.", inputSchema: { type: "object" }, annotations: { readOnlyHint: true } },
+      ],
+    },
+    { server: "vault", tools: [{ name: "read_notes", description: "Notes.", annotations: { readOnlyHint: true } }] },
+  ];
+
+  it("answers the compile request with steps from the instructions' words, which the app takes as the agent's workflow", async () => {
+    const { provider, model } = scriptModel();
+    const models = createModels();
+    models.setProvider(provider);
+    const { workflow } = await compileWorkflow(models, model, agent, listed);
+    // A look at each server the words name (its first read-only tool), the work the other steps say, and a tell.
+    expect(workflow).toEqual([
+      { kind: "look", server: "crm", tool: "list_deals", input: {} },
+      { kind: "work", prompt: "Work out which deals moved.\nSay why they moved." },
+      { kind: "tell", to: ["owner"], via: "chat" },
+    ]);
+    // Words edited: the steps follow them.
+    const edited = { ...agent, instructions: "1. Read the notes in vault.\n2. Sum them up.\n\nTells: You, by a notification." };
+    expect((await compileWorkflow(models, model, edited, listed)).workflow).toEqual([
+      { kind: "look", server: "vault", tool: "read_notes", input: {} },
+      { kind: "work", prompt: "Sum them up." },
+      { kind: "tell", to: ["owner"], via: "notify" },
+    ]);
+  });
+
+  it("answers only the compile request so: any other conversation goes by its script", () => {
+    expect(scriptWorkflow("no sections here")).toBeNull();
+    expect(said(scriptReply([system("You are pi."), user(compilePrompt(agent, listed))]))).toMatch(/^ok: /);
+    expect(JSON.parse(scriptWorkflow(compilePrompt({ ...agent, instructions: "Just say hi." }, listed))!)).toEqual([
+      { kind: "work", prompt: "Just say hi." },
+      { kind: "tell", to: ["owner"], via: "chat" },
+    ]);
   });
 });

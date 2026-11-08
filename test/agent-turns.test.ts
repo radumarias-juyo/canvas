@@ -17,6 +17,7 @@ import {
   piPlace,
   readsAlone,
   runsApart,
+  readsFiles,
   runTools,
   CatchUp,
   handOffs,
@@ -577,6 +578,47 @@ describe("allowedTools", () => {
     expect(allowedTools(["some_new_tool"], mcp, agent, true, signsIn)).toEqual(["some_new_tool"]);
     expect(allowedTools(["run_python", "crm__list_deals"], mcp, { servers: [] }, true, signsIn)).toEqual(["run_python"]);
     expect(allowedTools([], mcp, agent, false, signsIn)).toEqual([]);
+  });
+
+  describe("its owner's private files (AgentDefinition.files)", () => {
+    const fileTools = ["files_list", "files_read", "files_write", "run_python", "run_bash"];
+    const withFiles = [...tools, ...fileTools.filter((name) => !tools.includes(name))];
+    const files = (allowed: readonly string[]) => allowed.filter((name) => fileTools.includes(name));
+
+    it("lets a turn its owner asked for use them by default, and never once they are off for the agent", () => {
+      expect(files(allowedTools(withFiles, mcp, agent, true, signsIn))).toEqual(["run_python", "files_read", "files_list", "files_write", "run_bash"]);
+      const off = allowedTools(withFiles, mcp, { ...agent, files: { own: false, shared: false } }, true, signsIn);
+      expect(files(off)).toEqual([]);
+      // Everything else its owner's turn has stays.
+      expect(off).toContain("artifact_write");
+      expect(off).toContain("crm__update_deal");
+      // A member's agent's own turn in its seat is the same call (byOwner, never alone).
+      expect(files(allowedTools(withFiles, mcp, { files: { own: false, shared: false } }, true, signsIn, { alone: false }))).toEqual([]);
+    });
+
+    it("lets anyone else's turn read them only when the owner shares them in shared chats, and never write or run code", () => {
+      expect(files(allowedTools(withFiles, mcp, agent, false, signsIn))).toEqual([]);
+      const shared = allowedTools(withFiles, mcp, { ...agent, files: { own: true, shared: true } }, false, signsIn);
+      expect(files(shared)).toEqual(["files_read", "files_list"]);
+      // A turn nobody asked for (speaking up) never reads them, shared or not.
+      expect(files(allowedTools(withFiles, mcp, { ...agent, files: { own: true, shared: true } }, false, signsIn, { unprompted: true }))).toEqual([]);
+      // Shared needs own: a definition that says otherwise reads as not shared.
+      expect(files(allowedTools(withFiles, mcp, { ...agent, files: { own: false, shared: true } }, false, signsIn))).toEqual([]);
+    });
+
+    it("tells their names (the prompt's files list) only to a request that may read them", () => {
+      const offered = (names: readonly string[]) => names.map((name) => ({ name }));
+      expect(readsFiles(offered(allowedTools(withFiles, mcp, agent, true, signsIn)))).toBe(true);
+      expect(readsFiles(offered(allowedTools(withFiles, mcp, { files: { own: false, shared: false } }, true, signsIn)))).toBe(false);
+      expect(readsFiles(offered(allowedTools(withFiles, mcp, agent, false, signsIn)))).toBe(false);
+      expect(readsFiles(offered(allowedTools(withFiles, mcp, { files: { own: true, shared: true } }, false, signsIn)))).toBe(true);
+    });
+
+    it("never gives them to a run or to the turn a Yes to an offer starts, whatever the setting", () => {
+      const sharing = { ...agent, files: { own: true, shared: true } };
+      expect(files(runTools(withFiles, mcp, sharing))).toEqual([]);
+      expect(files(draftTools(withFiles, mcp, sharing))).toEqual([]);
+    });
   });
 });
 

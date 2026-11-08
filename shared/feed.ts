@@ -56,15 +56,17 @@ export interface FollowView {
  *   page_version  a page they follow has a new version
  *   page_chat     a page they follow has a chat now, which they may join
  *   run           one of their own agents' runs ended: sent, not today, failed, or waiting for a sign-in
+ *   lesson        one of their agents, or pi, learned something overnight that waits for their confirm (shared/dream.ts)
  */
-export type FeedKind = "tag" | "agent_post" | "approval" | "assumption" | "question" | "page_version" | "page_chat" | "run";
+export type FeedKind = "tag" | "agent_post" | "approval" | "assumption" | "question" | "page_version" | "page_chat" | "run" | "lesson";
 
 /** Where opening an item goes: a chat, a page (a version of it), a page's chat (joined on the way), an agent's page. */
 export type FeedOpen =
   | { to: "chat"; chatId: string }
   | { to: "page"; artifactId: string }
   | { to: "discuss"; artifactId: string }
-  | { to: "agent"; agentId: string; chatId?: string; tab?: string };
+  | { to: "agent"; agentId: string; chatId?: string; tab?: string }
+  | { to: "memory" };
 
 /** Who an item comes from: a person by name, or an agent, shown with its badge. */
 export interface FeedFrom {
@@ -153,7 +155,7 @@ export interface FeedList {
  * The kinds that always wait on the person, beside items marked so (a run waiting for a sign-in): a question until they
  * write in its chat again, the others until what they ask is done (an approval decided, an agent's guesses confirmed).
  */
-export const NEEDS_YOU: Partial<Record<FeedKind, true | "reply">> = { approval: true, assumption: true, question: "reply" };
+export const NEEDS_YOU: Partial<Record<FeedKind, true | "reply">> = { approval: true, assumption: true, question: "reply", lesson: true };
 
 /** The most items one feed keeps; the oldest go first, read ones before unread. */
 export const MAX_FEED_ITEMS = 500;
@@ -175,6 +177,8 @@ export function feedPath(open: FeedOpen): string {
       const query = new URLSearchParams({ ...(open.tab && { tab: open.tab }), ...(open.chatId && { chat: open.chatId }) }).toString();
       return `/agents/${open.agentId}${query ? `?${query}` : ""}`;
     }
+    case "memory":
+      return "/memory";
   }
 }
 
