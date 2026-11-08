@@ -33,7 +33,8 @@ import {
   type ReplyQuote,
 } from "../../shared/protocol.ts";
 import { textOf } from "../../shared/canonical.ts";
-import { AGENT_NAME, AGENT_TOKEN, type Mention } from "../../shared/mentions.ts";
+import type { MakeKind } from "../../shared/make.ts";
+import { AGENT_NAME, AGENT_TOKEN, summonsAgent, type Mention } from "../../shared/mentions.ts";
 import { replyQuote } from "../../shared/replies.ts";
 import { MessageActions } from "./MessageActions.tsx";
 import { Compact, useCompact, useSwipeReveal } from "./gestures.ts";
@@ -45,6 +46,7 @@ import { MenuButton } from "../layout.tsx";
 import { AutoPicked, ToolsPicked } from "./AutoPick.tsx";
 import { ChatCost, PromptCost } from "./Cost.tsx";
 import { ContextMeter } from "./Context.tsx";
+import { AllowanceRing } from "./Allowance.tsx";
 import { ChatPromptButton } from "../SystemPrompt.tsx";
 import { SharePanel } from "./SharePanel.tsx";
 import { promptSpend, totalTime } from "./spend.ts";
@@ -54,6 +56,7 @@ import { queueLines } from "./agentLines.ts";
 import { Fold, FoldScope, ItemChips } from "./Fold.tsx";
 import { workingPhrase } from "./phrase.ts";
 import { ComposerMore } from "./ComposerMore.tsx";
+import { MakePicker } from "./MakePicker.tsx";
 import { Dictation } from "./Dictation.tsx";
 import { ownMessages, useHistory } from "./history.ts";
 import { AgentDraft } from "./AgentDraft.tsx";
@@ -116,6 +119,8 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
   const working = state.busy || agents.some((agent) => agent.busy || agent.queued);
   const chatReactions = useMemo(() => ({ uid, react }), [uid, react]);
   const [draft, setDraft] = useState("");
+  // What the next message should come to (MakePicker): Auto until the viewer picks, and again once it is sent.
+  const [make, setMake] = useState<MakeKind>("auto");
   const [sharing, setSharing] = useState(false);
   // The agent whose window its owner has open (AgentWindow), by id.
   const [windowOf, setWindowOf] = useState<string | null>(null);
@@ -237,10 +242,12 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
     const named = mentions.take(text);
     const replyTo = replying?.id;
     if (attachments.pending.length === 0) {
-      if (!prompt(text, undefined, named, replyTo)) return;
-    } else if (!(await attachments.send((inputs) => prompt(text, inputs, named, replyTo)))) return;
+      if (!prompt(text, undefined, named, replyTo, make)) return;
+    } else if (!(await attachments.send((inputs) => prompt(text, inputs, named, replyTo, make)))) return;
     following.current = true;
     setDraft("");
+    // A choice is for one message: the next goes back to Auto.
+    setMake("auto");
     setReplying(null);
     mentions.clear();
     recalling.reset();
@@ -281,17 +288,21 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
     void submit();
   };
 
-  // "Make an agent" in the composer's menu: the ask starts the message, and the viewer says what the agent is for. pi
-  // drafts it (agent_propose), and its card shows here.
-  const makeAgent = useCallback(() => {
-    const start = `${shared ? `${AGENT_TOKEN} ` : ""}Make me an agent that `;
-    setDraft((current) => (current.trim() ? `${start}${current.trim()}` : start));
-    requestAnimationFrame(() => {
-      const el = input.current;
-      el?.focus();
-      el?.setSelectionRange(el.value.length, el.value.length);
-    });
-  }, [shared]);
+  // What the next message should come to (shared/make.ts): Auto, or an answer, a page, an agent (pi drafts it with
+  // agent_propose, and its card shows here) or a tool. In a shared chat a choice other than Auto calls pi, which only
+  // answers a message that calls it: the message starts with "@pi". Then the viewer says what they want.
+  const pickMake = useCallback(
+    (kind: MakeKind) => {
+      setMake(kind);
+      if (kind !== "auto" && shared) setDraft((current) => (summonsAgent(current) ? current : `${AGENT_TOKEN} ${current.trimStart()}`));
+      requestAnimationFrame(() => {
+        const el = input.current;
+        el?.focus();
+        el?.setSelectionRange(el.value.length, el.value.length);
+      });
+    },
+    [shared],
+  );
 
   // Dictated words join the draft with a space between them.
   // Stable, so the memoized Dictation skips the re-render on every streamed token.
@@ -614,8 +625,8 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
                   history={history}
                   onRecall={recalling.recall}
                   compact={compact}
-                  onMakeAgent={makeAgent}
                 />
+                <MakePicker value={make} onChange={pickMake} compact={compact} />
                 {/* The model and the context ring at the right. Stop and the transcript show a run; only an upload needs the spinner. */}
                 <div className="composer-model">
                   {attachments.sending && <span className="spinner" aria-hidden="true" />}
@@ -628,6 +639,7 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
                     onChange={setModel}
                   />
                   <ContextMeter entries={state.entries} model={state.model} />
+                  <AllowanceRing working={working} />
                 </div>
               </div>
             </form>

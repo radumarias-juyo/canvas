@@ -26,21 +26,40 @@ import { tapStream } from "./streams.ts";
 import type { ModelCache } from "./storage/model-cache.ts";
 
 /**
- * The Workers AI models the picker offers, best first. Workers AI runs on Cloudflare, within the account's free daily
- * allowance, and needs no provider key. Picked for building pages with tools: tool calling, a context of 128k tokens
- * or more (the system prompt carries the page runtime), and room to write a whole HTML page in one reply. A model
- * pi-ai no longer lists is left out.
+ * The Workers AI models the picker (and the agent editor) offers, best first. Workers AI runs on Cloudflare, within the
+ * account's free daily allowance, and needs no provider key. Picked for building pages with tools: tool calling, a
+ * context of 128k tokens or more (the system prompt carries the page runtime), and room to write a whole HTML page in
+ * one reply. A model pi-ai no longer lists is left out. Reasoning models with tool calling left out on purpose:
+ * Qwen3 30B A3B (32k context) and QwQ 32B (24k, no tool calling), too small for the system prompt; GLM 5.2 and DeepSeek
+ * V4 Flash (0731), each replaced by a newer one here; DeepSeek R1 Distill Qwen 32B (no tool calling). Their efforts are
+ * pi-ai's Workers AI catalog's, sent as `reasoning_effort` (gpt-oss: low, medium, high; Kimi K2.6: none or high).
  */
 const WORKERS_AI_MODELS = [
   "@cf/moonshotai/kimi-k2.7-code",
   "@cf/zai-org/glm-5.3",
   "@cf/deepseek-ai/deepseek-v4-pro-0813",
+  "@cf/moonshotai/kimi-k2.6",
   "@cf/qwen/qwen3.8-27b",
+  "@cf/nvidia/nemotron-3-120b-a12b",
   "@cf/zai-org/glm-5.3-flash",
   "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
   "@cf/openai/gpt-oss-120b",
+  "@cf/openai/gpt-oss-20b",
+  "@cf/zai-org/glm-4.7-flash",
   "@cf/google/gemma-4-26b-a4b-it",
 ];
+
+/**
+ * The model background jobs run on when the deployment names none (DREAM_MODEL): small, cheap, tool calling, and on
+ * Workers AI, so it needs no provider key. The interactive small jobs keep their own (a System One classifier for the
+ * routers and pickers, an embeddings model for interest); an agent's speak-up PASS is a turn on the agent's own model.
+ */
+export const DEFAULT_BACKGROUND_MODEL = "@cf/openai/gpt-oss-20b";
+
+/** The model a background job runs on: the deployment's (trimmed), else DEFAULT_BACKGROUND_MODEL. */
+export function internalModel(configured: string | undefined, fallback = DEFAULT_BACKGROUND_MODEL): string {
+  return configured?.trim() || fallback;
+}
 
 const PROVIDER_ORDER = Object.keys(PROVIDERS) as ProviderId[];
 
