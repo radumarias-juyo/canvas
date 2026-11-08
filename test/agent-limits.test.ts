@@ -247,13 +247,23 @@ describe("levels in a chat", () => {
 
   it("a hand-off to pi goes no further than the turn that handed it", () => {
     const radu = { name: "Radu", uid: OWNER };
-    expect(inputLevel(handOff(1), OWNER, () => ({ byOwner: true, calledBy: radu })).level).toBe(4);
+    expect(inputLevel(handOff(1), OWNER, () => ({ byOwner: true, calledBy: radu, ownersChain: true })).level).toBe(4);
     expect(inputLevel(handOff(1), OWNER, () => ({ byOwner: false, calledBy: { name: "Mia" } })).level).toBe(2);
     // A run's chain never does, whoever's it is; nor a turn the chat no longer has.
-    expect(inputLevel(handOff(1), OWNER, () => ({ byOwner: true, calledBy: radu, unattended: true })).level).toBe(2);
+    expect(inputLevel(handOff(1), OWNER, () => ({ byOwner: true, calledBy: radu, unattended: true, ownersChain: true })).level).toBe(2);
     // Nor a turn the router picked the agent for, though on the owner's message.
-    expect(inputLevel(handOff(1), OWNER, () => ({ byOwner: true, calledBy: { ...radu, routed: true } })).level).toBe(2);
+    expect(inputLevel(handOff(1), OWNER, () => ({ byOwner: true, calledBy: { ...radu, routed: true }, ownersChain: true })).level).toBe(2);
     expect(inputLevel(handOff(1), OWNER, () => null).level).toBe(2);
+  });
+
+  it("a member's own agent hands pi no more than a member's turn, on her own message too", () => {
+    // Mia's own message to her own agent (a seat): its turn is byOwner (Mia owns it), never the chat owner's.
+    const mias = { byOwner: true, calledBy: { name: "Mia", uid: "mia-uid" } };
+    expect(inputLevel(handOff(1), OWNER, () => mias)).toEqual({ level: 2, because: "handed over by atlas" });
+    // Marked the chat owner's by a bug or an old row: still not, for a turn someone else asked.
+    expect(inputLevel(handOff(1), OWNER, () => ({ ...mias, ownersChain: true })).level).toBe(2);
+    // A row from before the mark reads as no one's: fail closed.
+    expect(inputLevel(handOff(1), OWNER, () => ({ byOwner: true, calledBy: { name: "Radu", uid: OWNER } })).level).toBe(2);
   });
 
   it("an agent runs on its owner's own turn and proposes on any other", () => {
