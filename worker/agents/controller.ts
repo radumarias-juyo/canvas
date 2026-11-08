@@ -9,6 +9,7 @@ import { PI_TURN, sessionOf, type AgentTurn, type ChatRoster, type PostedPage, t
 import { isPass } from "./funnel.ts";
 import type { SeatBatch, SeatLink, SeatResult } from "./seats/link.ts";
 import { chatTraces } from "../chat-traces.ts";
+import { withoutYes } from "../../shared/offers.ts";
 import {
   askedApart,
   askOf,
@@ -167,7 +168,10 @@ export class AgentTurns {
       const byOwner = caller.byOwner && !caller.unattended && (caller.calledBy.uid === undefined || caller.calledBy.uid === ownerUid);
       const ask = typeof caller.ask === "function" ? caller.ask(byOwner) : caller.ask;
       const by = caller.by ?? caller.calledBy.uid;
-      const request = { ...caller, agentId, byOwner, ask, hop: caller.hop ?? 0, root, ...(by !== undefined && { by }) };
+      // A Yes to an offer reads every server of the agent's (draftTools): only its owner's is one. Anyone else's (a
+      // member's agent's offer the chat's owner answered) is a turn as any other they give it, which only reads.
+      const calledBy = caller.calledBy.drafts && caller.calledBy.uid !== ownerUid ? withoutYes(caller.calledBy) : caller.calledBy;
+      const request = { ...caller, calledBy, agentId, byOwner, ask, hop: caller.hop ?? 0, root, ...(by !== undefined && { by }) };
       const turn = this.#host.roster.enqueue(request, pi && piPlaced);
       // What pi's answer to it costs counts from now (its tokens are read as it ends).
       if (pi && piPlaced) this.#host.piTokens?.();

@@ -43,6 +43,11 @@ export interface SeatTurn extends ChatTurnData {
   byOwner: boolean;
   /** In a chain no person started (a run's hand-over): it only reads, whatever `byOwner` says. */
   unattended?: true;
+  /**
+   * The servers the room's owner lets agents use there (ChatAgentSettings.servers), as the turn starts: the seat's agent
+   * keeps to them as the room's own agents do (inChatServers, seatCaller). Every one of its own when absent.
+   */
+  servers?: string[];
 }
 
 /** How a seat's turn ended, with what the app recorded of it (sources only from a fork): the room builds the reply from it. */
@@ -55,7 +60,7 @@ export interface SeatLink {
    * once its input is in, with the newest log entry the seat has taken (its delivered seq). Giving one twice places it
    * once. The link adds its owner's name and the room's kind.
    */
-  give(batch: SeatBatch | null, turn: Omit<SeatTurn, "ownerName" | "kind">): Promise<number>;
+  give(batch: SeatBatch | null, turn: Omit<SeatTurn, "ownerName" | "kind" | "servers">): Promise<number>;
   /** Stop a turn the seat runs. */
   abort(turn: number): Promise<void>;
   /**

@@ -16,6 +16,7 @@ import type { Caller, GateCall } from "../limits/gate.ts";
 import { seatCaller } from "../limits/levels.ts";
 import type { RoomLink, RoomRef, SeatBatch, SeatResult, SeatTurn } from "./link.ts";
 import { chatAgentName } from "../../chat-name.ts";
+import { withoutYes } from "../../../shared/offers.ts";
 
 /** What a seat needs of the object it is in: its owner's definitions, pi's sessions there, and its rooms. */
 export interface SeatHost {
@@ -339,9 +340,12 @@ export class AgentSeats {
     await Promise.all(stale.map((row) => this.#starting.get(turnKey(ref, row.turn))));
     const delivered = batch ? await this.deliver(ref, agentId, batch) : seat.delivered;
     const byOwner = turn.byOwner && !turn.unattended && turn.hop === 0 && turn.calledBy.uid === this.#host.uid && !turn.calledBy.agentId;
-    const checked: SeatTurn = { ...turn, byOwner };
+    // A Yes to an offer reads every server of the agent's (draftTools), its owner's private ones too: only theirs is one,
+    // checked here against the asker. Anyone else's reads as any turn they give it.
+    const calledBy = turn.calledBy.drafts && turn.calledBy.uid !== this.#host.uid ? withoutYes(turn.calledBy) : turn.calledBy;
+    const checked: SeatTurn = { ...turn, byOwner, calledBy };
     // A turn that may read its owner's private servers runs apart, in a fork of the seat's session: their own (all of
-    // their tools), and anyone's Yes to an offer (draftTools reads every server of the agent's). Only its posted reply
+    // their tools), and their Yes to an offer (draftTools reads every server of the agent's). Only its posted reply
     // reaches the seat's session, which everyone else's turns read. A seat is never alone with its owner.
     const forked = runsApart(checked, false);
     const session = forked ? await this.#host.fork(seat.session) : seat.session;
