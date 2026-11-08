@@ -29,7 +29,9 @@ import type { SandboxTarget } from "./sandbox-names.ts";
 import { isToolResult, literalPath, MAX_DRAFTS, normalisePath, TOOL_RESULTS, type FileEntry, type ToolResults, type UserFiles } from "../storage/index.ts";
 import {
   checkDraft,
+  createReachOf,
   draftLine,
+  ownDraft,
   draftNamed,
   diffVersions,
   draftsListed,
@@ -43,6 +45,7 @@ import {
   type PublishScope,
   type SessionRules,
 } from "./publish.ts";
+import { changeRefusal, draftRefusal } from "./create-reach.ts";
 import { checkFolders, FileRefError, MAX_SANDBOX_BYTES, outputPaths, resolveFile, resolveRef, sandboxLayout, saveFiles } from "./file-refs.ts";
 import { clip, MAX_TOOL_TEXT, text } from "./output.ts";
 import { pagePart } from "./page-part.ts";
@@ -515,6 +518,9 @@ export function artifactExtension(scope: ChatScope): Extension {
                 `rather than writing the whole page again (${DRAFTS_TOOL} with its draft_id shows the page). Only a page that is not that one goes as html.`,
             );
           }
+          // On someone else's ask, no page the chat has changes (CreateReach): said before anything else about the page.
+          const changing = args.artifact_id !== undefined && changeRefusal(await createReachOf(scope, String(api.conversationId)), "Not saved:");
+          if (changing) throw new Error(changing);
           // Opening the drafts (memoised) while the artifact and the conversation's rules are read, rather than after.
           const [rules] = await Promise.all([args.artifact_id === undefined ? undefined : rulesOf(scope, api), scope.drafts()]);
           const artifact = args.artifact_id === undefined ? undefined : await chatArtifact(scope, args.artifact_id, rules);
@@ -635,10 +641,13 @@ export function artifactExtension(scope: ChatScope): Extension {
         parameters: Type.Object({ draft_id: Type.Optional(Type.String()), part: pagePartParameter }),
         replay: "safe",
         execute: async (args, api) => {
-          // Not the drafts another conversation apart from the chat saved: they are not the chat's yet.
-          const [drafts, rules] = await Promise.all([scope.drafts(), rulesOf(scope, api)]);
+          // Not the drafts another conversation apart from the chat saved: they are not the chat's yet. On someone else's
+          // ask, only this turn's or run's own (CreateReach.drafts): an earlier one's page may hold what only the owner sees.
+          const [drafts, rules, reach] = await Promise.all([scope.drafts(), rulesOf(scope, api), createReachOf(scope, String(api.conversationId))]);
+          if (reach && args.draft_id !== undefined && !ownDraft(scope, reach, args.draft_id)) throw new Error(draftRefusal(args.draft_id, "Not shown:"));
           if (args.draft_id === undefined) {
-            const list = await draftsListed(drafts, rules);
+            const listed = await draftsListed(drafts, rules);
+            const list = reach ? listed.filter((draft) => ownDraft(scope, reach, draft.id)) : listed;
             const lines = list.length ? `${plural(list.length, "draft")}, newest first:\n${list.map(draftLine).join("\n")}` : "This chat has no drafts.";
             return { output: text(lines) };
           }

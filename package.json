@@ -46,6 +46,7 @@
     "@tiptap/react": "3.32.0",
     "agents": "0.31.0",
     "diff": "8.0.4",
+    "docx": "9.13.0",
     "highlight.js": "11.11.1",
     "isomorphic-git": "1.44.8",
     "react": "^19.3.1",
