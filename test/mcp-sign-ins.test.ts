@@ -3,7 +3,7 @@ import type { SignInNotice } from "../shared/sign-ins.ts";
 import { grantMs, KEEP_ALIVE_MS, WARN_AHEAD_MS, warnAt, type SignInCheck } from "../worker/mcp/background.ts";
 import { McpOAuthClient } from "../worker/mcp/oauth.ts";
 import { openAuthRecord, sealAuthRecord } from "../worker/mcp/sealed.ts";
-import { McpSignIns, RECENT_REFRESH_MS } from "../worker/mcp/sign-ins.ts";
+import { FORGET_MISSING_MS, McpSignIns, RECENT_REFRESH_MS } from "../worker/mcp/sign-ins.ts";
 import { deriveUserAesKey } from "../worker/storage/keys.ts";
 import { MASTER_KEY, memorySql } from "./fakes.ts";
 
@@ -19,9 +19,9 @@ const CLIENT = { client_id: "c1", redirect_uris: ["https://app.example/api/mcp/o
 const key = () => deriveUserAesKey(MASTER_KEY, "MCP_TOKENS_KEY", "pi-artifacts/mcp-tokens/v1", "ada");
 
 /** A user's sign-ins over an in-memory database, with a clock, a scripted check, and everything they tell recorded. */
-function setup(options: { sql?: ReturnType<typeof memorySql>; check?: SignInCheck; grantDays?: string } = {}) {
+function setup(options: { sql?: ReturnType<typeof memorySql>; check?: SignInCheck; grantDays?: string; servers?: object[]; now?: number } = {}) {
   const sql = options.sql ?? memorySql();
-  let now = T0;
+  let now = options.now ?? T0;
   const told: SignInNotice[] = [];
   const pushed: string[] = [];
   const chats: string[] = [];
@@ -32,7 +32,7 @@ function setup(options: { sql?: ReturnType<typeof memorySql>; check?: SignInChec
   let result: SignInCheck = options.check ?? "ok";
   const signIns = new McpSignIns({
     sql,
-    env: { MCP_SERVERS: SERVERS, MCP_GRANT_DAYS: options.grantDays ?? "30" },
+    env: { MCP_SERVERS: options.servers ?? SERVERS, MCP_GRANT_DAYS: options.grantDays ?? "30" },
     key,
     changed: () => {},
     notify: async (notice, push) => {
@@ -151,11 +151,51 @@ describe("sealed sign-in records", () => {
     expect(await s.signIns.check(["Portal"])).toEqual({ Portal: "needs_sign_in" });
   });
 
-  it("forgets sign-ins to servers no longer configured", () => {
-    const sql = memorySql();
-    sql.exec("CREATE TABLE mcp_auth (server TEXT PRIMARY KEY, data TEXT NOT NULL)");
-    sql.exec("INSERT INTO mcp_auth (server, data) VALUES (?, ?)", "Gone", "{}");
-    expect(setup({ sql }).row("Gone")).toBeUndefined();
+  it("keeps every sign-in through a wake with no server configured, and they work again once it is back", async () => {
+    const s = setup();
+    await signIn(s, T0);
+    s.signIns.setRunServers("chat1", ["Portal"]);
+    await s.signIns.needed("Portal", { chatId: "chat2" });
+    const counts = () => ["mcp_auth", "mcp_known", "mcp_run_servers", "mcp_waiting", "mcp_notices"].map((table) => s.sql.exec(`SELECT COUNT(*) AS n FROM ${table}`).toArray()[0].n);
+    const before = counts();
+    // A deploy without its list of servers (PI_MCP_SERVERS unset), for months: nothing is forgotten, nothing is listed.
+    const bare = setup({ sql: s.sql, servers: [], now: T0 + 4 * FORGET_MISSING_MS });
+    expect(counts()).toEqual(before);
+    expect(bare.signIns.list()).toEqual([]);
+    expect(bare.signIns.known()).toEqual([]);
+    // Listed again: the same sign-in, with its tokens, its runs and what waits.
+    const back = setup({ sql: s.sql, now: T0 + 4 * FORGET_MISSING_MS });
+    expect(back.signIns.known()).toEqual(["Portal"]);
+    expect(back.signIns.list()).toMatchObject([{ server: "Portal", signedIn: true, usedByRuns: true }]);
+    expect((await back.signIns.record("Portal")).tokens).toEqual(TOKENS);
+  });
+
+  it("keeps a renamed server's rows a while, unread, and forgets them only once missing long enough", async () => {
+    const s = setup();
+    await signIn(s, T0);
+    const renamed = [{ name: "Portal2", url: "https://portal.example/mcp", auth: "oauth" }];
+    // The rename's first wake: Portal's rows are kept, and nothing of them is read under the new list.
+    const first = setup({ sql: s.sql, servers: renamed, now: T0 + 1000 });
+    expect(s.row("Portal")).toBeDefined();
+    expect(first.signIns.list()).toEqual([{ server: "Portal2", signedIn: false, usedByRuns: false, link: "/api/mcp/sign-in/Portal2" }]);
+    expect(first.signIns.known()).toEqual([]);
+    // Still missing just short of the limit: kept.
+    setup({ sql: s.sql, servers: renamed, now: T0 + 1000 + FORGET_MISSING_MS - 1 });
+    expect(s.row("Portal")).toBeDefined();
+    // Missing that long: forgotten, tokens included.
+    setup({ sql: s.sql, servers: renamed, now: T0 + 1000 + FORGET_MISSING_MS });
+    expect(s.row("Portal")).toBeUndefined();
+    expect(s.sql.exec("SELECT COUNT(*) AS n FROM mcp_known").toArray()[0].n).toBe(0);
+  });
+
+  it("starts the clock again for a server that came back before its rows were forgotten", async () => {
+    const s = setup();
+    await signIn(s, T0);
+    const renamed = [{ name: "Portal2", url: "https://portal.example/mcp", auth: "oauth" }];
+    setup({ sql: s.sql, servers: renamed, now: T0 });
+    setup({ sql: s.sql, now: T0 + FORGET_MISSING_MS / 2 });
+    setup({ sql: s.sql, servers: renamed, now: T0 + FORGET_MISSING_MS });
+    expect(s.row("Portal")).toBeDefined();
   });
 });
 
