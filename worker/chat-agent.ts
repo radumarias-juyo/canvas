@@ -3547,16 +3547,16 @@ export class ChatAgent extends DurableObject<Env> {
     }
   }
 
-  /**
-   * The pause check: once the chat was quiet for its pause after a person's message, the agents past the gates whose job
-   * is close to the conversation may speak up (worker/agents/speak-up.ts). While pi or an agent works, it waits again.
-   */
   /** pi or an agent just finished: a pause waiting counts its quiet from now, not from the person's message. */
   #quietFrom(at: number): void {
     const kept = this.ctx.storage.kv.get<PauseState>(PAUSE_KEY);
     if (kept && kept.after < at) this.ctx.storage.kv.put(PAUSE_KEY, { ...kept, after: at } satisfies PauseState);
   }
 
+  /**
+   * The pause check: once the chat was quiet for its pause after a person's message, the agents past the gates whose job
+   * is close to the conversation may speak up (worker/agents/speak-up.ts). While pi or an agent works, it waits again.
+   */
   async #afterPause(): Promise<void> {
     const kept = this.ctx.storage.kv.get<PauseState>(PAUSE_KEY);
     if (!kept) return;
@@ -4260,12 +4260,13 @@ export class ChatAgent extends DurableObject<Env> {
   }
 
   /**
-   * What this seat object made for the room it served, that the room never saw: the pages and files no reply posted
-   * there (seatLeftovers), and all its drafts, saved tool results and sandbox. What was posted stays its owner's.
+   * What this seat object made for the room it served, that the room never saw: the pages no reply posted there, and
+   * the files its sandbox saved in its own folder that none named (seatLeftovers), and all its drafts, saved tool
+   * results and sandbox. What was posted stays its owner's, and so does any other file of theirs.
    */
   async #cleanSeatChat(keeps: SeatKeeps): Promise<void> {
     const made = await this.#traces();
-    const gone = seatLeftovers({ pages: made.artifacts, files: made.files }, keeps);
+    const gone = seatLeftovers({ pages: made.artifacts, files: made.files }, keeps, chatOutFolder(this.chatId));
     await Promise.all([
       ...gone.pages.map(async (id) => {
         // One gone already (an earlier ask that did not answer) is not deleted again.

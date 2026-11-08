@@ -34,12 +34,17 @@ export function postedBy(entries: Iterable<Pick<EntryRecord, "kind" | "data">>, 
 
 /**
  * What a seat object removes when its last seat left: of what its sessions made (`made`: the artifacts it published and
- * the files it saved, as its traces say), those `keeps` does not name. Its drafts, saved results and sandbox go whole.
+ * the files it saved, as its traces say), those `keeps` does not name. Of the files, only those in the seat chat's own
+ * folder (`folder`: where its sandbox saves what it makes): a file saved anywhere else in its owner's files may be
+ * one of theirs it wrote over, which only they may delete. Its drafts, saved results and sandbox go whole.
  */
-export function seatLeftovers(made: SeatKeeps, keeps: SeatKeeps): SeatKeeps {
+export function seatLeftovers(made: SeatKeeps, keeps: SeatKeeps, folder: string): SeatKeeps {
   const pages = new Set(keeps.pages);
   const files = new Set(keeps.files);
-  return { pages: made.pages.filter((id) => !pages.has(id)), files: made.files.filter((path) => !files.has(path)) };
+  return {
+    pages: made.pages.filter((id) => !pages.has(id)),
+    files: made.files.filter((path) => path.startsWith(folder) && !files.has(path)),
+  };
 }
 
 /** How long the room waits before asking a seat again, after `attempts` failed asks: longer each time, at most an hour. */

@@ -3,7 +3,7 @@
 // sentence names it, adds a short line), and editing a sentence changes the rows it names; neither goes stale. Plain
 // functions, so the tests read them without a browser.
 
-import { inputOf, WEEKDAYS, type AgentDefinition, type AgentInput, type AgentStep, type AgentTrigger, type Weekday } from "../../shared/agents.ts";
+import { allSteps, inputOf, WEEKDAYS, type AgentDefinition, type AgentInput, type AgentStep, type AgentTrigger, type Weekday } from "../../shared/agents.ts";
 import { ASSUMED_FIELDS, DAY_NAMES, isAssumed, withoutAssumed, type GlanceRow } from "./glance.ts";
 
 export type RowKey = GlanceRow["key"];
@@ -41,11 +41,6 @@ const OWNER_NAMES = new Set(["owner", "me", "you"]);
 const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 /** A name as a whole word of the text: not part of a longer name ("crm" not in "crm-eu"). */
 const wordOf = (name: string, flags = "i") => new RegExp(`(?<![\\w-])${escape(name)}(?![\\w-])`, flags);
-
-/** Every step of a workflow, those inside an if's branches too. */
-function allSteps(steps: readonly AgentStep[] | undefined): AgentStep[] {
-  return (steps ?? []).flatMap((step) => (step.kind === "if" ? [step, ...allSteps(step.then), ...allSteps(step.else)] : [step]));
-}
 
 type Tell = Extract<AgentStep, { kind: "tell" }>;
 const tellsOf = (agent: Pick<AgentDefinition, "workflow">): Tell[] => allSteps(agent.workflow).filter((step): step is Tell => step.kind === "tell");
