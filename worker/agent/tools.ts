@@ -48,6 +48,7 @@ import type { AgentsScope } from "../agents/tools.ts";
 import { shownOf, type HeldPage } from "../agents/roster.ts";
 import { readsFiles } from "../agents/turns.ts";
 import { postedPage, versionRefusal } from "./page-authors.ts";
+import type { ReadDetails } from "./reach.ts";
 
 /** What the tools need from the chat they run in. */
 export interface ChatScope extends PublishScope, AgentsScope {
@@ -141,7 +142,10 @@ export function filesExtension(scope: ChatScope): Extension {
             const saved = await (await savedResult(await scope.toolResults(), args.path)).text();
             const from = Math.min(args.offset ?? 0, saved.length);
             const part = clip(saved.slice(from));
-            return { output: text(`${args.path}, characters ${from.toLocaleString("en")} on of ${saved.length.toLocaleString("en")}:\n${part}`) };
+            return {
+              output: text(`${args.path}, characters ${from.toLocaleString("en")} on of ${saved.length.toLocaleString("en")}:\n${part}`),
+              details: { read: [args.path] } satisfies ReadDetails,
+            };
           }
           const files = await scope.files();
           // Only what clip() can show: at most 4 bytes per character.
@@ -158,7 +162,8 @@ export function filesExtension(scope: ChatScope): Extension {
             if (!object) throw found.missing(path);
           }
           const content = clip(await object.text());
-          return { output: text(path === args.path ? content : `${path}:\n${content}`) };
+          // What it read, for who may see it (worker/agent/reach.ts): the model does not read details.
+          return { output: text(path === args.path ? content : `${path}:\n${content}`), details: { read: [path ?? args.path] } satisfies ReadDetails };
         },
       }),
       defineTool({
@@ -203,10 +208,17 @@ const SANDBOX_FILES =
   "Each run starts with fresh ./files, ./skills and ./out; other files under the working directory stay while the sandbox is up (10 minutes after the last run). " +
   `Returns exit code, the last ${MAX_RUN_STDOUT.toLocaleString("en")} characters of stdout and the last ${MAX_RUN_STDERR.toLocaleString("en")} of stderr: print a summary, and write anything longer to ./out.`;
 
-/** The files `refs` name, read, keyed by where they go under ./files/ (see sandboxLayout). */
-async function sandboxInputs(files: UserFiles, refs: readonly string[], ownFolder: string, maxBytes = MAX_SANDBOX_BYTES): Promise<SandboxFile[]> {
+/** The files `refs` name, read, keyed by where they go under ./files/ (see sandboxLayout); their paths added to `read`. */
+async function sandboxInputs(
+  files: UserFiles,
+  refs: readonly string[],
+  ownFolder: string,
+  maxBytes = MAX_SANDBOX_BYTES,
+  read: string[] = [],
+): Promise<SandboxFile[]> {
   if (refs.length === 0) return [];
   const { entries, paths, missing } = await findFiles(files, refs, (entries, ref) => resolveRef(entries, ref, ownFolder));
+  read.push(...paths);
   const layout = sandboxLayout(paths);
   const sizes = new Map(entries.map((e) => [e.path, e.size]));
   const listedBytes = paths.reduce((sum, path) => sum + (sizes.get(path) ?? 0), 0);
@@ -282,7 +294,9 @@ async function runInSandbox(
   ]);
   const room = MAX_SANDBOX_BYTES - [...skills, ...results].reduce((sum, file) => sum + file.bytes.byteLength, 0);
   if (room < 0) throw new Error(tooMuch(MAX_SANDBOX_BYTES - room, MAX_SANDBOX_BYTES));
-  const own = await sandboxInputs(files, refs.filter((ref) => !isToolResult(ref)), folder, room);
+  // What it read of the owner's, for who may see its output (worker/agent/reach.ts).
+  const read = refs.filter(isToolResult);
+  const own = await sandboxInputs(files, refs.filter((ref) => !isToolResult(ref)), folder, room, read);
   // The saved results land next to the user's files: neither may take a name, or a folder, the other needs.
   const layout = new Map(own.map((file) => [file.name, file.name]));
   for (const { name } of results) {
@@ -311,7 +325,11 @@ async function runInSandbox(
     result.stderr && `stderr:\n${result.stderr}`,
     ...savedReport(saved, skipped),
   ];
-  return { output: text(clip(report.filter(Boolean).join("\n\n"))), details: { saved } satisfies SavedFilesDetails, isError: result.exitCode !== 0 };
+  return {
+    output: text(clip(report.filter(Boolean).join("\n\n"))),
+    details: { saved, read: [...new Set(read)] } satisfies SavedFilesDetails & ReadDetails,
+    isError: result.exitCode !== 0,
+  };
 }
 
 const inputFiles = Type.Optional(

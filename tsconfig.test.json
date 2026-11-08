@@ -66,6 +66,7 @@
     "worker/feed",
     "worker/agent/mcp.ts",
     "worker/agent/checklist.ts",
+    "worker/agent/reach.ts",
     "worker/agent/output.ts",
     "worker/agent/attachments.ts",
     "worker/storage/paths.ts",

@@ -44,6 +44,7 @@ import {
   type ProxyRequest,
   type QueuedMessage,
   type IncomingMessage,
+  type PiHeld,
   type ToolPickNote,
   clampStaleMs,
   incomingKey,
@@ -89,6 +90,20 @@ import { recordSpend } from "./agent/ledger.ts";
 import type { ModelRunner } from "./agent/workers-ai.ts";
 import { asksUser, RunTracker } from "./chat-status.ts";
 import { mcpExtension, type McpToolInfo, type ServerCatalog } from "./agent/mcp.ts";
+import {
+  CLOSED_REACH,
+  heldReply,
+  ownersInput,
+  piPrivateEntry,
+  piShares,
+  reachExtension,
+  shownPiEvent,
+  showsResults,
+  withHeld,
+  withoutHeld,
+  type OthersCall,
+  type Reach,
+} from "./agent/reach.ts";
 import { deferredTools, MIN_TOOLS_TO_PICK, pickerId, pickFailure, pickTools, TOOL_PICK_MS, toolPicker, toolsToOffer, type PickableTool } from "./agent/tool-pick.ts";
 import { artifactExtension, filesExtension, filesIndexExtension, reactionsExtension, sandboxExtension, skillsExtension, type ChatScope } from "./agent/tools.ts";
 import { agentSandboxName, sandboxFor, sandboxName } from "./agent/sandbox-names.ts";
@@ -357,6 +372,17 @@ const SANDBOXES_KEY = "sandboxes";
 const DRAFTING_KEY = "drafting";
 /** Why a Yes to pi's offer is refused while pi works: its tools change for the whole run (#piTools). */
 const PI_BUSY_FOR_YES = "pi is still working: say yes once it is done.";
+/** When pi first read a result only the chat's owner may see (worker/agent/reach.ts): a summary made since may hold it. */
+const PI_PRIVATE_KEY = "piPrivateSince";
+/** When pi's run going now first read such a result with nobody but the owner in the chat (#settlePiAlone). */
+const PI_ALONE_KEY = "piAlonePrivate";
+/**
+ * Set while pi's run going now started with nobody but the owner in the chat (#notePiRunAlone): what it reads then is
+ * read alone with them, though someone joins before it does; cleared as it ends (#settlePiAlone).
+ */
+const PI_RUN_ALONE_KEY = "piRunAlone";
+/** pi's replies held for the owner (PiHeld): runs alone with them that read what only they see and ended after someone joined. */
+const PI_HELD_KEY = "piHeld";
 /** Set once the owner's sidebar heard whether this chat has members: chats shared before it kept that tell it once. */
 const SHARED_TOLD_KEY = "sharedTold";
 /** Set while the chat is on Auto: a router picks the model and effort for each message that starts a run. */
@@ -626,6 +652,10 @@ export class ChatAgent extends DurableObject<Env> {
     toolsStartedAt: (snapshot) => this.toolsStartedAt(snapshot),
     admit: (person) => this.admit(person),
     ownerUid: this.uid,
+    // Nothing to keep from anyone in a chat nobody else is in (a member's socket attaches with a snapshot read anew).
+    piReach: async (fresh) => (this.members.hasAny() ? this.#piReach({ known: !fresh }) : undefined),
+    piHeld: () => this.#piHeld(),
+    showPiHeld: (by, from) => this.showPiHeld(by, from),
     peopleFor: (uid) => this.peopleFor(uid),
     queued: (ids) => this.queued(ids),
     incoming: () => this.incoming(),
@@ -820,6 +850,21 @@ export class ChatAgent extends DurableObject<Env> {
     // The read cache's hits and evictions, per agent.
     this.hub.observe(this.metrics);
     this.registry.install(memoryExtension(this.memory.host()));
+    // On a run that answers someone else, pi reads only what the owner shares in the chat (worker/agent/reach.ts).
+    this.registry.install(
+      reachExtension({
+        isPi: isPiConversation,
+        answersOthers: () => this.#answersOthers(),
+        reach: (files) => this.#piReach({ files }),
+        privateSince: () => this.ctx.storage.kv.get<number>(PI_PRIVATE_KEY),
+        marksPrivate: () =>
+          this.ctx.storage.kv.get(PI_PRIVATE_KEY) === undefined || (this.#piReadsAlone() && this.ctx.storage.kv.get(PI_ALONE_KEY) === undefined),
+        readPrivate: (at) => {
+          if (this.ctx.storage.kv.get(PI_PRIVATE_KEY) === undefined) this.ctx.storage.kv.put(PI_PRIVATE_KEY, at);
+          if (this.#piReadsAlone() && this.ctx.storage.kv.get(PI_ALONE_KEY) === undefined) this.ctx.storage.kv.put(PI_ALONE_KEY, at);
+        },
+      }),
+    );
     // The chat's whole log, for its agents to search (worker/agents/history.ts); a seat's goes to its room.
     this.registry.install(historyExtension({ history: (session, query) => this.#history(session, query) }));
   }
@@ -1991,6 +2036,7 @@ export class ChatAgent extends DurableObject<Env> {
     // lets go after SETTLE_MS, which they can outlast. Only a view: the prompt goes on without it.
     await this.#watchRuns().catch((error: unknown) => console.error("chat status:", errorMessage(error)));
     this.scope.failedChecks.reset();
+    await this.#notePiRunAlone();
     try {
       await this.harness.submit(content, { entry: { kind: CHAT_MESSAGE_KIND, data } });
     } catch (error) {
@@ -2286,6 +2332,7 @@ export class ChatAgent extends DurableObject<Env> {
         tracker.apply(batch);
         // pi answered: the agents its answer names get turns.
         if (this.#runWatch === watch && batch.some((event) => event.type === "run_end")) {
+          this.#settlePiAlone();
           this.#scanPi();
           this.signals.piReplied();
         }
@@ -3124,7 +3171,11 @@ export class ChatAgent extends DurableObject<Env> {
     if (!this.isInChat(uid) || !keepsSignals(kind) || (subject === AGENT_NAME && uid !== this.uid)) return { off: true };
     const own = uid === this.uid;
     const alone = own && kind === "private" && !this.members.hasAny();
-    const read = await dreamLines(this.#log({ order: "descending" }), { subject, owner: uid, private: alone, from, to });
+    // Without pi's replies held for the owner; one of its replies built on what only they see reads as theirs (fork).
+    const reach = alone ? undefined : await this.#piReach();
+    const pages = withoutHeld(this.#log({ order: "descending" }), () => this.#piHeld(true));
+    const privateResult = reach && ((entry: EntryRecord) => entry.model?.[0]?.role === "toolResult" && piPrivateEntry(entry, reach));
+    const read = await dreamLines(pages, { subject, owner: uid, private: alone, from, to, ...(privateResult && { privateResult }) });
     return { kind, private: alone, own, ...read };
   }
 
@@ -3791,7 +3842,8 @@ export class ChatAgent extends DurableObject<Env> {
       for (const entry of page) {
         const step = piScanStep(scan, entry, this.uid, (input) => this.#piTurnFor(input));
         scan = step.scan;
-        if (step.handOn) this.turns.fromPi(step.handOn.text, scan.through, step.handOn.chain);
+        // A reply held for the owner hands nothing on: its words would reach the agent's session, which members' questions reach.
+        if (step.handOn && !heldReply(entry, this.#piHeld(true))) this.turns.fromPi(step.handOn.text, scan.through, step.handOn.chain);
         this.turns.piAnswered(step.answered);
       }
       if (this.#gone) return;
@@ -3918,7 +3970,8 @@ export class ChatAgent extends DurableObject<Env> {
       // Alone with the owner, a turn reads every server of its agent's only where nobody else will read it: apart.
       configure: (entry, agent, turn) =>
         this.#configureAgent(sessionOf(entry, turn), agent, { ...turn, alone: readsAlone(turn, !this.members.hasAny()) }, this.#nameOf(entry.ownerUid)),
-      logSince: (after) => this.#log({ order: "descending", minEntryId: (after + 1) as EntryId }),
+      // pi's replies held for the owner are not read into an agent's session, which members' questions reach.
+      logSince: (after) => withoutHeld(this.#log({ order: "descending", minEntryId: (after + 1) as EntryId }), () => this.#piHeld(true)),
       write: (session, text, requestId) => this.#writeTo(session, text, requestId),
       submit: (session, input, operationId, data) => this.#submitTo(session, input, operationId, data),
       wait: (session, operationId) => this.harness.wait(operationId, { session }),
@@ -3936,6 +3989,7 @@ export class ChatAgent extends DurableObject<Env> {
         await this.#watchRuns().catch((error: unknown) => console.error("chat status:", errorMessage(error)));
         // A hand-off: nobody may have asked for it, so pi saves nothing as the owner in its run (runAskedByOwner).
         await Promise.all([this.#refreshForTurn(input), this.memory.refresh()]);
+        await this.#notePiRunAlone();
         // The handing turn names the input: handed again after a restart, it is placed once. Its entry says which chain
         // pi's answer is in (#piScan).
         try {
@@ -4100,7 +4154,8 @@ export class ChatAgent extends DurableObject<Env> {
       ...(query.before !== undefined && { maxEntryId: (query.before - 1) as EntryId }),
       ...(query.after !== undefined && { minEntryId: (query.after + 1) as EntryId }),
     };
-    return this.#log({ order: "descending", ...range }, 100, Math.ceil(HISTORY_SCAN_ENTRIES / 100) + 1);
+    // Without pi's replies held for the owner: an agent's session, or pi's on someone else's message, may read it.
+    return withoutHeld(this.#log({ order: "descending", ...range }, 100, Math.ceil(HISTORY_SCAN_ENTRIES / 100) + 1), () => this.#piHeld(true));
   }
 
   /** (RPC, from a seat) A member's agent's turn ended there. True once taken: the seat lets it go. */
@@ -4328,7 +4383,8 @@ export class ChatAgent extends DurableObject<Env> {
     const events = await this.harness.session(pick.id).events();
     try {
       const { snapshot } = events;
-      const shown = shownEvent({ ...snapshot, entries: snapshot.entries.slice(-WINDOW_ENTRIES) }, false);
+      // An agent's session, for its owner: what pi read for whom does not apply.
+      const shown = shownEvent({ ...snapshot, entries: snapshot.entries.slice(-WINDOW_ENTRIES) }, false, undefined);
       const [started, toolsStarted] = await Promise.all([this.runStartedAt(snapshot), this.toolsStartedAt(snapshot)]);
       const now = Date.now();
       const since = (at: number) => Math.max(0, now - at);
@@ -5267,14 +5323,111 @@ export class ChatAgent extends DurableObject<Env> {
    * agent's the owner's message named, or else a proposal).
    */
   async #piCaller(): Promise<Caller> {
+    const placed = await this.#piInputs();
+    if (!placed.length) throw new Error(`${AGENT_NAME} is answering no message now.`);
+    const levels = placed.map((entry) => inputLevel(entry, this.uid, (turn) => this.roster.turn(turn)));
+    const lowest = lowestLevel(levels)!;
+    return { actor: { name: AGENT_NAME }, level: lowest.level, because: lowest.because, origin: { session: ROOT_SESSION } };
+  }
+
+  /** The inputs pi's run answers now, as placed in its log (an entry gone since reads as undefined). */
+  async #piInputs(): Promise<(EntryRecord | undefined)[]> {
     const pi = await this.harness.pi();
     const placed = (await pi.inspect(BACKGROUND_CONTEXT)).submissions.flatMap((one) =>
       one.type === "input" && one.status === "placed" && String(one.conversationId) === ROOT_SESSION ? [one.entry] : [],
     );
-    if (!placed.length) throw new Error(`${AGENT_NAME} is answering no message now.`);
-    const levels = await Promise.all(placed.map(async (id) => inputLevel(await this.#entryAt(id), this.uid, (turn) => this.roster.turn(turn))));
-    const lowest = lowestLevel(levels)!;
-    return { actor: { name: AGENT_NAME }, level: lowest.level, because: lowest.because, origin: { session: ROOT_SESSION } };
+    return Promise.all(placed.map((id) => this.#entryAt(id)));
+  }
+
+  /**
+   * Whether pi's run now answers anyone but the owner (ownersInput) in a chat others are in: it then reads only what the
+   * owner shares here (worker/agent/reach.ts). With nobody else in the chat, only the owner sees what it reads. A run
+   * whose inputs cannot be read answers someone else.
+   */
+  async #answersOthers(): Promise<boolean> {
+    if (!this.members.hasAny()) return false;
+    const placed = await this.#piInputs().catch(() => [undefined]);
+    return !placed.length || placed.some((entry) => !ownersInput(entry, this.uid, (turn) => this.roster.turn(turn)));
+  }
+
+  /**
+   * pi's replies held for the owner (PiHeld); `going`: with the run going now when it read what only the owner sees
+   * while they were alone and someone has joined since (held from then on, until it ends: #settlePiAlone).
+   */
+  #piHeld(going = false): PiHeld[] {
+    const held = this.ctx.storage.kv.get<PiHeld[]>(PI_HELD_KEY) ?? [];
+    const alone = going && this.members.hasAny() ? this.ctx.storage.kv.get<number>(PI_ALONE_KEY) : undefined;
+    return alone === undefined ? held : [...held, { from: alone }];
+  }
+
+  /**
+   * pi's run is over (or none is going): one that read what only the owner sees while they were alone, and ended with
+   * someone else in the chat, has its replies held for the owner, as an agent's turn apart is held (#6); the owner
+   * shows them to the chat or keeps them (showPiHeld). Their sockets hear of it; the others' get the chat anew.
+   */
+  #settlePiAlone(): void {
+    this.ctx.storage.kv.delete(PI_RUN_ALONE_KEY);
+    const from = this.ctx.storage.kv.get<number>(PI_ALONE_KEY);
+    if (from === undefined) return;
+    this.ctx.storage.kv.delete(PI_ALONE_KEY);
+    if (!this.members.hasAny()) return;
+    const held = withHeld(this.ctx.storage.kv.get<PiHeld[]>(PI_HELD_KEY) ?? [], { from, through: Date.now() });
+    this.ctx.storage.kv.put(PI_HELD_KEY, held);
+    this.sockets.sendTo(this.uid, { type: "piHeld", held });
+  }
+
+  /**
+   * Before an input of pi's goes in: a run whose end no watch saw (the object restarted) is settled first, and with
+   * nobody but the owner in the chat the run it starts or joins is marked as one alone with them (PI_RUN_ALONE_KEY).
+   */
+  async #notePiRunAlone(): Promise<void> {
+    const kv = this.ctx.storage.kv;
+    if ((kv.get(PI_ALONE_KEY) !== undefined || kv.get(PI_RUN_ALONE_KEY) !== undefined) && !(await this.#replying().catch(() => true))) this.#settlePiAlone();
+    if (!this.members.hasAny()) kv.put(PI_RUN_ALONE_KEY, true);
+  }
+
+  /** Whether what pi reads now is read alone with the owner: nobody else is in the chat, or its run started so. */
+  #piReadsAlone(): boolean {
+    return !this.members.hasAny() || this.ctx.storage.kv.get(PI_RUN_ALONE_KEY) === true;
+  }
+
+  /** The owner shows pi's held reply that started at `from` to everyone in the chat (null), or it was not held. */
+  async showPiHeld(by: Person, from: unknown): Promise<ChatRefusal | null> {
+    if (by.uid !== this.uid) return refuse(403, "Only the chat's owner shows pi's replies held for them.");
+    const held = this.ctx.storage.kv.get<PiHeld[]>(PI_HELD_KEY) ?? [];
+    const kept = held.filter((range) => range.from !== from);
+    if (kept.length === held.length) return refuse(404, "No such reply is held.");
+    this.ctx.storage.kv.put(PI_HELD_KEY, kept);
+    this.sockets.sendTo(this.uid, { type: "piHeld", held: kept });
+    // Everyone else gets the conversation anew, with the reply in it.
+    this.sockets.refresh((uid) => uid !== this.uid);
+    return null;
+  }
+
+  /** The servers pi reads for anyone in this chat (piShares): those that do not sign in each user. */
+  #piShares(): (server: string) => boolean {
+    return piShares(this.#signsIn);
+  }
+
+  /** The chat's traces as #piReach last read them: what the sockets go by between reads (a file saved since reads as private). */
+  #piTraces: SessionTraces | undefined;
+
+  /**
+   * What pi reads for whom (worker/agent/reach.ts), as the chat has it now; `known`: by the traces last read, if any, as
+   * each socket's batch asks (reading every session's new entries for each would cost too much while pi streams);
+   * `files: false`: without the chat's files (none is the chat's), for a call whose result goes by its server alone.
+   */
+  async #piReach({ known = false, files = true }: { known?: boolean; files?: boolean } = {}): Promise<OthersCall> {
+    const traces = !files ? undefined : (known && this.#piTraces) || (this.#piTraces = await this.#readTraces());
+    return {
+      mcp: this.#mcpTools,
+      shares: this.#piShares(),
+      chatFile: (path) => traces !== undefined && this.#inChat(path, traces),
+      held: this.#piHeld(true),
+      chatId: this.chatId,
+      chatFiles: async () => (await this.#chatFiles(false)).files.map((file) => file.path),
+      draftServers: async (id) => (await (await this.scope.drafts()).get(id))?.manifest.mcp?.servers.map((entry) => entry.server),
+    };
   }
 
   /** Hold a call for the owner: kept with its expiry alarm, its card in the chat's log, and in their feed's Needs you. */
@@ -5286,7 +5439,9 @@ export class ChatAgent extends DurableObject<Env> {
       session === ROOT_SESSION || this.roster.list().some((entry) => entry.seat === undefined && entry.session === session);
     // A seat's (this user's agent in someone else's chat) is always apart: its card is in that room, for this user alone.
     const seat = held.origin.seat;
-    const apart = seat !== undefined || apartOrigin(held.origin, shared);
+    // pi's call on a server it does not share here is the owner's alone too (worker/agent/reach.ts).
+    const piPrivate = held.origin.session === ROOT_SESSION && !this.#piShares()(held.server);
+    const apart = seat !== undefined || piPrivate || apartOrigin(held.origin, shared);
     const action: NewAction = apart ? { ...held, origin: { ...held.origin, apart: true } } : held;
     const view = this.actions.add(action);
     // A run's item waits at its step from now (in the same turn of the object as the action is kept): a restart before
@@ -5440,8 +5595,8 @@ export class ChatAgent extends DurableObject<Env> {
     const session = origin?.session ?? (origin?.run && this.runs.item(origin.run.agentId, origin.run.dueAt, origin.run.item)?.session);
     try {
       const conversation = session ? await this.harness.conversation(session) : undefined;
-      // An agent's own session hears what came of the call only from a server the agent shares (noteResult).
-      const shares = origin && !origin.apart && origin.session !== ROOT_SESSION ? await this.#sharesIn(origin.session) : null;
+      // pi's and an agent's own session hear what came of the call only from a server it shares (noteResult).
+      const shares = origin?.session === ROOT_SESSION ? this.#piShares() : origin && !origin.apart ? await this.#sharesIn(origin.session) : null;
       const told = origin ? { ...view, result: noteResult(view, origin, ROOT_SESSION, shares) } : view;
       const message: UserMessage = { role: "user", content: approvalNote(told), timestamp: Date.now() };
       await conversation?.submit({ type: "write", requestId: `approval:${view.id}`, entry: { kind: APP_APPROVAL_KIND, model: [message] } }, BACKGROUND_CONTEXT);
@@ -5685,6 +5840,15 @@ interface ChatSession {
   admit(person: Person): boolean;
   /** The chat's owner: only their sockets get what memory tools found (withoutNoteResults). */
   ownerUid: string;
+  /**
+   * What pi reads for whom: only the owner's sockets get what it read for them alone (shownPiEvent); none with nobody
+   * else in. `fresh`: with the chat's files read anew (a snapshot), else as last read.
+   */
+  piReach(fresh: boolean): Promise<Reach | undefined>;
+  /** pi's replies held for the owner (PiHeld). */
+  piHeld(): PiHeld[];
+  /** The owner shows pi's held reply that started at `from` to everyone. */
+  showPiHeld(by: Person, from: unknown): Promise<ChatRefusal | null>;
   peopleFor(uid: string): ChatPeopleView;
   queued(ids: readonly number[]): Promise<QueuedMessage[]>;
   incoming(): IncomingMessage[];
@@ -5804,6 +5968,14 @@ class ChatSockets extends LifecycleCapability implements DurableObjectCapability
     }
   }
 
+  /** Send the sockets of those `who` picks the conversation anew: what they may see of it changed (a reply shown). */
+  refresh(who: (uid: string) => boolean): void {
+    for (const ws of this.lifecycle.sockets.get(SOCKET_TAG)) {
+      const uid = this.#person(ws)?.uid;
+      if (uid !== undefined && who(uid)) void this.#detach(ws).then(() => this.#attach(ws));
+    }
+  }
+
   /** Tell one person's open sockets something only they see. */
   sendTo(uid: string, message: ChatServerMessage): void {
     for (const ws of this.lifecycle.sockets.get(SOCKET_TAG)) if (this.#person(ws)?.uid === uid) send(ws, message);
@@ -5882,6 +6054,10 @@ class ChatSockets extends LifecycleCapability implements DurableObjectCapability
       else if (message.type === "abort") await this.#chat.abort(person, typeof message.agent === "string" ? message.agent : undefined);
       else if (message.type === "model") await this.#chat.setModel(message, person);
       else if (message.type === "react") await this.#chat.react(person, message.entry, message.emoji, message.on === true);
+      else if (message.type === "pi_show") {
+        const refused = await this.#chat.showPiHeld(person, message.from);
+        if (refused) send(ws, { type: "error", message: refused.error });
+      }
     } catch (error) {
       send(ws, { type: "error", message: errorMessage(error) });
     }
@@ -5945,6 +6121,7 @@ class ChatSockets extends LifecycleCapability implements DurableObjectCapability
       send(ws, { type: "agents", agents: this.#chat.agents() });
       // Also when none: a reconnecting app may still show drafts posted or discarded from another window meanwhile.
       send(ws, { type: "agentDrafts", drafts: this.#chat.drafts(attachment.person.uid) });
+      if (attachment.person.uid === this.#chat.ownerUid) send(ws, { type: "piHeld", held: this.#chat.piHeld() });
       send(ws, { type: "actions", actions: this.#chat.actions(attachment.person.uid) });
       send(ws, { type: "agentSettings", settings: this.#chat.agentSettings() });
       this.#followAgents(ws);
@@ -5992,12 +6169,15 @@ class ChatSockets extends LifecycleCapability implements DurableObjectCapability
   async #events(batch: readonly AgentEvent[], member: boolean, timed = true): Promise<Extract<ChatServerMessage, { type: "events" }>> {
     const snapshot = batch.findLast((event) => event.type === "snapshot");
     const ids = inboxIds(batch);
-    const [timing, queued] = await Promise.all([
+    const [timing, queued, reach] = await Promise.all([
       snapshot && timed ? this.#timing(snapshot) : undefined,
       // Only a view of what pi has queued: without it the chat still works.
       ids && this.#chat.queued(ids).catch((error: unknown) => (console.error("queue:", errorMessage(error)), [])),
+      // Read only for a batch that may carry a tool's result; one that cannot be read shows anyone else none of them.
+      batch.some(showsResults) ? this.#chat.piReach(!!snapshot).catch((error: unknown) => (console.error("pi reach:", errorMessage(error)), CLOSED_REACH)) : undefined,
     ]);
-    return { type: "events", events: batch.map((event) => shownEvent(event, member)), ...timing, ...(queued && { queued }) };
+    const events = batch.map((event) => shownEvent(event, member, reach));
+    return { type: "events", events, ...timing, ...(queued && { queued }) };
   }
 
   /** How long the snapshot's run and its running calls have gone, by the server's clock. */
@@ -6080,7 +6260,8 @@ class ChatSockets extends LifecycleCapability implements DurableObjectCapability
       type: "agentEvents" as const,
       agent: run.agentId,
       turn: run.turn,
-      events: events.map((event) => shownEvent(event, member)),
+      // An agent's session, not pi's: what it reads for whom is the roster's (its turns' tools and forks).
+      events: events.map((event) => shownEvent(event, member, undefined)),
     });
     const events = await this.#chat.agentEvents(run.session);
     const now = Date.now();
@@ -6130,10 +6311,14 @@ function close(ws: WebSocket, code: number, reason: string): void {
   }
 }
 
-/** An event as a socket gets it: no prompt, no image data, and for someone other than the owner no notes (withoutNoteResults). */
-function shownEvent(event: AgentEvent, member: boolean): AgentEvent {
+/**
+ * An event as a socket gets it: no prompt, no image data, for someone other than the owner no notes (withoutNoteResults),
+ * and of pi's, what it read for the owner alone as `reach` says (shownPiEvent; none for an agent's session).
+ */
+function shownEvent(event: AgentEvent, member: boolean, reach: Reach | undefined): AgentEvent {
   const shown = withoutImageData(withoutSystemPrompt(event));
-  return member ? withoutNoteResults(shown) : shown;
+  const piShown = reach ? shownPiEvent(shown, reach, !member) : shown;
+  return member ? withoutNoteResults(piShown) : piShown;
 }
 
 function send(ws: WebSocket, message: ChatServerMessage): boolean {

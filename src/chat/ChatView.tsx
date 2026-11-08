@@ -60,7 +60,7 @@ import { MakePicker } from "./MakePicker.tsx";
 import { Dictation } from "./Dictation.tsx";
 import { ownMessages, useHistory } from "./history.ts";
 import { AgentDraft } from "./AgentDraft.tsx";
-import { AgentReply } from "./AgentReply.tsx";
+import { AgentReply, sourceLine } from "./AgentReply.tsx";
 import { ActionCard, ActionOutcome, ChatActions } from "./ActionCard.tsx";
 import { CHAT_ACTION_KIND, type ChatActionData } from "../../shared/limits.ts";
 import { ChecklistCard } from "./ChecklistCard.tsx";
@@ -78,6 +78,7 @@ import {
   blocks,
   endedSeat,
   firstNew,
+  heldReplies,
   inReply,
   isAgent,
   liveOffer,
@@ -85,6 +86,7 @@ import {
   outcomesAfter,
   published,
   replyItems,
+  replySources,
   sentAt,
   shown,
   showsAsCard,
@@ -128,7 +130,7 @@ const GROWS_ITSELF = CSS.supports("field-sizing", "content");
 const atBottom = (el: HTMLElement) => el.scrollHeight - el.scrollTop - el.clientHeight < 80;
 
 export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity, onLeft, onMenu, onOpenChat }: Props) {
-  const { state, connected, people, online, prompt, takeOffer: sendYes, abort, setModel, auto, reactions, react, hints, dropHint, agents, agentSettings, live, drafts, setDrafts, actions } =
+  const { state, connected, people, online, prompt, takeOffer: sendYes, abort, setModel, auto, reactions, react, hints, dropHint, agents, agentSettings, live, drafts, setDrafts, actions, piHeld, showPiHeld } =
     useChat(chatId);
   // pi, or an agent of the chat, is working or has turns waiting: Stop stops them all.
   const working = state.busy || agents.some((agent) => agent.busy || agent.queued);
@@ -375,6 +377,11 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
   // pi's replies' item chips: the records its tool results held, under the reply built on them.
   const itemsBefore = useRef<ReadonlyMap<number, ItemRef[]>>(undefined);
   const items = useMemo(() => (itemsBefore.current = replyItems(state.entries, itemsBefore.current)), [state.entries]);
+  // What only the owner sees that each of pi's replies is built on, as the chat marked its results: its source chip.
+  const sourcesBefore = useRef<ReadonlyMap<number, string[]>>(undefined);
+  const sources = useMemo(() => (sourcesBefore.current = replySources(state.entries, sourcesBefore.current)), [state.entries]);
+  // pi's replies held for the owner: under each, the owner shows it to the chat.
+  const held = useMemo(() => heldReplies(state.entries, piHeld), [state.entries, piHeld]);
   // Each plan an agent posted, as its latest entry says, drawn where it was first posted: only that entry draws again.
   const checklists = useMemo(() => foldChecklists(state.entries), [state.entries]);
   // The agents working now, each with its live steps, its time and its own Stop; then who waits for a turn.
@@ -474,6 +481,8 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
                               onOpenChat={onOpenChat}
                               chatId={chatId}
                               items={items.get(entry.id as number)}
+                              sources={sources.get(entry.id as number)}
+                              onShowHeld={held.has(entry.id as number) ? () => showPiHeld(held.get(entry.id as number)!) : undefined}
                               checklist={checklistAt(checklists, entry)}
                             />
                           </EntryOf.Provider>
@@ -694,6 +703,8 @@ const Entry = memo(function Entry({
   items,
   checklist,
   onOffer,
+  sources,
+  onShowHeld,
 }: {
   entry: EntryRecord;
   /** Where an agent message's steps show (stepRuns.ts). */
@@ -718,6 +729,10 @@ const Entry = memo(function Entry({
   checklist?: ChatChecklistData;
   /** Set on the reply with the chat's latest offer, for its owner: Yes under it replies to it (false when not sent). */
   onOffer?: (entry: number) => boolean;
+  /** For one of pi's replies in a chat others are in: what only the owner sees it is built on (replySources). */
+  sources?: string[];
+  /** For one of pi's replies held for the owner (heldReplies): shows it to the chat. */
+  onShowHeld?: () => boolean;
 }) {
   const people = useSharedChat();
   const offerYes = onOffer && (() => onOffer(entry.id as number));
@@ -794,6 +809,8 @@ const Entry = memo(function Entry({
         foldKey={String(entry.id)}
         entry={entry.id as number}
         onOfferYes={offerYes}
+        source={sources && sourceLine({ sources }, people && people.owner.uid !== uid ? people.owner.name : undefined)}
+        onShowHeld={onShowHeld}
       />
     );
   }
@@ -807,6 +824,24 @@ const Entry = memo(function Entry({
   }
   return null;
 });
+
+/**
+ * Under one of pi's replies held for the owner (PiHeld): why only they see it, and Show to the chat. Keeping it held
+ * needs nothing: the others see that pi's reply is the owner's alone.
+ */
+function HeldNote({ onShow }: { onShow: () => boolean }) {
+  const [sent, setSent] = useState(false);
+  return (
+    <div className="held-note" role="note">
+      <span className="draft-note">
+        Only you see this reply: {AGENT_NAME} read your private servers or files while you were alone here, and someone joined before it finished.
+      </span>
+      <button type="button" onClick={() => setSent(onShow())} disabled={sent}>
+        Show to the chat
+      </button>
+    </div>
+  );
+}
 
 /** The entries that start a day, the first of each day the conversation has messages on, with their time. */
 function dayStartsOf(entries: readonly EntryRecord[]): Map<number, number> {
@@ -1154,6 +1189,8 @@ function Assistant({
   bare = false,
   entry,
   onOfferYes,
+  source,
+  onShowHeld,
 }: {
   message: AssistantMessage;
   steps?: MessageSteps;
@@ -1171,6 +1208,10 @@ function Assistant({
   entry?: number;
   /** On the chat's latest offer, for its owner: what Yes does (OfferRow). */
   onOfferYes?: () => boolean;
+  /** Where a reply built on what only the owner sees came from (sourceLine): "from Radu's calendar". */
+  source?: string | null;
+  /** One held for the owner: shows it to everyone in the chat. */
+  onShowHeld?: () => boolean;
 }) {
   const content = useRef<HTMLDivElement>(null);
   // What a copy pastes as plain text: its Markdown. Not while it streams, when it has no actions.
@@ -1209,6 +1250,12 @@ function Assistant({
       {message.stopReason === "error" && <div className="chat-error">The model failed: {message.errorMessage ?? "unknown error"}</div>}
       {message.stopReason === "aborted" && <div className="tool-call">Stopped.</div>}
       {items && <ItemChips items={items} />}
+      {source && (
+        <div className="source-chip" title="Read with the chat owner's own sign-ins or files, which the others in the chat do not get">
+          {source}
+        </div>
+      )}
+      {onShowHeld && <HeldNote onShow={onShowHeld} />}
       {offered && <OfferRow offer={offered.offer} entry={entry} onYes={onOfferYes} />}
       {text && !bare && (
         <>
