@@ -94,6 +94,17 @@ describe("checkDocument", () => {
     for (const id of idsIn(doc)) if (id !== "tab1") expect(findBlock(doc, id)!.node.attrs!.h).toMatch(/^[0-9a-f]{14}$/);
   });
 
+  it("takes a line break inside a block, as Tiptap's HardBreak writes it, and reads it as one", () => {
+    const doc = checkDocument(variant((content) => (content[1] = p("p1", t("one"), { type: "hardBreak" }, t("two")))));
+    expect(doc.tabs[0]!.content[1]!.content![1]).toEqual({ type: "hardBreak" });
+    expect(blockText(findBlock(doc, "p1")!.node)).toBe("one\ntwo");
+    expect(findByQuote(doc, "one two")).toMatchObject([{ id: "p1" }]);
+    // Not in a code block (its text is plain), and not at a tab's top level.
+    refuses(variant((content) => (content[6] = { type: "codeBlock", attrs: { id: "cb" }, content: [{ type: "hardBreak" }] })), /codeBlock may not hold hardBreak/);
+    refuses(variant((content) => content.push({ type: "hardBreak" })), /a tab may not hold hardBreak/);
+    refuses(variant((content) => (content[1] = p("p1", { type: "hardBreak", attrs: { id: "x" } }))), /attrs\.id: is not an attribute of hardBreak/);
+  });
+
   it("recomputes a hash sent with the document, never trusting it", () => {
     const doc = checkDocument(variant((content) => ((content[1]!.attrs as Record<string, unknown>).h = "0000000000000a")));
     expect(doc.tabs[0]!.content[1]!.attrs!.h).not.toBe("0000000000000a");
