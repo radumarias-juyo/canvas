@@ -81,7 +81,7 @@ with `@cloudflare/vite-plugin`, pnpm; configured and deployed with the `cf` CLI 
   in the member's own object, one per room (`seatChatId`: what a chat object keeps, its pages, drafts, files, sandbox and
   held actions, never passes between rooms) (`worker/agents/seats/`): the member's own turns and anyone's Yes to its offer run in a fork
   of the seat's session, its calls go through the member's write gate (`seatCaller`: only the member's own message
-  changes data), what it holds has its card in the room for the member alone, and it reads as the room's kind. An
+  changes data), what it holds has its card in the room for the member alone, it reads as the room's kind, and it keeps to the servers the room lets agents use (`SeatTurn.servers`). An
   agent's owner alone opens its window (`shared/agent-window.ts`, `worker/agents/window.ts`; a seat's is read in the
   member's own object): its sessions and transcripts, and steering (`AgentTurns.instruct`): into their own turn running
   apart, else a turn of theirs, apart, whose ask is in no log or shared session. A turn
