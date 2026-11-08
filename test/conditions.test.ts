@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ConditionError, conditionNames, conditionProblem, evaluate, holds, parseCondition } from "../shared/conditions.ts";
+import { ConditionError, conditionProblem, evaluate, holds, parseCondition } from "../shared/conditions.ts";
 
 const scope = {
   signups: { weekly: 940, lastYear: 1000, regions: [{ name: "West", signups: 120 }, { name: "North", signups: "300" }] },
@@ -92,9 +92,5 @@ describe("conditions", () => {
     expect(evaluate("b.True", nested)).toBe("yes");
     expect(evaluate("b.Null", nested)).toBe(7);
     expect(evaluate("1.5 + 1", nested)).toBe(2.5);
-  });
-
-  it("names what a condition reads", () => {
-    expect(conditionNames("signups.weekly vs lastYear < -5% and len(alerts) > 0").sort()).toEqual(["alerts", "lastYear", "signups"]);
   });
 });

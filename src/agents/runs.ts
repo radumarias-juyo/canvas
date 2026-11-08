@@ -60,6 +60,7 @@ const GROUPS: [RunItemStatus, string][] = [
   ["running", "Running"],
   ["waiting", RUN_STATUS.waiting.text],
   ["acted", "Acted on"],
+  ["blocked", "Blocked"],
   ["failed", "Failed"],
   ["not_today", "Not today"],
 ];

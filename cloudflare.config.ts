@@ -1,10 +1,38 @@
 import { bindings, defineConfig, defineContainer, exports } from "cf/config";
 import { existsSync, readFileSync } from "node:fs";
+import { deployTarget, type DeployTarget } from "./deploy/preview.ts";
 import * as entrypoint from "./worker/index.ts" with { type: "cf-worker" };
 import type { McpServerConfig } from "./worker/mcp/servers.ts";
 
 // PI_NO_DOCKER=1 leaves out the sandbox container (and the run_python and run_bash tools), for machines without Docker.
 const withSandbox = process.env.PI_NO_DOCKER !== "1";
+
+// Production: the Worker, where it is served, who may sign in, and the per-account names of what keeps its data.
+const production: DeployTarget = {
+  preview: false,
+  name: "pi-artifacts",
+  // Served only on this custom domain (its zone must be in the account), behind the Access app of accessTeamDomain and
+  // accessAud below. workers.dev and Preview URLs stay off, so a deploy never reopens the Worker outside Access; both
+  // are set explicitly, since cf leaves an unset previewUrls to the account's current setting. Another account changes
+  // the domain along with those two (or drops it, which serves the Worker on workers.dev).
+  domains: ["pi.oxfer.app"],
+  workersDev: false,
+  accessTeamDomain: "xorio42.cloudflareaccess.com",
+  // The Access application's audience (AUD) tag, from Zero Trust → Access → Applications → pi-artifacts.
+  accessAud: "21dcccf4fbfa5991beb76a9ac48ff0c0de86d3c1a55597c82e141559e3ebcdc9",
+  bucket: "pi-artifacts",
+  repos: "pi-artifacts",
+  gateway: "pi-artifacts",
+  metrics: "pi_artifacts_metrics",
+  container: "pi-artifacts-sandbox",
+  // Rate-limit namespaces: any number unique within the account.
+  rateLimits: { PAGE_CALLS: "4201", PAGE_AI: "4202", DICTATION: "4203", AGENT_TURNS: "4204" },
+};
+// PI_PREVIEW=<name> (with PI_PREVIEW_ACCESS_AUD) deploys a separate preview Worker with its own resources instead
+// (deploy/preview.ts, docs/preview-deploy.md). Without it, this is production, unchanged (test/deploy-config.test.ts).
+const target = deployTarget(production, process.env);
+// What only local development reads from the environment: never for a preview, which refuses it being set.
+const local: Partial<Record<"AUTH_MODE" | "DEV_TOOLS" | "DEV_MODEL" | "DEV_PAUSE_MS" | "DEV_GAP_MS", string>> = target.preview ? {} : process.env;
 
 /**
  * The MCP servers every chat connects to, as [{ name, url, auth?, cacheScope? }]. Each deployment keeps its own list out of the
@@ -21,24 +49,21 @@ function mcpServerList(): Pick<McpServerConfig, keyof McpServerConfig>[] {
 
 // One Linux container per chat for run_python and run_bash. See Dockerfile.
 const sandbox = defineContainer({
-  name: "pi-artifacts-sandbox",
+  name: target.container,
   schedulingPolicy: "durable-object",
   images: { sandbox: { dockerfile: "./Dockerfile" } },
 });
 
 export default defineConfig({
   worker: {
-    name: "pi-artifacts",
+    name: target.name,
     compatibilityDate: "2026-10-01",
     compatibilityFlags: ["nodejs_compat"],
     entrypoint,
     observability: { enabled: true },
-    // Served only on this custom domain (its zone must be in the account), behind the Access app of ACCESS_TEAM_DOMAIN and
-    // ACCESS_AUD below. workers.dev and Preview URLs stay off, so a deploy never reopens the Worker outside Access; both
-    // are set explicitly, since cf leaves an unset previewUrls to the account's current setting. Another account changes
-    // the domain along with those two (or drops it and sets workersDev: true).
-    domains: ["pi.oxfer.app"],
-    workersDev: false,
+    // See production above. A preview is served on its own domain, or on workers.dev, behind its own Access app.
+    domains: target.domains,
+    workersDev: target.workersDev,
     previewUrls: false,
     // The React app. Everything the Worker answers itself is listed in
     // runWorkerFirst; any other path falls back to the SPA's index.html.
@@ -113,29 +138,31 @@ export default defineConfig({
         { id: "google-ai-studio/gemini-flash-latest", use: "fast, cheap answers that read images or long text" },
         { id: "cerebras/gpt-oss-120b", use: "very fast answers to simple questions; no images" },
       ]),
-      AI_GATEWAY_ID: bindings.text("pi-artifacts"),
+      AI_GATEWAY_ID: bindings.text(target.gateway),
       // Alias of the provider keys stored in the gateway (Provider Keys), one each for Anthropic and OpenAI. Empty: the
       // keys aliased "default", else unified billing. Workers AI models need no key.
       AI_BYOK_ALIAS: bindings.text(""),
       SANDBOX_ENABLED: bindings.text(withSandbox ? "true" : "false"),
       // Who is signed in. "access" (the default, and the only mode to deploy): a verified Cloudflare Access token.
       // "demo" (AUTH_MODE=demo pnpm dev): a typed name in a cookie, for local development only.
-      AUTH_MODE: bindings.text(process.env.AUTH_MODE === "demo" ? "demo" : "access"),
-      ACCESS_TEAM_DOMAIN: bindings.text("xorio42.cloudflareaccess.com"),
-      // The Access application's audience (AUD) tag, from Zero Trust → Access → Applications → pi-artifacts.
-      ACCESS_AUD: bindings.text("21dcccf4fbfa5991beb76a9ac48ff0c0de86d3c1a55597c82e141559e3ebcdc9"),
+      AUTH_MODE: bindings.text(local.AUTH_MODE === "demo" ? "demo" : "access"),
+      ACCESS_TEAM_DOMAIN: bindings.text(target.accessTeamDomain),
+      ACCESS_AUD: bindings.text(target.accessAud),
       // 32+ random bytes, base64. Each user's files are encrypted with a key derived from it: losing it loses the files.
       FILES_MASTER_KEY: bindings.secret(),
       // DEV_TOOLS=true (when running pnpm dev) enables POST /api/dev/chats/:id/publish and /api/dev/agents/:id/run. Never
       // set it for a deploy.
-      DEV_TOOLS: bindings.text(process.env.DEV_TOOLS === "true" ? "true" : "false"),
+      DEV_TOOLS: bindings.text(local.DEV_TOOLS === "true" ? "true" : "false"),
       // DEV_MODEL=script (with DEV_TOOLS=true, when running pnpm dev) puts every chat, agent and run on a scripted model
       // that follows /say and /tool lines in the conversation (worker/dev-model.ts), so agent turns work without a model.
       // Empty unless set; never set it for a deploy.
-      DEV_MODEL: bindings.text(process.env.DEV_MODEL === "script" ? "script" : ""),
+      DEV_MODEL: bindings.text(local.DEV_MODEL === "script" ? "script" : ""),
       // With DEV_MODEL=script only: how long, in milliseconds, a chat stays quiet before an agent may speak up in it (the
       // e2e suite's few seconds; worker/dev-model.ts). Empty: the usual pause.
-      DEV_PAUSE_MS: bindings.text(process.env.DEV_MODEL === "script" ? (process.env.DEV_PAUSE_MS ?? "") : ""),
+      DEV_PAUSE_MS: bindings.text(local.DEV_MODEL === "script" ? (local.DEV_PAUSE_MS ?? "") : ""),
+      // With DEV_MODEL=script only: the shortest time, in milliseconds, between two of an agent's unprompted posts in a
+      // chat (the e2e suite's second; worker/dev-model.ts). Empty: the limits' minutes.
+      DEV_GAP_MS: bindings.text(local.DEV_MODEL === "script" ? (local.DEV_GAP_MS ?? "") : ""),
       // The MCP servers every chat connects to: just a name and a URL each (see mcpServerList above). The agent learns
       // what a server offers from the server, and you name servers and tools in chat. "oauth": each user signs in, from
       // a link the agent gives. A Cloudflare MCP portal is one entry for every server behind it.
@@ -148,8 +175,8 @@ export default defineConfig({
       // (mailto: or https:) turn on Web Push. Without them nothing is pushed.
       MCP_GRANT_DAYS: bindings.text("30"),
       // Live calls from published pages: 120 a minute per viewer and chat, counted by Cloudflare across the Worker's
-      // isolates; and, counted apart, each viewer's writes of pages' saved values. The namespace is any number unique within the account.
-      PAGE_CALLS: bindings.rateLimit({ namespace: "4201", simple: { limit: 120, period: 60 } }),
+      // isolates; and, counted apart, each viewer's writes of pages' saved values.
+      PAGE_CALLS: bindings.rateLimit({ namespace: target.rateLimits.PAGE_CALLS, simple: { limit: 120, period: 60 } }),
       // What saved pages' model calls (pi.use("ai"): a viewer typing "put revenue first" into a dashboard) run on: a
       // comma-separated list of the picker's model ids, tried in order (worker/artifacts/page-ai.ts). gpt-oss-120b on
       // Workers AI needs no provider key; Gemini Flash-Lite, with the Google AI Studio key, answers when it fails.
@@ -159,10 +186,10 @@ export default defineConfig({
       // page's author. Counted in their UserDirectory.
       PAGE_AI_DAILY_USD: bindings.text("0.50"),
       // Calls to pages' models: 20 a minute per person.
-      PAGE_AI: bindings.rateLimit({ namespace: "4202", simple: { limit: 20, period: 60 } }),
+      PAGE_AI: bindings.rateLimit({ namespace: target.rateLimits.PAGE_AI, simple: { limit: 20, period: 60 } }),
       // Turns people give one agent: 10 a minute per person and agent, whoever's agent it is (worker/agents/controller.ts).
       // A turn past it ends at once, saying so.
-      AGENT_TURNS: bindings.rateLimit({ namespace: "4204", simple: { limit: 10, period: 60 } }),
+      AGENT_TURNS: bindings.rateLimit({ namespace: target.rateLimits.AGENT_TURNS, simple: { limit: 10, period: 60 } }),
       // Dictation for browsers whose own speech recognition is missing (Firefox) or cannot reach its service (Brave,
       // Arc, a blocked network): the composer records the clip and a speech-to-text model on Workers AI, through the AI
       // binding, writes it out (worker/dictation.ts). Empty: no such fallback; the browser's own recognition only.
@@ -170,7 +197,7 @@ export default defineConfig({
       // How many minutes of audio one person may have transcribed a day (UTC); counted in their UserDirectory.
       DICTATION_DAILY_MINUTES: bindings.text("60"),
       // Clips sent for transcribing: 12 a minute per person.
-      DICTATION: bindings.rateLimit({ namespace: "4203", simple: { limit: 12, period: 60 } }),
+      DICTATION: bindings.rateLimit({ namespace: target.rateLimits.DICTATION, simple: { limit: 12, period: 60 } }),
       // Headless Chrome (Browser Rendering): the agent checks each page in it before publishing (worker/artifacts/check.ts).
       // Local development runs a local Chrome, which miniflare downloads on first use.
       BROWSER: bindings.browser({ dev: { remote: false } }),
@@ -184,14 +211,14 @@ export default defineConfig({
       REVIEW_MODEL: bindings.text(process.env.PI_OFFLINE === "1" ? "" : "@cf/openai/gpt-oss-120b,google-ai-studio/gemini-flash-lite-latest"),
       // Agents' metrics in Workers Analytics Engine (worker/metrics.ts): turns, runs, router picks, the funnel of
       // unprompted posts, budgets, and the hub's read cache per agent. The dataset is made on the first write.
-      METRICS: bindings.analyticsEngineDataset({ name: "pi_artifacts_metrics" }),
+      METRICS: bindings.analyticsEngineDataset({ name: target.metrics }),
       // Workers AI binding. Pi's createAI() routes Claude through AI Gateway with it.
       AI: bindings.ai({}),
       // Each user's files (users/<uid>/files/…) and drafts (users/<uid>/drafts/<chatId>/…), and a read cache of artifact versions (artifacts/<id>/…).
-      FILES: bindings.r2({ name: "pi-artifacts" }),
+      FILES: bindings.r2({ name: target.bucket }),
       // Cloudflare Artifacts: one Git repo per published artifact, the source of truth for its versions.
       // Local development uses a local Git backend, so it never touches the deployed repos.
-      REPOS: bindings.artifacts({ namespace: "pi-artifacts", dev: { remote: false } }),
+      REPOS: bindings.artifacts({ namespace: target.repos, dev: { remote: false } }),
     },
     // The Worker reaches its own Durable Objects through `exports` from cloudflare:workers, not bindings.
     exports: {

@@ -21,6 +21,7 @@ import {
   PASS_PENALTY,
   raisedPenalty,
   recentText,
+  type DevTimes,
   type Embedder,
   type GateRefusal,
   type Penalty,
@@ -62,8 +63,8 @@ export interface SpeakUpHost {
   now(): number;
   /** How many of the people's messages the chat has after `at` (epoch ms), counted up to `max`. */
   messagesSince(at: number, max: number): Promise<number>;
-  /** On the scripted model with DEV_PAUSE_MS set, the pause in place of the limits' (worker/dev-model.ts: scriptPauseMs). */
-  readonly devPauseMs?: number;
+  /** On the scripted model, the pause and gap it sets in place of the limits' (worker/dev-model.ts). */
+  readonly dev?: DevTimes;
   /** Where each agent's raised threshold in this chat is kept (interestPenalty), by key. */
   readonly penalties: { get(key: string): Penalty | undefined; put(key: string, value: Penalty): void };
 }
@@ -183,7 +184,7 @@ export class SpeakUp {
           ...(used.lastAt !== undefined && { lastAt: used.lastAt, messagesSince }),
           ...(quietMs !== undefined && { quietMs }),
         };
-        return { entry, agent, refusal: limitRefusal(state, limits, host.devPauseMs) };
+        return { entry, agent, refusal: limitRefusal(state, limits, host.dev) };
       }),
     );
     const open: { entry: RosterEntry; agent: AgentDefinition }[] = [];

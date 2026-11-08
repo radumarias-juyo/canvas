@@ -23,6 +23,7 @@
   "include": [
     "worker",
     "worker/prices.json",
-    "shared"
+    "shared",
+    "deploy"
   ]
 }

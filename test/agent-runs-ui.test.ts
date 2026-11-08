@@ -80,6 +80,13 @@ describe("the Runs tab's words", () => {
     expect(groups[3].items[0].line).toBe("region.change < -5% did not hold");
     expect(groups[0].items[0].line).toBe("Look at crm.region");
     expect(itemLine(item("Islands", "waiting"))).toBe("Waits for you to approve a call.");
+    // An item a refused write stopped has its group too, with the gate's reason.
+    const blocked = itemGroups([item("Coast", "acted", { text: "Coast moved." }), item("Delta", "blocked", { reason: "crm.update was refused: a rule blocks it" })]);
+    expect(blocked.map((group) => [group.title, group.count])).toEqual([
+      ["Acted on", "1 of 2"],
+      ["Blocked", "1"],
+    ]);
+    expect(blocked[1].items[0].line).toBe("crm.update was refused: a rule blocks it");
     expect(usedParts({ skills: ["forecasting"], servers: ["crm", "forecast"], models: [], notes: 4 })).toEqual([
       { what: "Skill", text: "forecasting" },
       { what: "Memory", text: "4 notes" },
