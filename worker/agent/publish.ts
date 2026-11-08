@@ -598,17 +598,27 @@ export async function publishDraft(scope: PublishScope, input: PublishInput, sig
 }
 
 /**
- * The version of `meta` a read takes: `asked`, or the newest up to `newest` this conversation sees (one another
- * conversation apart from the chat published is not the chat's yet). Throws for an asked version it does not see.
+ * The version of `meta` a read takes: `asked`, or the newest up to `newest` this conversation sees. Either way only one
+ * `meta` lists (a page of another chat, or another person's, lists only what its own chat shows: ownArtifact) and the
+ * conversation's rules do not hide (one another conversation apart from the chat published is not the chat's yet).
+ * Throws for an asked version it does not see, and when it sees none up to `newest`.
  */
 export function versionToRead(meta: ArtifactMeta, asked: number | undefined, rules?: SessionRules, newest = meta.latest): number {
-  const hidden = (version: number) => !!rules?.hiddenVersion(meta.id, version);
+  const seen = (version: number) => !rules?.hiddenVersion(meta.id, version) && meta.versions.some((listed) => listed.version === version);
   if (asked !== undefined) {
-    // Not one of the versions `meta` lists either: a brought-in page's own chat may hold it (ownArtifact).
-    if (hidden(asked) || !meta.versions.some((version) => version.version === asked))
-      throw new Error(`Artifact ${meta.id} has no version ${asked} in this chat yet.`);
+    if (!seen(asked)) throw new Error(`Artifact ${meta.id} has no version ${asked} in this chat yet.`);
     return asked;
   }
-  // Version 1 when it sees none newer.
-  return newestShown(newest, hidden, 2);
+  const version = newestShown(newest, (version) => !seen(version));
+  if (version < 1) throw new Error(`Artifact ${meta.id} has no version${newest < meta.latest ? ` before v${newest + 1}` : ""} in this chat yet.`);
+  return version;
+}
+
+/**
+ * The two versions artifact_diff compares (versionToRead each): `to`, the newest this conversation sees by default, and
+ * `from`, by default the newest it sees before `to`.
+ */
+export function diffVersions(meta: ArtifactMeta, asked: { from?: number; to?: number }, rules?: SessionRules): { from: number; to: number } {
+  const to = versionToRead(meta, asked.to, rules);
+  return { from: versionToRead(meta, asked.from, rules, asked.from === undefined ? to - 1 : meta.latest), to };
 }
