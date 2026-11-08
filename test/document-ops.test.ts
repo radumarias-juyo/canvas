@@ -85,6 +85,15 @@ describe("markdown to blocks", () => {
     expect(() => markdownBlocks("<?claude block nope?>", {})).toThrow(/names no chip/);
   });
 
+  it("keeps a line break inside a paragraph as one, and a reword never goes through it", () => {
+    const [para] = markdownBlocks("line one\\\nline two");
+    expect(para!.content!.map((one) => one.type)).toEqual(["text", "hardBreak", "text"]);
+    expect(blockMarkdown(para!)).toBe("line one\\\nline two");
+    const doc = checkDocument({ title: "x", rev: 1, tabs: [{ id: "t", title: "t", content: [{ ...para!, attrs: { id: "b" } }] }] });
+    expect(applyOps(doc, [{ op: "replace", tab: "t", target: { quote: "one line" }, with: { text: "x" } }])).toMatchObject({ ok: false, refused: { code: "chip_in_change" } });
+    expect(ok(applyOps(doc, [{ op: "replace", tab: "t", target: { quote: "two" }, with: { text: "2" } }])).doc.tabs[0]!.content[0]!.content!.length).toBe(3);
+  });
+
   it("reads a block back as markdown", () => {
     const doc = sample();
     expect(blockMarkdown(findBlock(doc, "p1")!.node)).toBe("Ship the **connector** by Friday with @Ana.");

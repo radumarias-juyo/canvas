@@ -78,7 +78,7 @@ function inline(nodes: readonly PhrasingContent[], marks: readonly DocMark[], ch
       case "html":
         return textWithChips(node.value, marks, chips);
       case "break":
-        return textNode(" ", marks);
+        return [{ type: "hardBreak" }];
       case "image":
         return textNode(node.alt ?? "", marks);
       default:
@@ -188,6 +188,7 @@ const MARK_WRAP: Record<Exclude<MarkType, "link">, string> = { bold: "**", itali
 function inlineMarkdown(nodes: readonly DocNode[]): string {
   return nodes
     .map((node) => {
+      if (node.type === "hardBreak") return "\\\n";
       if (node.type === "mention") return `@${String(node.attrs?.name ?? "")}`;
       if (node.type === "date") return String(node.attrs?.value ?? "");
       if (node.type === "dropdown") return node.attrs?.value == null ? "[ ]" : `[${String(node.attrs.value)}]`;
