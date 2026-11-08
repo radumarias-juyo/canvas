@@ -10,7 +10,7 @@ import { WriteGate, type GateHost } from "../worker/agents/limits/gate.ts";
 import { seatLevel } from "../worker/agents/limits/levels.ts";
 import type { TurnResult } from "../worker/agents/controller.ts";
 import type { RosterEntry } from "../worker/agents/roster.ts";
-import { SeatActions } from "../worker/agents/seats/actions.ts";
+import { MAX_ENDED_SEAT_ACTIONS, SeatActions } from "../worker/agents/seats/actions.ts";
 import type { RoomLink, RoomRef, SeatTurn } from "../worker/agents/seats/link.ts";
 import type { ChatRules } from "../worker/agents/seats/rules.ts";
 import { AgentSeats, type SeatHost } from "../worker/agents/seats/seat.ts";
@@ -282,9 +282,32 @@ describe("A seat's held action", () => {
     expect(room.put(ROOM.chatId, MIA.uid, "m", { ...view, status: "declined" })).toBe(false);
     expect(room.put("other", ANA.uid, "p", { ...view, id: "00000000000000aa" })).toBe(false);
     expect(room.of(ANA.uid)).toHaveLength(1);
-    // Once it ended, the card goes (its outcome reaches the agent's session and her feed).
-    expect(room.put(ROOM.chatId, ANA.uid, "p", { ...view, status: "done" })).toBe(true);
-    expect(room.of(ANA.uid)).toEqual([]);
+    // Once it ended, its outcome stays, still for her alone (as the owner's own cards keep theirs).
+    const ran = { ...view, status: "done" as const, decidedAt: view.createdAt + 1, result: '{"ok":true}' };
+    expect(room.put(ROOM.chatId, ANA.uid, "p", ran)).toBe(true);
+    expect(room.of(ANA.uid)).toEqual([{ ...ran, seat: true }]);
+    expect([room.of(MIA.uid), room.of(RADU.uid)]).toEqual([[], []]);
+  });
+
+  it("keeps the outcomes of ended cards when its agent leaves, the newest few, and drops the open ones", async () => {
+    const view = await heldOne();
+    const room = new SeatActions(memorySql());
+    const id = (n: number) => n.toString(16).padStart(16, "0");
+    const ended = Array.from({ length: MAX_ENDED_SEAT_ACTIONS + 2 }, (_, n) => ({
+      ...view,
+      id: id(n + 1),
+      createdAt: view.createdAt + n,
+      status: (n % 2 ? "declined" : "expired") as "declined" | "expired",
+    }));
+    for (const card of ended) room.put(ROOM.chatId, ANA.uid, "p", card);
+    room.put(ROOM.chatId, ANA.uid, "p", { ...view, id: id(999) });
+    // Only the newest ended ones stay; the open one is kept besides.
+    const kept = room.of(ANA.uid);
+    expect(kept.filter((card) => card.status !== "pending").map((card) => card.id)).toEqual(ended.slice(2).map((card) => card.id));
+    expect(kept.filter((card) => card.status === "pending").map((card) => card.id)).toEqual([id(999)]);
+    room.dropAgent("p");
+    expect(room.of(ANA.uid).map((card) => card.status)).not.toContain("pending");
+    expect(room.of(ANA.uid)).toHaveLength(MAX_ENDED_SEAT_ACTIONS);
   });
 
   it("is in the member's Needs you as the room's: it opens the shared chat", async () => {

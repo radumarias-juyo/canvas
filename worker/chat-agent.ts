@@ -552,6 +552,7 @@ export class ChatAgent extends DurableObject<Env> {
   /** Agents that speak up (worker/agents/speak-up.ts). */
   readonly speakUp = new SpeakUp({
     roster: this.roster,
+    ...(scriptPauseMs(this.env) !== undefined && { devPauseMs: scriptPauseMs(this.env) }),
     settings: () => this.#agentSettings(),
     definition: async (entry) => this.#inThisChat(await this.#index(entry.ownerUid).getAgent(entry.agentId)),
     budgetLeft: () => this.spend.refusal() === undefined,
@@ -3194,7 +3195,8 @@ export class ChatAgent extends DurableObject<Env> {
     this.#broadcastAgents();
     this.#tellDrafts(entry.ownerUid);
     if (entry.seat !== undefined) {
-      // Its cards here go with it: what it held ends in its owner's object, by its expiry.
+      // Its open cards here go with it (what it held ends in its owner's object, by its expiry); the outcomes of those
+      // that ended stay for its owner (SeatActions.dropAgent).
       this.seatActions.dropAgent(entry.agentId);
       this.sockets.sendTo(entry.ownerUid, { type: "actions", actions: this.#actionsFor(entry.ownerUid) });
     }
@@ -3549,9 +3551,7 @@ export class ChatAgent extends DurableObject<Env> {
     const data = last?.data as Partial<ChatMessageData> | undefined;
     if (!data?.text || data.uid === undefined || data.sentAt === undefined) return;
     const line = askOf({ name: data.name ?? "someone", kind: "person" }, data.text, MAX_ASK_CHARS);
-    // How long it was quiet, for the agents' pause limits; with DEV_PAUSE_MS the dev pause just waited stands for them.
-    const quietMs = scriptPauseMs(this.env) === undefined ? Date.now() - kept.after : undefined;
-    await this.speakUp.afterPause(recent, { line, askKey: messageAskKey({ uid: data.uid, sentAt: data.sentAt }) }, quietMs);
+    await this.speakUp.afterPause(recent, { line, askKey: messageAskKey({ uid: data.uid, sentAt: data.sentAt }) }, Date.now() - kept.after);
   }
 
   /**

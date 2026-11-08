@@ -185,6 +185,7 @@ export const runFeedRef = (agentId: string, dueAt: number) => `run:${agentId}:${
 export const RUN_FEED_TEXT: Record<EndedRunStatus, string> = {
   sent: "sent its report",
   not_today: "had nothing to report",
+  blocked: "was stopped: a change it would make was refused",
   failed: "failed",
   needs_sign_in: "is waiting for you to sign in",
 };

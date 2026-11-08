@@ -71,7 +71,7 @@ export function postedRunView(run: AgentRunView, deliveries: readonly RunDeliver
     ...(run.endedAt !== undefined && { endedAt: run.endedAt }),
     cost: 0,
     // How many items its scope listed and how each went are not in the post: none shown.
-    items: { total: 0, acted: 0, notToday: 0, failed: 0, waiting: 0 },
+    items: { total: 0, acted: 0, notToday: 0, blocked: 0, failed: 0, waiting: 0 },
     summary: firstLine(post.text),
   };
 }
