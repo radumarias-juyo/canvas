@@ -155,8 +155,11 @@ class FakeChat implements TurnHost {
     return this.#result(operationId).promise;
   }
 
+  /** While set, an abort settles only once this does (a tool call it cut into that has not returned yet). */
+  abortGate: Promise<void> | undefined;
   async abort(session: string): Promise<void> {
     this.aborts.push(session);
+    await this.abortGate;
   }
 
   async turnEntries(session: string, turn: number): Promise<readonly EntryRecord[]> {
@@ -1045,6 +1048,21 @@ describe("AgentTurns: stop", () => {
     await chat.flush();
     expect(chat.replies().map((reply) => reply.text)).toEqual(["Bard done."]);
     expect(await chat.turns.stop(idOf(A))).toBe(false);
+  });
+
+  it("tells everyone a turn stopped at once, while its abort waits for the tool call it cut into", async () => {
+    const chat = new FakeChat([A]);
+    chat.turns.call([idOf(A)], chat.say(OWNER, "@atlas go"));
+    await chat.flush();
+    const gate = deferred<void>();
+    chat.abortGate = gate.promise;
+    const before = chat.changes;
+    const stopping = chat.turns.stop(idOf(A));
+    await chat.flush();
+    // The people bar, the window's Stop: they hear it now, not once the slow call returns.
+    expect(chat.changes).toBeGreaterThan(before);
+    gate.resolve();
+    expect(await stopping).toBe(true);
   });
 
   it("stops the turns of someone who left, and what their messages handed on, aborting what runs", async () => {

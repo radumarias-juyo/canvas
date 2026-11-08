@@ -2029,12 +2029,12 @@ describe("An agent's window, for its owner alone", () => {
     const second = ana.sessions.sessionOf(started.turn);
     expect(ana.sessions.forks.get(second)).toBe(seat);
     expect(ana.sessions.textOf(seat)).not.toContain("now the weekend");
-    // Her window, read in her object: the seat's session and each fork, with who asked and what she told it (once the
-    // room took a turn's result, the seat keeps no more of how it was given).
+    // Her window, read in her object: the seat's session and each fork, with who asked and what she told it, also once
+    // the room took a turn's result and the seat let go of how it was given.
     expect(ana.seats.window(ROOM, helper.agentId)).toEqual([
       { id: seat, kind: "shared", running: false },
       { id: second, kind: "fork", turn: started.turn, askedBy: ANA.name, window: true, running: true },
-      { id: fork, kind: "fork", turn: byAna.id, running: false },
+      { id: fork, kind: "fork", turn: byAna.id, askedBy: ANA.name, running: false },
     ]);
   });
 

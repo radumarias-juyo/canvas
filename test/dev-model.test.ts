@@ -2,7 +2,7 @@ import { createModels, fauxAssistantMessage, fauxToolCall, type Message } from "
 import { describe, expect, it } from "vitest";
 import { assistantText as said } from "../worker/agents/turns.ts";
 import { agentProfile, cosine, INTEREST_THRESHOLD } from "../worker/agents/funnel.ts";
-import { scriptEmbedder, scriptGapMs, scriptModel, scriptOn, scriptPauseMs, scriptReply, scriptSteps, scriptWorkflow } from "../worker/dev-model.ts";
+import { scriptEmbedder, scriptGapMs, scriptModel, scriptOn, scriptPauseMs, scriptReply, scriptSteps, scriptWorkflow, stepsFor } from "../worker/dev-model.ts";
 import { compilePrompt, compileWorkflow, type ServerTools } from "../worker/agents/runs/compile.ts";
 import type { AgentDefinition } from "../shared/agents.ts";
 
@@ -72,6 +72,34 @@ describe("the scripted dev model", () => {
     const catchUp = user("What was said in the chat since your last turn:\n\n[ada · person]: @helper /say not for you");
     const relay = system("Instructions:\n/say @pi please summarise");
     expect(said(scriptReply([relay, catchUp, user("Your turn: ada asked you.\n\n[ada · person]: @relay over to you")]))).toBe("@pi please summarise");
+  });
+
+  it("gives each speaker its own part of a script (/for), as its instructions name it, and pi the rest", () => {
+    const steps = scriptSteps("@alpha @beta /say for all /for alpha /say A /for beta /recall alpha · agent");
+    expect(stepsFor(steps, "alpha")).toEqual([{ say: "for all" }, { say: "A" }]);
+    expect(stepsFor(steps, "beta")).toEqual([{ say: "for all" }, { recall: "alpha · agent" }]);
+    expect(stepsFor(steps, "pi")).toEqual([{ say: "for all" }]);
+    const ask = user("Your turn: ada asked you.\n\n[ada · person · your owner]: @alpha @beta /for alpha /say Alpha found 41 rows. /for beta /say B");
+    expect(said(scriptReply([system("In this chat you are @alpha, one of its agents"), ask]))).toBe("Alpha found 41 rows.");
+    expect(said(scriptReply([system("You are an agent.", { agent: "In this chat you are @beta, one of its agents" }), ask]))).toBe("B");
+    // pi has no part of its own here: nothing for it, so ok.
+    expect(said(scriptReply([ask]))).toMatch(/^ok: /);
+  });
+
+  it("recalls the newest line it read before its turn that holds the text, never a script line", () => {
+    const catchUp = user("What was said in the chat since your last turn:\n\n[ada · person]: @alpha /recall alpha · agent\n\n[alpha · agent]: Alpha found 41 rows.");
+    const turn = user("Your turn: ada asked you.\n\n[ada · person]: /recall alpha · agent");
+    expect(said(scriptReply([catchUp, turn]))).toBe("recalled: [alpha · agent]: Alpha found 41 rows.");
+    expect(said(scriptReply([user("[ada · person]: hi"), user("/recall code word")]))).toBe('recalled nothing for "code word"');
+  });
+
+  it("pads a reply with filler, and puts the draft an earlier write answered with into a tool's input", () => {
+    const padded = said(scriptReply([user("/pad 1000 @beta over to you")]));
+    expect(padded.startsWith("@beta over to you\n\nfiller filler")).toBe(true);
+    expect(padded.length).toBe("@beta over to you\n\n".length + 1000);
+    const script = user('/tool artifact_write {"html":"<p>x</p>"}\n/tool artifact_publish {"title":"T","draft_id":"{{draft}}"}');
+    const publish = scriptReply([script, called("artifact_write"), result("artifact_write", 'Saved as draft "0a1b2c3d4e5f6a7b" (1 KB).')]);
+    expect(publish.content).toEqual([expect.objectContaining({ name: "artifact_publish", arguments: { title: "T", draft_id: "0a1b2c3d4e5f6a7b" } })]);
   });
 
   it("answers every call through pi-ai's models", async () => {
