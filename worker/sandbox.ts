@@ -1,9 +1,8 @@
 import { Files } from "@cloudflare/sandbox";
 import { DurableObject } from "cloudflare:workers";
 import { clipStart, mapLimit } from "../shared/util.ts";
-import { workspaceFresh } from "./agent/sandbox-names.ts";
+import { audienceSwitched, prepareCommand, WIPE_COMMAND, WORKSPACE, workspaceFresh } from "./agent/sandbox-names.ts";
 
-const WORKSPACE = "/workspace";
 const INACTIVITY_TIMEOUT_MS = 10 * 60_000;
 const RUN_TIMEOUT_SECONDS = 60;
 /**
@@ -35,9 +34,10 @@ export interface SandboxRun {
  * One Linux container for code a chat's sessions run: pi's in the chat's sandbox, each agent's in one of its own there
  * (worker/agent/sandbox-names.ts). No internet: data comes in as files the session picks from R2, in their folders
  * under ./files (and skills' folders under ./skills), and results go back the same way. Each run starts with fresh
- * ./files, ./skills and ./out; anything else under /workspace stays while the container is up (10 minutes after the
- * last run), for the same session's next run only: a run of another session (`session`) starts with an empty
- * /workspace. Runs go one at a time.
+ * ./files, ./skills and ./out, and no entry script but its own; anything else under /workspace stays while the container
+ * is up (10 minutes after the last run), for the same session's next run only: a run of another session (`session`,
+ * keyed by whom it answers too: sandboxSession) starts with an empty /workspace, or not at all, and one that answers
+ * someone else than the last one did starts in a fresh container (audienceSwitched). Runs go one at a time.
  */
 export class Sandbox extends DurableObject<Env> {
   /** The runs in order: one at a time, so a session never runs over another's /workspace. */
@@ -72,20 +72,27 @@ export class Sandbox extends DurableObject<Env> {
     skills: SandboxFile[],
     session: string,
   ): Promise<SandboxRun> {
-    const { container, started } = await this.#ensureRunning();
+    const last = await this.ctx.storage.get<string>(LAST_SESSION);
+    let { container, started } = await this.#ensureRunning();
+    // A run for someone else than the last one ran for: nothing that one left anywhere in the container is this one's.
+    if (!started && audienceSwitched(last, session)) {
+      await container.destroy();
+      ({ container, started } = await this.#ensureRunning());
+      if (!started) throw new Error("Could not start the sandbox afresh for this run.");
+    }
     const files = new Files(container);
-    // Another session ran here last: nothing it left under /workspace is this one's to read.
-    if (workspaceFresh(await this.ctx.storage.get<string>(LAST_SESSION), session, started)) {
-      await this.#exec(container, ["sh", "-c", `find ${WORKSPACE} -mindepth 1 -delete`]);
+    // Another session ran here last: nothing it left under /workspace is this one's to read. Not emptied, it does not
+    // run (and the next run tries again: the session that ran last is still the other one).
+    if (workspaceFresh(last, session, started)) {
+      await this.#must(container, WIPE_COMMAND, "empty the sandbox for this run");
     }
     await this.ctx.storage.put(LAST_SESSION, session);
 
-    // Inputs and skills keep their folders: made with ./files, ./skills and ./out, passed as arguments so their names
-    // need no quoting.
+    // Inputs and skills keep their folders: made with ./files, ./skills and ./out (prepareCommand).
     const placed = [...inputs.map((file) => ({ path: `${WORKSPACE}/files/${file.name}`, bytes: file.bytes })), ...skills.map((file) => ({ path: `${WORKSPACE}/skills/${file.name}`, bytes: file.bytes }))];
     const folders = new Set(placed.map((file) => file.path.slice(0, file.path.lastIndexOf("/"))));
     const dirs = [`${WORKSPACE}/files`, `${WORKSPACE}/skills`, `${WORKSPACE}/out`, ...folders];
-    await this.#exec(container, ["sh", "-c", `rm -rf ${WORKSPACE}/files ${WORKSPACE}/skills ${WORKSPACE}/out && mkdir -p "$@"`, "sh", ...dirs]);
+    await this.#must(container, prepareCommand(dirs), "prepare the sandbox for this run");
     await mapLimit([...placed, { path: `${WORKSPACE}/${entry.name}`, bytes: entry.contents }], PARALLEL_WRITES, (file) => files.writeFile(file.path, file.bytes));
 
     // A skill's scripts may be run by their path, as its instructions say: the zip kept no modes, so they are made
@@ -100,8 +107,14 @@ export class Sandbox extends DurableObject<Env> {
     return { ...run, outputs };
   }
 
-  async #exec(container: Container, argv: string[]): Promise<Omit<SandboxRun, "outputs">> {
-    const process = await container.exec(argv, { cwd: WORKSPACE });
+  /** A command the run cannot go on without: one that fails stops it, saying what could not be done. */
+  async #must(container: Container, argv: readonly string[], what: string): Promise<void> {
+    const done = await this.#exec(container, argv);
+    if (done.exitCode !== 0) throw new Error(`Could not ${what}: ${done.stderr.trim() || `exit code ${done.exitCode}`}`);
+  }
+
+  async #exec(container: Container, argv: readonly string[]): Promise<Omit<SandboxRun, "outputs">> {
+    const process = await container.exec([...argv], { cwd: WORKSPACE });
     const output = await process.output();
     const decoder = new TextDecoder();
     return {

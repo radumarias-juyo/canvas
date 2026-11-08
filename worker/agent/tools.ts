@@ -25,6 +25,7 @@ import { describeReport, type CheckReport } from "../artifacts/check.ts";
 import type { PageReview } from "../artifacts/review.ts";
 import { chatOutFolder, FILES_WRITE_TOOL, RUN_BASH_TOOL, RUN_PYTHON_TOOL, savedReport, wroteReport } from "../chat-traces.ts";
 import { MAX_RUN_STDERR, MAX_RUN_STDOUT, type SandboxFile, type SandboxRun } from "../sandbox.ts";
+import type { SandboxTarget } from "./sandbox-names.ts";
 import { isToolResult, literalPath, MAX_DRAFTS, normalisePath, TOOL_RESULTS, type FileEntry, type ToolResults, type UserFiles } from "../storage/index.ts";
 import {
   checkDraft,
@@ -78,10 +79,11 @@ export interface ChatScope extends PublishScope, AgentsScope {
    */
   skillFolders(names: readonly string[], maxBytes: number): Promise<SandboxFile[]>;
   /**
-   * The sandbox object conversation `session` runs code in (worker/agent/sandbox-names.ts): pi's the chat's, an agent's
-   * its own; null for a session nobody is known of, which runs none.
+   * Where conversation `session`'s run goes now (worker/agent/sandbox-names.ts): the sandbox object, pi's the chat's and
+   * an agent's its own, and the session the sandbox keys /workspace by, which tells whom the run answers
+   * (sandboxSession); null for a session nobody is known of, which runs none.
    */
-  sandboxOf(session: string): string | null;
+  sandboxOf(session: string): Promise<SandboxTarget | null>;
   /**
    * Conversation `session` is about to save these files: one apart from the chat records them first, so they stay
    * withheld until its reply is posted even when the tool is stopped before its result names them.
@@ -206,7 +208,7 @@ const SANDBOX_FILES =
   "(uploads/q3/sales.csv is ./files/q3/sales.csv, out/<chat>/report.csv is ./files/out/<chat>/report.csv). " +
   "Anything written to ./out/ (top level, not subfolders) is saved back to this chat's folder under out/ in the user's files (named with them). " +
   "Skills you name are copied into ./skills/<name>/, so their scripts run as the skill says. " +
-  "Each run starts with fresh ./files, ./skills and ./out; other files under the working directory stay while the sandbox is up (10 minutes after the last run). " +
+  "Each run starts with fresh ./files, ./skills and ./out; other files under the working directory stay while the sandbox is up (10 minutes after the last run), for your next run on the same person's behalf: a run for someone else starts empty. " +
   `Returns exit code, the last ${MAX_RUN_STDOUT.toLocaleString("en")} characters of stdout and the last ${MAX_RUN_STDERR.toLocaleString("en")} of stderr: print a summary, and write anything longer to ./out.`;
 
 /** The files `refs` name, read, keyed by where they go under ./files/ (see sandboxLayout); their paths added to `read`. */
@@ -280,10 +282,9 @@ async function runInSandbox(
   args: { files?: string[]; skills?: string[] },
   run: (sandbox: ReturnType<typeof exports.Sandbox.getByName>, inputs: SandboxFile[], skills: SandboxFile[], session: string) => Promise<SandboxRun>,
 ) {
-  const session = String(api.conversationId);
   // Asked first: a session that may run no code reads no files for it either.
-  const name = scope.sandboxOf(session);
-  if (name === null) throw new Error("This conversation has no sandbox to run code in.");
+  const target = await scope.sandboxOf(String(api.conversationId));
+  if (target === null) throw new Error("This conversation has no sandbox to run code in.");
   const files = await scope.files();
   const folder = chatOutFolder(scope.chatId);
   // The skills and saved results first: their sizes are known before the files are read, which get what they leave of the limit.
@@ -306,7 +307,7 @@ async function runInSandbox(
   }
   checkFolders(layout);
   const inputs = [...results, ...own];
-  const result = await run(exports.Sandbox.getByName(name), inputs, skills, session);
+  const result = await run(exports.Sandbox.getByName(target.name), inputs, skills, target.session);
   const { toSave, skipped } = outputPaths(folder, result.outputs);
   // A reviewed turn apart from the chat saves no file over one the chat has: those are left out, saying why.
   const rules = await rulesOf(scope, api);
