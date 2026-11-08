@@ -1,11 +1,11 @@
-// What a message asks to be made, as the composer's "Make" choice says it: an answer in the chat, a page, an agent that
+// What a message asks to be made, as the composer's "Make" choice says it: an answer in the chat, a page, a document, an agent that
 // runs on its own, a tool (a skill), or Auto, which reads the message for a request to repeat something on a schedule
 // or on a change ("every morning…", "when … tell me") and takes that for an agent. The choice reaches the model as one
 // line after the message (makeNote), never as part of what the person wrote.
 
 import { AGENT_PROPOSE_TOOL } from "./agents.ts";
 
-export const MAKE_KINDS = ["auto", "answer", "page", "agent", "tool"] as const;
+export const MAKE_KINDS = ["auto", "answer", "page", "document", "agent", "tool"] as const;
 export type MakeKind = (typeof MAKE_KINDS)[number];
 /** What Auto comes to: one of the others, or nothing to say (the model decides, as without a choice). */
 export type MadeKind = Exclude<MakeKind, "auto">;
@@ -15,6 +15,7 @@ export const MAKE_CHOICES: readonly { kind: MakeKind; label: string; hint: strin
   { kind: "auto", label: "Auto", hint: "Decides from what you write" },
   { kind: "answer", label: "Answer", hint: "A reply here in the chat" },
   { kind: "page", label: "Page", hint: "A live page, checked before it is published" },
+  { kind: "document", label: "Document", hint: "A doc pi writes section by section, for you to edit" },
   { kind: "agent", label: "Agent", hint: "Runs on its own: drafted off, for you to check" },
   { kind: "tool", label: "Tool", hint: "A skill the assistant can use again" },
 ];
@@ -71,6 +72,8 @@ export function makeNote(kind: MakeKind | undefined, text: string): string {
       return "[They chose Answer: reply here in the chat. Make no page, agent or skill unless they ask for one.]";
     case "page":
       return "[They chose Page: build it as a live page (artifact_write, then artifact_check, then artifact_publish).]";
+    case "document":
+      return "[They chose Document: write it as a document with document_create (an outline with a placeholder per section), then fill each section with document_update.]";
     case "agent":
       return auto
         ? `[This reads as something to run on its own, on a schedule or a change: draft it as an agent with ${AGENT_PROPOSE_TOOL} (saved off for them to check and turn on), unless they asked for something else. Ask only about what the servers' tools cannot tell you.]`

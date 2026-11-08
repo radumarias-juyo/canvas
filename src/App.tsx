@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type FormEvent } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type FormEvent } from "react";
 import { ID_PATTERN, secondSeatUid, type ChatContents } from "../shared/protocol.ts";
 import { chatFileRoute, MAX_LISTED } from "../shared/uploads.ts";
 import { isActive, type SkillInfo } from "../shared/skills.ts";
@@ -27,12 +27,16 @@ import { AgentPage } from "./agents/AgentPage.tsx";
 import { AgentsNav } from "./agents/AgentsNav.tsx";
 import { agentPlace, PI_PAGE, type AgentPlace } from "./agents/nav.ts";
 import { PiPage } from "./agents/PiPage.tsx";
+import { DocumentsNav } from "./documents/DocumentsNav.tsx";
 import { reloadAgents } from "./agents/store.ts";
 import { MemoryView } from "./memory/MemoryView.tsx";
 import { reloadMemory, toConfirm, useMemory } from "./memory/store.ts";
 import { FeedNav } from "./feed/FeedNav.tsx";
 import { FeedView } from "./feed/FeedView.tsx";
 import { reloadFeed, reloadFollows } from "./feed/store.ts";
+
+/** A document's page loads its editor (Tiptap) only when a document opens: the rest of the app goes without it. */
+const DocumentPage = lazy(() => import("./documents/DocumentPage.tsx").then((module) => ({ default: module.DocumentPage })));
 
 /** The app's location, path and query, and a way to go elsewhere in it without loading the page again. */
 function usePath(): [URL, (path: string) => void] {
@@ -93,6 +97,7 @@ export function App() {
       opening={chatId && opening && ID_PATTERN.test(opening) ? opening : undefined}
       showSkills={path === "/skills"}
       showMemory={path === "/memory"}
+      documentId={path.match(/^\/d\/([A-Za-z0-9_-]{1,64})$/)?.[1]}
       showFeed={path === "/feed"}
       agentPage={agentPlace(url) ?? undefined}
       navigate={navigate}
@@ -210,6 +215,8 @@ interface WorkspaceProps {
   showSkills: boolean;
   /** The memory page in place of a chat. */
   showMemory: boolean;
+  /** A document's page (/d/:id) is open. */
+  documentId?: string;
   /** The feed in place of a chat. */
   showFeed: boolean;
   /** An agent's page in place of a chat. */
@@ -236,7 +243,7 @@ const PREVIEW_MIN = 360;
 /** Phones and narrow windows: one column, the sidebar a menu that slides in over it (styles.css, the same width). */
 const NARROW = "(max-width: 900px)";
 
-function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, showFeed, showMemory, agentPage, navigate, onSignOut }: WorkspaceProps) {
+function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, showFeed, showMemory, documentId, agentPage, navigate, onSignOut }: WorkspaceProps) {
   const { chats, load: loadChats, newSince } = useChatList(chatId);
   const [artifacts, loadArtifacts] = useLatest<ArtifactSummary[]>(api.artifacts, []);
   const [files, loadFiles] = useLatest<FileInfo[]>(api.files, []);
@@ -323,7 +330,7 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, showFe
 
   // The menu closes once the user picked something in it: a chat, the skills, a file or an artifact to preview; and when
   // the window widens past NARROW, so it does not open again by itself when it narrows.
-  useEffect(() => setMenuOpen(false), [chatId, showSkills, showFeed, showMemory, agentPage?.id, preview, narrow]);
+  useEffect(() => setMenuOpen(false), [chatId, showSkills, showFeed, showMemory, documentId, agentPage?.id, preview, narrow]);
   useEffect(() => {
     if (!menuOpen) return;
     const onKey = (event: KeyboardEvent) => event.key === "Escape" && setMenuOpen(false);
@@ -467,6 +474,7 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, showFe
                 {artifacts.map((a) => (
                   <ArtifactLink key={a.id} artifact={a} />
                 ))}
+                <DocumentsNav openId={documentId} navigate={navigate} />
               </nav>
             )}
             {contents && chatFileBase && (
@@ -536,7 +544,7 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, showFe
       {narrow && menuOpen && <div className="drawer-backdrop" onClick={() => setMenuOpen(false)} aria-hidden="true" />}
       <main className="main" ref={chatRef}>
         {/* A chat has its own header, with the menu button in it. */}
-        {narrow && (showSkills || !chatId) && !agentPage && !showFeed && !showMemory && (
+        {narrow && (showSkills || !chatId) && !agentPage && !showFeed && !showMemory && !documentId && (
           <header className="chat-header">
             <MenuButton onClick={openMenu} />
             <h1 className="chat-title">{showSkills ? "Skills" : "Chats"}</h1>
@@ -554,6 +562,12 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, showFe
         ) : showFeed ? (
           <ErrorBoundary key="feed" what="the feed">
             <FeedView navigate={navigate} onMenu={narrow ? openMenu : undefined} />
+          </ErrorBoundary>
+        ) : documentId ? (
+          <ErrorBoundary key={`doc:${documentId}`} what="this document">
+            <Suspense fallback={<p className="skills-note doc-loading">Opening the document…</p>}>
+              <DocumentPage id={documentId} uid={uid} navigate={navigate} onMenu={narrow ? openMenu : undefined} />
+            </Suspense>
           </ErrorBoundary>
         ) : showMemory ? (
           <ErrorBoundary what="memory">
