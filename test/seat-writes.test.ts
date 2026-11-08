@@ -2,6 +2,7 @@ import type { EntryRecord } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
 import type { AgentDefinition, ChatTurnData, StepInput } from "../shared/agents.ts";
 import type { GuardrailRule, PendingActionView } from "../shared/limits.ts";
+import { inChatServers } from "../shared/agent-settings.ts";
 import { placeNote } from "../shared/memory.ts";
 import type { ToolInfo } from "../shared/protocol.ts";
 import { ChatActions, type NewAction } from "../worker/agents/limits/actions.ts";
@@ -10,7 +11,7 @@ import { WriteGate, type GateHost } from "../worker/agents/limits/gate.ts";
 import { seatLevel } from "../worker/agents/limits/levels.ts";
 import type { TurnResult } from "../worker/agents/controller.ts";
 import type { RosterEntry } from "../worker/agents/roster.ts";
-import { SeatActions } from "../worker/agents/seats/actions.ts";
+import { MAX_ENDED_SEAT_ACTIONS, SeatActions } from "../worker/agents/seats/actions.ts";
 import type { RoomLink, RoomRef, SeatTurn } from "../worker/agents/seats/link.ts";
 import type { ChatRules } from "../worker/agents/seats/rules.ts";
 import { AgentSeats, type SeatHost } from "../worker/agents/seats/seat.ts";
@@ -226,15 +227,45 @@ describe("Seat turns through the write gate", () => {
     await expect(callerWith({ ...PLANNER, servers: ["db"] })).rejects.toThrow("not one of the servers");
   });
 
-  it("runs anyone's Yes to an offer in a fork of the seat's session, so only its posted reply reaches it", async () => {
+  it("keeps a seat's agent to the servers the room lets agents use: its tools and its calls", async () => {
+    const configured: string[][] = [];
+    const ana = new (class extends AnasObject {
+      async configure(session: string, agent: AgentDefinition, turn: SeatTurn) {
+        // As ChatAgent's seat host does (inChatServers with the turn's servers).
+        configured.push(inChatServers(agent, turn, ["crm", "db"]).servers ?? []);
+        await super.configure(session, agent, turn);
+      }
+    })();
+    await ana.seats.give(ROOM, "p", { ...seatTurn(1, ANA, true), servers: ["db"] });
+    await settle();
+    expect(configured).toEqual([["db"]]);
+    // The room names only db: Ana's own message cannot make her agent write to crm there, whatever its tools.
+    const fork = ana.sessionOf(1);
+    await expect(ana.seats.caller(fork, { server: "crm" }, async () => PLANNER)).rejects.toThrow("may use in this chat");
+    // A room that names none leaves it its own.
+    await ana.seats.give(ROOM, "p", seatTurn(2, ANA, true));
+    await settle();
+    await expect(ana.seats.caller(ana.sessionOf(2), { server: "crm" }, async () => PLANNER)).resolves.toMatchObject({ level: 4 });
+  });
+
+  it("runs only its owner's Yes to an offer apart, with draftTools; anyone else's is a turn that reads as any other", async () => {
     const ana = new AnasObject();
-    // Radu says Yes to the planner's offer: draftTools reads every server of Ana's agent, her own ones too.
+    // Radu (the room's owner) says Yes to the planner's offer: a Yes reads every server of Ana's agent (draftTools), her
+    // own ones too, and its reply is posted in the room. It is not his to give: it runs as a turn of his, in the shared
+    // session, never as a Yes.
     await ana.seats.give(ROOM, "p", seatTurn(1, { ...RADU, drafts: true }, false));
     await settle();
-    const fork = ana.sessionOf(1);
-    expect(fork).toMatch(/^s1-fork/);
-    // It is not Ana's turn for all that: her memory notes do not take its words as hers, and it changes nothing.
-    expect(ana.seats.memoryAgent(fork)).toMatchObject({ byOwner: false });
+    const shared = ana.sessionOf(1);
+    expect(shared).not.toMatch(/fork/);
+    expect(ana.seats.turnIn(shared)?.turn.calledBy).toEqual(RADU);
+    expect(ana.seats.memoryAgent(shared)).toMatchObject({ byOwner: false });
+    expect(seatLevel(ana.seats.turnIn(shared)!.turn).level).toBe(1);
+    // Ana's own Yes is one: apart, in a fork of the seat's session, so only its posted reply reaches it; it changes nothing.
+    await ana.seats.give(ROOM, "p", seatTurn(2, { ...ANA, drafts: true }, false));
+    await settle();
+    const fork = ana.sessionOf(2);
+    expect(fork).toMatch(/-fork/);
+    expect(ana.seats.turnIn(fork)?.turn.calledBy).toEqual({ ...ANA, drafts: true });
     expect(seatLevel(ana.seats.turnIn(fork)!.turn).level).toBe(1);
   });
 });
@@ -282,9 +313,32 @@ describe("A seat's held action", () => {
     expect(room.put(ROOM.chatId, MIA.uid, "m", { ...view, status: "declined" })).toBe(false);
     expect(room.put("other", ANA.uid, "p", { ...view, id: "00000000000000aa" })).toBe(false);
     expect(room.of(ANA.uid)).toHaveLength(1);
-    // Once it ended, the card goes (its outcome reaches the agent's session and her feed).
-    expect(room.put(ROOM.chatId, ANA.uid, "p", { ...view, status: "done" })).toBe(true);
-    expect(room.of(ANA.uid)).toEqual([]);
+    // Once it ended, its outcome stays, still for her alone (as the owner's own cards keep theirs).
+    const ran = { ...view, status: "done" as const, decidedAt: view.createdAt + 1, result: '{"ok":true}' };
+    expect(room.put(ROOM.chatId, ANA.uid, "p", ran)).toBe(true);
+    expect(room.of(ANA.uid)).toEqual([{ ...ran, seat: true }]);
+    expect([room.of(MIA.uid), room.of(RADU.uid)]).toEqual([[], []]);
+  });
+
+  it("keeps the outcomes of ended cards when its agent leaves, the newest few, and drops the open ones", async () => {
+    const view = await heldOne();
+    const room = new SeatActions(memorySql());
+    const id = (n: number) => n.toString(16).padStart(16, "0");
+    const ended = Array.from({ length: MAX_ENDED_SEAT_ACTIONS + 2 }, (_, n) => ({
+      ...view,
+      id: id(n + 1),
+      createdAt: view.createdAt + n,
+      status: (n % 2 ? "declined" : "expired") as "declined" | "expired",
+    }));
+    for (const card of ended) room.put(ROOM.chatId, ANA.uid, "p", card);
+    room.put(ROOM.chatId, ANA.uid, "p", { ...view, id: id(999) });
+    // Only the newest ended ones stay; the open one is kept besides.
+    const kept = room.of(ANA.uid);
+    expect(kept.filter((card) => card.status !== "pending").map((card) => card.id)).toEqual(ended.slice(2).map((card) => card.id));
+    expect(kept.filter((card) => card.status === "pending").map((card) => card.id)).toEqual([id(999)]);
+    room.dropAgent("p");
+    expect(room.of(ANA.uid).map((card) => card.status)).not.toContain("pending");
+    expect(room.of(ANA.uid)).toHaveLength(MAX_ENDED_SEAT_ACTIONS);
   });
 
   it("is in the member's Needs you as the room's: it opens the shared chat", async () => {

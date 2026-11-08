@@ -1,8 +1,7 @@
 import { auth } from "@modelcontextprotocol/sdk/client/auth.js";
-import { isReadOnly, type ToolInfo } from "../../shared/protocol.ts";
 import { errorMessage } from "../../shared/util.ts";
 import { connectStreamableHttp, fetchWithin, REQUEST_TIMEOUT_MS } from "./connect.ts";
-import { McpFailure, type McpConnection, type McpHub } from "./hub.ts";
+import { McpFailure, type McpConnection } from "./hub.ts";
 import { McpOAuthClient, type McpAuthRecord, type McpAuthStore } from "./oauth.ts";
 import type { McpServerConfig } from "./servers.ts";
 
@@ -86,17 +85,3 @@ export async function checkSignIn(
 
 /** fetch, with each request given up after CHECK_REQUEST_MS (an abort the SDK asked for still works). */
 const timedFetch = fetchWithin(CHECK_REQUEST_MS);
-
-/**
- * The tools of `server` a run may use: only those the server marks read-only. A scheduled run reads; anything that
- * writes waits for its owner's approval (worker/agents/limits, later).
- */
-export async function readOnlyTools(hub: Pick<McpHub, "tools">, server: string): Promise<ToolInfo[]> {
-  return (await hub.tools(server)).filter(isReadOnly);
-}
-
-/** Refuse, before it reaches the server, a run's call to a tool that is not read-only (or that the server does not list). */
-export async function assertReadOnly(hub: Pick<McpHub, "tools">, server: string, tool: string): Promise<void> {
-  if ((await readOnlyTools(hub, server)).some((info) => info.name === tool)) return;
-  throw new McpFailure({ code: "not_granted", server, message: `${tool} on ${server} is not a read-only tool; a scheduled run may only read.` });
-}

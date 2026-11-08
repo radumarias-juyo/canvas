@@ -51,7 +51,13 @@ with `@cloudflare/vite-plugin`, pnpm; configured and deployed with the `cf` CLI 
   How people work with an agent or pi (corrections, drafts, decisions, mutes, reactions, repeats) is recorded as signals,
   with no model call and never what anyone said (`shared/signals.ts`, `worker/memory/chat-signals.ts`), in the agent's
   owner's directory (pi's: the chat owner's; `SignalStore`), tagged with the chat and its kind; nothing from a chat off
-  the record, checked at both ends.
+  the record, checked at both ends. Each night at 03:00 in the owner's time zone (`worker/memory/user-dreams.ts`, one
+  alarm with the sign-ins'), pi (account setting, on) and each agent with `learns` (on for new agents) dream once per day
+  (`Dreamer`, `worker/memory/dream.ts`): one cheap call (`internalModel(DREAM_MODEL)`, on the owner's meter and runs' cap) per audience,
+  the owner's private chats together and each shared chat alone, over the day's signals and the log's lines (never a
+  reply built on private servers). The model only proposes; `placeDreamNote` (`shared/dream.ts`) puts
+  each note from where what it cites came from: a shared chat's into that chat, a "how to work" lesson for wider use
+  off until confirmed, a fact off until confirmed. Notes left waiting are a Needs you item (`lesson`).
   Keep those rules in code.
 - Shared chats (`worker/chat-routes.ts`, `worker/members.ts`): the owner invites people by single-use link; they share
   the one conversation and the one agent, which always acts as the owner (owner's MCP sign-ins, files, skills; artifacts
@@ -63,23 +69,26 @@ with `@cloudflare/vite-plugin`, pnpm; configured and deployed with the `cf` CLI 
   pi's reach too (`worker/agent/reach.ts`): a run that answers anyone but the owner reads only pi's servers for shared
   chats (the owner's list on pi's page, `shared/pi-settings.ts`, else those that do not sign in each user) and the chat's
   files, and what pi read for the owner alone is left out of its requests and, with its calls' output, of others'
-  screens; a run alone with the owner that read such a result and ends after someone joined, or one in a shared chat with
-  the owner's review before posting on, has its replies held for the owner (Show to the chat), which no agent's catch-up
-  or `chat_history` reads and which hand nothing on. Keep it that way.
+  screens; a run that started alone with the owner, read such a result and ends after someone joined, or one in a shared
+  chat with the owner's review before posting on, has its replies held for the owner (Show to the chat), which no
+  agent's catch-up, `chat_history` or dream reads and which hand nothing on; a dream reads a reply of pi's built on what
+  only the owner sees as theirs (`fork`). Keep it that way.
 - Agents (`shared/agents.ts`, `worker/agents/`): definitions per user in `UserDirectory` (`AgentStore`); a chat's roster
   and durable turn queue (`ChatRoster`) and the turn controller (`AgentTurns`) run each roster agent in its own pi
   session of the chat object, configured per turn (`#configureAgent`: the session's tools are an allow-list,
   `allowedTools`, and a turn its owner did not ask for gets only read tools: the shared servers' (all its servers' when it runs apart in a chat with nobody else in it) and `READ_TOOLS`, plus
-  `DISPLAY_TOOLS`, which only show something (a checklist card, no data; not for an unprompted turn); the owner's Yes to an
+  `DISPLAY_TOOLS`, which only show something (a checklist card, no data; not for an unprompted turn); the owner's files
+  (`FILE_TOOLS`) only as the agent's `files` allows, `own` for its owner's turns, `shared` for others' (reading only, never
+  unprompted, a run or a Yes), and the prompt names them only to a request that may read them; the owner's Yes to an
   offered next step (`offer_yes`, `ChatAgent.takeOffer`) gets only `draftTools`, reading and `agent_propose`, pi's run too; the
   harness offers and runs no tool off that list); keep it that way. A turn its owner asked for, their Yes, and any turn that
   starts with nobody but the owner in the chat run apart, in a fork of the agent's session (`runsApart`): only the posted
   reply goes back, and one built on a private server is held for the owner when someone joined meanwhile. A call such a
   fork or a run holds shows anyone else only who asks for which tool (`shownToMembers`). A member's agent runs as a seat
   in the member's own object, one per room (`seatChatId`: what a chat object keeps, its pages, drafts, files, sandbox and
-  held actions, never passes between rooms) (`worker/agents/seats/`): the member's own turns and anyone's Yes to its offer run in a fork
+  held actions, never passes between rooms) (`worker/agents/seats/`): the member's own turns and their Yes to its offer (offerOwner: only theirs) run in a fork
   of the seat's session, its calls go through the member's write gate (`seatCaller`: only the member's own message
-  changes data), what it holds has its card in the room for the member alone, and it reads as the room's kind. An
+  changes data), what it holds has its card in the room for the member alone, it reads as the room's kind, and it keeps to the servers the room lets agents use (`SeatTurn.servers`). An
   agent's owner alone opens its window (`shared/agent-window.ts`, `worker/agents/window.ts`; a seat's is read in the
   member's own object): its sessions and transcripts, and steering (`AgentTurns.instruct`): into their own turn running
   apart, else a turn of theirs, apart, whose ask is in no log or shared session. A turn
@@ -127,4 +136,5 @@ with `@cloudflare/vite-plugin`, pnpm; configured and deployed with the `cf` CLI 
   raw.githubusercontent.com serves only the LFS pointer.
 - Deploy with `cf deploy` from the repository root (Worker `pi-artifacts` on the custom domain `pi.oxfer.app`, workers.dev
   and Preview URLs off; R2 bucket, Artifacts namespace and AI Gateway all named `pi-artifacts`). The sandbox image build
-  needs Docker.
+  needs Docker. `PI_PREVIEW=<name>` deploys a separate preview Worker with its own resources instead (`deploy/preview.ts`,
+  `docs/preview-deploy.md`); without it the config is production's, held by `test/fixtures/production-config.json`.

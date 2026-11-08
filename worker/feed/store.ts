@@ -196,6 +196,20 @@ export class FeedStore {
     return this.#sql.exec("UPDATE feed SET needs = 0, read = 1 WHERE about = ? AND kind = ? AND needs > 0", about, kind).rowsWritten;
   }
 
+  /** How many unread items of `kind` about `about` came from `from` to `to`, by chat (for the dream: reports nobody opened). */
+  unreadBy(about: string, kind: FeedKind, from: number, to: number): { chatId: string; count: number }[] {
+    return this.#sql
+      .exec(
+        "SELECT chat_id, COUNT(*) AS n FROM feed WHERE about = ? AND kind = ? AND read = 0 AND at >= ? AND at < ? AND chat_id IS NOT NULL GROUP BY chat_id",
+        about,
+        kind,
+        from,
+        to,
+      )
+      .toArray()
+      .map((row) => ({ chatId: row.chat_id as string, count: Number(row.n) }));
+  }
+
   /** A chat is gone, or the person is out of it: its items go. */
   forgetChat(chatId: string): number {
     this.#sql.exec("DELETE FROM feed_answered WHERE chat_id = ?", chatId);

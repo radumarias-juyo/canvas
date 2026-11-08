@@ -1,11 +1,11 @@
 // The Setup tab's servers table, apart so the tests render it without the rest of the form.
 
-import type { AgentServerInfo } from "../../shared/agents.ts";
+import type { AgentFiles, AgentServerInfo } from "../../shared/agents.ts";
 
 /**
  * The servers table: each of the deployment's MCP servers with whether it signs in each user, and two switches, for
  * the agent itself and for shared chats. A server that signs in as the owner and is on for shared chats says that the
- * chat sees what the agent reads from it. The owner's private files close it, as a fixed row (FilesRow).
+ * chat sees what the agent reads from it. The owner's private files close it (FilesRow), with the same two switches.
  */
 export function ServersTable({
   servers,
@@ -14,6 +14,8 @@ export function ServersTable({
   shared,
   name,
   onToggle,
+  files,
+  onFiles,
 }: {
   servers: AgentServerInfo[] | null;
   error: string | null;
@@ -21,6 +23,9 @@ export function ServersTable({
   shared: Set<string>;
   name: string;
   onToggle: (column: "servers" | "sharedServers", server: string, on: boolean) => void;
+  /** The owner's files setting as it holds (agentFiles), and a change to it: taking them from the agent takes them from shared chats too. */
+  files: AgentFiles;
+  onFiles: (files: AgentFiles) => void;
 }) {
   if (error) return <p className="form-error">Could not read the servers: {error}</p>;
   if (!servers) return <p className="skills-note">Reading the servers…</p>;
@@ -63,29 +68,32 @@ export function ServersTable({
             </tr>
           );
         })}
-        <FilesRow />
+        <FilesRow files={files} name={name} onChange={onFiles} />
       </tbody>
     </table>
   );
 }
 
 /**
- * Your private files, as a row of the table: fixed, as the app decides it in code (allowedTools), not a setting. A turn
- * you ask for reads them, apart from the chat; a turn anyone else asks for, or one nobody asked for, never does.
+ * Your private files, as a row of the table (allowedTools enforces it). "This agent": a turn you ask for reads and
+ * writes them, and runs code on them, apart from the chat. "Shared chats": a turn anyone else in a shared chat gives it
+ * may read them, and they see what it reads, as with a server that signs in as you. Never in a run, or unprompted.
  */
-function FilesRow() {
+function FilesRow({ files, name, onChange }: { files: AgentFiles; name: string; onChange: (files: AgentFiles) => void }) {
   return (
     <tr className="agent-server-files">
       <th scope="row">
         <span className="agent-server-name">files</span>
         <small>your private files</small>
-        <small>Read only on a turn you ask for, apart from the chat: only its reply is posted. Never for anyone else, or in a run.</small>
+        {files.shared && (
+          <small className="agent-server-warn">Anyone in a shared chat can make @{name || "it"} read your files, and sees what it reads.</small>
+        )}
       </th>
       <td>
-        <Switch label="Your files for this agent: on a turn you ask for" on disabled onChange={() => {}} />
+        <Switch label="Your files for this agent" on={files.own} onChange={(on) => onChange({ own: on, shared: on && files.shared })} />
       </td>
       <td>
-        <Switch label="Your files in shared chats: never" on={false} disabled onChange={() => {}} />
+        <Switch label="Your files in shared chats" on={files.shared} disabled={!files.own} onChange={(on) => onChange({ own: files.own, shared: on })} />
       </td>
     </tr>
   );

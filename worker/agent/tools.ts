@@ -46,7 +46,8 @@ import { clip, MAX_TOOL_TEXT, text } from "./output.ts";
 import { pagePart } from "./page-part.ts";
 import type { AgentsScope } from "../agents/tools.ts";
 import { shownOf, type HeldPage } from "../agents/roster.ts";
-import { upTo, versionRefusal } from "./page-authors.ts";
+import { readsFiles } from "../agents/turns.ts";
+import { postedPage, versionRefusal } from "./page-authors.ts";
 import type { ReadDetails } from "./reach.ts";
 
 /** What the tools need from the chat they run in. */
@@ -63,7 +64,7 @@ export interface ChatScope extends PublishScope, AgentsScope {
    * The newest version of another person's page (a member's agent's, or the room's for a seat) that conversation
    * `session` may read as posted in its chat; 0 for none. Unset: no other person's page is read here.
    */
-  chatPage?(meta: Pick<ArtifactMeta, "id" | "ownerUid" | "chatId">, session: string): Promise<number>;
+  chatPage?(meta: Pick<ArtifactMeta, "id" | "ownerUid" | "chatId">, session: string): Promise<{ upTo: number; held: HeldPage }>;
   /** Save a skill for the user, turned off until they turn it on. */
   proposeSkill(skill: SkillInput): Promise<SkillResult>;
   /** The checks that found errors in a row; the chat resets it when someone writes. */
@@ -192,11 +193,13 @@ export function filesExtension(scope: ChatScope): Extension {
   });
 }
 
-/** The prompt's list of the user's files (see filesIndex), installed again whenever it changes. */
+/**
+ * The prompt's list of the user's files (see filesIndex), installed again whenever it changes. Only in a request that
+ * may read them (readsFiles): an agent's turn without its owner's files (allowedTools) is not told their names.
+ */
 export function filesIndexExtension(index: string): Extension {
-  return defineExtension({ name: "files-index", sections: [section("user_files", () => index)] });
+  return defineExtension({ name: "files-index", sections: [section("user_files", ({ agent }) => (readsFiles(agent.tools) ? index : undefined))] });
 }
-
 const SANDBOX_FILES =
   "Files you name are copied from the user's files into ./files/, in their folders but without the leading uploads/ " +
   "(uploads/q3/sales.csv is ./files/q3/sales.csv, out/<chat>/report.csv is ./files/out/<chat>/report.csv). " +
@@ -386,7 +389,8 @@ async function ownArtifact(scope: ChatScope, id: string, session: string, rules?
     return shown;
   }
   // Another person's page posted in this chat (a member's agent's, or the room's to a seat): up to the newest version posted.
-  const posted = upTo(meta, (await scope.chatPage?.(meta, session)) ?? 0);
+  const page = await scope.chatPage?.(meta, session);
+  const posted = page && postedPage(meta, page);
   if (!posted) throw missing();
   return posted;
 }

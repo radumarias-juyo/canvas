@@ -7,6 +7,7 @@ import {
   AgentSettingsError,
   budgetNotice,
   chatAllowsServer,
+  inChatServers,
   checkAgentSettings,
   DEFAULT_MESSAGE_TOKENS,
   messageBudget,
@@ -219,6 +220,9 @@ describe("the funnel's gates", () => {
     expect(limitRefusal({ ...fresh, quietMs: limits.pauseMinutes * 60_000 - 1 }, limits)).toBe("pause");
     // A follow-up has no pause.
     expect(limitRefusal(fresh, { ...limits, pauseMinutes: 600 })).toBeNull();
+    // The scripted model's pause (DEV_PAUSE_MS) in place of the limits': seconds, not minutes.
+    expect(limitRefusal({ ...fresh, quietMs: 1_500 }, limits, 1_500)).toBeNull();
+    expect(limitRefusal({ ...fresh, quietMs: 1_499 }, limits, 1_500)).toBe("pause");
   });
 
   it("takes the stricter of the chat's and the agent's limits, each one set, else the default", () => {
@@ -811,5 +815,12 @@ describe("a chat's agent settings", () => {
     expect(agentRouterOn({ router: false }, "private")).toBe(false);
     expect(chatAllowsServer({}, "crm")).toBe(true);
     expect(chatAllowsServer({ servers: ["docs"] }, "crm")).toBe(false);
+  });
+
+  it("keeps an agent to the servers the chat names, its shared list too; one that names none to the deployment's there", () => {
+    const all = ["crm", "docs", "mail"];
+    expect(inChatServers({ servers: ["crm", "docs"], sharedServers: ["crm"] }, {}, all)).toEqual({ servers: ["crm", "docs"], sharedServers: ["crm"] });
+    expect(inChatServers({ servers: ["crm", "docs"], sharedServers: ["crm"] }, { servers: ["docs"] }, all)).toEqual({ servers: ["docs"], sharedServers: [] });
+    expect(inChatServers({}, { servers: ["docs", "mail"] }, all)).toEqual({ servers: ["docs", "mail"] });
   });
 });

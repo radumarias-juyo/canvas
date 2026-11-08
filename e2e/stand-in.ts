@@ -1,9 +1,11 @@
 // Stand-in MCP servers for the e2e suite (node --experimental-strip-types e2e/stand-in.ts [port]), on two local ports:
 //   <port>     "crm": list_deals (read-only) and update_deal (a write), over a few made-up deals; GET /state tells what
-//              they are now and which writes came in
+//              they are now, which writes came in and which holds wait; hold (read-only) answers only once the test
+//              releases its key (POST /release?key=), or after HOLD_MS: a turn that keeps working while a flow looks at it
 //   <port + 1> "vault": the tests' stand-in portal (test/fake-portal.ts: an MCP server behind OAuth, with discovery,
-//              dynamic registration, PKCE and refresh), whose authorize page approves at once; one read-only tool,
-//              read_notes
+//              dynamic registration, PKCE and refresh), whose authorize page approves at once; read-only tools
+//              read_notes, and read_notes_slowly, which answers the same after `ms` (up to 15 s): a call still going
+//              while someone joins a chat
 // Generic names and data only. The servers keep nothing between runs.
 
 import { createServer, type ServerResponse } from "node:http";
@@ -20,6 +22,11 @@ const deals = [
   { id: "d3", name: "Initech upgrade", stage: "won", amount: 9000 },
 ];
 const writes: { tool: string; input: unknown }[] = [];
+/** The longest a hold waits for its release. */
+const HOLD_MS = 45_000;
+/** The holds waiting, by key, and the keys released before their hold came. */
+const holds = new Map<string, () => void>();
+const released = new Set<string>();
 
 const send = (res: ServerResponse, status: number, body: unknown) => res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
 
@@ -35,6 +42,24 @@ function crmServer(): McpServer {
       annotations: { readOnlyHint: true },
     },
     async ({ stage }) => text({ deals: deals.filter((deal) => !stage || deal.stage === stage) }),
+  );
+  server.registerTool(
+    "hold",
+    {
+      description: "Wait until the tests release this key, then answer. For tests only.",
+      inputSchema: { key: z.string() },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ key }) => {
+      if (!released.delete(key)) {
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, HOLD_MS);
+          holds.set(key, () => (clearTimeout(timer), resolve()));
+        });
+        holds.delete(key);
+      }
+      return text({ released: key });
+    },
   );
   server.registerTool(
     "update_deal",
@@ -58,7 +83,14 @@ createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", `http://127.0.0.1:${port}`);
   try {
     if (url.pathname === "/health") return send(res, 200, { ok: true });
-    if (url.pathname === "/state") return send(res, 200, { deals, writes });
+    if (url.pathname === "/state") return send(res, 200, { deals, writes, holding: [...holds.keys()] });
+    if (url.pathname === "/release" && req.method === "POST") {
+      const key = url.searchParams.get("key") ?? "";
+      const waiting = holds.get(key);
+      if (waiting) waiting();
+      else released.add(key);
+      return send(res, 200, { released: key, waited: Boolean(waiting) });
+    }
     if (url.pathname === "/mcp") return await serveMcp(crmServer(), req, res, await readBody(req));
     send(res, 404, { error: "not_found" });
   } catch (error) {
@@ -66,9 +98,16 @@ createServer(async (req, res) => {
   }
 }).listen(port, "127.0.0.1", () => console.log(`stand-in crm on http://127.0.0.1:${port}/mcp`));
 
+const notes = { notes: ["Quarterly review on Friday", "Renewals are due next month"] };
 const vault = new FakePortal((server) => {
-  server.registerTool("read_notes", { description: "Read the shared notes.", annotations: { readOnlyHint: true } }, async () =>
-    text({ notes: ["Quarterly review on Friday", "Renewals are due next month"] }),
+  server.registerTool("read_notes", { description: "Read the shared notes.", annotations: { readOnlyHint: true } }, async () => text(notes));
+  server.registerTool(
+    "read_notes_slowly",
+    { description: "Read the shared notes, after a wait.", inputSchema: { ms: z.number().int().min(0).max(15_000) }, annotations: { readOnlyHint: true } },
+    async ({ ms }) => {
+      await new Promise((done) => setTimeout(done, ms));
+      return text(notes);
+    },
   );
 });
 vault.origin = `http://127.0.0.1:${port + 1}`;

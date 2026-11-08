@@ -2,7 +2,9 @@ import { createModels, fauxAssistantMessage, fauxToolCall, type Message } from "
 import { describe, expect, it } from "vitest";
 import { assistantText as said } from "../worker/agents/turns.ts";
 import { agentProfile, cosine, INTEREST_THRESHOLD } from "../worker/agents/funnel.ts";
-import { scriptEmbedder, scriptModel, scriptOn, scriptPauseMs, scriptReply, scriptSteps } from "../worker/dev-model.ts";
+import { scriptEmbedder, scriptModel, scriptOn, scriptPauseMs, scriptReply, scriptSteps, scriptWorkflow, stepsFor } from "../worker/dev-model.ts";
+import { compilePrompt, compileWorkflow, type ServerTools } from "../worker/agents/runs/compile.ts";
+import type { AgentDefinition } from "../shared/agents.ts";
 
 const user = (text: string): Message => ({ role: "user", content: text, timestamp: 0 });
 const system = (text: string, sections?: Record<string, string>): Message => ({ role: "system", content: text, ...(sections && { sections }), timestamp: 0 });
@@ -72,6 +74,34 @@ describe("the scripted dev model", () => {
     expect(said(scriptReply([relay, catchUp, user("Your turn: ada asked you.\n\n[ada · person]: @relay over to you")]))).toBe("@pi please summarise");
   });
 
+  it("gives each speaker its own part of a script (/for), as its instructions name it, and pi the rest", () => {
+    const steps = scriptSteps("@alpha @beta /say for all /for alpha /say A /for beta /recall alpha · agent");
+    expect(stepsFor(steps, "alpha")).toEqual([{ say: "for all" }, { say: "A" }]);
+    expect(stepsFor(steps, "beta")).toEqual([{ say: "for all" }, { recall: "alpha · agent" }]);
+    expect(stepsFor(steps, "pi")).toEqual([{ say: "for all" }]);
+    const ask = user("Your turn: ada asked you.\n\n[ada · person · your owner]: @alpha @beta /for alpha /say Alpha found 41 rows. /for beta /say B");
+    expect(said(scriptReply([system("In this chat you are @alpha, one of its agents"), ask]))).toBe("Alpha found 41 rows.");
+    expect(said(scriptReply([system("You are an agent.", { agent: "In this chat you are @beta, one of its agents" }), ask]))).toBe("B");
+    // pi has no part of its own here: nothing for it, so ok.
+    expect(said(scriptReply([ask]))).toMatch(/^ok: /);
+  });
+
+  it("recalls the newest line it read before its turn that holds the text, never a script line", () => {
+    const catchUp = user("What was said in the chat since your last turn:\n\n[ada · person]: @alpha /recall alpha · agent\n\n[alpha · agent]: Alpha found 41 rows.");
+    const turn = user("Your turn: ada asked you.\n\n[ada · person]: /recall alpha · agent");
+    expect(said(scriptReply([catchUp, turn]))).toBe("recalled: [alpha · agent]: Alpha found 41 rows.");
+    expect(said(scriptReply([user("[ada · person]: hi"), user("/recall code word")]))).toBe('recalled nothing for "code word"');
+  });
+
+  it("pads a reply with filler, and puts the draft an earlier write answered with into a tool's input", () => {
+    const padded = said(scriptReply([user("/pad 1000 @beta over to you")]));
+    expect(padded.startsWith("@beta over to you\n\nfiller filler")).toBe(true);
+    expect(padded.length).toBe("@beta over to you\n\n".length + 1000);
+    const script = user('/tool artifact_write {"html":"<p>x</p>"}\n/tool artifact_publish {"title":"T","draft_id":"{{draft}}"}');
+    const publish = scriptReply([script, called("artifact_write"), result("artifact_write", 'Saved as draft "0a1b2c3d4e5f6a7b" (1 KB).')]);
+    expect(publish.content).toEqual([expect.objectContaining({ name: "artifact_publish", arguments: { title: "T", draft_id: "0a1b2c3d4e5f6a7b" } })]);
+  });
+
   it("answers every call through pi-ai's models", async () => {
     const { provider, model } = scriptModel();
     const models = createModels();
@@ -111,5 +141,62 @@ describe("the scripted dev model", () => {
     expect(scriptPauseMs({ DEV_MODEL: "script", DEV_TOOLS: "false", DEV_PAUSE_MS: "1500" })).toBeUndefined();
     expect(scriptPauseMs({ DEV_MODEL: "script", DEV_TOOLS: "true" })).toBeUndefined();
     expect(scriptPauseMs({ DEV_MODEL: "script", DEV_TOOLS: "true", DEV_PAUSE_MS: "soon" })).toBeUndefined();
+  });
+});
+
+describe("the scripted dev model compiles a workflow", () => {
+  const agent: AgentDefinition = {
+    id: "a1b2c3d4e5f60718",
+    name: "brief",
+    avatar: "br",
+    color: "blue",
+    job: "Where the deals stand",
+    instructions: "1. Every weekday at 07:00, look at the deals in crm.\n2. Work out which deals moved.\n3. Say why they moved.\n\nTells: You, in the chat.",
+    servers: ["crm", "vault"],
+    autonomy: 1,
+    origin: "agent",
+    enabled: false,
+    version: 1,
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const listed: ServerTools[] = [
+    {
+      server: "crm",
+      tools: [
+        { name: "update_deal", description: "Move a deal.", inputSchema: { type: "object" } },
+        { name: "list_deals", description: "List deals.", inputSchema: { type: "object" }, annotations: { readOnlyHint: true } },
+      ],
+    },
+    { server: "vault", tools: [{ name: "read_notes", description: "Notes.", annotations: { readOnlyHint: true } }] },
+  ];
+
+  it("answers the compile request with steps from the instructions' words, which the app takes as the agent's workflow", async () => {
+    const { provider, model } = scriptModel();
+    const models = createModels();
+    models.setProvider(provider);
+    const { workflow } = await compileWorkflow(models, model, agent, listed);
+    // A look at each server the words name (its first read-only tool), the work the other steps say, and a tell.
+    expect(workflow).toEqual([
+      { kind: "look", server: "crm", tool: "list_deals", input: {} },
+      { kind: "work", prompt: "Work out which deals moved.\nSay why they moved." },
+      { kind: "tell", to: ["owner"], via: "chat" },
+    ]);
+    // Words edited: the steps follow them.
+    const edited = { ...agent, instructions: "1. Read the notes in vault.\n2. Sum them up.\n\nTells: You, by a notification." };
+    expect((await compileWorkflow(models, model, edited, listed)).workflow).toEqual([
+      { kind: "look", server: "vault", tool: "read_notes", input: {} },
+      { kind: "work", prompt: "Sum them up." },
+      { kind: "tell", to: ["owner"], via: "notify" },
+    ]);
+  });
+
+  it("answers only the compile request so: any other conversation goes by its script", () => {
+    expect(scriptWorkflow("no sections here")).toBeNull();
+    expect(said(scriptReply([system("You are pi."), user(compilePrompt(agent, listed))]))).toMatch(/^ok: /);
+    expect(JSON.parse(scriptWorkflow(compilePrompt({ ...agent, instructions: "Just say hi." }, listed))!)).toEqual([
+      { kind: "work", prompt: "Just say hi." },
+      { kind: "tell", to: ["owner"], via: "chat" },
+    ]);
   });
 });

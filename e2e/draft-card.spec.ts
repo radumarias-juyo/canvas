@@ -4,7 +4,8 @@
 
 import { expect, test, type Page } from "@playwright/test";
 import { mkdirSync } from "node:fs";
-import { newChat, send, signIn, type Person } from "./app.ts";
+import type { AgentDefinition } from "../shared/agents.ts";
+import { call, newChat, send, signIn, type Person } from "./app.ts";
 
 test.describe.configure({ mode: "serial" });
 
@@ -97,4 +98,20 @@ test("j. the draft card edits in place: its rows and its sentences stay in step"
   await shots(page, "step-edit");
   await card.locator("form.agent-step-edit").getByRole("button", { name: "Save" }).click();
   await expect(runs).toContainText("Weekdays at 06:15");
+  await expect(card).toContainText("its steps follow the new sentence");
+
+  // Its steps are compiled again from the new words: the work step says what step 2 says now, and the tell goes as
+  // the Tells line says (by a notification).
+  const second = card.locator(".agent-card-steps li").nth(1);
+  await second.hover();
+  await second.getByRole("button", { name: /Edit/ }).click();
+  await card.getByRole("textbox", { name: "Step 2" }).fill("Work out which deals moved, and why.");
+  await card.locator("form.agent-step-edit").getByRole("button", { name: "Save" }).click();
+  await expect(card).toContainText("Its steps follow the new sentence.");
+  const agents = await call<AgentDefinition[]>(page, "GET", "/api/agents");
+  expect(agents.find((agent) => agent.name === "deal-brief")?.workflow).toEqual([
+    { kind: "look", server: "crm", tool: "list_deals", input: {} },
+    { kind: "work", prompt: "Work out which deals moved, and why.\nTell me in the chat." },
+    { kind: "tell", to: ["owner"], via: "notify" },
+  ]);
 });

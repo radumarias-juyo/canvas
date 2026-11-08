@@ -1,7 +1,7 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode, type RefObject } from "react";
-import { assistantOffer } from "../../shared/offers.ts";
+import { assistantOffer, offerOwner } from "../../shared/offers.ts";
 import { CHAT_AGENT_KIND, CHAT_TURN_KIND, proposedBy, type ChatAgentReplyData, type ChatAgentView } from "../../shared/agents.ts";
 import { AgentWindow } from "./AgentWindow.tsx";
 import { DraftCard } from "../agents/DraftCard.tsx";
@@ -62,7 +62,7 @@ import { Dictation } from "./Dictation.tsx";
 import { ownMessages, useHistory } from "./history.ts";
 import { AgentDraft } from "./AgentDraft.tsx";
 import { AgentReply, sourceLine } from "./AgentReply.tsx";
-import { ActionCard, ChatActions } from "./ActionCard.tsx";
+import { ActionCard, ActionOutcome, ChatActions } from "./ActionCard.tsx";
 import { CHAT_ACTION_KIND, type ChatActionData } from "../../shared/limits.ts";
 import { ChecklistCard } from "./ChecklistCard.tsx";
 import { CHAT_CHECKLIST_KIND, checklistAt, foldChecklists, type ChatChecklistData } from "../../shared/checklist.ts";
@@ -77,12 +77,14 @@ import { Thinking } from "./Thinking.tsx";
 import { useRevealedText } from "./reveal.ts";
 import {
   blocks,
+  endedSeat,
   firstNew,
   heldReplies,
   inReply,
   isAgent,
   liveOffer,
   openHints,
+  outcomesAfter,
   published,
   replyItems,
   replySources,
@@ -179,9 +181,14 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
     },
     [prompt, dropHint],
   );
-  // The latest next step a reply offered (shared/offers.ts), which only the chat's owner answers: Yes replies to that
-  // message, which calls the agent that wrote it, asking it to set the step up.
-  const offered = useMemo(() => (isOwner ? liveOffer(state.entries) : undefined), [isOwner, state.entries]);
+  // The latest next step a reply offered (shared/offers.ts), which only the owner of the agent that offered it answers
+  // (offerOwner: the chat's owner for pi's and their agents'): Yes replies to that message, which calls the agent that
+  // wrote it, asking it to set the step up.
+  const offered = useMemo(() => {
+    const live = people ? liveOffer(state.entries) : undefined;
+    const entry = live === undefined ? undefined : state.entries.find((one) => one.id === live);
+    return entry && offerOwner(entry, people!.owner.uid) === uid ? live : undefined;
+  }, [people, state.entries, uid]);
   const takeOffer = useCallback(
     (entry: number) => {
       if (!sendYes(entry)) return false;
@@ -385,8 +392,11 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
   const chatActions = useMemo(() => ({ actions, isOwner, ownerName: people?.owner.name }), [actions, isOwner, people]);
   // Only an agent of the viewer's own has a window for them (the server checks too).
   const windowAgent = windowOf === null ? undefined : agents.find((agent) => agent.id === windowOf && agent.ownerUid === uid);
-  // What the viewer's own agents held in their seats here: their cards, which no one else gets, under the transcript.
+  // What the viewer's own agents held in their seats here, which no one else gets: the cards that wait, under the
+  // transcript; those that ended, as a line after the entry they were decided after.
   const seatActions = useMemo(() => [...actions.values()].filter((action) => action.seat).sort((a, b) => a.createdAt - b.createdAt), [actions]);
+  const seatOpen = useMemo(() => seatActions.filter((action) => !endedSeat(action)), [seatActions]);
+  const seatOutcomes = useMemo(() => outcomesAfter(state.entries, seatActions.filter(endedSeat)), [state.entries, seatActions]);
   return (
     <ChatActions.Provider value={chatActions}>
     <SharedChat.Provider value={group}>
@@ -479,6 +489,7 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
                             />
                           </EntryOf.Provider>
                           {spend && <PromptCost spend={spend} />}
+                          {seatOutcomes.get(entry.id as number)?.map((action) => <ActionOutcome key={action.id} action={action} />)}
                         </Fragment>
                       );
                     })}
@@ -503,7 +514,7 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
                     {drafts.map((draft) => (
                       <AgentDraft key={draft.turn} chatId={chatId} draft={draft} onDone={setDrafts} />
                     ))}
-                    {seatActions.map((action) => (
+                    {seatOpen.map((action) => (
                       <ActionCard key={action.id} action={action} />
                     ))}
                     <Queue queued={state.queued} incoming={state.incoming} uid={uid} />

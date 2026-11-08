@@ -13,6 +13,7 @@ const RUN_STATUS: Record<RunStatus, { text: string; tone: Tone }> = {
   running: { text: "Running", tone: "draft" },
   sent: { text: "Sent", tone: "on" },
   not_today: { text: "Not today", tone: "off" },
+  blocked: { text: "Blocked", tone: "error" },
   failed: { text: "Failed", tone: "error" },
   needs_sign_in: { text: "Needs sign-in", tone: "error" },
   waiting: { text: "Waits for you", tone: "draft" },
@@ -34,6 +35,7 @@ const ITEM_STATUS: Record<RunItemStatus, string> = {
   running: "Running",
   acted: "Acted",
   not_today: "Not today",
+  blocked: "Blocked",
   failed: "Failed",
   waiting: RUN_STATUS.waiting.text,
 };
@@ -96,7 +98,13 @@ export function usedParts(used: AgentRunDetail["used"]): { what: string; text: s
 /** How a run's items went, when it had a scope: "3 of 6 acted · 3 not today". Empty for a run with one item. */
 export function itemsLabel(items: AgentRunView["items"]): string {
   if (items.total <= 1) return "";
-  return [`${items.acted} of ${items.total} acted`, items.notToday && `${items.notToday} not today`, items.failed && `${items.failed} failed`, items.waiting && `${items.waiting} wait for you`]
+  return [
+    `${items.acted} of ${items.total} acted`,
+    items.notToday && `${items.notToday} not today`,
+    items.blocked && `${items.blocked} blocked, not acted on`,
+    items.failed && `${items.failed} failed`,
+    items.waiting && `${items.waiting} wait for you`,
+  ]
     .filter(Boolean)
     .join(" · ");
 }

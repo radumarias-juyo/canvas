@@ -9,8 +9,8 @@ type Answer = "yes" | "no" | null;
 const isAnswer = (value: unknown): value is Answer => value === "yes" || value === "no" || value === null;
 
 /**
- * The next step a reply offers (shared/offers.ts), as a row under its bubble: an arrow and the question. For the chat's
- * owner, on the latest offer in the chat (`onYes`), Yes and No thanks: Yes replies to the message asking its agent to
+ * The next step a reply offers (shared/offers.ts), as a row under its bubble: an arrow and the question. For the owner
+ * of the agent that offered it (offerOwner), on the latest offer in the chat (`onYes`), Yes and No thanks: Yes replies to the message asking its agent to
  * set it up (`onYes`, false when it could not be sent), No thanks hides them. Anyone else, and older offers, see the
  * question only.
  */
