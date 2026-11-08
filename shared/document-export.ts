@@ -1,9 +1,10 @@
 /**
- * A document as a reader may take it away: the parts they may see (`readerView`), as Markdown (`documentMarkdown`) and
- * as the static HTML its PDF prints (`documentHtml`). Word is in worker/documents/docx.ts, the PDF's printing in
- * worker/documents/pdf.ts. Pure: no DOM, no Worker APIs.
+ * A document as a reader takes it away, from its block tree (shared/document.ts): as Markdown (`documentMarkdown`) and
+ * as the static HTML its PDF prints (`documentHtml`). Word is worker/documents/docx.ts, the printing worker/documents/pdf.ts.
+ * What the reader may see is the document object's to cut (DocumentObject.exportView), never these. Pure: no DOM, no
+ * Worker APIs.
  */
-import type { DocNode, DocMark } from "./document.ts";
+import type { DocMark, DocNode } from "./document.ts";
 
 /** The file formats a document exports to, with what each is served as. */
 export const EXPORT_FORMATS = {
@@ -17,9 +18,6 @@ export function isExportFormat(value: string): value is ExportFormat {
   return Object.hasOwn(EXPORT_FORMATS, value);
 }
 
-/** What a private section shows to a reader it is held from, in the editor and in an export. */
-export const HELD_SECTION = "A section only the document's owner sees.";
-
 /** A file name for the export: the title's letters, digits, spaces, dots and dashes, never empty, never a path. */
 export function exportFileName(title: string, format: ExportFormat): string {
   const base =
@@ -32,76 +30,91 @@ export function exportFileName(title: string, format: ExportFormat): string {
   return `${base}.${EXPORT_FORMATS[format].extension}`;
 }
 
+/** A picture an export carries itself: a data: URL of a raster type (what exportView's `images` holds). */
+export const DATA_IMAGE = /^data:image\/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+$/;
+
 // ---- Inline text -------------------------------------------------------------------------------------------------
-
-/** A chip's words as plain text: a person's name, a date, a dropdown's choice. */
-export function chipText(node: DocNode): string {
-  const attrs = node.attrs ?? {};
-  if (node.type === "mention") return `@${String(attrs.label ?? attrs.name ?? attrs.id ?? "")}`;
-  if (node.type === "date") return String(attrs.value ?? attrs.date ?? "");
-  if (node.type === "dropdown") return String(attrs.value ?? attrs.label ?? "");
-  return "";
-}
-
-/** True for a node that is a run of text or stands inside one (a chip, a line break). */
-function inline(node: DocNode): boolean {
-  return node.type === "text" || node.type === "hardBreak" || isChip(node);
-}
 
 export function isChip(node: DocNode): boolean {
   return node.type === "mention" || node.type === "date" || node.type === "dropdown";
 }
 
-/** A block's text, marks and chips flattened: for alt text, table cells in plain formats, and tests. */
+/** A chip's words, as the editor shows them: a person's @name, a date, a dropdown's value (none: nothing). */
+export function chipText(node: DocNode): string {
+  if (node.type === "mention") return `@${String(node.attrs?.name ?? "")}`;
+  if (node.type === "date") return String(node.attrs?.value ?? "");
+  if (node.type === "dropdown") return node.attrs?.value == null ? "" : String(node.attrs.value);
+  return "";
+}
+
+/** A node that is a run of text or stands in one: text, a chip, a line break. */
+function inline(node: DocNode): boolean {
+  return node.type === "text" || node.type === "hardBreak" || isChip(node);
+}
+
+/** A block's text, marks dropped and chips as their words: a code, CSV or formula block's source, a cell's words. */
 export function plainText(node: DocNode): string {
   if (node.type === "text") return node.text ?? "";
   if (node.type === "hardBreak") return "\n";
   if (isChip(node)) return chipText(node);
-  return (node.content ?? []).map(plainText).join(inline(node) ? "" : node.content?.every(inline) ? "" : "\n");
+  const children = node.content ?? [];
+  return children.map(plainText).join(children.every(inline) ? "" : "\n");
 }
 
-/** A link's address, kept only for the schemes a reader can safely follow from a file. */
+/** A link's address, only for the schemes the schema allows (the object already holds no other; a file never links one). */
 export function safeHref(mark: DocMark): string | undefined {
   const href = String(mark.attrs?.href ?? "").trim();
-  return /^(https?:|mailto:)/i.test(href) ? href : undefined;
+  return /^(https?:\/\/|mailto:)/i.test(href) ? href : undefined;
+}
+
+function isList(node: DocNode): boolean {
+  return node.type === "bulletList" || node.type === "orderedList" || node.type === "taskList";
+}
+
+function isHeaderCell(cell: DocNode): boolean {
+  return cell.type === "tableHeader";
+}
+
+/** What an embed (a chart or a diagram, drawn live in the editor) is in a file: its title, else its kind. */
+export function embedLabel(node: DocNode): string {
+  const title = String(node.attrs?.title ?? "");
+  return title ? `${node.attrs?.kind === "diagram" ? "Diagram" : "Chart"}: ${title}` : node.attrs?.kind === "diagram" ? "Diagram" : "Chart";
 }
 
 // ---- Markdown ----------------------------------------------------------------------------------------------------
 
 /** Characters Markdown would read as syntax in running text. */
 function escapeMarkdown(text: string): string {
-  return text.replace(/([\\`*_~[\]<>#|])/g, "\\$1").replace(/^(\s*)(\d+)\./gm, "$1$2\\.").replace(/^(\s*)([-+])(\s)/gm, "$1\\$2$3");
+  return text
+    .replace(/([\\`*_~[\]<>#|$])/g, "\\$1")
+    .replace(/^(\s*)(\d+)\./gm, "$1$2\\.")
+    .replace(/^(\s*)([-+])(\s)/gm, "$1\\$2$3");
 }
 
-function inlineMarkdown(nodes: DocNode[] | undefined): string {
+/** Inline content as Markdown; `inCell` for a table cell, where GFM ends the cell at any unescaped pipe, code or not. */
+function inlineMarkdown(nodes: DocNode[] | undefined, inCell = false): string {
   let out = "";
   for (const node of nodes ?? []) {
-    if (node.type === "hardBreak") {
-      out += "  \n";
-      continue;
+    if (node.type === "hardBreak") out += inCell ? "<br>" : "\\\n";
+    else if (isChip(node)) out += escapeMarkdown(chipText(node));
+    else if (node.type === "text") {
+      const marks = node.marks ?? [];
+      const has = (type: string) => marks.some((mark) => mark.type === type);
+      let text = has("code") ? codeSpan(node.text ?? "") : escapeMarkdown(node.text ?? "");
+      if (inCell) text = text.replace(/(?<!\\)\|/g, "\\|");
+      if (has("bold")) text = `**${text}**`;
+      if (has("italic")) text = `*${text}*`;
+      if (has("strike")) text = `~~${text}~~`;
+      const link = marks.find((mark) => mark.type === "link");
+      const href = link && safeHref(link);
+      if (href) text = `[${text}](<${href.replace(/[<>\s]/g, encodeURIComponent)}>)`;
+      out += text;
     }
-    if (isChip(node)) {
-      out += escapeMarkdown(chipText(node));
-      continue;
-    }
-    if (node.type !== "text") continue;
-    const marks = node.marks ?? [];
-    const code = marks.some((mark) => mark.type === "code");
-    let text = code ? codeSpan(node.text ?? "") : escapeMarkdown(node.text ?? "");
-    if (!code) {
-      if (marks.some((mark) => mark.type === "bold")) text = `**${text}**`;
-      if (marks.some((mark) => mark.type === "italic")) text = `*${text}*`;
-      if (marks.some((mark) => mark.type === "strike")) text = `~~${text}~~`;
-    }
-    const link = marks.find((mark) => mark.type === "link");
-    const href = link && safeHref(link);
-    if (href) text = `[${text}](<${href.replace(/[<>]/g, encodeURIComponent)}>)`;
-    out += text;
   }
   return out;
 }
 
-/** Inline code that holds backticks: a fence one longer than the longest run inside. */
+/** Inline code that may hold backticks: a fence one longer than the longest run inside. */
 function codeSpan(text: string): string {
   const longest = Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length));
   const fence = "`".repeat(longest + 1);
@@ -109,37 +122,89 @@ function codeSpan(text: string): string {
   return `${fence}${pad}${text}${pad}${fence}`;
 }
 
+/** A fenced block that may hold fences: one longer than the longest run of backticks inside. */
 function fenced(text: string, info = ""): string {
   const longest = Math.max(2, ...(text.match(/`{3,}/g) ?? []).map((run) => run.length));
   const fence = "`".repeat(longest + 1);
-  return `${fence}${info.replace(/[^\w+#.-]/g, "")}\n${text}\n${fence}`;
+  return `${fence}${info}\n${text}\n${fence}`;
 }
 
-function tableMarkdown(table: DocNode): string {
-  const rows = (table.content ?? []).map((row) => (row.content ?? []).map((cell) => cellMarkdown(cell)));
+/** A GFM table from rows of cells already in Markdown; the first row is its header, as GFM needs one. */
+function gfmTable(rows: string[][]): string {
   if (!rows.length) return "";
-  const width = Math.max(...rows.map((row) => row.length), 1);
-  const pad = (row: string[]) => [...row, ...Array<string>(width - row.length).fill("")];
-  const line = (row: string[]) => `| ${pad(row).join(" | ")} |`;
+  const width = Math.max(1, ...rows.map((row) => row.length));
+  const line = (row: string[]) => `| ${[...row, ...Array<string>(width - row.length).fill("")].join(" | ")} |`;
   const [head, ...body] = rows;
-  return [line(head), `|${" --- |".repeat(width)}`, ...body.map(line)].join("\n");
+  return [line(head!), `|${" --- |".repeat(width)}`, ...body.map(line)].join("\n");
 }
 
-/** A cell in one line: its paragraphs joined by <br>, its pipes escaped. */
+/** A cell in one line: its paragraphs joined by <br>, its line breaks too. */
 function cellMarkdown(cell: DocNode): string {
-  return (cell.content ?? [])
-    .map((block) => (block.content?.every(inline) ? inlineMarkdown(block.content) : escapeMarkdown(plainText(block))))
-    .join("<br>")
-    .replace(/\n/g, " ");
+  return (cell.content ?? []).map((paragraph) => inlineMarkdown(paragraph.content, true)).join("<br>");
 }
 
-function csvMarkdown(node: DocNode): string {
-  const rows = parseCsv(String(node.attrs?.text ?? plainText(node)));
-  if (!rows.length) return "";
-  return tableMarkdown({
-    type: "table",
-    content: rows.map((row) => ({ type: "tableRow", content: row.map((text) => ({ type: "tableCell", content: [{ type: "paragraph", content: text ? [{ type: "text", text }] : [] }] })) })),
-  });
+/** A list at `indent` (the spaces its markers start after): an item's text, and what nests in it, line up after its marker. */
+function listMarkdown(list: DocNode, indent: string): string {
+  let number = list.type === "orderedList" ? Number(list.attrs?.start ?? 1) : 0;
+  return (list.content ?? [])
+    .map((item) => {
+      // A task's checkbox belongs to its text, so what nests under it lines up with the "[", as GFM reads it.
+      const marker = list.type === "orderedList" ? `${number++}. ` : "- ";
+      const box = list.type === "taskList" ? `[${item.attrs?.checked ? "x" : " "}] ` : "";
+      const inner = `${indent}${" ".repeat(marker.length)}`;
+      // The first paragraph goes on the marker's line; the rest of the item under it, indented to its text.
+      const [first, ...rest] = item.content ?? [];
+      const head = first ? inlineMarkdown(first.content).replace(/\n/g, `\n${inner}`) : "";
+      const after = rest.map((child) => (isList(child) ? listMarkdown(child, inner) : `\n${inner}${inlineMarkdown(child.content).replace(/\n/g, `\n${inner}`)}`));
+      return [`${indent}${marker}${box}${head}`, ...after].join("\n");
+    })
+    .join("\n");
+}
+
+function blockMarkdown(block: DocNode): string {
+  switch (block.type) {
+    case "heading":
+      return `${"#".repeat(Math.min(3, Math.max(1, Number(block.attrs?.level) || 1)) + 1)} ${inlineMarkdown(block.content)}`;
+    case "paragraph":
+      return inlineMarkdown(block.content);
+    case "bulletList":
+    case "orderedList":
+    case "taskList":
+      return listMarkdown(block, "");
+    case "table":
+      return gfmTable((block.content ?? []).map((row) => (row.content ?? []).map(cellMarkdown)));
+    case "codeBlock":
+      return fenced(plainText(block), String(block.attrs?.language ?? ""));
+    case "csv":
+      return gfmTable(parseCsv(plainText(block)).map((row) => row.map((field) => escapeMarkdown(field).replace(/\n/g, "<br>"))));
+    case "latex":
+      return `$$\n${plainText(block)}\n$$`;
+    case "image": {
+      const src = String(block.attrs?.src ?? "");
+      const alt = escapeMarkdown(String(block.attrs?.alt ?? ""));
+      // Only a picture the export carries (exportView's data: URL); one it has no bytes for is its alt text.
+      return DATA_IMAGE.test(src) ? `![${alt}](${src})` : `*[${alt || "Image"}]*`;
+    }
+    case "embed":
+      return `*[${escapeMarkdown(embedLabel(block))}]*`;
+    case "pending":
+      // A section still being written: nothing yet.
+      return "";
+    default:
+      return "";
+  }
+}
+
+/**
+ * The document as Markdown (CommonMark with GFM tables, task lists and strikethrough): its title as the one level-1
+ * heading, its headings one level down under it.
+ */
+export function documentMarkdown(title: string, blocks: DocNode[]): string {
+  const body = blocks
+    .map(blockMarkdown)
+    .filter((text) => text !== "")
+    .join("\n\n");
+  return `# ${escapeMarkdown(title)}\n\n${body}${body ? "\n" : ""}`;
 }
 
 /** CSV rows: quoted fields with doubled quotes, commas and line breaks inside quotes. */
@@ -149,96 +214,30 @@ export function parseCsv(text: string): string[][] {
   let field = "";
   let quoted = false;
   for (let i = 0; i < text.length; i++) {
-    const char = text[i];
+    const char = text[i]!;
     if (quoted) {
-      if (char === '"' && text[i + 1] === '"') (field += '"'), i++;
-      else if (char === '"') quoted = false;
+      if (char === '"' && text[i + 1] === '"') {
+        field += '"';
+        i++;
+      } else if (char === '"') quoted = false;
       else field += char;
     } else if (char === '"' && field === "") quoted = true;
-    else if (char === ",") row.push(field), (field = "");
-    else if (char === "\n" || char === "\r") {
+    else if (char === ",") {
+      row.push(field);
+      field = "";
+    } else if (char === "\n" || char === "\r") {
       if (char === "\r" && text[i + 1] === "\n") i++;
-      row.push(field), rows.push(row), (row = []), (field = "");
+      row.push(field);
+      rows.push(row);
+      row = [];
+      field = "";
     } else field += char;
   }
-  if (field !== "" || row.length) row.push(field), rows.push(row);
-  return rows;
-}
-
-function listMarkdown(list: DocNode, depth: number): string {
-  const ordered = list.type === "orderedList";
-  let number = Number(list.attrs?.start ?? 1) || 1;
-  const indent = "  ".repeat(depth);
-  return (list.content ?? [])
-    .map((item) => {
-      const marker = list.type === "taskList" ? `- [${item.attrs?.checked ? "x" : " "}] ` : ordered ? `${number++}. ` : "- ";
-      const [first, ...rest] = item.content ?? [];
-      const head = first && !isList(first) ? blocksMarkdown([first], depth + 1).replace(/\n/g, `\n${indent}${" ".repeat(marker.length)}`) : "";
-      const nested = [...(first && isList(first) ? [first] : []), ...rest].map((child) =>
-        isList(child) ? listMarkdown(child, depth + 1) : `${indent}${" ".repeat(marker.length)}${blocksMarkdown([child], depth + 1)}`,
-      );
-      return [`${indent}${marker}${head}`, ...nested].join("\n");
-    })
-    .join("\n");
-}
-
-function isList(node: DocNode): boolean {
-  return node.type === "bulletList" || node.type === "orderedList" || node.type === "taskList";
-}
-
-function blocksMarkdown(blocks: DocNode[], depth = 0): string {
-  return blocks
-    .map((block) => blockMarkdown(block, depth))
-    .filter((text) => text !== "")
-    .join("\n\n");
-}
-
-function blockMarkdown(block: DocNode, depth: number): string {
-  switch (block.type) {
-    case "heading":
-      return `${"#".repeat(Math.min(3, Math.max(1, Number(block.attrs?.level) || 1)))} ${inlineMarkdown(block.content)}`;
-    case "paragraph":
-      return inlineMarkdown(block.content);
-    case "bulletList":
-    case "orderedList":
-    case "taskList":
-      return listMarkdown(block, depth);
-    case "table":
-      return tableMarkdown(block);
-    case "codeBlock":
-      return fenced(plainText(block), String(block.attrs?.language ?? ""));
-    case "csv":
-      return csvMarkdown(block);
-    case "latex":
-      return `$$\n${String(block.attrs?.text ?? plainText(block))}\n$$`;
-    case "image": {
-      const alt = escapeMarkdown(String(block.attrs?.alt ?? ""));
-      const src = String(block.attrs?.src ?? "");
-      // Only a picture the export carries (a data: URL) or one on the web; a file of the owner's is never linked by path.
-      return /^(https:|data:image\/)/i.test(src) ? `![${alt}](<${src}>)` : alt ? `*[image: ${alt}]*` : "*[image]*";
-    }
-    case "embed":
-      return `*[${escapeMarkdown(String(block.attrs?.title ?? block.attrs?.kind ?? "chart"))}]*`;
-    case "pending":
-      return "";
-    case "held":
-      return `*${HELD_SECTION}*`;
-    case "horizontalRule":
-      return "---";
-    case "blockquote":
-      return blocksMarkdown(block.content ?? [], depth)
-        .split("\n")
-        .map((line) => `> ${line}`)
-        .join("\n");
-    default:
-      return block.content ? blocksMarkdown(block.content, depth) : "";
+  if (field !== "" || row.length) {
+    row.push(field);
+    rows.push(row);
   }
-}
-
-/** The document as Markdown (CommonMark with GFM tables, task lists and strikethrough), from its block tree. */
-export function documentMarkdown(title: string, blocks: DocNode[]): string {
-  const body = blocksMarkdown(blocks);
-  return `# ${escapeMarkdown(title)}\n\n${body}${body ? "\n" : ""}`;
+  return rows;
 }
 
 // ---- HTML (what the PDF prints) ----------------------------------------------------------------------------------
@@ -254,11 +253,12 @@ function inlineHtml(nodes: DocNode[] | undefined): string {
     else if (isChip(node)) out += `<span class="chip">${escapeHtml(chipText(node))}</span>`;
     else if (node.type === "text") {
       const marks = node.marks ?? [];
+      const has = (type: string) => marks.some((mark) => mark.type === type);
       let text = escapeHtml(node.text ?? "");
-      if (marks.some((mark) => mark.type === "code")) text = `<code>${text}</code>`;
-      if (marks.some((mark) => mark.type === "bold")) text = `<strong>${text}</strong>`;
-      if (marks.some((mark) => mark.type === "italic")) text = `<em>${text}</em>`;
-      if (marks.some((mark) => mark.type === "strike")) text = `<s>${text}</s>`;
+      if (has("code")) text = `<code>${text}</code>`;
+      if (has("bold")) text = `<strong>${text}</strong>`;
+      if (has("italic")) text = `<em>${text}</em>`;
+      if (has("strike")) text = `<s>${text}</s>`;
       const link = marks.find((mark) => mark.type === "link");
       const href = link && safeHref(link);
       if (href) text = `<a href="${escapeHtml(href)}">${text}</a>`;
@@ -272,67 +272,58 @@ function blocksHtml(blocks: DocNode[] | undefined): string {
   return (blocks ?? []).map(blockHtml).join("\n");
 }
 
-function itemsHtml(list: DocNode): string {
-  return (list.content ?? []).map((item) => `<li>${blocksHtml(item.content)}</li>`).join("");
+function itemHtml(item: DocNode): string {
+  return (item.content ?? []).map((child) => (isList(child) ? blockHtml(child) : `<p>${inlineHtml(child.content) || "<br>"}</p>`)).join("");
 }
 
 function blockHtml(block: DocNode): string {
   switch (block.type) {
     case "heading": {
+      // The title is the page's h1; the document's headings go one level down.
       const level = Math.min(3, Math.max(1, Number(block.attrs?.level) || 1)) + 1;
       return `<h${level}>${inlineHtml(block.content)}</h${level}>`;
     }
     case "paragraph":
       return `<p>${inlineHtml(block.content) || "<br>"}</p>`;
     case "bulletList":
-      return `<ul>${itemsHtml(block)}</ul>`;
+      return `<ul>${(block.content ?? []).map((item) => `<li>${itemHtml(item)}</li>`).join("")}</ul>`;
     case "orderedList": {
-      const start = Number(block.attrs?.start ?? 1) || 1;
-      return `<ol${start !== 1 ? ` start="${start}"` : ""}>${itemsHtml(block)}</ol>`;
+      const start = Number(block.attrs?.start ?? 1);
+      return `<ol${start !== 1 ? ` start="${start}"` : ""}>${(block.content ?? []).map((item) => `<li>${itemHtml(item)}</li>`).join("")}</ol>`;
     }
     case "taskList":
       return `<ul class="tasks">${(block.content ?? [])
-        .map((item) => `<li><span class="box">${item.attrs?.checked ? "&#9745;" : "&#9744;"}</span><div>${blocksHtml(item.content)}</div></li>`)
+        .map((item) => `<li><span class="box">${item.attrs?.checked ? "&#9745;" : "&#9744;"}</span><div>${itemHtml(item)}</div></li>`)
         .join("")}</ul>`;
     case "table":
       return `<table>${(block.content ?? [])
-        .map((row) => `<tr>${(row.content ?? []).map((cell) => (header(cell) ? `<th>${blocksHtml(cell.content)}</th>` : `<td>${blocksHtml(cell.content)}</td>`)).join("")}</tr>`)
+        .map((row) => `<tr>${(row.content ?? []).map((cell) => (isHeaderCell(cell) ? `<th>${blocksHtml(cell.content)}</th>` : `<td>${blocksHtml(cell.content)}</td>`)).join("")}</tr>`)
         .join("")}</table>`;
     case "codeBlock":
       return `<pre><code>${escapeHtml(plainText(block))}</code></pre>`;
     case "csv": {
-      const rows = parseCsv(String(block.attrs?.text ?? plainText(block)));
       const cells = (row: string[], tag: string) => row.map((field) => `<${tag}>${escapeHtml(field)}</${tag}>`).join("");
-      return `<table class="csv">${rows.map((row, i) => `<tr>${cells(row, i === 0 ? "th" : "td")}</tr>`).join("")}</table>`;
+      return `<table class="csv">${parseCsv(plainText(block))
+        .map((row, i) => `<tr>${cells(row, i === 0 ? "th" : "td")}</tr>`)
+        .join("")}</table>`;
     }
     case "latex":
-      return `<pre class="formula">${escapeHtml(String(block.attrs?.text ?? plainText(block)))}</pre>`;
+      return `<pre class="formula">${escapeHtml(plainText(block))}</pre>`;
     case "image": {
       const src = String(block.attrs?.src ?? "");
       const alt = escapeHtml(String(block.attrs?.alt ?? ""));
+      const width = Number(block.attrs?.width) || 0;
       // Only pictures the export carries itself: the printing browser reaches nothing.
-      return DATA_IMAGE.test(src) ? `<figure><img src="${src}" alt="${alt}"></figure>` : `<p class="note">[${alt || "image"}]</p>`;
+      return DATA_IMAGE.test(src)
+        ? `<figure><img src="${src}" alt="${alt}"${width ? ` style="width:${Math.min(width, 4000)}px"` : ""}></figure>`
+        : `<p class="note">[${alt || "Image"}]</p>`;
     }
     case "embed":
-      return `<p class="note">[${escapeHtml(String(block.attrs?.title ?? block.attrs?.kind ?? "chart"))}]</p>`;
-    case "pending":
-      return "";
-    case "held":
-      return `<p class="note">${escapeHtml(HELD_SECTION)}</p>`;
-    case "horizontalRule":
-      return "<hr>";
-    case "blockquote":
-      return `<blockquote>${blocksHtml(block.content)}</blockquote>`;
+      return `<p class="note">[${escapeHtml(embedLabel(block))}]</p>`;
     default:
-      return blocksHtml(block.content);
+      // A pending section (being written) and anything else the schema may add: nothing.
+      return "";
   }
-}
-
-/** A picture an export carries itself, as a data: URL of a raster type. */
-export const DATA_IMAGE = /^data:image\/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+$/;
-
-function header(cell: DocNode): boolean {
-  return cell.type === "tableHeader" || cell.attrs?.header === true;
 }
 
 /** The page's own styles: print-friendly, no web fonts, nothing fetched. */
@@ -350,12 +341,11 @@ th, td { border: 0.75pt solid #c7c7c7; padding: 4pt 6pt; text-align: left; verti
 th p, td p { margin: 0; } tr { break-inside: avoid; }
 ul.tasks { list-style: none; padding-left: 0; } ul.tasks li { display: flex; gap: 6pt; } ul.tasks li > div > p { margin: 0; }
 li > p { margin: 0 0 2pt; } .chip { background: #eef2ff; border-radius: 3pt; padding: 0 3pt; }
-figure { margin: 0 0 10pt; } img { max-width: 100%; } .note { color: #6b7280; font-style: italic; }
-blockquote { border-left: 3pt solid #d1d5db; margin: 0 0 8pt; padding-left: 10pt; color: #374151; }`;
+figure { margin: 0 0 10pt; } img { max-width: 100%; } .note { color: #6b7280; font-style: italic; }`;
 
 /**
- * The document as one static HTML page for printing: no script, a policy that loads nothing (pictures only as data:
- * URLs carried in it), the title as its heading.
+ * The document as one static HTML page, its read-only view for printing: no script, a policy that loads nothing
+ * (pictures only as data: URLs carried in it), the title as its heading.
  */
 export function documentHtml(title: string, blocks: DocNode[]): string {
   return `<!doctype html><html><head><meta charset="utf-8">

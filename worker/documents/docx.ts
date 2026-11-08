@@ -5,6 +5,7 @@ import {
   HeadingLevel,
   ImageRun,
   LevelFormat,
+  LineRuleType,
   Packer,
   Paragraph,
   ShadingType,
@@ -16,11 +17,13 @@ import {
   type IRunOptions,
   type ParagraphChild,
 } from "docx";
-import { DATA_IMAGE, HELD_SECTION, chipText, isChip, parseCsv, plainText, safeHref } from "../../shared/document-export.ts";
+import { DATA_IMAGE, chipText, embedLabel, isChip, parseCsv, plainText, safeHref } from "../../shared/document-export.ts";
 import type { DocNode } from "../../shared/document.ts";
 
-/** The numbering every ordered list of the document uses (one instance per list), decimal at every level. */
-const ORDERED = "ordered";
+/** The numbering ordered lists that start at `start` use (one instance per list): decimal, then letters, then roman. */
+function orderedReference(start: number): string {
+  return `ordered-${start}`;
+}
 const MONO = "Consolas";
 const CODE_SHADING = { type: ShadingType.CLEAR, color: "auto", fill: "F3F4F6" } as const;
 /** The widest a picture is laid out, in pixels (docx's unit for an image's size): the text width of an A4 page. */
@@ -73,15 +76,20 @@ export function imageSize(bytes: Uint8Array): { width: number; height: number; t
   return undefined;
 }
 
+/** A grey, italic line standing for what a file cannot hold (a chart drawn live, a picture without its bytes). */
+function note(text: string): Paragraph {
+  return new Paragraph({ children: [new TextRun({ text: `[${text}]`, italics: true, color: "6B7280" })] });
+}
+
 function imageParagraph(block: DocNode): Paragraph {
   const src = String(block.attrs?.src ?? "");
   const alt = String(block.attrs?.alt ?? "");
-  const note = () => new Paragraph({ children: [new TextRun({ text: `[${alt || "image"}]`, italics: true, color: "6B7280" })] });
-  if (!DATA_IMAGE.test(src)) return note();
+  if (!DATA_IMAGE.test(src)) return note(alt || "Image");
   const bytes = Uint8Array.from(atob(src.slice(src.indexOf(",") + 1)), (char) => char.charCodeAt(0));
   const size = imageSize(bytes);
-  if (!size || !size.width || !size.height) return note();
-  const scale = Math.min(1, MAX_IMAGE_WIDTH / size.width);
+  if (!size || !size.width || !size.height) return note(alt || "Image");
+  // As wide as the editor shows it (its width, when set), never wider than the page.
+  const scale = Math.min(Number(block.attrs?.width) || size.width, MAX_IMAGE_WIDTH) / size.width;
   return new Paragraph({
     children: [
       new ImageRun({
@@ -124,6 +132,8 @@ function table(rows: { header: boolean; blocks: (Paragraph | Table)[] }[][]): Ta
 /** Walks the block tree into Word's paragraphs and tables, numbering each ordered list as its own. */
 class Writer {
   #lists = 0;
+  /** The starts of the ordered lists written, each a numbering of its own (1 always, for nested lists). */
+  readonly starts = new Set<number>([1]);
 
   blocks(blocks: DocNode[] | undefined, depth = 0, base: RunStyle = {}): (Paragraph | Table)[] {
     return (blocks ?? []).flatMap((block) => this.block(block, depth, base));
@@ -147,7 +157,7 @@ class Writer {
           table(
             (block.content ?? []).map((row) =>
               (row.content ?? []).map((cell) => {
-                const header = cell.type === "tableHeader" || cell.attrs?.header === true;
+                const header = cell.type === "tableHeader";
                 return { header, blocks: this.blocks(cell.content, 0, header ? { bold: true } : {}) };
               }),
             ),
@@ -158,27 +168,20 @@ class Writer {
       case "csv":
         return [
           table(
-            parseCsv(String(block.attrs?.text ?? plainText(block))).map((row, i) =>
+            parseCsv(plainText(block)).map((row, i) =>
               row.map((field) => ({ header: i === 0, blocks: [new Paragraph({ children: [new TextRun({ text: field, bold: i === 0 })] })] })),
             ),
           ),
         ];
       case "latex":
-        return codeParagraphs(String(block.attrs?.text ?? plainText(block)));
+        return codeParagraphs(plainText(block));
       case "image":
         return [imageParagraph(block)];
       case "embed":
-        return [new Paragraph({ children: [new TextRun({ text: `[${String(block.attrs?.title ?? block.attrs?.kind ?? "chart")}]`, italics: true, color: "6B7280" })] })];
-      case "pending":
-        return [];
-      case "held":
-        return [new Paragraph({ children: [new TextRun({ text: HELD_SECTION, italics: true, color: "6B7280" })] })];
-      case "horizontalRule":
-        return [new Paragraph({ thematicBreak: true, children: [] })];
-      case "blockquote":
-        return this.blocks(block.content, depth, { ...base, italics: true });
+        return [note(embedLabel(block))];
       default:
-        return this.blocks(block.content, depth, base);
+        // A pending section (being written) and anything else the schema may add: nothing.
+        return [];
     }
   }
 
@@ -186,6 +189,9 @@ class Writer {
   list(list: DocNode, depth: number): (Paragraph | Table)[] {
     const level = Math.min(depth, 8);
     const instance = list.type === "orderedList" ? ++this.#lists : 0;
+    // A top-level list numbers from its start; a nested one from 1 (what Word's levels can say).
+    const start = list.type === "orderedList" && depth === 0 ? Number(list.attrs?.start ?? 1) : 1;
+    this.starts.add(start);
     return (list.content ?? []).flatMap((item) => {
       const [first, ...rest] = item.content ?? [];
       const marked = first && first.type === "paragraph" ? first : undefined;
@@ -193,14 +199,19 @@ class Writer {
       const lead = new Paragraph({
         // A task carries its checkbox instead of a bullet, indented as a list item would be.
         ...(list.type === "orderedList"
-          ? { numbering: { reference: ORDERED, level, instance } }
+          ? { numbering: { reference: orderedReference(start), level, instance } }
           : list.type === "taskList"
             ? { indent: { left: 360 * (level + 1) } }
             : { bullet: { level } }),
         children: [...box, ...runs(marked?.content)],
       });
+      // The item's other paragraphs line up with its text; its lists go one level in.
       const after = (marked ? rest : item.content ?? []).flatMap((child) =>
-        child.type === "bulletList" || child.type === "orderedList" || child.type === "taskList" ? this.list(child, depth + 1) : this.block(child, depth + 1, {}),
+        child.type === "paragraph"
+          ? [new Paragraph({ indent: { left: 720 * (level + 1) }, children: runs(child.content) })]
+          : child.type === "bulletList" || child.type === "orderedList" || child.type === "taskList"
+            ? this.list(child, depth + 1)
+            : this.block(child, depth + 1, {}),
       );
       return [lead, ...after];
     });
@@ -208,33 +219,34 @@ class Writer {
 }
 
 /** The document as a Word file (.docx): its title, headings, lists with tasks, tables, code, pictures, links, chips as text. */
-export async function documentDocx(title: string, blocks: DocNode[]): Promise<Uint8Array> {
-  const body = new Writer().blocks(blocks);
+export async function documentDocx(title: string, blocks: DocNode[]): Promise<Uint8Array<ArrayBuffer>> {
+  const writer = new Writer();
+  const body = writer.blocks(blocks);
   const document = new Document({
     title,
     creator: "",
     // Some room after each paragraph and before each heading, as the editor shows them; a sans-serif face.
     styles: {
       default: {
-        document: { run: { font: "Calibri", size: 22 }, paragraph: { spacing: { after: 120, line: 276 } } },
+        document: { run: { font: "Calibri", size: 22 }, paragraph: { spacing: { after: 120, line: 276, lineRule: LineRuleType.AUTO } } },
         heading1: { paragraph: { spacing: { before: 360, after: 120 } } },
         heading2: { paragraph: { spacing: { before: 280, after: 100 } } },
         heading3: { paragraph: { spacing: { before: 240, after: 80 } } },
       },
     },
     numbering: {
-      config: [
-        {
-          reference: ORDERED,
-          levels: Array.from({ length: 9 }, (_, level) => ({
-            level,
-            format: [LevelFormat.DECIMAL, LevelFormat.LOWER_LETTER, LevelFormat.LOWER_ROMAN][level % 3],
-            text: `%${level + 1}.`,
-            alignment: AlignmentType.START,
-            style: { paragraph: { indent: { left: 720 * (level + 1), hanging: 360 } } },
-          })),
-        },
-      ],
+      config: [...writer.starts].map((start) => ({
+        reference: orderedReference(start),
+        levels: Array.from({ length: 9 }, (_, level) => ({
+          level,
+          format: [LevelFormat.DECIMAL, LevelFormat.LOWER_LETTER, LevelFormat.LOWER_ROMAN][level % 3],
+          text: `%${level + 1}.`,
+          // A list's own start at its top level (`start` of an ordered list); a nested list counts from 1.
+          start: level === 0 ? start : 1,
+          alignment: AlignmentType.START,
+          style: { paragraph: { indent: { left: 720 * (level + 1), hanging: 360 } } },
+        })),
+      })),
     },
     sections: [{ children: [new Paragraph({ heading: HeadingLevel.TITLE, children: [new TextRun(title)] }), ...body] }],
   });

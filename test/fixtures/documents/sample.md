@@ -1,34 +1,37 @@
 # Quarter \<plan\>
 
-# Plan
+## Plan
 
 Plain, **bold**, *italic*, ~~gone~~, `x = 1` and a [link](<https://example.com/a?b=1>).
 
-Not a link \*stars\* and \| pipes
+Not \*emphasis\*, \| pipes, \# hash, \$5 and 1. not a list
 
 @Ada on 2026-11-08: Done
 
-## Lists
+### Lists
 
 - one
 - two
+
+  two, more
   - two-a
 
-1. first
-2. second
+3. third
+4. fourth
+   1. fourth-a
 
 - [x] done
 - [ ] to do
 
-### Data
+#### Data
 
 | Name | Status |
 | --- | --- |
-| Alpha | Open |
+| Alpha `a\|b` | Open |
 
 ```ts
 const a = 1;
-console.log(a);
+console.log(`${a}`);
 ```
 
 | city | people |
@@ -39,8 +42,8 @@ $$
 e^{i\pi} + 1 = 0
 $$
 
-![A red dot](<data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAAEUlEQVR4nGP4z8DwHwyBDABL8AX7Hf8NQAAAAABJRU5ErkJggg==>)
+![A red dot](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAAEUlEQVR4nGP4z8DwHwyBDABL8AX7Hf8NQAAAAABJRU5ErkJggg==)
 
-*[image: Owner's file]*
+*[Not carried]*
 
-*A section only the document's owner sees.*
+*[Chart: Sales]*
