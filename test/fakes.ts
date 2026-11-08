@@ -86,12 +86,17 @@ export async function listen(server: Server): Promise<string> {
   return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 }
 
-/** A Durable Object's SQL API over an in-memory node:sqlite database. */
+/** A Durable Object's SQLite allows this many terms in one compound SELECT (UNION, INTERSECT, EXCEPT); node:sqlite 500. */
+const DO_COMPOUND_SELECT_TERMS = 5;
+
+/** A Durable Object's SQL API over an in-memory node:sqlite database, refusing what a Durable Object's refuses and node:sqlite not. */
 export function memorySql(): Sql & DumpSql & { db: DatabaseSync } {
   const db = new DatabaseSync(":memory:");
   return {
     db,
     exec(query: string, ...given: (string | number | null | ArrayBuffer)[]) {
+      const terms = (query.match(/\b(UNION|INTERSECT|EXCEPT)\b/gi)?.length ?? 0) + 1;
+      if (terms > DO_COMPOUND_SELECT_TERMS) throw new Error("too many terms in compound SELECT: SQLITE_ERROR");
       // A Durable Object takes bytes as an ArrayBuffer; node:sqlite as a Uint8Array.
       const bindings = given.map((value) => (value instanceof ArrayBuffer ? new Uint8Array(value) : value));
       if (bindings.length === 0 && query.trim().split(";").filter((part) => part.trim()).length > 1) {

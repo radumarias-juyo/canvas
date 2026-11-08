@@ -140,6 +140,16 @@ describe("a preview deploy", () => {
     await expect(config({ ...PREVIEW, ...env })).rejects.toThrow(why);
   });
 
+  it.each(["DEV_TOOLS", "DEV_MODEL", "DEV_PAUSE_MS", "DEV_GAP_MS"])("refuses %s for production without the demo sign-in", async (flag) => {
+    await expect(config({ [flag]: flag === "DEV_MODEL" ? "script" : "true" })).rejects.toThrow(new RegExp(`${flag} is for local development, with AUTH_MODE=demo`));
+    await expect(config({ [flag]: "1", AUTH_MODE: "access" })).rejects.toThrow(/for local development/);
+  });
+
+  it("takes the development switches for local development, with the demo sign-in", async () => {
+    const local = await config({ AUTH_MODE: "demo", DEV_TOOLS: "true", DEV_MODEL: "script", DEV_PAUSE_MS: "1500", DEV_GAP_MS: "1000" });
+    expect(local.worker.env).toMatchObject({ AUTH_MODE: { value: "demo" }, DEV_TOOLS: { value: "true" }, DEV_MODEL: { value: "script" }, DEV_GAP_MS: { value: "1000" } });
+  });
+
   it("is refused production's name, domain or Access application", async () => {
     const { worker } = await config();
     const [domain] = worker.domains as string[];

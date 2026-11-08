@@ -210,7 +210,8 @@ export function AgentSettingsPanel({
         label="Daily token budget"
         hint={
           <>
-            Every model call of this chat counts: {tokens(today.tokens)} tokens{today.costUsd > 0 && ` ($${today.costUsd.toFixed(2)})`} today (UTC).
+            Every model call of this chat counts the tokens it processed (new input, output and what it caches, not the cached
+            conversation it reads again): {tokens(today.tokens)} tokens{today.costUsd > 0 && ` ($${today.costUsd.toFixed(2)})`} today (UTC).
           </>
         }
         value={settings.dailyTokens}
@@ -223,7 +224,7 @@ export function AgentSettingsPanel({
       <NumberSetting
         id={`message-budget-${chatId}`}
         label="Token budget per message"
-        hint="What the agents a message calls, and their hand-offs, may use together; past it, the rest of them do not run."
+        hint="The tokens the agents a message calls, and their hand-offs, may process together (as the daily budget counts them); past it, the rest of them do not run."
         value={settings.messageTokens}
         min={MIN_DAILY_TOKENS}
         max={MAX_DAILY_TOKENS}

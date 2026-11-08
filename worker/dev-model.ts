@@ -44,9 +44,22 @@ const SCRIPT_ID = "scripted";
 /** The picker's id of the scripted model. */
 export const SCRIPT_MODEL = modelKey(SCRIPT_PROVIDER, SCRIPT_ID);
 
-/** Whether this deployment runs on the scripted model: only a local one with DEV_TOOLS on. */
-export function scriptOn(env: { DEV_MODEL?: string; DEV_TOOLS?: string }): boolean {
-  return env.DEV_MODEL === "script" && env.DEV_TOOLS === "true";
+/** What the development switches are read from: the Worker's or a Durable Object's environment. */
+export type DevEnv = { DEV_TOOLS?: string; AUTH_MODE?: string };
+
+/**
+ * Whether this is local development: DEV_TOOLS on, and the demo sign-in (AUTH_MODE=demo), which a deploy never has
+ * (cloudflare.config.ts refuses DEV_* without it, and a preview refuses both). Every dev route (worker/dev-routes.ts),
+ * the scripted model and its times, and the dev-only state behind them (the funnel's log, a dream's scripted answer)
+ * are only on here: DEV_TOOLS alone, deployed by mistake behind Access, turns nothing on.
+ */
+export function devOn(env: DevEnv): boolean {
+  return env.DEV_TOOLS === "true" && env.AUTH_MODE === "demo";
+}
+
+/** Whether this deployment runs on the scripted model: only in local development (devOn) with DEV_MODEL=script. */
+export function scriptOn(env: DevEnv & { DEV_MODEL?: string }): boolean {
+  return env.DEV_MODEL === "script" && devOn(env);
 }
 
 /** Places in the scripted interest model's vectors. */
@@ -74,7 +87,7 @@ function wordVector(text: string): number[] {
 }
 
 /** A DEV_* setting's milliseconds, on the scripted model only; undefined anywhere else, or for one that is no whole number. */
-function scriptMs(env: { DEV_MODEL?: string; DEV_TOOLS?: string }, value: string | undefined): number | undefined {
+function scriptMs(env: DevEnv & { DEV_MODEL?: string }, value: string | undefined): number | undefined {
   const ms = Number(value || NaN);
   return scriptOn(env) && Number.isSafeInteger(ms) && ms >= 0 ? ms : undefined;
 }
@@ -83,7 +96,7 @@ function scriptMs(env: { DEV_MODEL?: string; DEV_TOOLS?: string }, value: string
  * How long a chat stays quiet before an agent may speak up in it, on the scripted model with DEV_PAUSE_MS set (the e2e
  * suite's, so it waits seconds, not minutes); undefined anywhere else: PAUSE_MS.
  */
-export function scriptPauseMs(env: { DEV_MODEL?: string; DEV_TOOLS?: string; DEV_PAUSE_MS?: string }): number | undefined {
+export function scriptPauseMs(env: DevEnv & { DEV_MODEL?: string; DEV_PAUSE_MS?: string }): number | undefined {
   return scriptMs(env, env.DEV_PAUSE_MS);
 }
 
@@ -91,7 +104,7 @@ export function scriptPauseMs(env: { DEV_MODEL?: string; DEV_TOOLS?: string; DEV
  * The shortest time between two of an agent's unprompted posts in a chat, on the scripted model with DEV_GAP_MS set (the
  * e2e suite's, so an agent may speak up again within seconds); undefined anywhere else: the limits' gapMinutes.
  */
-export function scriptGapMs(env: { DEV_MODEL?: string; DEV_TOOLS?: string; DEV_GAP_MS?: string }): number | undefined {
+export function scriptGapMs(env: DevEnv & { DEV_MODEL?: string; DEV_GAP_MS?: string }): number | undefined {
   return scriptMs(env, env.DEV_GAP_MS);
 }
 

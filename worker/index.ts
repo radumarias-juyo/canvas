@@ -1,7 +1,6 @@
 import { exports, waitUntil } from "cloudflare:workers";
 import { DICTATION_ROUTE } from "../shared/dictation.ts";
 import { ID_PATTERN, isSecondSeatUid, UID_PATTERN, type ArtifactView, type ProxyRequest } from "../shared/protocol.ts";
-import { errorMessage } from "../shared/util.ts";
 import { PageCallCache } from "./artifacts/page-calls.ts";
 import { pageAiRoute, pageFailed, pageStorageRoute, type PageHome } from "./artifacts/page-routes.ts";
 import { artifactETag, artifactResponse, notModified, sourceETag, sourceResponse } from "./artifacts/serve.ts";
@@ -9,9 +8,8 @@ import { DEMO_COOKIE, identify } from "./auth/index.ts";
 import { dataRoute } from "./data-routes.ts";
 import { dictationRoute } from "./dictation.ts";
 import { filesRoute } from "./files-routes.ts";
-import { answerJson, json, readJson } from "./http.ts";
+import { json, readJson } from "./http.ts";
 import type { UserDirectory } from "./users.ts";
-import type { MemoryKind, MemoryScope, ServerCoverage } from "../shared/memory.ts";
 import { chatRoute, discussRoute } from "./chat-routes.ts";
 import { mcpRoute } from "./mcp-routes.ts";
 import { pushRoute } from "./push-routes.ts";
@@ -21,9 +19,9 @@ import { skillsRoute } from "./skills-routes.ts";
 import { agentsRoute } from "./agents-routes.ts";
 import { memoryRoute } from "./memory-routes.ts";
 import { runsRoute } from "./runs-routes.ts";
+import { devRoute } from "./dev-routes.ts";
 import { limitsRoute } from "./limits-routes.ts";
 import { feedRoute } from "./feed-routes.ts";
-import type { FeedInput } from "../shared/feed.ts";
 import { dollars, type Allowance } from "../shared/allowance.ts";
 import { chatAgentName } from "./chat-agent.ts";
 import { newestShown } from "./agents/roster.ts";
@@ -249,7 +247,14 @@ async function route(request: Request, env: Env): Promise<Response> {
     mcpServers(env),
   );
   if (agents) return agents;
-  const runs = await runsRoute(request, uid, directory, env.DEV_TOOLS === "true");
+  // Local development's routes (/api/dev/*), each only with devOn: elsewhere every one of them is a 404.
+  const dev = await devRoute(request, env, uid, directory, {
+    chat: (chatId) => exports.ChatAgent.getByName(chatAgentName(uid, chatId)),
+    runs: () => runsRoute(request, uid, directory, true),
+  });
+  if (dev) return dev;
+
+  const runs = await runsRoute(request, uid, directory, false);
   if (runs) return runs;
   const limits = await limitsRoute(request, uid, directory, mcpServers(env));
   if (limits) return limits;
@@ -263,47 +268,6 @@ async function route(request: Request, env: Env): Promise<Response> {
   // A chat's Durable Object is named after its owner's verified uid; others reach it only once they joined by an invite.
   const chat = await chatRoute(request, directory, { uid, name: identity.email ?? uid }, (owner) => storage.userFiles(owner));
   if (chat) return chat;
-
-  // Publish a page without the model, to try the live-data path locally. Needs DEV_TOOLS=true.
-  const devPublish = path.match(/^\/api\/dev\/chats\/([a-z0-9]+)\/publish$/);
-  if (devPublish && method === "POST" && env.DEV_TOOLS === "true") {
-    if (!(await directory.hasChat(devPublish[1]))) return json({ error: "No such chat" }, 404);
-    try {
-      return json(await exports.ChatAgent.getByName(chatAgentName(uid, devPublish[1])).devPublish(await request.json()));
-    } catch (error) {
-      return json({ error: errorMessage(error) }, 400);
-    }
-  }
-
-  // The speak-up funnel's latest stages in one of the caller's chats, for the e2e suite. Needs DEV_TOOLS=true.
-  const devFunnel = path.match(/^\/api\/dev\/chats\/([a-z0-9]+)\/funnel$/);
-  if (devFunnel && method === "GET" && env.DEV_TOOLS === "true") {
-    if (!(await directory.hasChat(devFunnel[1]))) return json({ error: "No such chat" }, 404);
-    return answerJson(await exports.ChatAgent.getByName(chatAgentName(uid, devFunnel[1])).devFunnel(uid));
-  }
-
-  // Save an agent as the model proposes one (off, for review), to try its draft card and page without the model.
-  if (path === "/api/dev/agents/propose" && method === "POST" && env.DEV_TOOLS === "true") {
-    const saved = await directory.saveAgent(await readJson(request), "agent", false);
-    return json(saved, "error" in saved ? 400 : 201);
-  }
-
-  // Save notes as agents learn them in a chat, and what servers cover, to try the Memory view without the model. Needs DEV_TOOLS=true.
-  if (path === "/api/dev/memory" && method === "POST" && env.DEV_TOOLS === "true") return devMemory(request, directory);
-  // A dream with a scripted answer (the model's JSON), as Dream now runs it: {subject: "pi" | agentId, answer}.
-  if (path === "/api/dev/dream" && method === "POST" && env.DEV_TOOLS === "true") {
-    const body = await readJson<{ subject?: unknown; answer?: unknown }>(request);
-    if (typeof body?.subject !== "string" || typeof body.answer !== "string") return json({ error: "Expected {subject, answer}." }, 400);
-    return json(await directory.dreamNow(body.subject, body.answer));
-  }
-  // Add an item to the caller's own feed, to try the feed without runs or a model. Needs DEV_TOOLS=true.
-  if (path === "/api/dev/feed" && method === "POST" && env.DEV_TOOLS === "true") {
-    const item = await readJson<FeedInput>(request);
-    if (!item || typeof item.ref !== "string" || typeof item.title !== "string" || !item.open) {
-      return json({ error: "Expected a feed item (shared/feed.ts)." }, 400);
-    }
-    return json({ kept: await directory.addFeed({ ...item, ref: `dev:${item.ref}`, at: item.at || Date.now() }) });
-  }
 
   const files = await filesRoute(request, () => storage.userFiles(uid));
   if (files) return files;
@@ -335,24 +299,4 @@ async function artifactPage(request: Request, storage: Storage, uid: string, id:
 function demoCookie(url: URL, value: string, maxAge: number): string {
   const secure = url.protocol === "https:" ? "; Secure" : "";
   return `${DEMO_COOKIE}=${value}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${secure}`;
-}
-
-/** See /api/dev/memory: {learn?: [{chatId, text, scope, kind, agentId?, learnedBy?, byOwner?}], coverage?: [ServerCoverage]}. */
-async function devMemory(request: Request, directory: DurableObjectStub<UserDirectory>): Promise<Response> {
-  const body = await readJson<{ learn?: Record<string, unknown>[]; coverage?: ServerCoverage[] }>(request);
-  if (!body) return json({ error: "Expected JSON." }, 400);
-  if (Array.isArray(body.coverage)) await directory.noteCoverage(body.coverage);
-  const learned = [];
-  for (const note of body.learn ?? []) {
-    const chatId = String(note.chatId);
-    const kind = await directory.chatKind(chatId);
-    const agentId = typeof note.agentId === "string" ? note.agentId : undefined;
-    learned.push(
-      await directory.learnNote(
-        { chatId, kinds: [kind], alone: kind === "private", byOwner: note.byOwner !== false, learnedBy: String(note.learnedBy ?? "pi"), ...(agentId && { agentId }) },
-        { text: note.text, scope: note.scope as MemoryScope, kind: note.kind as MemoryKind },
-      ),
-    );
-  }
-  return json(learned);
 }

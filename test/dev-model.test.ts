@@ -20,7 +20,8 @@ const result = (name: string, text: string, isError = false): Message => ({
 
 describe("the scripted dev model", () => {
   it("is on only with DEV_MODEL=script and DEV_TOOLS=true", () => {
-    expect(scriptOn({ DEV_MODEL: "script", DEV_TOOLS: "true" })).toBe(true);
+    expect(scriptOn({ DEV_MODEL: "script", DEV_TOOLS: "true", AUTH_MODE: "demo" })).toBe(true);
+    expect(scriptOn({ DEV_MODEL: "script", DEV_TOOLS: "true" })).toBe(false);
     expect(scriptOn({ DEV_MODEL: "script", DEV_TOOLS: "false" })).toBe(false);
     expect(scriptOn({ DEV_MODEL: "", DEV_TOOLS: "true" })).toBe(false);
     expect(scriptOn({})).toBe(false);
@@ -136,12 +137,12 @@ describe("the scripted dev model", () => {
   });
 
   it("shortens the pause before speaking up only on the scripted model", () => {
-    expect(scriptPauseMs({ DEV_MODEL: "script", DEV_TOOLS: "true", DEV_PAUSE_MS: "1500" })).toBe(1500);
+    expect(scriptPauseMs({ DEV_MODEL: "script", DEV_TOOLS: "true", AUTH_MODE: "demo", DEV_PAUSE_MS: "1500" })).toBe(1500);
     expect(scriptPauseMs({ DEV_MODEL: "", DEV_TOOLS: "true", DEV_PAUSE_MS: "1500" })).toBeUndefined();
     expect(scriptPauseMs({ DEV_MODEL: "script", DEV_TOOLS: "false", DEV_PAUSE_MS: "1500" })).toBeUndefined();
     expect(scriptPauseMs({ DEV_MODEL: "script", DEV_TOOLS: "true" })).toBeUndefined();
     expect(scriptPauseMs({ DEV_MODEL: "script", DEV_TOOLS: "true", DEV_PAUSE_MS: "soon" })).toBeUndefined();
-    expect(scriptGapMs({ DEV_MODEL: "script", DEV_TOOLS: "true", DEV_GAP_MS: "1000" })).toBe(1000);
+    expect(scriptGapMs({ DEV_MODEL: "script", DEV_TOOLS: "true", AUTH_MODE: "demo", DEV_GAP_MS: "1000" })).toBe(1000);
     expect(scriptGapMs({ DEV_MODEL: "", DEV_TOOLS: "true", DEV_GAP_MS: "1000" })).toBeUndefined();
   });
 });

@@ -223,14 +223,14 @@ function describe(node: Node): string {
   return "the value";
 }
 
-/** A value as a number, when it is one or numeric text ("1,234.5" and "12%" too); else undefined. */
+/** A value as a number, when it is one or numeric text ("1,234.5" and "12%" too), finite ("Infinity" is not); else undefined. */
 function numeric(value: Value): number | undefined {
   if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
   if (typeof value !== "string") return undefined;
   const text = value.trim().replace(/,/g, "");
   const percent = text.endsWith("%");
   const number = Number(percent ? text.slice(0, -1) : text);
-  if (!text || Number.isNaN(number)) return undefined;
+  if (!text || !Number.isFinite(number)) return undefined;
   return percent ? number / 100 : number;
 }
 
@@ -279,10 +279,21 @@ function numbersOf(args: Value[], name: string): number[] {
   return items.flatMap((item) => (numeric(item) === undefined ? [] : [numeric(item)!]));
 }
 
+/**
+ * min() or max() (`pick`) of a list's numbers, or of the numbers given: one at least, else a ConditionError (as avg's),
+ * never Infinity; by reduce, as a spread of a long list would overflow the call stack.
+ */
+function extreme(args: Value[], nodes: Node[], name: "min" | "max", pick: (a: number, b: number) => number): number {
+  const ofList = Array.isArray(args[0]) && (args.length === 1 || (args.length === 2 && typeof args[1] === "string"));
+  const numbers = ofList ? numbersOf(args, name) : args.map((x, i) => needNumber(x, nodes[i]));
+  if (!numbers.length) throw new ConditionError(`${name}() of an empty list.`);
+  return numbers.reduce((a, b) => pick(a, b));
+}
+
 const FUNCTIONS: Record<string, (args: Value[], nodes: Node[]) => Value> = {
   abs: ([x], [node]) => Math.abs(needNumber(x ?? null, node)),
-  min: (args, nodes) => (Array.isArray(args[0]) && args.length === 1 ? Math.min(...numbersOf(args, "min")) : Math.min(...args.map((x, i) => needNumber(x, nodes[i])))),
-  max: (args, nodes) => (Array.isArray(args[0]) && args.length === 1 ? Math.max(...numbersOf(args, "max")) : Math.max(...args.map((x, i) => needNumber(x, nodes[i])))),
+  min: (args, nodes) => extreme(args, nodes, "min", Math.min),
+  max: (args, nodes) => extreme(args, nodes, "max", Math.max),
   round: ([x, digits], nodes) => {
     const scale = 10 ** (digits === undefined ? 0 : needNumber(digits, nodes[1]));
     return Math.round(needNumber(x ?? null, nodes[0]) * scale) / scale;

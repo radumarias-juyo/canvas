@@ -5,7 +5,7 @@ import type { Value } from "../shared/conditions.ts";
 import type { PendingActionView } from "../shared/limits.ts";
 import type { ArtifactMeta } from "../shared/protocol.ts";
 import { KEPT_RUNS, RUN_CONCURRENCY, type RunDelivery } from "../shared/runs.ts";
-import { actedOf, fillInput, missedDecisions, itemKey, itemsOf, reportOf, SignInNeeded, type ActContext, type ActResult, type DeliveryRequest, type WorkResult } from "../worker/agents/runs/executor.ts";
+import { actedOf, fillInput, missedDecisions, itemKey, itemsOf, reportOf, uniqueKey, SignInNeeded, type ActContext, type ActResult, type DeliveryRequest, type WorkResult } from "../worker/agents/runs/executor.ts";
 import { publishedAlready, publishFindings, publishRebuilt, readOnlyDeclaration, runMark } from "../worker/agents/runs/page.ts";
 import { answeredIn, findingsEdit, FINDINGS_END, FINDINGS_START, reportHtml, workSpend } from "../worker/agents/runs/report.ts";
 import { AgentRunner, type RunAlarm, type RunnerHost, type WatchAlarm } from "../worker/agents/runs/runner.ts";
@@ -206,6 +206,26 @@ function home(definition = agent()) {
 
 // The newest one-shot: a fired one stays in the fake's map, as the real Scheduler drops it only after its callback.
 const runAlarm = (host: FakeHome) => [...host.alarms.values()].findLast((alarm) => alarm.at !== undefined)!;
+
+describe("a run's list keys", () => {
+  it("makes a repeated key unique with its place, within the 80 characters a key may have", () => {
+    const seen = new Set<string>();
+    const keyOf = (key: string, index: number) => {
+      const unique = uniqueKey(key, index, seen);
+      seen.add(unique);
+      return unique;
+    };
+    const long = "k".repeat(80);
+    expect([keyOf("north", 0), keyOf("north", 1), keyOf("north", 2)]).toEqual(["north", "north~1", "north~2"]);
+    const longs = [keyOf(long, 3), keyOf(long, 4), keyOf(long, 123)];
+    expect(longs[0]).toBe(long);
+    expect(longs.slice(1)).toEqual([`${"k".repeat(78)}~4`, `${"k".repeat(76)}~123`]);
+    expect(longs.every((key) => key.length <= 80)).toBe(true);
+    // One already taken by an element's own key moves on to the next free place.
+    const taken = new Set(["a", "a~1"]);
+    expect(uniqueKey("a", 1, taken)).toBe("a~2");
+  });
+});
 
 describe("scheduled runs", () => {
   it("sets the next local time as a one-shot, and runs at it", async () => {
@@ -1106,6 +1126,29 @@ describe("scheduled runs", () => {
       expect(host.acts.map((act) => act.call)).toEqual(["crm.charge"]);
       expect(host.delivered).toHaveLength(0);
       expect(host.runs.items(definition.id, T0)[0]).toMatchObject({ status: "failed", reason: expect.stringMatching(/crm\.charge was too large to keep/) });
+    });
+
+    it("reads a kept look back when it goes on, though its input named a result too large to keep", async () => {
+      const after: AgentStep[] = [
+        { kind: "do", server: "crm", tool: "charge", input: {} },
+        { kind: "look", server: "crm", tool: "receipt", input: { id: "{{done.id}}" }, as: "receipt" },
+        { kind: "do", server: "crm", tool: "hold", input: { receipt: "{{receipt.n}}" } },
+        { kind: "tell", to: ["owner"], via: "chat" },
+      ];
+      const definition = agent({ workflow: after, autonomy: 3 });
+      const setup = home(definition);
+      setup.host.values.set("crm.receipt", { n: 7 });
+      // The charge ran, with a result over what a run keeps of one (`done` is missing when the item goes on); the hold waits.
+      setup.host.actAnswer = (call) => (call === "crm.charge" ? { status: "ran", value: { id: "c-1", pad: "p".repeat(20_000) } } : HELD);
+      await setup.runner.now(definition.id, false);
+      await setup.host.settled();
+      expect(setup.host.runs.items(definition.id, T0)[0].status).toBe("waiting");
+      await setup.runner.decided({ ...ref(definition), step: "2" }, actedOf({ status: "done", result: "ok" }, "ok")!);
+      await setup.host.settled();
+      // Its look is not read again, nor its input filled from the missing result: the item goes on to its tell.
+      expect(setup.host.reads.filter((read) => read.call === "crm.receipt")).toHaveLength(1);
+      expect(setup.host.runs.items(definition.id, T0)[0]).toMatchObject({ status: "acted" });
+      expect(setup.host.delivered).toHaveLength(1);
     });
 
     it("takes the same way at a condition when it goes on, though its read was too large to keep", async () => {

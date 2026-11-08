@@ -1,5 +1,5 @@
 import type { Api, Model, Models } from "@earendil-works/pi-ai";
-import { calculateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
+import { processedTokens } from "../shared/agent-settings.ts";
 import { askPageModel } from "./artifacts/page-features.ts";
 import { SCRIPT_MODEL } from "./dev-model.ts";
 import { GeminiCompat } from "./gemini.ts";
@@ -32,7 +32,7 @@ export async function completeDream(env: Env, ownModel: string | undefined, syst
   const candidates = [...named, ...(own ? [own] : []), ...(scripted ? [scripted] : [])] as Model<Api>[];
   if (!candidates.length) return null;
   const answer = await askPageModel(made, candidates, { system, messages: [{ role: "user", content: prompt }], maxTokens: DREAM_TOKENS, json: true });
-  const spent = { tokens: calculateContextTokens(answer.usage), costUsd: answer.usage.cost.total };
+  const spent = { tokens: processedTokens(answer.usage), costUsd: answer.usage.cost.total };
   // An answer that is not the JSON asked for is still read (jsonIn): checkDreamOutput refuses what does not check out.
   if (answer.ok) return { text: answer.text, ...spent };
   if (answer.error.code === "bad_output") return { text: "", ...spent };

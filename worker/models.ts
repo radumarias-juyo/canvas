@@ -430,7 +430,7 @@ export function gatewayAI(env: GatewayEnv, gemini: GeminiCompat, warmer?: CacheW
 
 /** Where a Worker or chat object finds the catalog, from its environment. */
 export function catalogSource(
-  env: GatewayEnv & { AUTO_MODELS?: unknown; DEV_MODEL?: string; DEV_TOOLS?: string },
+  env: GatewayEnv & { AUTO_MODELS?: unknown; DEV_MODEL?: string; DEV_TOOLS?: string; AUTH_MODE?: string },
   cache: ModelCache,
   waitUntil?: (promise: Promise<unknown>) => void,
 ): CatalogSource {

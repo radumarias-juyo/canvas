@@ -11,6 +11,13 @@ type AuthRow = { server: string; signed_in_at: number | null; warned_at: number;
 
 /** A check before a run trusts a refresh this recent instead of refreshing again (and rotating the refresh token). */
 export const RECENT_REFRESH_MS = 60 * 60 * 1000;
+/**
+ * How long a server may be missing from the deployment's list, while that list names other servers that sign in each
+ * user, before its rows are forgotten: a renamed or dropped server's sign-in survives a deploy that fixes the list.
+ */
+export const FORGET_MISSING_MS = 30 * 24 * 60 * 60 * 1000;
+/** The tables that hold rows by server. */
+const SERVER_TABLES = ["mcp_auth", "mcp_run_servers", "mcp_waiting", "mcp_notices", "mcp_known", "mcp_step_servers"] as const;
 
 /** What the sign-ins need from the UserDirectory they live in. */
 export interface SignInsHost {
@@ -54,6 +61,11 @@ export type SignInNeededContext = {
  * - `mcp_known`: the servers the user has signed in to and not Disconnected, whatever became of the record since (a
  *   refused refresh clears its tokens, a refused client all of it): runs that may use one wait for its sign-in. Stamped
  *   when tokens or a grant are written; records from before the table all count.
+ * - `mcp_missing`: since when each server with rows here has been missing from the deployment's list (`#forgetMissing`).
+ *
+ * Rows of a server the deployment does not list now are kept but never read (every read keeps to `#configured`), so
+ * they work again when it is listed again; they are forgotten only after FORGET_MISSING_MS missing, and never while the
+ * list has no server that signs in each user (a deploy without its list must not sign everyone out).
  *
  * Changes to a record run one at a time: sealing one awaits, and a sign-in and the refreshes of several chats must not
  * overwrite each other. Opened records are kept in memory (this object is their only writer), so the token read every
@@ -89,11 +101,40 @@ export class McpSignIns {
       sql.exec("CREATE TABLE mcp_known (server TEXT PRIMARY KEY); INSERT INTO mcp_known (server) SELECT server FROM mcp_auth");
     }
     // mcp_notices.step_reads, from code before, is no longer read: step reads come from mcp_step_servers.
-    // Forget sign-ins to servers this deployment no longer has, tokens included.
-    const configured = this.#oauthServers().map((server) => server.name);
-    const notIn = configured.length ? ` WHERE server NOT IN (${configured.map(() => "?").join(", ")})` : "";
-    for (const table of ["mcp_auth", "mcp_run_servers", "mcp_waiting", "mcp_notices", "mcp_known", "mcp_step_servers"]) {
-      sql.exec(`DELETE FROM ${table}${notIn}`, ...configured);
+    sql.exec("CREATE TABLE IF NOT EXISTS mcp_missing (server TEXT PRIMARY KEY, since INTEGER NOT NULL)");
+    this.#forgetMissing();
+  }
+
+  /**
+   * Note since when each server with rows here has been missing from the deployment's list, and forget the rows of those
+   * missing for FORGET_MISSING_MS, tokens included. Nothing at all while the list names no server that signs in each user:
+   * a deploy without PI_MCP_SERVERS (or with a broken one) keeps everyone's sign-ins for when it is fixed.
+   */
+  #forgetMissing(): void {
+    const configured = new Set(this.#oauthServers().map((server) => server.name));
+    if (!configured.size) return;
+    const sql = this.#host.sql;
+    const now = this.#now();
+    // One query per table: a Durable Object's SQLite allows only 5 terms in a compound SELECT, so no UNION of all six.
+    const held = new Set(
+      SERVER_TABLES.flatMap((table) =>
+        sql
+          .exec(`SELECT DISTINCT server FROM ${table}`)
+          .toArray()
+          .map((row) => row.server as string),
+      ),
+    );
+    for (const server of configured) sql.exec("DELETE FROM mcp_missing WHERE server = ?", server);
+    for (const server of [...held].filter((name) => !configured.has(name))) {
+      sql.exec("INSERT OR IGNORE INTO mcp_missing (server, since) VALUES (?, ?)", server, now);
+    }
+    const gone = sql
+      .exec("SELECT server FROM mcp_missing WHERE since <= ?", now - FORGET_MISSING_MS)
+      .toArray()
+      .map((row) => row.server as string);
+    for (const server of gone) {
+      for (const table of SERVER_TABLES) sql.exec(`DELETE FROM ${table} WHERE server = ?`, server);
+      sql.exec("DELETE FROM mcp_missing WHERE server = ?", server);
     }
   }
 
@@ -153,10 +194,12 @@ export class McpSignIns {
    * registration, a sign-in under way) is not one.
    */
   known(): string[] {
+    const configured = this.#configured();
     return this.#host.sql
       .exec("SELECT server FROM mcp_known")
       .toArray()
-      .map((row) => row.server as string);
+      .map((row) => row.server as string)
+      .filter((server) => configured.has(server));
   }
 
   /**
@@ -392,7 +435,8 @@ export class McpSignIns {
        WHERE EXISTS (SELECT 1 FROM mcp_waiting w WHERE w.chat_id = s.chat_id AND w.server = s.server)
           OR EXISTS (SELECT 1 FROM mcp_run_servers r WHERE r.chat_id = s.chat_id AND r.server = s.server)`,
     );
-    return new Set(rows.toArray().map((row) => row.server as string));
+    const configured = this.#configured();
+    return new Set(rows.toArray().map((row) => row.server as string).filter((server) => configured.has(server)));
   }
 
   /**
@@ -487,8 +531,11 @@ export class McpSignIns {
     }
   }
 
+  /** The records of the servers listed now: one kept for a server the deployment no longer lists is neither shown nor kept alive. */
   #rows(): AuthRow[] {
-    return this.#host.sql.exec("SELECT server, signed_in_at, warned_at, keep_at FROM mcp_auth").toArray() as AuthRow[];
+    const configured = this.#configured();
+    const rows = this.#host.sql.exec("SELECT server, signed_in_at, warned_at, keep_at FROM mcp_auth").toArray() as AuthRow[];
+    return rows.filter((row) => configured.has(row.server));
   }
 
   #signedIn(): (AuthRow & { signed_in_at: number })[] {
@@ -496,13 +543,20 @@ export class McpSignIns {
   }
 
   #runServers(): string[] {
+    const configured = this.#configured();
     return this.#host.sql
       .exec("SELECT DISTINCT server FROM mcp_run_servers")
       .toArray()
-      .map((row) => row.server as string);
+      .map((row) => row.server as string)
+      .filter((server) => configured.has(server));
   }
 
   #oauthServers(): McpServerConfig[] {
     return oauthServers(this.#host.env);
+  }
+
+  /** The names of the servers that sign in each user, as the deployment lists them now. */
+  #configured(): Set<string> {
+    return new Set(this.#oauthServers().map((server) => server.name));
   }
 }

@@ -215,6 +215,22 @@ export function itemsOf(result: Value): Value[] {
   return [];
 }
 
+/** The longest key an element of a run's list has. */
+const MAX_ITEM_KEY = 80;
+
+/**
+ * An element's key, unique among those `seen` before it: its own when free, else with "~" and its place in the list,
+ * which no other element shares, its own cut to keep within MAX_ITEM_KEY.
+ */
+export function uniqueKey(key: string, index: number, seen: ReadonlySet<string>): string {
+  if (!seen.has(key)) return key;
+  for (let n = index; ; n++) {
+    const suffix = `~${n}`;
+    const next = `${key.slice(0, MAX_ITEM_KEY - suffix.length)}${suffix}`;
+    if (!seen.has(next)) return next;
+  }
+}
+
 /** An element's key in its run, and what people call it. */
 export function itemKey(element: Value, index: number): { key: string; label: string } {
   const field = (names: readonly string[]) => {
@@ -225,9 +241,11 @@ export function itemKey(element: Value, index: number): { key: string; label: st
     }
     return undefined;
   };
-  if (typeof element === "string" || typeof element === "number") return { key: String(element).slice(0, 80), label: String(element).slice(0, 80) };
-  const key = (field(["id", "key", "slug", "code", "name"]) ?? `#${index + 1}`).slice(0, 80);
-  return { key, label: (field(["name", "title", "label", "key", "id"]) ?? key).slice(0, 80) };
+  if (typeof element === "string" || typeof element === "number") {
+    return { key: String(element).slice(0, MAX_ITEM_KEY), label: String(element).slice(0, MAX_ITEM_KEY) };
+  }
+  const key = (field(["id", "key", "slug", "code", "name"]) ?? `#${index + 1}`).slice(0, MAX_ITEM_KEY);
+  return { key, label: (field(["name", "title", "label", "key", "id"]) ?? key).slice(0, MAX_ITEM_KEY) };
 }
 
 /**
@@ -578,10 +596,10 @@ export class RunExecutor {
     const elements = itemsOf(result)
       .slice(0, MAX_RUN_ITEMS)
       .map((value, index) => {
-        let { key, label } = itemKey(value, index);
-        while (seen.has(key)) key = `${key}~`;
+        const named = itemKey(value, index);
+        const key = uniqueKey(named.key, index, seen);
         seen.add(key);
-        return { key, label, value };
+        return { key, label: named.label, value };
       });
     this.#host.runs.keepElements(agent.id, run.dueAt, elements, MAX_KEPT_CHARS);
     return elements;
@@ -673,13 +691,14 @@ export class RunExecutor {
         state.steps.push({ kind: step.kind, label, ok, ms: Date.now() - started, ...(detail && { detail }), ...(cost !== undefined && { cost }) });
       switch (step.kind) {
         case "look": {
-          const input = fillInput(step.input, state.scope);
           const label = `${STEP_LABELS.look} ${step.server}.${step.tool}`;
           let value: Value;
+          // A look kept from before (an item going on again) is read back, not read again: its input is not filled, so a
+          // value it used that is gone now (a do step's cut result) does not stop it.
           if (key in state.kept.looked) value = state.kept.looked[key] as Value;
           else {
             try {
-              value = await readFor(this.#host, state.agent, step, input);
+              value = await readFor(this.#host, state.agent, step, fillInput(step.input, state.scope));
             } catch (error) {
               if (!(error instanceof SignInNeeded)) record(label, false, errorMessage(error));
               throw error;

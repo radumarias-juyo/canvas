@@ -1,6 +1,6 @@
 import { bindings, defineConfig, defineContainer, exports } from "cf/config";
 import { existsSync, readFileSync } from "node:fs";
-import { deployTarget, type DeployTarget } from "./deploy/preview.ts";
+import { checkLocalSwitches, deployTarget, type DeployTarget } from "./deploy/preview.ts";
 import * as entrypoint from "./worker/index.ts" with { type: "cf-worker" };
 import type { McpServerConfig } from "./worker/mcp/servers.ts";
 
@@ -31,6 +31,8 @@ const production: DeployTarget = {
 // PI_PREVIEW=<name> (with PI_PREVIEW_ACCESS_AUD) deploys a separate preview Worker with its own resources instead
 // (deploy/preview.ts, docs/preview-deploy.md). Without it, this is production, unchanged (test/deploy-config.test.ts).
 const target = deployTarget(production, process.env);
+// Production's config refuses a development switch set without the demo sign-in, which a deploy never has.
+if (!target.preview) checkLocalSwitches(process.env);
 // What only local development reads from the environment: never for a preview, which refuses it being set.
 const local: Partial<Record<"AUTH_MODE" | "DEV_TOOLS" | "DEV_MODEL" | "DEV_PAUSE_MS" | "DEV_GAP_MS", string>> = target.preview ? {} : process.env;
 

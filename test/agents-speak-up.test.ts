@@ -13,6 +13,7 @@ import {
   messageBudget,
   messageBudgetNotice,
   MIN_DAILY_TOKENS,
+  processedTokens,
 } from "../shared/agent-settings.ts";
 import { CHAT_AGENT_KIND, type AgentDefinition } from "../shared/agents.ts";
 import { CHAT_MESSAGE_KIND } from "../shared/protocol.ts";
@@ -737,6 +738,31 @@ describe("a chat's spend meter", () => {
     expect(spend.refusal()).toBeUndefined();
     await metered.streamSimple(MODEL, { messages: [] } as never).result();
     expect(sent).toHaveLength(2);
+  });
+
+  it("counts what each answer processed, never the cached conversation it read again", async () => {
+    const { spend, told } = meter();
+    // An agent with 80,000 tokens of cached context making ten tool calls: written to the cache once, read back after.
+    const cached = (call: number): AssistantMessage => ({
+      ...assistant(0, 0.001),
+      usage: {
+        input: 500,
+        output: 200,
+        cacheRead: call === 0 ? 0 : 80_000,
+        cacheWrite: call === 0 ? 80_000 : 0,
+        totalTokens: 80_700,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.001 },
+      },
+    });
+    let call = 0;
+    const { models } = fakeModels(() => cached(call++));
+    const metered = spend.models(models);
+    for (let i = 0; i < 10; i++) await metered.streamSimple(MODEL, { messages: [] } as never).result();
+    // 80,000 written once, and 700 new each call: not 10 x 80,700.
+    expect(spend.today().tokens).toBe(80_000 + 10 * 700);
+    expect(told.map((spent) => spent.tokens)).toEqual([80_700, ...Array(9).fill(700)]);
+    expect(processedTokens({ input: 3, output: 4, cacheWrite: 5 })).toBe(12);
+    expect(processedTokens({ input: -1, output: 2, cacheWrite: 0 })).toBe(2);
   });
 
   it("counts a turn another object ran for the chat in its day, without telling it as an answer of its own", () => {

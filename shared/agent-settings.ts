@@ -49,8 +49,21 @@ export const MAX_CHAT_SERVERS = 50;
 export const MAX_DAILY_TOKENS = 100_000_000;
 /** The smallest daily budget: below it, a single answer would stop. */
 export const MIN_DAILY_TOKENS = 10_000;
-/** A message's chain stops past this many tokens unless the owner set another budget (one turn with tools takes ~100k). */
-export const DEFAULT_MESSAGE_TOKENS = 1_000_000;
+/**
+ * A message's chain stops past this many tokens unless the owner set another budget. Counted as processedTokens: a turn
+ * with a few tool calls processes some 20,000 to 60,000 on a cached prompt (the prompt written once, then only what is
+ * new each call), up to about 150,000 on a model that caches nothing.
+ */
+export const DEFAULT_MESSAGE_TOKENS = 500_000;
+
+/**
+ * The tokens one answer counts against the budgets (a chat's day, a message's chain): what the model processed for it,
+ * its new input, its output and the prompt it wrote to the cache. Not what it read back from the cache, which is the
+ * whole conversation again on every call: an agent with 80,000 cached tokens making 10 tool calls would count 800,000.
+ */
+export function processedTokens(usage: { input: number; output: number; cacheWrite: number }): number {
+  return Math.max(0, usage.input) + Math.max(0, usage.output) + Math.max(0, usage.cacheWrite);
+}
 
 /** Thrown by checkAgentSettings with what to fix. */
 export class AgentSettingsError extends Error {}
