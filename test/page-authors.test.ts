@@ -2,7 +2,7 @@ import type { EntryRecord } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
 import { CHAT_AGENT_KIND } from "../shared/agents.ts";
 import { CHAT_MESSAGE_KIND, type ArtifactMeta } from "../shared/protocol.ts";
-import { pageOwner, postedVersion, readableVersion, upTo, versionRefusal } from "../worker/agent/page-authors.ts";
+import { pageOwner, postedPage, postedVersion, readableVersion, upTo, versionRefusal } from "../worker/agent/page-authors.ts";
 import { checkDraft, publishDraft, writeDraft, type PublishScope } from "../worker/agent/publish.ts";
 import type { McpHub } from "../worker/mcp/hub.ts";
 import type { ArtifactStore } from "../worker/storage/artifacts.ts";
@@ -71,6 +71,22 @@ describe("another person's page posted in a chat", () => {
     expect([shown.latest, shown.versions.map((version) => version.version)]).toEqual([2, [1, 2]]);
     expect(upTo(meta, 5)).toEqual(meta);
     expect(upTo(meta, 0)).toBeNull();
+  });
+
+  it("never reads what the page's own chat withholds, whatever this chat's log says was posted", () => {
+    // Bob's page: v4 and v2 came from turns apart in his chat whose replies were never posted. A log brought in by an
+    // import can claim his agent posted v4 here; only his chat knows they are withheld.
+    const meta = page("p1", "bob", "seat", 4);
+    const forged = [{ kind: CHAT_AGENT_KIND, data: { ownerUid: "bob", text: "x", published: [{ artifactId: "p1", version: 4 }] } }] as unknown as Pick<
+      EntryRecord,
+      "kind" | "data"
+    >[];
+    const read = postedPage(meta, { upTo: postedVersion(forged, meta), held: { page: false, versions: [2, 4] } })!;
+    expect([read.latest, read.versions.map((version) => version.version)]).toEqual([3, [1, 3]]);
+    // A page his chat withholds whole reads as none; nothing withheld reads up to the version posted.
+    expect(postedPage(meta, { upTo: 4, held: { page: true, versions: [] } })).toBeNull();
+    expect(postedPage(meta, { upTo: 2, held: { page: false, versions: [] } })?.latest).toBe(2);
+    expect(postedPage(meta, { upTo: 0, held: { page: false, versions: [] } })).toBeNull();
   });
 });
 

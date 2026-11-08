@@ -7,6 +7,7 @@
 import { CHAT_AGENT_KIND, type ChatAgentReplyData } from "../../shared/agents.ts";
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import type { ArtifactMeta } from "../../shared/protocol.ts";
+import { shownOf, type HeldPage } from "../agents/roster.ts";
 
 /**
  * Whose a page is to a turn in chat `chatId` of `uid`: this chat's (`chat`), another chat's of the same person
@@ -49,6 +50,17 @@ export function postedVersion(entries: Iterable<Pick<EntryRecord, "kind" | "data
     for (const page of reply.published) if (page?.artifactId === meta.id && page.version > newest) newest = page.version;
   }
   return newest;
+}
+
+/**
+ * Another person's page as a chat reads it: up to the newest version posted there (`page.upTo`, postedVersion), less what
+ * the page's own chat holds back from the reader (`page.held`: versions turns apart there published with their replies
+ * not posted). The reading chat's log says what was posted; only the page's chat knows what it withholds, and a log
+ * brought in by an import could say anything. Null when nothing of it is left.
+ */
+export function postedPage(meta: ArtifactMeta, page: { upTo: number; held: HeldPage }): ArtifactMeta | null {
+  const posted = upTo(meta, page.upTo);
+  return posted && shownOf(posted, page.held);
 }
 
 /** `meta` as a chat that shows it up to version `newest` has it: null when it shows none of it. */
