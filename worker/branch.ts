@@ -3,13 +3,19 @@ import type { EntryRecord, JsonObject } from "@earendil-works/pi-durable";
 import { CHAT_AGENT_KIND } from "../shared/agents.ts";
 import { textOf } from "../shared/canonical.ts";
 import { CHAT_CONTEXT_KIND, CHAT_COPY_KIND, type ChatCopyData } from "../shared/chat-kinds.ts";
-import { CHAT_MESSAGE_KIND, publishedBy, type ChatMessageData, type Person } from "../shared/protocol.ts";
+import { CHAT_MESSAGE_KIND, publishedBy, type ChatMessageData, type Person, type PiHeld } from "../shared/protocol.ts";
+import { heldReply } from "./agent/reach.ts";
 import { askLine, assistantText, userText } from "./agents/turns.ts";
 
 /** A display-only entry a branch writes into its log: as it was in the chat it branched off from, or a copy of pi's reply. */
 export interface CopiedEntry {
   kind: string;
   data: JsonObject;
+}
+
+/** Whether an entry is a copy of one of pi's replies held for the owner (ChatCopyData.held). */
+export function heldCopy(entry: Pick<EntryRecord, "kind" | "data">): boolean {
+  return entry.kind === CHAT_COPY_KIND && (entry.data as Partial<{ held: unknown }> | undefined)?.held === true;
 }
 
 /** How much of the conversation a branch's agent reads word for word; before that, a summary. */
@@ -21,12 +27,15 @@ const SUMMARY_INPUT_CHARS = 120_000;
  * What a branch copies of the chat it branched off from (`entries`, oldest first, up to and including the message it
  * branches from): the people's messages and the agents' replies as they were, pi's replies as their text, and the
  * artifacts it published as cards. Tool calls, notices and what only the model read stay behind. `owner` wrote the
- * plain `pi.user` messages from before chats kept their author.
+ * plain `pi.user` messages from before chats kept their author. pi's replies held for the owner (`held`, heldIn, and
+ * copies already marked so) go only into the owner's own branch (`forOwner`), marked held there; anyone else's has none.
  */
-export function branchCopies(entries: readonly EntryRecord[], owner: Person): CopiedEntry[] {
+export function branchCopies(entries: readonly EntryRecord[], owner: Person, held: readonly PiHeld[] = [], forOwner = true): CopiedEntry[] {
   const copies: CopiedEntry[] = [];
   for (const entry of entries) {
     const message = entry.model?.[0];
+    const isHeld = heldCopy(entry) || heldReply(entry, held);
+    if (isHeld && !forOwner) continue;
     if (entry.kind === CHAT_MESSAGE_KIND) {
       // An aside stays one: the app shows it as any message, and the branch's agent reads all of it from the context write.
       copies.push({ kind: CHAT_MESSAGE_KIND, data: entry.data as JsonObject });
@@ -40,7 +49,7 @@ export function branchCopies(entries: readonly EntryRecord[], owner: Person): Co
       if (text) copies.push({ kind: CHAT_MESSAGE_KIND, data: { ...owner, text, sentAt: message.timestamp } satisfies ChatMessageData as unknown as JsonObject });
     } else if (entry.kind === "pi.assistant" && message?.role === "assistant") {
       const text = assistantText(message);
-      if (text) copies.push({ kind: CHAT_COPY_KIND, data: { from: "pi", text, sentAt: message.timestamp } satisfies ChatCopyData });
+      if (text) copies.push({ kind: CHAT_COPY_KIND, data: { from: "pi", text, sentAt: message.timestamp, ...(isHeld && { held: true }) } satisfies ChatCopyData });
     } else if (entry.kind === "pi.tool-result") {
       const artifact = publishedBy(entry);
       if (artifact) {
@@ -56,17 +65,19 @@ export function branchCopies(entries: readonly EntryRecord[], owner: Person): Co
  * What the branch's agent reads of the conversation it carries, as one passive write: each message as a labelled line
  * ("[Ana · person]: …"), as an agent's catch-up reads them (without the chat's own context notes), with `ownerUid`'s lines marked as the owner's. Past
  * BRANCH_CONTEXT_CHARS the newest lines stay word for word and the older ones are `summarize`d (a small model), or left
- * out with a note when it fails or there is none.
+ * out with a note when it fails or there is none. pi's replies held for the owner (`held`, and copies marked so) are
+ * never in it, for anyone's branch: the branch's agents answer whoever is let in later.
  */
 export async function branchContext(
   entries: readonly EntryRecord[],
   ownerUid: string,
   title: string,
   summarize?: (older: string) => Promise<string | undefined>,
+  held: readonly PiHeld[] = [],
 ): Promise<string> {
   // Not what the chat's own agents were told of it (a branch's context, its page): the copies it carries say it again.
   const lines = entries
-    .filter((entry) => entry.kind !== CHAT_CONTEXT_KIND)
+    .filter((entry) => entry.kind !== CHAT_CONTEXT_KIND && !heldReply(entry, held) && !heldCopy(entry))
     .map((entry) => askLine(entry, "", ownerUid))
     .filter((line): line is string => Boolean(line));
   const kept: string[] = [];

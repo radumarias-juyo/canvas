@@ -312,7 +312,8 @@ export function askLine(entry: EntryRecord, self: string, owner: OwnerMarks | st
   // One of pi's replies copied into a branch; the people's messages and agents' replies are copied as they were.
   if (entry.kind === CHAT_COPY_KIND) {
     const data = entry.data as unknown as ChatCopyData;
-    return data.from === "pi" && data.text ? askOf({ name: AGENT_NAME, kind: "agent" }, data.text) : undefined;
+    // One held for the owner where it came from is read by no agent: they answer whoever the branch lets in.
+    return data.from === "pi" && data.text && !data.held ? askOf({ name: AGENT_NAME, kind: "agent" }, data.text) : undefined;
   }
   // What the app tells the agents: of the page the chat discusses, and of the conversation a branch carries. Never a
   // person's words.
