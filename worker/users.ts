@@ -1,5 +1,6 @@
 import { DurableObject, exports } from "cloudflare:workers";
 import { devOn } from "./dev-model.ts";
+import { directoryUid } from "./user-uid.ts";
 import type { ModelSetting } from "../shared/models.ts";
 import { PAGE_STORAGE_LIMITS, SOCKET_PING, MAX_CHAT_TITLE, type ArtifactSummary, type ChatStatus, type ChatSummary, type ChatRowChange, type MentionNotice, type Person, type RunsNotice, type SidebarList } from "../shared/protocol.ts";
 import type { ExportedAgent, ExportedChat, ExportedPageValues, ExportedSkill, ExportStart, ImportedSettings } from "../shared/data-export.ts";
@@ -158,9 +159,18 @@ export class UserDirectory extends DurableObject<Env> {
   readonly #feed: FeedStore;
   /** What this user follows, and who follows their pages and agents. */
   readonly #follows: FollowStore;
+  /**
+   * The user this directory is: its name, or, for an object woken without it (its alarm), the name it kept when it last
+   * had it. Undefined only for a directory that never had its name, which no request makes.
+   */
+  readonly #uid: string | undefined;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+    // The uid names the key that opens this user's sign-ins, and every place their chats, follows and feed are found. An
+    // object woken only by its alarm may not know its name, so it is kept: a wrong key would make every record look
+    // unreadable, and be forgotten.
+    this.#uid = directoryUid(ctx.id.name, ctx.storage.kv);
     this.#agents = new AgentStore(ctx.storage.sql);
     this.#push = new PushSubscriptions(ctx.storage.sql);
     this.#limits = new LimitsDirectory(ctx.storage.sql, ctx.storage.kv);
@@ -210,7 +220,7 @@ export class UserDirectory extends DurableObject<Env> {
       },
       complete: (agent, system, prompt) => completeDream(env, agent ? agent.model : (this.modelChoice()?.model ?? undefined), system, prompt),
       spent: ({ tokens, costUsd }) => this.recordModelSpend({ calls: 1, tokens, cost: costUsd }),
-      unopenedReports: (agentId, from, to) => this.#feed.unreadBy(aboutOf("agent", agentId, this.ctx.id.name!), "run", from, to),
+      unopenedReports: (agentId, from, to) => this.#feed.unreadBy(aboutOf("agent", agentId, this.#me), "run", from, to),
       changed: () => this.#changed("memory"),
       armed: () => this.#setAlarm(),
       addFeed: (input) => void this.addFeed(input),
@@ -224,10 +234,7 @@ export class UserDirectory extends DurableObject<Env> {
     if (addColumns(sql, "artifacts", { seen: "INTEGER NOT NULL DEFAULT 0" }).length) sql.exec("UPDATE artifacts SET seen = latest");
     // A sidebar's socket stays open for hours: answer its keep-alive pings without waking this object.
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair(SOCKET_PING.request, SOCKET_PING.response));
-    // The uid names the key that opens this user's sign-ins. An object woken only by its alarm may not know its name,
-    // so it is kept: a wrong key would make every record look unreadable, and be forgotten.
-    if (ctx.id.name) ctx.storage.kv.put("uid", ctx.id.name);
-    const uid = ctx.id.name ?? ctx.storage.kv.get<string>("uid");
+    const uid = this.#uid;
     this.#signIns = new McpSignIns({
       sql: ctx.storage.sql,
       env,
@@ -349,12 +356,18 @@ export class UserDirectory extends DurableObject<Env> {
     void (times.length ? this.ctx.storage.setAlarm(Math.min(...times)) : this.ctx.storage.deleteAlarm());
   }
 
+  /** The user this directory is (#uid); throws for one that never had its name, rather than use another's. */
+  get #me(): string {
+    if (!this.#uid) throw new Error("This directory does not know its user.");
+    return this.#uid;
+  }
+
   /**
    * What chat `chat` gives a dream of `subject`'s day there (ChatAgent.dreamLines): read as this user, a person in it.
    * A chat whose owner is unknown (an agent's home with only unopened reports) is this user's own.
    */
   async #dreamExcerpt(chat: { chatId: string; chatOwner: string }, subject: string, from: number, to: number): Promise<DreamExcerpt | null> {
-    const uid = this.ctx.id.name!;
+    const uid = this.#me;
     const owner = chat.chatOwner || uid;
     // Off the record as this user's row says, whatever the chat says: nothing is read.
     const row = this.#rows.kindOf(chat.chatId);
@@ -420,7 +433,7 @@ export class UserDirectory extends DurableObject<Env> {
     }
     const known = input.chat ? this.#rows.kindOf(input.chat.id) : null;
     // What it is about goes with it: a page or agent unfollowed or gone, or one of this user's agents deleted.
-    const about = follow ? aboutOf(follow.kind, follow.id, follow.ownerUid) : input.aboutAgent && aboutOf("agent", input.aboutAgent, this.ctx.id.name!);
+    const about = follow ? aboutOf(follow.kind, follow.id, follow.ownerUid) : input.aboutAgent && aboutOf("agent", input.aboutAgent, this.#me);
     const added = this.#feed.add(input, known, about);
     if (added === "same" || added === "refused") return added;
     this.#changed("feed");
@@ -478,7 +491,7 @@ export class UserDirectory extends DurableObject<Env> {
     if ("error" in result) return result;
     const via = record.chatOwner && record.chatId ? { ownerUid: record.chatOwner, chatId: record.chatId } : undefined;
     const counted = await exports.UserDirectory.getByName(record.ownerUid)
-      .addFollower(record.kind, record.id, { uid: this.ctx.id.name!, ...(via && { via }) })
+      .addFollower(record.kind, record.id, { uid: this.#me, ...(via && { via }) })
       .catch((error: unknown) => ({ error: errorMessage(error) }));
     if ("error" in counted) {
       if (had) this.#follows.follow(had);
@@ -499,7 +512,7 @@ export class UserDirectory extends DurableObject<Env> {
       this.#dropFollow(had);
       // Not told, the owner forgets them at its next post (addFeed answers false): the follow is gone here either way.
       await exports.UserDirectory.getByName(had.ownerUid)
-        .removeFollower(kind, id, this.ctx.id.name!)
+        .removeFollower(kind, id, this.#me)
         .catch((error: unknown) => console.error("feed:", errorMessage(error)));
     }
     return this.#follows.list();
@@ -527,7 +540,7 @@ export class UserDirectory extends DurableObject<Env> {
     const gone = this.#follows.through(chatOwner, chatId);
     if (!gone.length) return;
     this.#dropFollow(...gone);
-    const uid = this.ctx.id.name!;
+    const uid = this.#me;
     this.ctx.waitUntil(
       mapLimit(gone, FAN_OUT, (follow) => exports.UserDirectory.getByName(follow.ownerUid).removeFollower(follow.kind, follow.id, uid)).catch(
         (error: unknown) => console.error("feed:", errorMessage(error)),
@@ -552,7 +565,7 @@ export class UserDirectory extends DurableObject<Env> {
   #fanOut(kind: FollowKind, id: string, input: FeedInput, title?: string): void {
     const followers = this.#follows.followersOf(kind, id);
     if (!followers.length) return;
-    const owner = this.ctx.id.name!;
+    const owner = this.#me;
     const sent = fanOut(kind, followers, {
       stillIn: (via, uids) => exports.ChatAgent.getByName(chatAgentName(via.ownerUid, via.chatId)).followersIn(id, owner, uids),
       deliver: (uid) => exports.UserDirectory.getByName(uid).addFeed(input, { kind, id, ownerUid: owner, ...(title && { title }) }),
@@ -570,7 +583,7 @@ export class UserDirectory extends DurableObject<Env> {
    * it, so they follow it no more (each told now, rather than at its next post). Its followers through other chats stay.
    */
   agentLeftChat(agentId: string, chatOwner: string, chatId: string): void {
-    const owner = this.ctx.id.name!;
+    const owner = this.#me;
     const uids = this.#follows.dropFollowersThrough("agent", agentId, chatOwner, chatId);
     if (!uids.length) return;
     this.ctx.waitUntil(
@@ -598,7 +611,7 @@ export class UserDirectory extends DurableObject<Env> {
 
   /** One of this user's pages or agents is gone: its followers stop following it. */
   #targetGone(kind: FollowKind, id: string): void {
-    const owner = this.ctx.id.name!;
+    const owner = this.#me;
     const uids = this.#follows.dropTarget(kind, id);
     if (!uids.length) return;
     this.ctx.waitUntil(
@@ -640,7 +653,7 @@ export class UserDirectory extends DurableObject<Env> {
     if (!postsReachFollowers(agent, all, (server) => signIn.has(server))) return;
     this.#fanOut("agent", agent.id, {
       kind: "agent_post",
-      ref: `post:${this.ctx.id.name}:${agent.id}:${run.dueAt}`,
+      ref: `post:${this.#me}:${agent.id}:${run.dueAt}`,
       at: Date.now(),
       title: `@${agent.name} posted`,
       text: run.post,
@@ -722,7 +735,7 @@ export class UserDirectory extends DurableObject<Env> {
   /** The chat `ownerUid`'s chat `id` is now `kind`: told by the chat, to every sidebar that lists it. */
   setChatKind(id: string, ownerUid: string, kind: ChatKind): void {
     // Written, and the sidebars told, only on a change: the chat tells a member again each time they open it.
-    const own = ownerUid === this.ctx.id.name;
+    const own = ownerUid === this.#uid;
     const sql = own
       ? this.ctx.storage.sql.exec("UPDATE chats SET kind = ? WHERE id = ? AND kind IS NOT ?", kind, id, kind)
       : this.ctx.storage.sql.exec("UPDATE shared_chats SET kind = ? WHERE id = ? AND owner_uid = ? AND kind IS NOT ?", kind, id, ownerUid, kind);
@@ -749,7 +762,7 @@ export class UserDirectory extends DurableObject<Env> {
 
   /** People this user shares chat `chatId` with: what "@" offers to add to a chat (see ChatRows.knowPeople). */
   knowPeople(chatId: string, people: readonly Person[]): void {
-    this.#rows.knowPeople(chatId, people, this.ctx.id.name!);
+    this.#rows.knowPeople(chatId, people, this.#me);
   }
 
   /** Count a branch of this user's conversation that started in chat `root`, unless it has `max` (ChatRows.takeBranch). */
@@ -805,7 +818,7 @@ export class UserDirectory extends DurableObject<Env> {
 
   /** Tell an agent's home conversation about it as it is now (null: deleted). Off the caller's path; a failure is logged. */
   #tellHome(chatId: string, agentId: string, agent: AgentDefinition | null): void {
-    const chat = exports.ChatAgent.getByName(chatAgentName(this.ctx.id.name!, chatId));
+    const chat = exports.ChatAgent.getByName(chatAgentName(this.#me, chatId));
     this.ctx.waitUntil(chat.agentChanged(agentId, agent).catch((error: unknown) => console.error("agent home:", errorMessage(error))));
   }
 
@@ -836,7 +849,7 @@ export class UserDirectory extends DurableObject<Env> {
    * when a row changed, and returns whether one did.
    */
   #updateChat(id: string, ownerUid: string, set: string, ...values: SqlStorageValue[]): boolean {
-    const own = ownerUid === this.ctx.id.name;
+    const own = ownerUid === this.#uid;
     const sql = own ? `UPDATE chats SET ${set} WHERE id = ?` : `UPDATE shared_chats SET ${set} WHERE id = ? AND owner_uid = ?`;
     const written = this.ctx.storage.sql.exec(sql, ...values, id, ...(own ? [] : [ownerUid])).rowsWritten > 0;
     if (written) this.#changed("chats");
@@ -898,7 +911,7 @@ export class UserDirectory extends DurableObject<Env> {
 
   /** Whose chat `id` is: this user's own uid, the owner's for a chat shared with them, or null. The chat itself still checks membership. */
   chatOwner(id: string): string | null {
-    if (this.hasChat(id)) return this.ctx.id.name!;
+    if (this.hasChat(id)) return this.#me;
     const row = this.ctx.storage.sql.exec<{ owner_uid: string }>("SELECT owner_uid FROM shared_chats WHERE id = ?", id).toArray()[0];
     return row?.owner_uid ?? null;
   }
@@ -1033,7 +1046,7 @@ export class UserDirectory extends DurableObject<Env> {
     const before = this.chatTitle(id);
     const named = before === UNNAMED_CHAT;
     const title = named || before === null ? titleFromMessage(prompt) : before;
-    this.#touch(id, this.ctx.id.name!, title, byOther, tag, named, answered, sentAt);
+    this.#touch(id, this.#me, title, byOther, tag, named, answered, sentAt);
     return { title, named };
   }
 
@@ -1059,7 +1072,7 @@ export class UserDirectory extends DurableObject<Env> {
     // Its pages are gone: whoever follows them stops; and its items leave this user's feed.
     for (const artifactId of this.chatArtifactIds(id)) this.#targetGone("page", artifactId);
     if (this.#feed.forgetChat(id)) this.#changed("feed");
-    this.#leftChat(this.ctx.id.name!, id);
+    this.#leftChat(this.#me, id);
     if (this.ctx.storage.sql.exec("DELETE FROM artifacts WHERE chat_id = ?", id).rowsWritten) this.#changed("artifacts");
     this.#rows.forgetChat(id);
     if (this.ctx.storage.sql.exec("DELETE FROM chats WHERE id = ?", id).rowsWritten) this.#changed("chats");
@@ -1384,7 +1397,7 @@ export class UserDirectory extends DurableObject<Env> {
 
   /** One of this user's agents is off: its runs wait on nothing more, no sign-in or answer is needed for a run that will not go on. */
   #agentOff(id: string): void {
-    if (this.#feed.resolveAbout(aboutOf("agent", id, this.ctx.id.name!), "run")) this.#changed("feed");
+    if (this.#feed.resolveAbout(aboutOf("agent", id, this.#me), "run")) this.#changed("feed");
   }
 
   deleteAgent(id: string): { error: string } | null {
@@ -1396,7 +1409,7 @@ export class UserDirectory extends DurableObject<Env> {
     this.#agentChanged(id);
     // Its followers stop following it, and its items (runs, guesses to confirm) leave this user's feed.
     this.#targetGone("agent", id);
-    if (this.#feed.forgetAbout(aboutOf("agent", id, this.ctx.id.name!))) this.#changed("feed");
+    if (this.#feed.forgetAbout(aboutOf("agent", id, this.#me))) this.#changed("feed");
     return null;
   }
 
