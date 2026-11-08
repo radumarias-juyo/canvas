@@ -2,7 +2,7 @@ Title: Quarter &lt;plan&gt;
 Heading1: Plan
 p: Plain, bold, italic, gone, x = 1 and a link. [link] [mono]
 p: Not *emphasis*, | pipes, # hash, $5 and 1. not a list
-p: @Ada on 2026-11-08: Done
+p: @Ada on<br>the 2026-11-08: Done
 Heading2: Lists
 ListParagraph list=1.0: one
 ListParagraph list=1.0: two

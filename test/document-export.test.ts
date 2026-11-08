@@ -59,7 +59,7 @@ const SAMPLE: DocNode[] = checkDocument(
             text("."),
           ),
           p(text("Not *emphasis*, | pipes, # hash, $5 and 1. not a list")),
-          p({ type: "mention", attrs: { uid: "u1", name: "Ada" } }, text(" on "), { type: "date", attrs: { value: "2026-11-08" } }, text(": "), {
+          p({ type: "mention", attrs: { uid: "u1", name: "Ada" } }, text(" on"), { type: "hardBreak" }, text("the "), { type: "date", attrs: { value: "2026-11-08" } }, text(": "), {
             type: "dropdown",
             attrs: { options: ["Open", "Done"], value: "Done" },
           }),
@@ -125,7 +125,7 @@ describe("document export", () => {
     );
     const xml = files.get("word/document.xml")!;
     // The document's structure, without the ids Word gives runs and relationships: a line per paragraph, one per table row.
-    const words = (part: string) => [...part.matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>/g)].map((match) => match[1]).join("");
+    const words = (part: string) => [...part.matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>|<w:br\/>/g)].map((match) => match[1] ?? "<br>").join("");
     const outline = [...xml.matchAll(/<w:tbl>[\s\S]*?<\/w:tbl>|<w:p\b[\s\S]*?<\/w:p>/g)].map(([part]) => {
       if (part.startsWith("<w:tbl>")) {
         return [...part.matchAll(/<w:tr\b[\s\S]*?<\/w:tr>/g)]

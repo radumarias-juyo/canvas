@@ -6,7 +6,8 @@ Plain, **bold**, *italic*, ~~gone~~, `x = 1` and a [link](<https://example.com/a
 
 Not \*emphasis\*, \| pipes, \# hash, \$5 and 1. not a list
 
-@Ada on 2026-11-08: Done
+@Ada on\
+the 2026-11-08: Done
 
 ### Lists
 
