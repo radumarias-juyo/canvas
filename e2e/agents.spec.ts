@@ -232,9 +232,14 @@ test("h. a run that needs a sign-in says so, and goes on once signed in", async 
   // The link opens the sign-in in a tab of its own; the chat hears the run's reply and the sign-in over its sockets.
   const popup = page.waitForEvent("popup");
   await page.getByRole("link", { name: "Sign in" }).click();
-  await (await popup).waitForLoadState();
+  const signInTab = await popup;
+  await signInTab.waitForLoadState();
   await expect(agentReply(page, "notes", "Two notes: the quarterly review and the renewals.")).toBeVisible();
   await expect(page.getByText("Sign in to vault", { exact: true })).toHaveCount(0);
+  // Closed once done, as a person would: left open, it keeps ada's tab in the background, where the browser slows its
+  // frames to about one a second and every later click waits on them.
+  await signInTab.close();
+  await page.bringToFront();
   await shot(page, "h-signed-in");
 });
 
@@ -330,6 +335,9 @@ test("k. a run's write waits for the owner's approval, and one a guardrail block
     workflow: [
       { kind: "do", server: "crm", tool: "update_deal", input: { id: "d1", stage: "negotiation" } },
       { kind: "do", server: "crm", tool: "update_deal", input: { id: "d3", stage: "lost" } },
+      // After the blocked step: never reached.
+      { kind: "work", prompt: "/say Both deals moved." },
+      { kind: "tell", to: ["owner"], via: "chat" },
     ],
   });
   const started = await call<{ homeChatId: string }>(page, "POST", `/api/dev/agents/${closer.id}/run`, {});
@@ -349,13 +357,18 @@ test("k. a run's write waits for the owner's approval, and one a guardrail block
   await shot(page, "k-needs-you");
   await item.getByRole("button", { name: "Approve" }).click();
 
-  // The server got exactly the stored call, once; the run went on to the blocked step, which never reached it.
+  // The server got exactly the stored call, once; the run went on to the blocked step, which never reached it and
+  // stopped the item there: the run is blocked, never "Sent", and nothing after the step ran or went out.
   await page.goto(`/agents/${closer.id}?tab=runs`);
   const run = page.locator(".run-row").first();
-  await expect(run).toContainText("Sent");
+  await expect(run).toContainText("Blocked");
+  await expect(run).toContainText("Blocked: crm.update_deal was refused");
+  await expect(run).not.toContainText("Sent");
+  await expect(run).not.toContainText("Acted on");
   await run.click();
   await expect(page.getByRole("heading", { name: "How it got there" })).toBeVisible();
-  await expect(page.getByText(/a rule blocks it.*People mark deals lost/)).toBeVisible();
+  await expect(page.locator(".run-detail .form-error")).toContainText(/Blocked: crm\.update_deal was refused: Not run: a rule blocks it.*People mark deals lost/);
+  await expect(page.getByText("Nothing: no item got to a step that sends.")).toBeVisible();
   const after = await crmState(page);
   expect(after.writes).toEqual([...before.writes, { tool: "update_deal", input: { id: "d1", stage: "negotiation" } }]);
   expect(after.deals.find((deal) => deal.id === "d3")?.stage).toBe(before.deals.find((deal) => deal.id === "d3")?.stage);
@@ -364,6 +377,7 @@ test("k. a run's write waits for the owner's approval, and one a guardrail block
   await page.goto(`/c/${started.homeChatId}`);
   await expect(card).toContainText("Ran");
   await expect(card.getByRole("button", { name: "Approve" })).toHaveCount(0);
+  await expect(agentReply(page, "closer", "Both deals moved.")).toHaveCount(0);
 });
 
 test("l. bob brings his own agents to ada's shared chat: his turns write, hers only read, his drafts and approvals are his", async () => {
@@ -416,8 +430,12 @@ test("l. bob brings his own agents to ada's shared chat: his turns write, hers o
   await shot(member, "l-member-approval");
   expect((await crmState(member)).writes).toHaveLength(before + 1);
   await held.getByRole("button", { name: "Approve" }).click();
-  // Once it ran, the room lets its card go (worker/agents/seats/actions.ts): the outcome is in bob's feed.
+  // Once it ran, its card gives way to an outcome line, for bob alone.
   await expect(held).toHaveCount(0);
+  const outcome = member.getByLabel("Ran: @clerk crm.update_deal, only you see this");
+  await expect(outcome).toContainText("Ran · @clerk crm.update_deal");
+  await expect(owner.locator(".action-outcome")).toHaveCount(0);
+  await shot(member, "l-member-outcome");
   expect((await crmState(member)).writes.slice(before + 1)).toEqual([{ tool: "update_deal", input: { id: "d3", stage: "lost" } }]);
 
   // scribe's reply read a server bob does not share: a draft only he sees until he posts it, edited.

@@ -21,10 +21,15 @@ import { LimitsDirectory, type CallEntry } from "./agents/limits/directory.ts";
 import { approvalAsk, approvalFeed, approvalRef } from "./agents/limits/feed.ts";
 import { actorName, LIMIT_FIELDS, type CallLogView, type GuardrailRule, type PendingActionView } from "../shared/limits.ts";
 import { UserMemory, type Learned, type LearnedNote } from "./memory/memory.ts";
+import { SignalStore } from "./memory/signals.ts";
+import { completeDream } from "./dream-model.ts";
+import { UserDreams, type DreamExcerpt, type DreamSettings, type DreamsView } from "./memory/user-dreams.ts";
+import type { DreamRecord } from "../shared/dream.ts";
 import type { Forgot, MemoryNote, MemoryNoteView, MemoryReader, MemoryWriter, Recalled, ServerCoverage } from "../shared/memory.ts";
 import { ChatRows } from "./chat-rows.ts";
 import { addColumns } from "./members.ts";
 import { mayLeave, type ChatKind, type ChatRef } from "../shared/chat-kinds.ts";
+import { keepsSignals, type AgentSignal } from "../shared/signals.ts";
 import {
   agentFrom,
   NEEDS_YOU,
@@ -137,6 +142,12 @@ export class UserDirectory extends DurableObject<Env> {
   readonly #limits: LimitsDirectory;
   /** The user's memory notes (worker/memory/). */
   readonly #memory: UserMemory;
+  /** How people worked with this user's agents, in every chat they are in (shared/signals.ts). */
+  readonly #signals: SignalStore;
+  /** pi's and the agents' nightly dreams (worker/memory/user-dreams.ts). */
+  readonly #dreams: UserDreams;
+  /** When the sign-ins want the alarm (McpSignIns), kept: the alarm is shared with the dreams (#setAlarm). */
+  #signInsAlarm: number | null = null;
   /** What of each sidebar row is this user's alone (pinned, closed, their name for it), chats' kinds, page chats, people (worker/chat-rows.ts). */
   readonly #rows: ChatRows;
   /** What came in for this user across their chats, pages and agents (worker/feed/store.ts). */
@@ -174,7 +185,32 @@ export class UserDirectory extends DurableObject<Env> {
       chatKind: (id) => (this.hasChat(id) ? this.#rows.kindOf(id) : null),
       chatTitles: () => this.#rows.ownTitles(),
       agentNames: () => this.#agents.names(),
+      changed: () => {
+        this.#changed("memory");
+        this.#dreams?.notesChanged();
+      },
+    });
+    this.#signals = new SignalStore(ctx.storage.sql);
+    this.#dreams = new UserDreams({
+      sql: ctx.storage.sql,
+      kv: ctx.storage.kv,
+      memory: this.#memory.store,
+      signals: this.#signals,
+      agents: () => this.#agents.list(),
+      excerpt: (chat, subject, from, to) => this.#dreamExcerpt(chat, subject, from, to),
+      overBudget: async () => {
+        const cap = Number(env.RUNS_DAILY_USD);
+        const { costUsd } = this.modelSpentToday();
+        if (!Number.isFinite(cap) || cap <= 0 || costUsd < cap) return undefined;
+        return `Today's model calls cost $${costUsd.toFixed(2)}, past the daily cap of $${cap.toFixed(2)}.`;
+      },
+      complete: (agent, system, prompt) => completeDream(env, agent ? agent.model : (this.modelChoice()?.model ?? undefined), system, prompt),
+      spent: ({ tokens, costUsd }) => this.recordModelSpend({ calls: 1, tokens, cost: costUsd }),
+      unopenedReports: (agentId, from, to) => this.#feed.unreadBy(aboutOf("agent", agentId, this.ctx.id.name!), "run", from, to),
       changed: () => this.#changed("memory"),
+      armed: () => this.#setAlarm(),
+      addFeed: (input) => void this.addFeed(input),
+      resolveFeed: (ref) => this.resolveFeed(ref),
     });
     this.#feed = new FeedStore(ctx.storage.sql);
     this.#follows = new FollowStore(ctx.storage.sql);
@@ -203,8 +239,21 @@ export class UserDirectory extends DurableObject<Env> {
       signedIn: async (chatId, server) => {
         if (uid) await exports.ChatAgent.getByName(chatAgentName(uid, chatId)).signedIn(server);
       },
-      setAlarm: (at) => void (at === null ? ctx.storage.deleteAlarm() : ctx.storage.setAlarm(at)),
+      setAlarm: (at) => {
+        this.#signInsAlarm = at;
+        ctx.storage.kv.put("alarm.signIns", at);
+        this.#setAlarm();
+      },
     });
+    const kept = ctx.storage.kv.get<number | null>("alarm.signIns");
+    this.#signInsAlarm = kept ?? null;
+    // A directory from before the dreams shared the alarm: the one set is the sign-ins', kept so a dream's never moves it.
+    if (kept === undefined) {
+      void ctx.blockConcurrencyWhile(async () => {
+        this.#signInsAlarm = await ctx.storage.getAlarm();
+        ctx.storage.kv.put("alarm.signIns", this.#signInsAlarm);
+      });
+    }
   }
 
 
@@ -274,9 +323,59 @@ export class UserDirectory extends DurableObject<Env> {
       .sort();
   }
 
-  /** Warnings before sign-ins end, and the daily keep-alive refresh of the ones runs use (McpSignIns.alarm). */
+  /**
+   * Warnings before sign-ins end, and the daily keep-alive refresh of the ones runs use (McpSignIns.alarm); and the
+   * nightly dreams when they are due. One alarm for both, set again after (#setAlarm).
+   */
   async alarm(): Promise<void> {
-    await this.#signIns.alarm();
+    try {
+      await this.#signIns.alarm();
+    } finally {
+      try {
+        await this.#dreams.alarm();
+      } finally {
+        this.#setAlarm();
+      }
+    }
+  }
+
+  /** The one alarm, at the sooner of what the sign-ins want and when the dreams are due; none when neither wants one. */
+  #setAlarm(): void {
+    const times = [this.#signInsAlarm, this.#dreams?.due() ?? null].filter((at): at is number => at !== null);
+    void (times.length ? this.ctx.storage.setAlarm(Math.min(...times)) : this.ctx.storage.deleteAlarm());
+  }
+
+  /**
+   * What chat `chat` gives a dream of `subject`'s day there (ChatAgent.dreamLines): read as this user, a person in it.
+   * A chat whose owner is unknown (an agent's home with only unopened reports) is this user's own.
+   */
+  async #dreamExcerpt(chat: { chatId: string; chatOwner: string }, subject: string, from: number, to: number): Promise<DreamExcerpt | null> {
+    const uid = this.ctx.id.name!;
+    const owner = chat.chatOwner || uid;
+    // Off the record as this user's row says, whatever the chat says: nothing is read.
+    const row = this.#rows.kindOf(chat.chatId);
+    if (row && !keepsSignals(row)) return { off: true };
+    return exports.ChatAgent.getByName(chatAgentName(owner, chat.chatId)).dreamLines(uid, subject, from, to);
+  }
+
+  /** pi's and the agents' dreams: the settings, the latest ones, when the next is due. */
+  dreams(): DreamsView {
+    return this.#dreams.view();
+  }
+
+  setDreamSettings(input: unknown): DreamSettings | { error: string } {
+    const set = this.#dreams.setSettings(input);
+    if (!("error" in set)) this.#changed("memory");
+    return set;
+  }
+
+  /** The owner's "Dream now" for pi ("pi") or one of their agents. */
+  async dreamNow(subject: string, scripted?: string): Promise<DreamRecord | { error: string; retryAt?: number }> {
+    // A scripted answer only with DEV_TOOLS (POST /api/dev/dream): the e2e suite's stand-in for the model.
+    const script = this.env.DEV_TOOLS === "true" ? scripted : undefined;
+    const done = await this.#dreams.dreamNow(subject === "pi" ? { kind: "pi" } : { kind: "agent", agentId: subject }, script);
+    if (!("error" in done)) this.#changed("memory");
+    return done;
   }
 
   addPushSubscription(sub: PushSubscriptionKeys): void {
@@ -631,6 +730,8 @@ export class UserDirectory extends DurableObject<Env> {
   /** Chat `id`'s row now says `kind`: off the record, what the feed kept of it leaves too (wherever a row's kind is set). */
   #kindSet(id: string, kind: ChatKind | undefined): void {
     if (kind && !mayLeave({ what: "feed" }, kind) && this.#feed.forgetChat(id)) this.#changed("feed");
+    // Nothing recorded of how people worked with an agent there stays.
+    if (kind && !keepsSignals(kind)) this.#signals.forgetChat(id);
   }
 
   /** The chat that discusses one of this user's artifacts (Discuss on its page), or null. */
@@ -707,6 +808,8 @@ export class UserDirectory extends DurableObject<Env> {
   /** One of this user's agents was saved, turned on or off, or deleted: the lists and its home conversation follow. */
   #agentChanged(agentId: string): void {
     this.#changed("agents");
+    // It may learn overnight now, or no longer: the night's alarm follows.
+    this.#dreams.arm();
     const agent = this.#agents.get(agentId);
     const home = this.agentHome(agentId);
     if (!home) {
@@ -946,6 +1049,7 @@ export class UserDirectory extends DurableObject<Env> {
     this.#agents.forgetChat(id);
     this.#limits.forgetChat(id);
     this.#memory.forgetChat(id);
+    this.#signals.forgetChat(id);
     // The values its pages saved for this user, which were everyone's defaults.
     this.ctx.storage.sql.exec("DELETE FROM page_values WHERE artifact_id IN (SELECT id FROM artifacts WHERE chat_id = ?)", id);
     // Its pages are gone: whoever follows them stops; and its items leave this user's feed.
@@ -1283,6 +1387,8 @@ export class UserDirectory extends DurableObject<Env> {
     const refused = this.#agents.delete(id);
     if (refused) return refused;
     this.#memory.forgetAgent(id);
+    this.#signals.forgetAgent(id);
+    this.#dreams.forgetAgent(id);
     this.#agentChanged(id);
     // Its followers stop following it, and its items (runs, guesses to confirm) leave this user's feed.
     this.#targetGone("agent", id);
@@ -1350,6 +1456,15 @@ export class UserDirectory extends DurableObject<Env> {
     return this.#memory.delete(id);
   }
 
+  /**
+   * Keep what a chat recorded of how people worked with this user's agents there (shared/signals.ts): each checked, and
+   * none from a chat off the record, as the chat says or as this user's sidebar row of it says.
+   */
+  recordSignals(signals: AgentSignal[]): void {
+    // Something happened: the night's dream is set, when anything learns overnight.
+    if (this.#signals.record(signals, (chatId) => this.#rows.kindOf(chatId)) && this.#dreams.due() === null) this.#dreams.arm();
+  }
+
   /** A note the model saves in one of the user's chats, which says who reads and asks there (UserMemory.learn). */
   learnNote(writer: MemoryWriter, note: LearnedNote): Learned {
     return this.#memory.learn(writer, note);
@@ -1381,8 +1496,8 @@ export class UserDirectory extends DurableObject<Env> {
   }
 
   /** What the Memory view shows: every note, and what the servers cover. */
-  memoryView(): { notes: MemoryNoteView[]; coverage: ServerCoverage[] } {
-    return { notes: this.#memory.list(), coverage: this.serverCoverage() };
+  memoryView(): { notes: MemoryNoteView[]; coverage: ServerCoverage[]; dreams: DreamsView } {
+    return { notes: this.#memory.list(), coverage: this.serverCoverage(), dreams: this.#dreams.view() };
   }
 
   /** What the MCP servers cover, as one of the user's chats last listed them: what Memory shows of the data agents reach. */

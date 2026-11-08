@@ -20,6 +20,7 @@ const KIND_LABEL: Record<FeedKind, string> = {
   page_version: "New version",
   page_chat: "Page chat",
   run: "Run",
+  lesson: "Learned",
 };
 
 /**

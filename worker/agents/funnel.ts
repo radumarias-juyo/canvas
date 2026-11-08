@@ -77,13 +77,14 @@ export interface LimitState {
 
 /**
  * The limit an agent is past in a chat (`limits`, the stricter of the chat's and its own: strictestLimits), or null:
- * its posts today, the time since its last one, the people's messages since it, and how long the chat has been quiet.
+ * its posts today, the time since its last one, the people's messages since it, and how long the chat has been quiet
+ * (`pauseMs`: the limits' pause, unless the scripted model's DEV_PAUSE_MS sets another, worker/dev-model.ts).
  */
-export function limitRefusal(state: LimitState, limits: Required<SpeakUpLimits>): GateRefusal | null {
+export function limitRefusal(state: LimitState, limits: Required<SpeakUpLimits>, pauseMs = limits.pauseMinutes * 60_000): GateRefusal | null {
   if (state.postsToday >= limits.perDay) return "daily";
   if (state.lastAt !== undefined && state.now - state.lastAt < limits.gapMinutes * 60_000) return "cooldown";
   if (state.lastAt !== undefined && (state.messagesSince ?? 0) < limits.perMessages) return "messages";
-  if (state.quietMs !== undefined && state.quietMs < limits.pauseMinutes * 60_000) return "pause";
+  if (state.quietMs !== undefined && state.quietMs < pauseMs) return "pause";
   return null;
 }
 

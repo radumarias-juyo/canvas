@@ -144,6 +144,9 @@
     "src/chat/people.tsx",
     "src/SignIns.tsx",
     "src/push.ts",
-    "src/sidebar.ts"
+    "src/sidebar.ts",
+    "src/memory/Dreams.tsx",
+    "src/memory/Notes.tsx",
+    "src/memory/store.ts"
   ]
 }
