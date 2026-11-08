@@ -227,6 +227,13 @@ async function route(request: Request, env: Env): Promise<Response> {
     return json(saved, "error" in saved ? 400 : 200);
   }
 
+  // pi's settings for all the user's chats (shared/pi-settings.ts). PUT {sharedServers?, reviewBeforePosting?}: the whole of them.
+  if (path === "/api/me/pi" && method === "GET") return json(await directory.piSettings());
+  if (path === "/api/me/pi" && method === "PUT") {
+    const saved = await directory.setPiSettings(await readJson<unknown>(request));
+    return json(saved, "error" in saved ? 400 : 200);
+  }
+
   // Export and import of everything the user has (worker/data-routes.ts).
   const data = await dataRoute(request, uid, directory, storage);
   if (data) return data;

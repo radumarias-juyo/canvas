@@ -89,3 +89,39 @@ test("p2. a reply pi built alone with the owner is held when someone joins befor
   await expect(member.locator(".assistant", { hasText: NOTE })).toHaveCount(0);
   await expect(owner.getByRole("button", { name: "Show to the chat" })).toHaveCount(0);
 });
+
+test("p3. on pi's page the owner turns on review, then shares vault: a held reply, then a member's read that runs", async () => {
+  const owner = dora.page;
+  await owner.goto("/agents/pi");
+  await expect(owner.getByRole("heading", { name: "pi", exact: true })).toBeVisible();
+  await owner.getByText("Review before posting").click();
+  await owner.getByRole("button", { name: "Save" }).click();
+  await expect(owner.getByText(/Saved: it applies/)).toBeVisible();
+
+  const chat = await newChat(owner);
+  await send(owner, "/say Hi.");
+  await expect(piReply(owner, "Hi.")).toBeVisible();
+  await join(eli, await inviteLink(owner), chat);
+  const member = eli.page;
+  // dora's own message reads vault: with review on, the reply waits for her.
+  await send(owner, "@pi /tool vault.read_notes {}\n/say Reviewed reply.");
+  const show = owner.getByRole("button", { name: "Show to the chat" });
+  await expect(show).toBeVisible();
+  await expect(owner.locator(".held-note")).toContainText("you review pi's replies in shared chats first");
+  await expect(member.getByText("shown only to the chat's owner for now")).toBeVisible();
+  await show.click();
+  await expect(piReply(member, "Reviewed reply.")).toBeVisible();
+
+  // dora shares vault in shared chats, with the warning: eli's own read now runs, and he sees its notes.
+  await owner.goto("/agents/pi");
+  await owner.getByRole("checkbox", { name: "vault in shared chats" }).check();
+  await expect(owner.getByText("Anyone in a chat you share can make pi read this as you")).toBeVisible();
+  await owner.getByRole("button", { name: "Save" }).click();
+  await expect(owner.getByText(/Saved: it applies/)).toBeVisible();
+  await send(member, "@pi /tool vault.read_notes {}\n/say Read for eli.");
+  await expect(piReply(member, "Read for eli.")).toBeVisible();
+  await expect(member.locator(".assistant", { hasText: NOTE }).first()).toBeVisible();
+  // What pi read for dora before stays hers: that result is still left out for eli.
+  await expect(member.locator(".assistant", { hasText: "Shown only to the chat's owner" }).first()).toBeVisible();
+  await shot(owner, "p3-pi-page");
+});

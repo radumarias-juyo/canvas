@@ -27,6 +27,7 @@ import {
   type IncomingAttachment,
   type IncomingMessage,
   type Person,
+  type PiHeld,
   type Presence,
   type PublishedDetails,
   type QueuedMessage,
@@ -482,7 +483,8 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
                               chatId={chatId}
                               items={items.get(entry.id as number)}
                               sources={sources.get(entry.id as number)}
-                              onShowHeld={held.has(entry.id as number) ? () => showPiHeld(held.get(entry.id as number)!) : undefined}
+                              held={held.get(entry.id as number)}
+                              onShowHeld={showPiHeld}
                               checklist={checklistAt(checklists, entry)}
                             />
                           </EntryOf.Provider>
@@ -704,6 +706,7 @@ const Entry = memo(function Entry({
   checklist,
   onOffer,
   sources,
+  held,
   onShowHeld,
 }: {
   entry: EntryRecord;
@@ -731,8 +734,9 @@ const Entry = memo(function Entry({
   onOffer?: (entry: number) => boolean;
   /** For one of pi's replies in a chat others are in: what only the owner sees it is built on (replySources). */
   sources?: string[];
-  /** For one of pi's replies held for the owner (heldReplies): shows it to the chat. */
-  onShowHeld?: () => boolean;
+  /** For one of pi's replies held for the owner (heldReplies): its hold, which onShowHeld shows to the chat by when it started. */
+  held?: PiHeld;
+  onShowHeld?: (from: number) => boolean;
 }) {
   const people = useSharedChat();
   const offerYes = onOffer && (() => onOffer(entry.id as number));
@@ -810,6 +814,7 @@ const Entry = memo(function Entry({
         entry={entry.id as number}
         onOfferYes={offerYes}
         source={sources && sourceLine({ sources }, people && people.owner.uid !== uid ? people.owner.name : undefined)}
+        held={held}
         onShowHeld={onShowHeld}
       />
     );
@@ -829,14 +834,16 @@ const Entry = memo(function Entry({
  * Under one of pi's replies held for the owner (PiHeld): why only they see it, and Show to the chat. Keeping it held
  * needs nothing: the others see that pi's reply is the owner's alone.
  */
-function HeldNote({ onShow }: { onShow: () => boolean }) {
+function HeldNote({ held, onShow }: { held: PiHeld; onShow: (from: number) => boolean }) {
   const [sent, setSent] = useState(false);
   return (
     <div className="held-note" role="note">
       <span className="draft-note">
-        Only you see this reply: {AGENT_NAME} read your private servers or files while you were alone here, and someone joined before it finished.
+        {held.review
+          ? `Only you see this reply until you show it: it is built on your private servers or files, and you review ${AGENT_NAME}'s replies in shared chats first.`
+          : `Only you see this reply: ${AGENT_NAME} read your private servers or files while you were alone here, and someone joined before it finished.`}
       </span>
-      <button type="button" onClick={() => setSent(onShow())} disabled={sent}>
+      <button type="button" onClick={() => setSent(onShow(held.from))} disabled={sent}>
         Show to the chat
       </button>
     </div>
@@ -1190,6 +1197,7 @@ function Assistant({
   entry,
   onOfferYes,
   source,
+  held,
   onShowHeld,
 }: {
   message: AssistantMessage;
@@ -1210,8 +1218,9 @@ function Assistant({
   onOfferYes?: () => boolean;
   /** Where a reply built on what only the owner sees came from (sourceLine): "from Radu's calendar". */
   source?: string | null;
-  /** One held for the owner: shows it to everyone in the chat. */
-  onShowHeld?: () => boolean;
+  /** One held for the owner: its hold, and what shows it to everyone in the chat. */
+  held?: PiHeld;
+  onShowHeld?: (from: number) => boolean;
 }) {
   const content = useRef<HTMLDivElement>(null);
   // What a copy pastes as plain text: its Markdown. Not while it streams, when it has no actions.
@@ -1255,7 +1264,7 @@ function Assistant({
           {source}
         </div>
       )}
-      {onShowHeld && <HeldNote onShow={onShowHeld} />}
+      {held && onShowHeld && <HeldNote held={held} onShow={onShowHeld} />}
       {offered && <OfferRow offer={offered.offer} entry={entry} onYes={onOfferYes} />}
       {text && !bare && (
         <>

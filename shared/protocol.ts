@@ -609,9 +609,10 @@ export type ChatClientMessage =
 /**
  * pi's replies held for the chat's owner, by the times its messages started (epoch ms): a run alone with the owner that
  * read what only they see (their private servers or files) and ended after someone joined, as an agent's turn apart is
- * held (`through`: when it ended; none while it still runs). Nobody else sees them until the owner shows them.
+ * held, or one in a shared chat with the owner's review before posting on (`review`; shared/pi-settings.ts).
+ * `through`: when it ended; none while it still runs. Nobody else sees them until the owner shows them.
  */
-export type PiHeld = { from: number; through?: number };
+export type PiHeld = { from: number; through?: number; review?: true };
 
 /** Whether one of pi's messages, by when it started (epoch ms), is among its held replies. */
 export function heldIn(held: readonly PiHeld[] | undefined, at: number): boolean {
