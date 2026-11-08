@@ -115,7 +115,7 @@ export interface PublishScope {
    * (worker/agent/create-reach.ts): undefined for the owner's own turn, and unset for a chat with no such rules.
    */
   createReach?(session: string): Promise<CreateReach | undefined>;
-  /** The drafts each conversation wrote: on someone else's ask a turn builds only on its own (CreateReach). */
+  /** The drafts each turn or run on someone else's ask wrote (by CreateReach.drafts): it builds only on its own. */
   sessionDrafts?: SessionDrafts;
   /** The files of those of the owner's skills named that are on and have any, by name: what a page may name (shared/skill-files.ts). */
   skillSets(names: readonly string[]): Promise<Map<string, { set: string; files: SkillFileInfo[] }>>;
@@ -313,6 +313,11 @@ export function rulesOf(scope: PublishScope, session: string | undefined): Promi
   return session === undefined ? undefined : scope.rulesFor?.(session);
 }
 
+/** Whether the turn or run `reach` is for wrote draft `id` itself (CreateReach.drafts). */
+export function ownDraft(scope: Pick<PublishScope, "sessionDrafts">, reach: CreateReach, id: string): boolean {
+  return scope.sessionDrafts?.has(reach.drafts, id) === true;
+}
+
 /** What conversation `session` may build a page on (PublishScope.createReach); undefined, not a model's turn, or none: all. */
 export function createReachOf(scope: PublishScope, session: string | undefined): Promise<CreateReach | undefined> {
   return session === undefined || !scope.createReach ? Promise.resolve(undefined) : scope.createReach(session);
@@ -322,9 +327,9 @@ export function createReachOf(scope: PublishScope, session: string | undefined):
  * Throws, starting with `what`, when conversation `session` on someone else's ask (`reach`) may not take `draft` further:
  * one it did not write itself, or one that calls a server the asker may not use.
  */
-function checkReach(scope: PublishScope, reach: CreateReach | undefined, session: string | undefined, draft: Draft, what: string): void {
+function checkReach(scope: PublishScope, reach: CreateReach | undefined, draft: Draft, what: string): void {
   if (!reach) return;
-  if (session === undefined || !scope.sessionDrafts?.has(session, draft.id)) throw new Error(draftRefusal(draft.id, `${what}:`));
+  if (!ownDraft(scope, reach, draft.id)) throw new Error(draftRefusal(draft.id, `${what}:`));
   const outside = reachRefusal(draft.manifest, reach, `${what}:`);
   if (outside) throw new Error(outside);
 }
@@ -357,7 +362,7 @@ export async function writeDraft(scope: PublishScope, input: WriteInput): Promis
   // On someone else's ask: a new page, or a draft of this turn's own, never a version of a page the chat has.
   const changing = artifact && changeRefusal(reach, "Not saved:");
   if (changing) throw new Error(changing);
-  if (reach && from !== undefined && !scope.sessionDrafts?.has(session!, from)) throw new Error(draftRefusal(from, "Not saved:"));
+  if (reach && from !== undefined && !ownDraft(scope, reach, from)) throw new Error(draftRefusal(from, "Not saved:"));
   let { html, mcp } = input;
   let artifactId = artifact?.id;
   let reviewed: true | undefined;
@@ -383,10 +388,9 @@ export async function writeDraft(scope: PublishScope, input: WriteInput): Promis
   const skillSets = await pinSkillFiles(scope, html, "Not saved.");
   const id = await draftId(html, manifest, skillSets);
   // Whose it is, before it is there to list.
-  if (session !== undefined) {
-    scope.onDrafted?.(session, id);
-    scope.sessionDrafts?.add(session, id);
-  }
+  if (session !== undefined) scope.onDrafted?.(session, id);
+  // This turn's or run's own, which it alone builds on (CreateReach.drafts).
+  if (reach) scope.sessionDrafts?.add(reach.drafts, id);
   return drafts.save({ id, html, manifest, artifactId, ...(Object.keys(skillSets).length && { skillSets }), ...(reviewed && { reviewed }) }, null);
 }
 
@@ -417,7 +421,7 @@ export async function checkDraft(
   const [drafts, rules, reach] = await Promise.all([scope.drafts(), rulesOf(scope, session), createReachOf(scope, session)]);
   const draft = await draftNamed(drafts, id, "Not checked.", rules);
   // Before the browser: its live calls are answered as the owner's.
-  checkReach(scope, reach, session, draft, "Not checked");
+  checkReach(scope, reach, draft, "Not checked");
   const { html, pageLine } = await pageToRun(scope, draft, "Not checked.");
   // Stops the review when the check fails or could not run: it is no longer waited for, and a review costs.
   const stop = new AbortController();
@@ -587,7 +591,7 @@ export async function publishDraft(scope: PublishScope, input: PublishInput, sig
   const by = session ?? input.session;
   const [drafts, rules, reach] = await Promise.all([scope.drafts(), rulesOf(scope, session), createReachOf(scope, by)]);
   let draft = await draftNamed(drafts, input.draftId, "Not published.", rules);
-  checkReach(scope, reach, by, draft, "Not published");
+  checkReach(scope, reach, draft, "Not published");
   const changing = input.artifactId !== undefined && changeRefusal(reach, "Not published:");
   if (changing) throw new Error(changing);
   // Without the code review: its findings would stop the publish unseen, and the draft would then be reviewed already.

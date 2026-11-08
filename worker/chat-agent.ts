@@ -143,7 +143,7 @@ import { WriteGate, type Caller, type GateCall, type GateContext, type GateHost 
 import { approvalEnd } from "./agents/limits/feed.ts";
 import { toolInput } from "./agents/limits/tell.ts";
 import { inputLevel, lowestLevel, seatLevel, turnLevel } from "./agents/limits/levels.ts";
-import { liveCallRefusal, SessionDrafts, type CreateReach } from "./agent/create-reach.ts";
+import { liveCallRefusal, piCreateReach, SessionDrafts, type CreateReach } from "./agent/create-reach.ts";
 import { APP_APPROVAL_KIND, callLine, CHAT_ACTION_KIND, valueAt, type ActionActor, type ChatActionData, type PendingActionView } from "../shared/limits.ts";
 import { instantOf, wallClock } from "./agents/runs/schedule.ts";
 import { mcpServers, oauthServerNames, sharesResults, watchableForAll, type McpServerConfig } from "./mcp/servers.ts";
@@ -3537,34 +3537,54 @@ export class ChatAgent extends DurableObject<Env> {
    * What a page conversation `session` makes may reach when someone other than its owner asked for its turn
    * (worker/agent/create-reach.ts): an agent's turn below its owner's level (a member's message, a hand-off, one the chat
    * picked it for) makes new pages only, calling only its servers shared with the chat (a member's agent: within the
-   * room's list, SeatTurn.servers); pi on a run that answers anyone but the owner (#answersOthers) calls only the servers
-   * it shares, as its reach has it. Undefined for the owner's own turn, and for a session no turn of the chat's is
-   * (a run's, which goes by its own rules). A turn whose agent cannot be read reaches no server.
+   * room's list, SeatTurn.servers); so does pi on a run that answers anyone but the owner (#answersOthers), calling only
+   * the servers it shares. Each builds only on the drafts of its own turn or run (CreateReach.drafts). Undefined for the
+   * owner's own turn, and for a session no turn of the chat's is (a run's, which goes by its own rules). A turn whose
+   * agent cannot be read reaches no server.
    */
   async #createReach(session: string): Promise<CreateReach | undefined> {
     const names = this.#serverNames();
     if (session === ROOT_SESSION) {
-      if (!(await this.#answersOthers())) return undefined;
-      return { servers: names.filter(this.#piShares()), newOnly: false };
+      const [answersOthers, run] = await Promise.all([this.#answersOthers(), this.#piRunKey()]);
+      return piCreateReach(answersOthers, names, this.#piShares(), run);
     }
-    const shared = (agent: AgentDefinition | null): CreateReach => ({
+    const shared = (agent: AgentDefinition | null, turn: number): CreateReach => ({
       servers: agent ? names.filter(sharedServer(agent, this.#signsIn)) : [],
       newOnly: true,
+      drafts: `${session}:${turn}`,
     });
     const running = this.roster.runningSessions().find((one) => one.session === session);
     const turn = running && this.roster.turn(running.turn);
     if (turn) {
       if (turnLevel(turn).level === 4) return undefined;
       const entry = this.roster.get(turn.agentId);
-      return shared(entry?.ownerUid === this.uid ? this.#inThisChat(await this.#directory.getAgent(turn.agentId).catch(() => null)) : null);
+      const agent = entry?.ownerUid === this.uid ? this.#inThisChat(await this.#directory.getAgent(turn.agentId).catch(() => null)) : null;
+      return shared(agent, turn.id);
     }
     const seated = this.seats.turnIn(session);
     if (seated) {
       if (seatLevel(seated.turn).level === 4) return undefined;
       const agent = await this.#directory.getAgent(seated.agentId).catch(() => null);
-      return shared(agent && inChatServers(agent, seated.turn, names));
+      return shared(agent && inChatServers(agent, seated.turn, names), seated.turn.turn);
     }
     return undefined;
+  }
+
+  /**
+   * The key of pi's run going now (CreateReach.drafts): its first input's entry, which stays as later inputs join it.
+   * One whose inputs cannot be read gets a key of its own, so it builds on no earlier draft (fail closed).
+   */
+  async #piRunKey(): Promise<string> {
+    try {
+      const pi = await this.harness.pi();
+      const first = (await pi.inspect(BACKGROUND_CONTEXT)).submissions.find(
+        (one) => one.type === "input" && one.status === "placed" && String(one.conversationId) === ROOT_SESSION,
+      );
+      if (first?.type === "input" && first.entry !== undefined) return `pi:${String(first.entry)}`;
+    } catch (error) {
+      console.error("pi run:", errorMessage(error));
+    }
+    return `pi:unknown:${crypto.randomUUID()}`;
   }
 
   /** The deployment's MCP servers, by name: what an agent that names none may use. */

@@ -8,13 +8,26 @@ import type { ArtifactManifest } from "../../shared/protocol.ts";
 
 /**
  * What a conversation's turn may build into a page when someone other than its owner asked for it (a member's message,
- * a hand-off, a turn the chat picked it for): `servers`, those its page may declare and call (the servers shared with the
- * chat, within the room's list for a member's agent); `newOnly`, it makes new pages only, never a new version of one the
- * chat has. Undefined (no CreateReach) for the owner's own turn, which reaches what it always did.
+ * a hand-off, a turn the chat picked it for; pi's run that answers anyone but the owner): `servers`, those its page may
+ * declare and call (the servers shared with the chat, within the room's list for a member's agent); `newOnly`, it makes
+ * new pages only, never a new version of one the chat has; `drafts`, the key of this turn or run (worker/agent/
+ * create-reach.ts SessionDrafts), whose own drafts alone it lists and builds on: never one an earlier turn or run of the
+ * same conversation saved, such as the owner's own, whose page may hold what only they see. Undefined (no CreateReach)
+ * for the owner's own turn, which reaches what it always did.
  */
 export interface CreateReach {
   servers: readonly string[];
   newOnly: boolean;
+  drafts: string;
+}
+
+/**
+ * pi's reach for a run (ChatAgent.#createReach): on one that answers anyone but the owner (`answersOthers`), new pages
+ * only, calling the servers pi shares in the chat (`shares`, of `servers`), on the run's own drafts (`run`: the key of
+ * this run, its first input); none on the owner's own run. Changing a page the chat has is the owner's own turn's.
+ */
+export function piCreateReach(answersOthers: boolean, servers: readonly string[], shares: (server: string) => boolean, run: string): CreateReach | undefined {
+  return answersOthers ? { servers: servers.filter(shares), newOnly: true, drafts: run } : undefined;
 }
 
 /** The servers a manifest declares. */
@@ -47,7 +60,7 @@ export function changeRefusal(reach: CreateReach | undefined, what: string): str
 
 /** Why a turn within `reach` may not use a draft it did not write itself, starting with `what`. */
 export function draftRefusal(id: string, what: string): string {
-  return `${what} draft "${id}" is not one this turn wrote. On someone else's ask you build only on your own drafts: write the page as html.`;
+  return `${what} draft "${id}" is not one this turn wrote. On someone else's ask you build only on drafts of this turn: write the page as html.`;
 }
 
 /** A manifest as a page made within `reach` is published with: it keeps the servers it may call (ArtifactManifest.reach). */

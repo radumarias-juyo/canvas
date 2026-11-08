@@ -247,6 +247,23 @@ test("7. anyone may ask an agent for a new page, calling only what the chat shar
   await expect(agentReply(member, "maker", /artifact_publish failed: .*changing a page the chat already has/)).toBeVisible();
   expect((await call<{ latest: number }>(owner, "GET", `/api/artifacts/${made!.id}`)).latest).toBe(1);
 
+  // pi on finn's message is new-only too: no version of eve's page, by id.
+  await send(
+    member,
+    `@pi /tool artifact_write {"html":"Deals, pi for finn"}\n/tool artifact_publish {"title":"Deals for finn","draft_id":"{{draft}}","artifact_id":"${made!.id}"}`,
+  );
+  await expect(piReply(member, /artifact_publish failed: .*changing a page the chat already has/)).toBeVisible();
+  expect((await call<{ latest: number }>(owner, "GET", `/api/artifacts/${made!.id}`)).latest).toBe(1);
+  // eve's own draft, from pi's run on her message, is not finn's run's to publish, nor listed for it.
+  await send(owner, '@pi /tool artifact_write {"html":"Eve private salary notes"}');
+  const saved = await piReply(owner, /artifact_write: Saved as draft "\w+"/).last().innerText();
+  const draftId = /Saved as draft "(\w+)"/.exec(saved)![1];
+  await send(member, `@pi /tool artifact_publish {"title":"Salary","draft_id":"${draftId}","new_artifact":true}`);
+  await expect(piReply(member, /artifact_publish failed: .*is not one this turn wrote/)).toBeVisible();
+  await send(member, "@pi /tool artifact_drafts {}");
+  await expect(piReply(member, /artifact_drafts: This chat has no drafts/)).toBeVisible();
+  expect(await artifactTitles(owner)).not.toContain("Salary");
+
   // A hand-off: finn's own agent asks maker, which builds the pipeline page.
   await agent(member, "relay", "Passes asks on", { instructions: "/say @maker please build the pipeline page" });
   await addToChat(member, "relay");

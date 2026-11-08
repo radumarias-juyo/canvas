@@ -31,6 +31,7 @@ import {
   checkDraft,
   createReachOf,
   draftLine,
+  ownDraft,
   draftNamed,
   diffVersions,
   draftsListed,
@@ -44,7 +45,7 @@ import {
   type PublishScope,
   type SessionRules,
 } from "./publish.ts";
-import { changeRefusal } from "./create-reach.ts";
+import { changeRefusal, draftRefusal } from "./create-reach.ts";
 import { checkFolders, FileRefError, MAX_SANDBOX_BYTES, outputPaths, resolveFile, resolveRef, sandboxLayout, saveFiles } from "./file-refs.ts";
 import { clip, MAX_TOOL_TEXT, text } from "./output.ts";
 import { pagePart } from "./page-part.ts";
@@ -640,10 +641,13 @@ export function artifactExtension(scope: ChatScope): Extension {
         parameters: Type.Object({ draft_id: Type.Optional(Type.String()), part: pagePartParameter }),
         replay: "safe",
         execute: async (args, api) => {
-          // Not the drafts another conversation apart from the chat saved: they are not the chat's yet.
-          const [drafts, rules] = await Promise.all([scope.drafts(), rulesOf(scope, api)]);
+          // Not the drafts another conversation apart from the chat saved: they are not the chat's yet. On someone else's
+          // ask, only this turn's or run's own (CreateReach.drafts): an earlier one's page may hold what only the owner sees.
+          const [drafts, rules, reach] = await Promise.all([scope.drafts(), rulesOf(scope, api), createReachOf(scope, String(api.conversationId))]);
+          if (reach && args.draft_id !== undefined && !ownDraft(scope, reach, args.draft_id)) throw new Error(draftRefusal(args.draft_id, "Not shown:"));
           if (args.draft_id === undefined) {
-            const list = await draftsListed(drafts, rules);
+            const listed = await draftsListed(drafts, rules);
+            const list = reach ? listed.filter((draft) => ownDraft(scope, reach, draft.id)) : listed;
             const lines = list.length ? `${plural(list.length, "draft")}, newest first:\n${list.map(draftLine).join("\n")}` : "This chat has no drafts.";
             return { output: text(lines) };
           }

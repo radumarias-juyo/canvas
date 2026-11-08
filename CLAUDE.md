@@ -69,7 +69,8 @@ with `@cloudflare/vite-plugin`, pnpm; configured and deployed with the `cf` CLI 
   pi's reach too (`worker/agent/reach.ts`): a run that answers anyone but the owner reads only pi's servers for shared
   chats (the owner's list on pi's page, `shared/pi-settings.ts`, else those that do not sign in each user) and the chat's
   files, and what pi read for the owner alone is left out of its requests and, with its calls' output, of others'
-  screens; a run that started alone with the owner, read such a result and ends after someone joined, or one in a shared
+  screens; such a run makes new pages only (calling the servers pi shares, kept on the version), never changes a page the
+  chat has, and lists and builds on only the drafts of that run (`piCreateReach`, `CreateReach.drafts`); a run that started alone with the owner, read such a result and ends after someone joined, or one in a shared
   chat with the owner's review before posting on, has its replies held for the owner (Show to the chat), which no
   agent's catch-up, `chat_history`, dream or branch's context reads and which hand nothing on; a branch copies them only
   for the owner's own, marked held (`ChatCopyData.held`: shown to them alone there, read by no agent), and an export
@@ -83,8 +84,9 @@ with `@cloudflare/vite-plugin`, pnpm; configured and deployed with the `cf` CLI 
   `DISPLAY_TOOLS`, which only show something (a checklist card, no data; not for an unprompted turn), and `CREATE_TOOLS`,
   which make a new page (not for an unprompted turn): on anyone's ask but its owner's own (pi's too, on a run that answers
   someone else) a page calls only the servers shared with the chat (a seat's within `SeatTurn.servers`), builds only on
-  the turn's own drafts and changes no page the chat has (`PublishScope.createReach`, `worker/agent/create-reach.ts`), and
-  its version keeps those servers (`ArtifactManifest.reach`), which its live calls go by (`artifactCall`); the owner's files
+  drafts of that turn or run (`CreateReach.drafts`, never an earlier one's) and changes no page the chat has
+  (`PublishScope.createReach`, `worker/agent/create-reach.ts`), and its version keeps those servers
+  (`ArtifactManifest.reach`), which its live calls go by (`artifactCall`); the owner's files
   (`FILE_TOOLS`) only as the agent's `files` allows, `own` for its owner's turns, `shared` for others' (reading only, never
   unprompted, a run or a Yes), and the prompt names them only to a request that may read them; the owner's Yes to an
   offered next step (`offer_yes`, `ChatAgent.takeOffer`) gets only `draftTools`, reading and `agent_propose`, pi's run too; the

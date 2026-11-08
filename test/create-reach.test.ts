@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ArtifactManifest, ArtifactMeta } from "../shared/protocol.ts";
-import { changeRefusal, liveCallRefusal, reachRefusal, SessionDrafts, withReach, type CreateReach } from "../worker/agent/create-reach.ts";
+import { changeRefusal, liveCallRefusal, piCreateReach, reachRefusal, SessionDrafts, withReach, type CreateReach } from "../worker/agent/create-reach.ts";
 import { checkDraft, publishDraft, writeDraft, type PublishScope } from "../worker/agent/publish.ts";
 import type { McpHub } from "../worker/mcp/hub.ts";
 import type { ArtifactStore } from "../worker/storage/artifacts.ts";
@@ -12,7 +12,7 @@ const CHAT = "0123456789abcdef";
 const crm = [{ server: "crm", tools: ["list_deals"] }];
 const vault = [{ server: "vault", tools: ["read_notes"] }];
 // Sessions: the owner's own turn ("own"), a member's ask of the owner's agent and a hand-off ("asked").
-const ASKED: CreateReach = { servers: ["crm"], newOnly: true };
+const ASKED: CreateReach = { servers: ["crm"], newOnly: true, drafts: "asked:1" };
 
 const page = (id: string, latest = 1): ArtifactMeta => ({
   id,
@@ -25,8 +25,12 @@ const page = (id: string, latest = 1): ArtifactMeta => ({
   versions: Array.from({ length: latest }, (_, i) => ({ version: i + 1, publishedAt: i + 1, manifest: { mcp: { servers: crm } } })),
 });
 
-/** Ada's chat: one page of hers ("signups"), crm and vault, and what the scope's sessions may reach. */
+/**
+ * Ada's chat: one page of hers ("signups"), crm and vault, and what the scope's sessions may reach. pi's one session
+ * ("pi") answers Ada's own message in run 1 and a member's in run 2 (`piRun`), which is new-only on run 2's drafts.
+ */
 function chat() {
+  const piRun = { run: 1 };
   const drafts = new ChatDrafts(new FakeBucket().r2, "ada", CHAT, new ArrayBuffer(32));
   const published: { id?: string; manifest: ArtifactManifest }[] = [];
   const checked: string[] = [];
@@ -57,10 +61,11 @@ function chat() {
     skillSets: async () => new Map(),
     readSkillFile: async () => null,
     publishUnchecked: false,
-    createReach: async (session) => (session === "asked" ? ASKED : undefined),
+    createReach: async (session) =>
+      session === "asked" ? ASKED : session === "pi" ? piCreateReach(piRun.run === 2, ["crm", "vault"], (server) => server === "crm", `pi:${piRun.run}`) : undefined,
     sessionDrafts: new SessionDrafts(),
   };
-  return { scope, published, checked, pages };
+  return { scope, published, checked, pages, piRun };
 }
 
 describe("a page made on someone else's ask", () => {
@@ -99,6 +104,40 @@ describe("a page made on someone else's ask", () => {
     expect(published).toEqual([]);
   });
 
+  it("is new-only for pi on a run that answers a member too: no edit, no version by id, no title match onto a page", async () => {
+    const { scope, published, pages, piRun } = chat();
+    piRun.run = 2;
+    await expect(writeDraft(scope, { edits: [{ old: "v1", new: "v2" }], artifact: pages[0], session: "pi" })).rejects.toThrow(
+      /Not saved: changing a page the chat already has/,
+    );
+    const draft = await writeDraft(scope, { html: "<p>signups for Mia</p>", mcp: crm, session: "pi" });
+    await checkDraft(scope, draft.id, {}, undefined, "pi");
+    await expect(publishDraft(scope, { title: "Page signups", draftId: draft.id, artifactId: "signups" }, undefined, "pi")).rejects.toThrow(
+      /Not published: changing a page the chat already has.*new_artifact: true/,
+    );
+    // By its title it goes as a new page, never onto "Page signups".
+    await publishDraft(scope, { title: "Page signups", draftId: draft.id }, undefined, "pi");
+    expect(published).toEqual([{ id: undefined, manifest: { mcp: { servers: crm }, reach: ["crm"] } }]);
+  });
+
+  it("builds only on drafts of its own run: pi's earlier run for the owner left one it may not touch", async () => {
+    const { scope, published, checked, piRun } = chat();
+    // Run 1, the owner's own: a page with what only they see in its html, on crm alone.
+    const owners = await writeDraft(scope, { html: "<p>Ada's salary: 120k</p>", mcp: crm, session: "pi" });
+    piRun.run = 2;
+    // Run 2 answers a member, in the same session: the owner's draft is not this run's, whatever it declares.
+    await expect(writeDraft(scope, { draftId: owners.id, edits: [{ old: "120k", new: "a lot" }], session: "pi" })).rejects.toThrow(
+      /Not saved: draft "\w+" is not one this turn wrote/,
+    );
+    await expect(checkDraft(scope, owners.id, {}, undefined, "pi")).rejects.toThrow(/Not checked: draft/);
+    await expect(publishDraft(scope, { title: "Salary", draftId: owners.id }, undefined, "pi")).rejects.toThrow(/Not published: draft/);
+    // An agent's later turn in the same session is another turn too.
+    const mine = await writeDraft(scope, { html: "<p>deals</p>", mcp: crm, session: "asked" });
+    scope.createReach = async () => ({ ...ASKED, drafts: "asked:2" });
+    await expect(checkDraft(scope, mine.id, {}, undefined, "asked")).rejects.toThrow(/Not checked: draft/);
+    expect([checked, published]).toEqual([[], []]);
+  });
+
   it("leaves the owner's own turn as it was: any server, a new version of the chat's page, no reach kept", async () => {
     const { scope, published } = chat();
     const draft = await writeDraft(scope, { html: "<p>notes</p>", mcp: [...crm, ...vault], session: "own" });
@@ -111,9 +150,12 @@ describe("a page made on someone else's ask", () => {
 describe("the reach rules", () => {
   it("say which servers are outside, keep the reach on the version, and refuse a live call outside it", () => {
     expect(reachRefusal({ mcp: { servers: crm } }, ASKED, "Not saved:")).toBeNull();
-    expect(reachRefusal({ mcp: { servers: vault } }, { servers: [], newOnly: true }, "Not saved:")).toContain("calls no server at all");
+    expect(reachRefusal({ mcp: { servers: vault } }, { servers: [], newOnly: true, drafts: "x" }, "Not saved:")).toContain("calls no server at all");
     expect(changeRefusal(undefined, "Not saved:")).toBeNull();
-    expect(changeRefusal({ servers: [], newOnly: false }, "Not saved:")).toBeNull();
+    expect(changeRefusal({ servers: [], newOnly: false, drafts: "x" }, "Not saved:")).toBeNull();
+    // pi: none on the owner's own run; new-only on the servers it shares, on the run's drafts, on anyone else's.
+    expect(piCreateReach(false, ["crm", "vault"], (server) => server === "crm", "pi:7")).toBeUndefined();
+    expect(piCreateReach(true, ["crm", "vault"], (server) => server === "crm", "pi:7")).toEqual({ servers: ["crm"], newOnly: true, drafts: "pi:7" });
     expect(withReach({ mcp: { servers: crm } }, undefined)).toEqual({ mcp: { servers: crm } });
     const kept = withReach({ mcp: { servers: crm } }, ASKED);
     expect(liveCallRefusal(kept, "crm")).toBeNull();
