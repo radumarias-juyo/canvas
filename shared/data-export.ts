@@ -1,3 +1,6 @@
+import type { AgentDefinition, AgentInput, AgentOrigin } from "./agents.ts";
+import type { MemoryNote } from "./memory.ts";
+import type { FollowKind } from "./feed.ts";
 import type { ModelSetting } from "./models.ts";
 import { ID_PATTERN, type ArtifactVersion } from "./protocol.ts";
 import type { SkillFileInfo } from "./skill-files.ts";
@@ -18,7 +21,11 @@ import { sha256Hex } from "./util.ts";
  *   files/<path>                   the user's files
  */
 export const EXPORT_FORMAT = "pi-artifacts-export";
-export const EXPORT_VERSION = 1;
+/**
+ * Counts up when an export carries what an older deployment cannot read, which then refuses the zip as a whole: 2 adds
+ * the agents and each chat's roster (chat_agents). Every older version stays readable.
+ */
+export const EXPORT_VERSION = 2;
 
 export const ARCHIVE = {
   manifest: "manifest.json",
@@ -44,10 +51,32 @@ export interface ExportedSkill extends SkillInput {
   files?: SkillFileInfo[];
 }
 
+/**
+ * One of the user's agents, as exported: its fields, whether it is on, and its id, which the rosters of the chats it
+ * is in point at. An import never replaces one of the importer's: one they have by that name is kept.
+ */
+export interface ExportedAgent extends AgentInput {
+  id: string;
+  origin: AgentOrigin;
+  enabled: boolean;
+  copiedFrom?: AgentDefinition["copiedFrom"];
+}
+
 /** What one page saved for the user (pi.use("storage")), by key; null: a key they removed (see UserDirectory.pageValues). */
 export interface ExportedPageValues {
   artifactId: string;
   values: Record<string, string | null>;
+}
+
+/**
+ * A page or agent the user follows, as the app names it: an import follows it again where the importer may open it
+ * (the same deployment), with its owner told as when following it by hand; elsewhere it is skipped. Their feed stays.
+ */
+export interface ExportedFollow {
+  kind: FollowKind;
+  id: string;
+  /** For an agent: the chat it is shared in. */
+  chatId?: string;
 }
 
 export interface ExportedAccount {
@@ -55,6 +84,12 @@ export interface ExportedAccount {
   model: ModelSetting | null;
   builtinSkillsOff: string[];
   skills: ExportedSkill[];
+  /** None in an export made before agents. */
+  agents?: ExportedAgent[];
+  /** The memory notes (shared/memory.ts); none in an export made before them. Never one of a chat off the record. */
+  memory?: MemoryNote[];
+  /** None in an export made before follows. */
+  follows?: ExportedFollow[];
   pageValues: ExportedPageValues[];
 }
 
@@ -162,6 +197,11 @@ export interface ChatImportStart {
   from: string;
   /** Artifact ids the plan changed: old to new. */
   artifacts: Record<string, string>;
+  /**
+   * The agents the import brought in or found here, by their id in the export: the id each has here. The chat keeps
+   * only these of its roster; none for an export made before agents.
+   */
+  agents?: Record<string, string>;
 }
 
 /** POST /api/me/import/artifacts/:id/versions: one version, in order, of an artifact of `chatId`. */
@@ -202,6 +242,8 @@ export function checkManifest(value: unknown): ExportManifest | { error: string 
   }
   const lists = [manifest.chats, manifest.artifacts, manifest.files, manifest.sharedWithMe];
   if (typeof manifest.uid !== "string" || !manifest.account || !lists.every(Array.isArray)) return { error: "The export's manifest is damaged." };
+  const optional = [manifest.account.agents, manifest.account.follows, manifest.account.memory];
+  if (optional.some((list) => list !== undefined && !Array.isArray(list))) return { error: "The export's manifest is damaged." };
   // Ids and skill names go into request paths: only ones this app makes.
   const ids = [...manifest.chats!.flatMap((chat) => [chat?.id]), ...manifest.artifacts!.flatMap((artifact) => [artifact?.id, artifact?.chatId])];
   const skills = Array.isArray(manifest.account.skills) ? manifest.account.skills : [];

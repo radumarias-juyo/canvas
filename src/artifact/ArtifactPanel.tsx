@@ -6,6 +6,7 @@ import { useVisible } from "../sidebar.ts";
 import { ArtifactFrame } from "./ArtifactFrame.tsx";
 import { ArtifactSource } from "./ArtifactSource.tsx";
 import { ShowAs, ViewportPicker, ViewportStage, useViewport } from "./viewport.tsx";
+import { FollowButton } from "../feed/FeedNav.tsx";
 
 interface Props {
   artifactId: string;
@@ -26,6 +27,9 @@ export function ArtifactPanel({ artifactId, latestKnown, uid, onClose, fullPage 
   // The version whose source was last shown: it stays read and coloured while the page shows, for going back to it.
   const [sourceOf, setSourceOf] = useState<number>();
   const [clone, setClone] = useState<{ command: string; expiresAt: string } | { error: string } | null>(null);
+  // Why Discuss could not open the page's chat.
+  const [discussError, setDiscussError] = useState<string | null>(null);
+  const [discussing, setDiscussing] = useState(false);
   const viewport = useViewport();
 
   useEffect(() => {
@@ -63,6 +67,26 @@ export function ArtifactPanel({ artifactId, latestKnown, uid, onClose, fullPage 
       setClone({ command: `git -c http.extraHeader="Authorization: Bearer ${access.token}" clone ${access.remote}`, expiresAt: access.expiresAt });
     } catch (e) {
       setClone({ error: errorMessage(e) });
+    }
+  }
+
+  // The chat on this page: its author opens (or makes) it, anyone else joins it.
+  async function discuss() {
+    setDiscussing(true);
+    setDiscussError(null);
+    try {
+      let found = await api.discuss(artifactId);
+      if ("canStart" in found) {
+        const start = confirm(
+          "Start a chat on this page? Anyone who can open the page can join it, read all of it and call its agents, which act as you. You can make it a group or private later.",
+        );
+        if (!start) return setDiscussing(false);
+        found = await api.discuss(artifactId, true);
+      }
+      if ("chatId" in found) location.href = `/c/${found.chatId}`;
+    } catch (e) {
+      setDiscussError(errorMessage(e));
+      setDiscussing(false);
     }
   }
 
@@ -110,6 +134,16 @@ export function ArtifactPanel({ artifactId, latestKnown, uid, onClose, fullPage 
               git
             </button>
           )}
+          <button
+            type="button"
+            onClick={() => void discuss()}
+            disabled={discussing}
+            title={meta.isOwner ? "Open this page's chat, where anyone who can open the page can join and ask about it" : "Join this page's chat, to ask about it"}
+          >
+            Discuss
+          </button>
+          {/* Someone else's page: its new versions, and a chat about it, can reach their feed. */}
+          {!meta.isOwner && <FollowButton kind="page" id={meta.id} />}
           {/* Only people in the chat that builds it are told which chat that is. */}
           {meta.chatId && (
             <a className="button primary" href={`/c/${meta.chatId}?artifact=${meta.id}`} title="Open the chat that builds this artifact, with it beside the chat">
@@ -128,6 +162,11 @@ export function ArtifactPanel({ artifactId, latestKnown, uid, onClose, fullPage 
           )}
         </div>
       </header>
+      {discussError && (
+        <div className="clone-box">
+          <span>{discussError}</span>
+        </div>
+      )}
       {clone && (
         <div className="clone-box">
           {"error" in clone ? (

@@ -11,6 +11,17 @@ export function text(value: unknown): string | undefined {
   return typeof value === "string" && value ? value : undefined;
 }
 
+/** Whether the runtime knows `tz` as an IANA time zone. */
+export function isTimeZone(tz: unknown): tz is string {
+  if (typeof tz !== "string" || !tz || tz.length > 64) return false;
+  try {
+    new Intl.DateTimeFormat("en", { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** The message of anything thrown. */
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -73,6 +84,30 @@ export function toBase64(bytes: Uint8Array): string {
 /** The bytes of standard base64. */
 export function fromBase64(base64: string): Uint8Array<ArrayBuffer> {
   return Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+}
+
+/** base64url (RFC 4648 §5) of `bytes`, unpadded, as JWTs and Web Push use it. */
+export function toBase64url(bytes: Uint8Array): string {
+  return toBase64(bytes).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/** The bytes of base64url, padded or not; throws on anything else. */
+export function fromBase64url(value: string): Uint8Array<ArrayBuffer> {
+  const bytes = tryFromBase64url(value);
+  if (!bytes) throw new Error("Not valid base64url.");
+  return bytes;
+}
+
+/** The bytes of base64url, padded or not; undefined for anything else. */
+export function tryFromBase64url(value: string): Uint8Array<ArrayBuffer> | undefined {
+  const trimmed = value.replace(/=+$/, "");
+  if (!/^[A-Za-z0-9_-]*$/.test(trimmed) || trimmed.length % 4 === 1) return undefined;
+  const base64 = trimmed.replace(/-/g, "+").replace(/_/g, "/");
+  try {
+    return fromBase64(base64 + "=".repeat((4 - (base64.length % 4)) % 4));
+  } catch {
+    return undefined;
+  }
 }
 
 /** `fn`'s result, computed once and shared; a failure is forgotten, so the next call tries again. */
@@ -169,4 +204,18 @@ export function jsonIn(text: string): unknown {
 /** A search box's text as the lowercase words every match must contain. */
 export function searchWords(query: string): string[] {
   return query.toLowerCase().split(/\s+/).filter(Boolean);
+}
+
+/**
+ * Characters a browser draws as nothing: format characters (zero-width, bidi controls, tags), private and unassigned
+ * code points, variation selectors but the emoji ones (U+FE0E, U+FE0F), and the Hangul fillers. The zero-width joiner
+ * and non-joiner stay: they join emoji into one ("👩‍💻") or keep letters apart (Persian, Indic scripts),
+ * and hide nothing alone. So do the format characters a browser draws as a sign (the Arabic, Syriac and Kaithi number marks).
+ */
+const UNSEEN =
+  /(?![\u200c\u200d\u0600-\u0605\u06dd\u070f\u0890\u0891\u08e2\u{110bd}\u{110cd}])[\p{Cf}\p{Co}\p{Cn}\uFE00-\uFE0D\u{E0100}-\u{E01EF}\u115F\u1160\u3164\uFFA0]/gu;
+
+/** `text` with only what its reader sees: nothing hidden rides along (UNSEEN). */
+export function withoutUnseen(text: string): string {
+  return text.replace(UNSEEN, "");
 }

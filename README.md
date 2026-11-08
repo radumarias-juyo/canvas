@@ -7,7 +7,7 @@ agent that builds **live dashboards**, preview them beside the chat, and share t
 
 - **Pi Durable** runs the agent inside a Durable Object, one per chat, and survives evictions mid-turn.
 - **Durable Objects** hold each chat (agent, MCP connections, live calls) and each user's index of chats and artifacts.
-- **Sandbox** (a Linux container per chat) runs the Python the agent writes, with no internet.
+- **Sandbox** (a Linux container per chat, and one per agent in it) runs the Python the agent writes, with no internet.
 - **[Artifacts](https://developers.cloudflare.com/artifacts/)** keeps each published artifact as a Git repo: one commit
   and tag per version.
 - **R2** keeps each user's files, which the agent reads and writes, plus a read cache of artifact versions.
@@ -123,7 +123,10 @@ refresh. There is nothing specific to any one server:
 Where things live and who can use them:
 
 - **Tokens are per user,** in your `UserDirectory` Durable Object, which only requests carrying your verified identity
-  reach. All your chats share them.
+  reach. All your chats share them. Each record is encrypted with AES-GCM under a key of your own, derived from
+  `MCP_TOKENS_KEY` (or, without it, from `FILES_MASTER_KEY` under a label of its own) with your uid, and bound to the
+  server's name (`worker/mcp/sealed.ts`). A copy of the storage alone reads nothing. Records stored before this are
+  sealed the first time they are read.
 - **When a sign-in lapses,** the SDK refreshes it. If it can't, calls fail with `auth_required`, and the message
   carries the sign-in link.
 - **Two chats refreshing at once don't undo each other.** Each change to the stored record (new tokens, a cleared
@@ -135,15 +138,50 @@ Where things live and who can use them:
   tools out for them. Claude's artifacts instead use each viewer's own connectors.
 - **Removing a server** from the list also removes everyone's stored sign-in for it, tokens included. This happens the
   next time each user's directory loads.
-- **Signing out:** a new sign-in replaces your tokens once it finishes; starting one (anyone can link to the sign-in route) changes nothing until then. To end the portal's own session, sign out on the portal's home
-  page.
+- **Signing out:** a new sign-in replaces your tokens once it finishes; starting one (anyone can link to the sign-in route) changes nothing until then.
+  **Sign-ins** in the account menu lists each such server with when you signed in, and **Disconnect** deletes the
+  stored record, tokens and registration. To end the portal's own session, sign out on the portal's home page.
 
 `test/mcp-oauth.test.ts` runs the whole flow against a stand-in portal:
 - a sign-in;
 - two users kept apart;
 - a forged `state` refused;
 - refresh on expiry;
-- `auth_required` when refresh fails, leaving an open sign-in untouched.
+- `auth_required` when refresh fails, leaving an open sign-in untouched;
+- the check before a scheduled run: `ok` after a refresh, `needs_sign_in` when the refresh is refused, `unavailable`
+  when the server does not answer.
+
+### Sign-ins with nobody present
+
+An agent's scheduled runs use your sign-ins while you are away (`worker/mcp/background.ts`, `worker/mcp/sign-ins.ts`):
+
+- **Before a run** the app refreshes each sign-in it needs (`UserDirectory.checkSignIns`): per server `ok`,
+  `needs_sign_in` or `unavailable`. A run with `needs_sign_in` does not start. You get a notice with the sign-in link in
+  the sidebar, as a browser notification, and as a push when the app is closed (once until you sign in). After the
+  sign-in callback, each chat with a run waiting hears it (`UserDirectory.onSignedIn` → `ChatAgent.signedIn`), so the
+  run can go again.
+- **How long a sign-in lasts** is not something Access or OAuth says, so the app counts it from the sign-in:
+  `MCP_GRANT_DAYS` (default 30) should match the grant session duration of the portal's Access application. Three days
+  before it ends (a tenth of a grant shorter than 30 days), you get one warning per sign-in. A sign-in a refresh cannot
+  renew ends there: it shows as signed out until you sign in again.
+- **Keep-alive:** sign-ins that runs use are refreshed about once a day, in case the authorization server ends a
+  session idle for 24 hours.
+- **Runs only read:** the helpers for the run code, `readOnlyTools` and `assertReadOnly`, offer a run only the tools a
+  server marks read-only and refuse any other call before it reaches the server.
+- **The refresh token is the real credential:** 2FA protects a new sign-in, not a refresh. Access checks its Allow
+  policy again on every refresh, so removing someone from it ends their runs' access at the next refresh.
+
+### Push notifications
+
+With the VAPID secrets set, the app also reaches people while it is closed (Web Push, `worker/push/`): RFC 8291
+payload encryption and an RFC 8292 VAPID token, with WebCrypto alone. Turning on notifications in the app subscribes
+the browser (a service worker, `public/sw.js`); a push goes out only when none of the user's apps is open, says only
+that something arrived (never its content), and opens the chat when clicked. Its topic (which the push service sees) is
+an HMAC of the notice's tag, not the tag. A subscription the browser replaces while the app is closed is handed to the
+Worker by the service worker. A subscription belongs to the user signed
+in when it was made: signing out ends it, and a browser where another user signs in next gets a new one. Endpoints are taken only at the known push
+services, and ones a push service reports gone are forgotten. Other code sends one with `UserDirectory.push({ title,
+body, url, tag })`. Without the secrets nothing is pushed and the rest works as before.
 
 Locally, `PI_MCP_SERVERS='[…]' pnpm dev` uses another list, for example with a local stand-in portal.
 
@@ -316,8 +354,10 @@ opens quickly.
 
 ## The sandbox
 
-`run_python` and `run_bash` run in one Linux container per chat (`worker/sandbox.ts`, the Sandbox SDK's container
-in a Durable Object). It runs Debian with Python 3.13, pandas, numpy, the libraries skills' scripts commonly import (pypdf, pdfplumber,
+`run_python` and `run_bash` run in a Linux container (`worker/sandbox.ts`, the Sandbox SDK's container in a Durable
+Object): pi's sessions in the chat's, and each agent's sessions in one of the agent's own in that chat
+(`worker/agent/sandbox-names.ts`), so no agent reads what another, or pi, left in its container; a session nobody is known
+of runs none. A member's agent runs in its seat's object, one per room. It runs Debian with Python 3.13, pandas, numpy, the libraries skills' scripts commonly import (pypdf, pdfplumber,
 reportlab, openpyxl, python-docx, python-pptx, pillow, matplotlib, pyyaml, jinja2, beautifulsoup4, lxml) and the usual command-line tools, and has no
 internet. Each run is limited to 60 seconds. Files move like this:
 
@@ -331,7 +371,8 @@ internet. Each run is limited to 60 seconds. Files move like this:
   own folder, so two chats of one user running at once never overwrite each other's outputs; the agent is told to keep
   the files it writes with `files_write` there too.
 - **Between runs:** `./files` and `./out` start empty each run. Anything else in the working directory stays until
-  the container stops, 10 minutes after the last run.
+  the container stops, 10 minutes after the last run, for the same session only: a run of another session (an agent's
+  next turn, in a fork of its own) starts with an empty working directory. Runs in one container go one at a time.
 
 The container never sees R2, the bucket or any key: only the bytes the Worker hands it.
 
@@ -344,8 +385,10 @@ a request fits one, the agent calls `activate_skill` and gets the rest. Skills u
 `skills()` from `agents/harness/pi`.
 
 - **Built-in skills** ship as `SKILL.md` files in `worker/skills/builtin/`: `analyze-files` (questions about uploaded
-  files, with `run_python`), `revise-artifact` (change a published page from its current version) and
-  `explore-mcp-server` (learn a server with one small read-only call). Each user can turn them off.
+  files, with `run_python`), `revise-artifact` (change a published page from its current version),
+  `explore-mcp-server` (learn a server with one small read-only call) and `app-help` (what the app and this chat can
+  do: kinds, sharing, agents, routines; the agent answers from it, never from what other apps do). Each user can turn
+  them off.
 - **Your own skills** are kept per user in `UserDirectory` and apply in all your chats. Write them, import a `SKILL.md`,
   download one, turn them on and off or delete them under **Skills** in the sidebar (`/skills`, API under
   `/api/skills`, in `worker/skills-routes.ts`). A change applies from the next message in any chat.
@@ -423,9 +466,11 @@ piece and the zip is not bound by what one Worker request may hold.
 
 - **In it:** your own chats (each chat object's conversation, reactions and settings, `worker/chat-dump.ts`, and the
   pages its agent saved and did not publish), your artifacts with every version, your files, your skills with the files
-  of those imported as packages, your system prompt, model pick and built-in skills turned off, and what pages saved for
-  you (`pi.use("storage")`).
+  of those imported as packages, your system prompt, model pick and built-in skills turned off, what pages saved for
+  you (`pi.use("storage")`), and the pages and agents you follow. An import follows each again only where you may
+  open it, as following by hand checks (on the same deployment); the rest are skipped.
 - **Not in it:** your sign-ins to MCP servers (tokens, which belong to the deployment), what pages' model calls cost you,
+  your feed (it fills again from what you follow and what happens next),
   the chats others shared with you (listed by name only: they are their owners'), and the people in your shared chats
   and their invites: their ids mean nothing on another deployment, so an imported chat has only you in it. Their
   messages stay in its conversation, under their names. Work still running in a chat (a run, a queued message) is left
@@ -516,6 +561,65 @@ people: many people share one conversation with one agent, and their messages qu
 - **Pages:** people in the chat may load its pages' data from servers that sign in each user, since they see that
   data in the conversation anyway. A page's write tools stay the author's only.
 - Routes in `worker/chat-routes.ts`; members and invites in `worker/members.ts`, in the chat object's SQLite.
+
+## Agents
+
+Besides `pi`, a chat can hold agents of its owner's: each with its own name (called as `@name`), job line,
+instructions, model and effort, and the MCP servers it may use.
+
+- **Definitions** live in the owner's `UserDirectory` (`agents` table, `worker/agents/store.ts`), with routes under
+  `/api/agents` (`worker/agents-routes.ts`). Each change counts the version up; a save that read an older version is
+  refused. An agent pi proposes (`agent_propose`) is saved off until its owner turns it on, as skills are, and the model
+  can never change or turn on an agent of the user's. An agent's name follows `AGENT_NAME_PATTERN` and can't be `pi`
+  or a word for everyone.
+- **In a chat**, the owner adds agents that are on (`POST /api/chats/:id/agents`). The chat keeps only a roster that
+  points at definitions (`chat_agents`, `worker/agents/roster.ts`), and runs each agent in a pi session of its own in
+  the chat object, set up afresh from its definition before each turn.
+- **Who speaks:** a message that names agents with `@name` gives each a turn, in the order named; a reply to an agent's
+  message gives it one too. Turns wait in a queue in the chat's SQLite (`chat_agent_turns`), one at a time per agent,
+  and survive a restart: a turn whose input never reached its session starts again, and a turn ends with its reply kept
+  in its row and its hand-offs queued, in one write, then posts the reply under a request id, so a restart in between
+  posts it then, once. An agent's reply naming another agent (or `@pi`) hands the work
+  on, at most three hand-offs per person's message however many agents it named (`MAX_HOPS`), a hand-off to pi counted
+  too; an agent never calls itself. One its owner turned off says so when it is called. Stop stops pi and every agent.
+  When someone leaves the chat or is removed, their agents' turns stop, with those their messages handed on.
+- **What an agent reads:** before each turn, its session gets one passive write with what was said in the chat since its
+  last turn, one labelled message each (`[Ana · person]`, `[research · agent]`, `[Radu · person · your owner]`), its
+  further lines indented and anything in it shaped like an owner's label marked as quoted; then the turn's input names
+  who asked and quotes the message. While it works, everyone in the chat watches its steps live (the socket follows
+  its session for that turn only: `TurnFilter`, `worker/agents/live.ts`); then its final text is posted to the chat (a
+  `chat.agent` entry, with the pages it published and the records its MCP results held, as chips), which pi also reads
+  as context, and its tool calls stay in its own session. The pages it publishes and the
+  files it saves are the chat's, as pi's are: the chat's traces read every session.
+- **Who decides its tools:** a turn its owner asked for may use the agent's servers (`servers`, all when unset). Any
+  other turn (a member's message, a hand-off, pi naming it) gets only read-only tools of the servers it may use in
+  shared chats (`sharedServers`; by default those that don't sign in each user), and of the app's own tools only those
+  that read the chat's pages and the owner's skills: no writes, code, private files or sign-in links. The tools are an
+  allow-list set on the session before each turn (`allowedTools` in `worker/agents/turns.ts`): the harness offers the
+  model no other tool, and refuses a call to one. Only the owner's messages are instructions to it (its own prompt says so); the
+  others are information. Like pi, it acts as the owner: their sign-ins, files, skills, and pages owned by them.
+
+### Memory notes
+
+pi and the agents keep short notes between conversations (`worker/memory/`, rules in `shared/memory.ts`), in a
+`memory` table in the owner's `UserDirectory`. Each note has a scope that says who reads it:
+
+- **Just me** (`user`): read only where nobody but the owner reads the replies, a private chat with nobody else in it.
+- **This agent** (`agent`): read by that agent's sessions wherever it works, shared chats included.
+- **This chat** (`chat`): read by pi and every agent in that chat, and nowhere else.
+
+The model saves notes with `memory_note`, looks further with `memory_recall` and forgets with `memory_forget`. A
+preference is kept at once; a fact (something an agent computes with) waits, unconfirmed and unread, until the owner
+confirms it under Memory, as a proposed skill waits until turned on. What is learned in a chat others are in stays with
+that chat until the owner moves it. pi can't tell whose words it follows in a shared chat, so there it reads only the
+chat's notes, and what it saves waits for a confirm; an agent's turn its owner didn't ask for gets only
+`memory_recall`. Nothing is saved from, or read in, a chat off the record (`mayLeave`, checked against both the chat's
+kind and the one the owner's sidebar holds). The notes a conversation reads go into its prompt as the last section,
+set when its turn starts, oldest first, so a new note changes only the end of the prompt; each note counts a use the
+first time a conversation's prompt holds it, and for each recall. The Memory page (`/memory`) and each agent's Knows
+tab list, add, edit, pin, move, confirm, forget and bring back notes, and show what the agents reach: the MCP servers
+(with what each says it covers, as a chat last listed them), the owner's files and their skills. Export and import
+carry the notes.
 
 ## Models
 
@@ -648,9 +752,21 @@ pnpm dev        # cf dev: needs a Cloudflare login (cf auth login; the AI bindin
   # → {"artifactId":"…","version":1}; open http://localhost:5173/a/<artifactId>
   ```
 
+- **A scripted model:** with `DEV_TOOLS=true`, adding `DEV_MODEL=script` makes a scripted model (`worker/dev-model.ts`)
+  the default and the picker's only choice. A message's `/say <text>` is its reply, `/tool <name> <json>` (or
+  `server.tool`) makes one tool call, and anything else gets `ok:` and the message. An agent's instructions or a
+  workflow's work step can carry the same lines.
+
 Tests: `pnpm test` covers the hub, the broker, Access token checks and the storage rules (including a test that fails
 if code outside `worker/storage/` touches the bucket). `LIVE=1 pnpm test` also calls CoinGecko. Typecheck with
 `pnpm typecheck`.
+
+`pnpm e2e` (not part of `pnpm test`) runs the agents feature in a browser, as two people signed in with demo sign-in:
+editor and drafted agents, hand-offs, a shared chat, chat kinds, memory, scheduled runs, follows and the feed, a run
+that needs a sign-in, offers and checklists (`e2e/agents.spec.ts`). It starts stand-in MCP servers (`e2e/stand-in.ts`:
+`crm` with a read and a write tool, `vault` behind OAuth) and the dev server offline on the scripted model, with a
+local state that each run starts empty (`PI_STATE_DIR`), and writes a screenshot per flow to `e2e/screens/`. It uses
+the Chromium Playwright finds; `E2E_CHROMIUM` names another, and `E2E_PORT` and `E2E_MCP_PORT` move its ports.
 
 ## Deploy
 
@@ -667,8 +783,8 @@ The project uses Cloudflare's [`cf` CLI](https://developers.cloudflare.com/cf/);
    button; no redeploy is needed. `MODEL` in `cloudflare.config.ts`, what new chats run on until Auto or their user picks, is a pi-ai
    gateway specifier (`anthropic/claude-sonnet-5.5`); a Workers AI id such as `@cf/zai-org/glm-5.3-flash` needs no key. See [Models](#models).
 4. Put the app behind Cloudflare Access: create a self-hosted Access application for the Worker's hostname with a
-   policy listing who may sign in, then set `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` (the application's audience tag) in
-   `cloudflare.config.ts`. That hostname is `domains` there, a custom domain on a zone in your account, with
+   policy listing who may sign in, then set `accessTeamDomain` and `accessAud` (the application's audience tag) in
+   `production` in `cloudflare.config.ts`. That hostname is `domains` there, a custom domain on a zone in your account, with
    workers.dev and Preview URLs off so the Worker is reachable only through Access; change it to yours, or drop it and
    set `workersDev: true` to serve on workers.dev.
 5. Generate the file-encryption master key (`openssl rand -base64 32`, at least 32 bytes) and keep a copy somewhere
@@ -676,7 +792,19 @@ The project uses Cloudflare's [`cf` CLI](https://developers.cloudflare.com/cf/);
    [How file encryption works](#how-file-encryption-works)). Pass it as a secret:
    `cf deploy --secrets-file secrets.json` with `{"FILES_MASTER_KEY": "…"}`, then delete `secrets.json`. Later deploys
    keep the secret, so they need no `--secrets-file` unless it changes.
+
+   Optional secrets, in the same file:
+   - `MCP_TOKENS_KEY` (`openssl rand -base64 32`): encrypts stored MCP sign-ins. Without it they are encrypted with a
+     key derived from `FILES_MASTER_KEY`. Adding or changing it later makes stored sign-ins unreadable: they are
+     forgotten when next read, and everyone signs in to those servers again.
+   - `PUSH_VAPID_PUBLIC_KEY` and `PUSH_VAPID_PRIVATE_KEY` (from `node --experimental-strip-types scripts/vapid-keys.ts`),
+     and `PUSH_SUBJECT` (a `mailto:` or `https:` contact for the push services): push notifications. Changing the key
+     pair makes each browser subscribe again the next time the app opens.
 6. `pnpm run deploy` (`cf deploy`). This builds the sandbox image with Docker and needs the Workers Paid plan.
+
+To try a branch next to production, deploy it as a preview: a separate Worker with its own hostname, Access
+application, bucket, Artifacts namespace, gateway, dataset, container, rate limits and secrets, set by `PI_PREVIEW` and a
+few other variables. Without them the config is production's, unchanged. See [docs/preview-deploy.md](docs/preview-deploy.md).
 
 A website that links to the app gets a "Back to <hostname>" link at the top of the sidebar, taken from the browser's
 referrer and kept for the tab. The Access sign-in on a first visit replaces the referrer, so a site that wants the

@@ -1,0 +1,277 @@
+{
+  "worker": {
+    "name": "pi-artifacts",
+    "compatibilityDate": "2026-10-01",
+    "compatibilityFlags": [
+      "nodejs_compat"
+    ],
+    "entrypoint": "<entrypoint>",
+    "observability": {
+      "enabled": true
+    },
+    "domains": [
+      "pi.oxfer.app"
+    ],
+    "workersDev": false,
+    "previewUrls": false,
+    "assets": {
+      "notFoundHandling": "single-page-application",
+      "runWorkerFirst": [
+        "/api/*",
+        "/u/*"
+      ]
+    },
+    "env": {
+      "MODEL": {
+        "type": "text",
+        "value": "anthropic/claude-sonnet-5.5"
+      },
+      "THINKING_LEVEL": {
+        "type": "text",
+        "value": "high"
+      },
+      "TITLE_MODEL": {
+        "type": "text",
+        "value": "anthropic/claude-haiku-5.5"
+      },
+      "CALL_HINT_MODEL": {
+        "type": "text",
+        "value": "typesafe/jev"
+      },
+      "ROUTER_MODEL": {
+        "type": "text",
+        "value": "system-one:typesafe/jev,@cf/openai/gpt-oss-120b,google-ai-studio/gemini-flash-lite-latest"
+      },
+      "TOOL_PICK_MODEL": {
+        "type": "text",
+        "value": "typesafe/jev"
+      },
+      "SKILLS_MODEL": {
+        "type": "text",
+        "value": "typesafe/jev"
+      },
+      "AGENT_ROUTER_MODEL": {
+        "type": "text",
+        "value": "typesafe/jev"
+      },
+      "INTEREST_MODEL": {
+        "type": "text",
+        "value": "@cf/baai/bge-m3"
+      },
+      "DREAM_MODEL": {
+        "type": "text",
+        "value": "@cf/openai/gpt-oss-20b"
+      },
+      "RUNS_DAILY_USD": {
+        "type": "text",
+        "value": "5.00"
+      },
+      "AUTO_MODELS": {
+        "type": "json",
+        "value": [
+          {
+            "id": "anthropic/claude-opus-5.5",
+            "use": "the hardest work: large or intricate pages, debugging what failed, long multi-step tool use"
+          },
+          {
+            "id": "anthropic/claude-sonnet-5.5",
+            "use": "most page building and editing, data work, writing code"
+          },
+          {
+            "id": "anthropic/claude-haiku-5.5",
+            "use": "small edits, short answers, simple lookups with a tool or two"
+          },
+          {
+            "id": "openai/gpt-6.1-sol",
+            "use": "strong reasoning and code, an alternative for page building and analysis"
+          },
+          {
+            "id": "openai/gpt-6-luna",
+            "use": "cheap quick answers and light tool use"
+          },
+          {
+            "id": "google-ai-studio/gemini-pro-latest",
+            "use": "long documents and large attachments, analysis over a lot of text"
+          },
+          {
+            "id": "google-ai-studio/gemini-flash-latest",
+            "use": "fast, cheap answers that read images or long text"
+          },
+          {
+            "id": "cerebras/gpt-oss-120b",
+            "use": "very fast answers to simple questions; no images"
+          }
+        ]
+      },
+      "AI_GATEWAY_ID": {
+        "type": "text",
+        "value": "pi-artifacts"
+      },
+      "AI_BYOK_ALIAS": {
+        "type": "text",
+        "value": ""
+      },
+      "SANDBOX_ENABLED": {
+        "type": "text",
+        "value": "true"
+      },
+      "AUTH_MODE": {
+        "type": "text",
+        "value": "access"
+      },
+      "ACCESS_TEAM_DOMAIN": {
+        "type": "text",
+        "value": "xorio42.cloudflareaccess.com"
+      },
+      "ACCESS_AUD": {
+        "type": "text",
+        "value": "21dcccf4fbfa5991beb76a9ac48ff0c0de86d3c1a55597c82e141559e3ebcdc9"
+      },
+      "FILES_MASTER_KEY": {
+        "type": "secret"
+      },
+      "DEV_TOOLS": {
+        "type": "text",
+        "value": "false"
+      },
+      "DEV_MODEL": {
+        "type": "text",
+        "value": ""
+      },
+      "DEV_PAUSE_MS": {
+        "type": "text",
+        "value": ""
+      },
+      "DEV_GAP_MS": {
+        "type": "text",
+        "value": ""
+      },
+      "MCP_SERVERS": {
+        "type": "json",
+        "value": []
+      },
+      "MCP_GRANT_DAYS": {
+        "type": "text",
+        "value": "30"
+      },
+      "PAGE_CALLS": {
+        "type": "rate-limit",
+        "namespace": "4201",
+        "simple": {
+          "limit": 120,
+          "period": 60
+        }
+      },
+      "PAGE_AI_MODEL": {
+        "type": "text",
+        "value": "@cf/openai/gpt-oss-120b,google-ai-studio/gemini-flash-lite-latest"
+      },
+      "PAGE_AI_DAILY_USD": {
+        "type": "text",
+        "value": "0.50"
+      },
+      "PAGE_AI": {
+        "type": "rate-limit",
+        "namespace": "4202",
+        "simple": {
+          "limit": 20,
+          "period": 60
+        }
+      },
+      "AGENT_TURNS": {
+        "type": "rate-limit",
+        "namespace": "4204",
+        "simple": {
+          "limit": 10,
+          "period": 60
+        }
+      },
+      "DICTATION_MODEL": {
+        "type": "text",
+        "value": "@cf/openai/whisper-large-v3-turbo"
+      },
+      "DICTATION_DAILY_MINUTES": {
+        "type": "text",
+        "value": "60"
+      },
+      "DICTATION": {
+        "type": "rate-limit",
+        "namespace": "4203",
+        "simple": {
+          "limit": 12,
+          "period": 60
+        }
+      },
+      "BROWSER": {
+        "type": "browser",
+        "dev": {
+          "remote": false
+        }
+      },
+      "CHECK_LOOK_MODEL": {
+        "type": "text",
+        "value": "typesafe/jev"
+      },
+      "REVIEW_MODEL": {
+        "type": "text",
+        "value": "@cf/openai/gpt-oss-120b,google-ai-studio/gemini-flash-lite-latest"
+      },
+      "METRICS": {
+        "type": "analytics-engine-dataset",
+        "name": "pi_artifacts_metrics"
+      },
+      "AI": {
+        "type": "ai"
+      },
+      "FILES": {
+        "type": "r2",
+        "name": "pi-artifacts"
+      },
+      "REPOS": {
+        "type": "artifacts",
+        "namespace": "pi-artifacts",
+        "dev": {
+          "remote": false
+        }
+      }
+    },
+    "exports": {
+      "ChatAgent": {
+        "type": "durable-object",
+        "storage": "sqlite"
+      },
+      "UserDirectory": {
+        "type": "durable-object",
+        "storage": "sqlite"
+      },
+      "Source": {
+        "type": "durable-object",
+        "storage": "sqlite"
+      },
+      "Sandbox": {
+        "type": "durable-object",
+        "storage": "sqlite",
+        "container": {
+          "name": "pi-artifacts-sandbox",
+          "schedulingPolicy": "durable-object",
+          "images": {
+            "sandbox": {
+              "dockerfile": "./Dockerfile"
+            }
+          }
+        }
+      }
+    }
+  },
+  "containers": [
+    {
+      "name": "pi-artifacts-sandbox",
+      "schedulingPolicy": "durable-object",
+      "images": {
+        "sandbox": {
+          "dockerfile": "./Dockerfile"
+        }
+      }
+    }
+  ]
+}

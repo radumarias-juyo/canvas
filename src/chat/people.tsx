@@ -1,4 +1,5 @@
 import { createContext, useContext, type CSSProperties } from "react";
+import type { AgentColor, ChatAgentView } from "../../shared/agents.ts";
 import { AGENT_NAME } from "../../shared/mentions.ts";
 import { everyone, type ChatPeople } from "../../shared/protocol.ts";
 
@@ -29,6 +30,18 @@ export function useSharedChat(): ChatPeople | null {
   return useContext(SharedChat);
 }
 
+/** The chat's agents besides pi (its roster), for what names them: the "@name" chips, the badges of replies quoting them. */
+export const ChatAgents = createContext<readonly ChatAgentView[]>([]);
+
+export function useChatAgents(): readonly ChatAgentView[] {
+  return useContext(ChatAgents);
+}
+
+/** The style that gives an element an agent's colour as --tone. */
+export function toneStyle(color: AgentColor): CSSProperties {
+  return { "--tone": `var(--agent-${color})` } as CSSProperties;
+}
+
 /** A round badge with a person's first letter in their colour; `online` adds a dot for someone with the chat open. */
 export function Avatar({ name, tint, online }: { name: string; tint: number; online?: boolean }) {
   return (
@@ -39,22 +52,32 @@ export function Avatar({ name, tint, online }: { name: string; tint: number; onl
   );
 }
 
-/** The agent's badge: square-cornered where a person's is round. `working` adds a dot while it runs. */
-export function AgentAvatar({ working = false }: { working?: boolean }) {
+/** Another agent's badge than pi's: its own letters on its own colour. */
+export interface AgentBadge {
+  avatar: string;
+  color: AgentColor;
+}
+
+/**
+ * An agent's badge, pi's unless `badge` says another's: square-cornered where a person's is round. `working` adds a dot
+ * while it runs; `off`, for one its owner turned off, fades it.
+ */
+export function AgentAvatar({ working = false, off = false, badge }: { working?: boolean; off?: boolean; badge?: AgentBadge }) {
   return (
-    <span className="avatar agent" aria-hidden="true">
-      π{working && <i className="presence working" />}
+    <span className={["avatar agent", badge && "toned", off && "off"].filter(Boolean).join(" ")} style={badge && toneStyle(badge.color)} aria-hidden="true">
+      {badge ? badge.avatar : "π"}
+      {working && <i className="presence working" />}
     </span>
   );
 }
 
-/** The agent's badge and name, over its replies. */
-export function AgentByline() {
+/** An agent's badge and name, over its replies: pi's, or another's with `badge` and what `note` says of the reply. */
+export function AgentByline({ name = AGENT_NAME, badge, note = "agent" }: { name?: string; badge?: AgentBadge; note?: string }) {
   return (
     <div className="byline agent">
-      <AgentAvatar />
-      <strong>{AGENT_NAME}</strong>
-      <small>agent</small>
+      <AgentAvatar badge={badge} />
+      <strong>{badge ? `@${name}` : name}</strong>
+      <small>{note}</small>
     </div>
   );
 }

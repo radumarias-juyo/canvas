@@ -1,6 +1,7 @@
 import type { AssistantMessage, ToolCall, ToolResultMessage } from "@earendil-works/pi-ai";
 import type { EntryRecord } from "@earendil-works/pi-durable";
-import { published, shown } from "./entries.ts";
+import { CHAT_CHECKLIST_KIND } from "../../shared/checklist.ts";
+import { checklistPost, showsAsCard, shown } from "./entries.ts";
 
 /** One step of the agent's: a tool call, or a thought. `key` stays the same once a streamed message lands. */
 export type StepItem = { kind: "tool"; key: string; call: ToolCall; streaming: boolean } | { kind: "thought"; key: string; text: string };
@@ -30,7 +31,7 @@ export function endedEarly(message: AssistantMessage): boolean {
 }
 
 /** A message's block as a step, or nothing for text (and for a thought with nothing to show). */
-function stepItem(message: AssistantMessage, block: AssistantMessage["content"][number] | undefined, i: number, streaming: boolean): StepItem | undefined {
+export function stepItem(message: AssistantMessage, block: AssistantMessage["content"][number] | undefined, i: number, streaming: boolean): StepItem | undefined {
   if (block?.type === "toolCall") return { kind: "tool", key: block.id, call: block, streaming };
   // By the block's own index, which stays the same once the message lands, so an opened thought stays open.
   if (block?.type === "thinking" && !block.redacted && block.thinking.trim()) return { kind: "thought", key: `${message.timestamp}:${i}`, text: block.thinking };
@@ -60,18 +61,24 @@ function placeSteps(message: AssistantMessage, entry: number, streaming: boolean
 
 /**
  * Groups the agent's steps into runs: the steps one after the other with nothing shown between them (text, a message,
- * an artifact card, or what the chat draws over an entry in `breaks`: a day, the "New" line), across the messages of a
- * reply. Each run shows where its first step is. A message that places the same steps as in `prev` keeps its places
- * from it, so it is not drawn again.
+ * an artifact card, a checklist where it was first posted, or what the chat draws over an entry in `breaks`: a day, the
+ * "New" line), across the messages of a reply. A checklist's later entries draw nothing, so they end no run. Each run
+ * shows where its first step is. A message that places the same steps as in `prev` keeps its places from it, so it is
+ * not drawn again.
  */
 export function stepRuns(entries: readonly EntryRecord[], breaks: ReadonlySet<number>, prev?: StepRuns): StepRuns {
   const byEntry = new Map<number, MessageSteps>();
   const calls = new Set<string>();
+  const posted = new Set<string>();
   let run: OpenRun | undefined;
   for (const entry of entries) {
     if (!shown(entry)) continue;
     const id = entry.id as number;
     if (breaks.has(id)) run = undefined;
+    if (entry.kind === CHAT_CHECKLIST_KIND) {
+      if (checklistPost(entry, posted)) run = undefined;
+      continue;
+    }
     const message = entry.model?.[0];
     if (entry.kind === "pi.assistant" && message?.role === "assistant") {
       for (const block of message.content) if (block?.type === "toolCall") calls.add(block.id);
@@ -79,8 +86,9 @@ export function stepRuns(entries: readonly EntryRecord[], breaks: ReadonlySet<nu
       [places, run] = placeSteps(message, id, false, run);
       if (places.size) byEntry.set(id, places);
     } else if (entry.kind === "pi.tool-result" && message?.role === "toolResult") {
-      // A result shows as a step of its call, except a published artifact (a card) and one whose call is not in the chat.
-      if (published(entry) || !calls.has((message as ToolResultMessage).toolCallId)) run = undefined;
+      // A result shows as a step of its call, except a card (a published artifact, a drafted agent) and one whose call
+      // is not in the chat.
+      if (showsAsCard(entry) || !calls.has((message as ToolResultMessage).toolCallId)) run = undefined;
     } else run = undefined;
   }
   // Only now: a run takes the steps of later messages too.

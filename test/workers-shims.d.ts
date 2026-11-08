@@ -4,3 +4,4 @@ type R2ObjectBody = any;
 type Artifacts = any;
 type ArtifactsRepo = any;
 type R2Object = any;
+type AnalyticsEngineDataset = { writeDataPoint(event?: { indexes?: (string | null)[]; blobs?: (string | null)[]; doubles?: number[] }): void };

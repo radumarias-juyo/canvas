@@ -1,7 +1,8 @@
-import type { CallToolResult, McpError, ToolInfo } from "../../shared/protocol.ts";
+import { isReadOnly, type CallToolResult, type McpError, type ToolInfo } from "../../shared/protocol.ts";
+import type { GateContext, GateVerdict, WriteGate } from "../agents/limits/gate.ts";
 import { callIdentity, derivePayload, firstText } from "../../shared/canonical.ts";
 import { errorMessage } from "../../shared/util.ts";
-import { ResultCache, type CachedResult } from "./result-cache.ts";
+import { ResultCache, type CachedResult, type EvictReason, type OwnerStats } from "./result-cache.ts";
 import { sharesResults, type McpServerConfig } from "./servers.ts";
 
 /** A tool result as an MCP server returns it. */
@@ -29,12 +30,43 @@ export class McpFailure extends Error {
   }
 }
 
+/** A call the write gate refused or held for its owner: `verdict` says which, and `message` what the caller is told. */
+export class CallHeld extends McpFailure {
+  constructor(
+    server: string,
+    readonly verdict: Extract<GateVerdict, { run: false }>,
+  ) {
+    super({ code: "not_granted", server, message: verdict.message });
+  }
+}
+
+/** A tool that changes data, called where nothing may change any (a read, or a hub with no write gate). */
+function changesData(server: string, tool: string): McpFailure {
+  return new McpFailure({ code: "not_granted", server, message: `${server}.${tool} changes data, and nothing may change data here.` });
+}
+
 export interface ReadResult {
   result: CallToolResult;
   /** When the result was produced upstream (epoch ms). */
   storedAt: number;
   /** When a fresh result is next worth asking for: the server hint pages poll by. */
   nextRefreshAt: number;
+}
+
+/**
+ * Told how the hub's read cache does, per owner (who reads: an agent's id, "pi", or "pages"): `hit` for a read served
+ * from the cache, `miss` for one that went upstream (or joined a call already on its way), `evict` for a result that
+ * left the cache to make room.
+ */
+export interface CacheObserver {
+  hit(owner: string): void;
+  miss(owner: string): void;
+  evict(owner: string, bytes: number, reason: EvictReason): void;
+}
+
+export interface McpHubOptions {
+  /** Told of the read cache's hits, misses and evictions. */
+  observer?: CacheObserver;
 }
 
 /** What one chat object may hold in cached results. Durable Objects have 128 MB; results vary from bytes to megabytes. */
@@ -49,7 +81,9 @@ const TOOLS_LIFETIME_MS = 5 * 60_000;
  *
  * Reads go through `read()`, which caches successful results and lets
  * concurrent identical calls share one upstream request. Writes go through
- * `call()` and are never cached.
+ * `call()` and are never cached. With a write gate installed (`guard`), every
+ * call of a tool that is not read-only asks it first, with who is calling
+ * (worker/agents/limits/gate.ts); a hub with none (a Source's) only reads.
  */
 export class McpHub {
   readonly #connector: Connector;
@@ -59,12 +93,32 @@ export class McpHub {
   readonly #tools = new Map<string, { list: Promise<ToolInfo[]>; listedAt: number }>();
   readonly #cache: ResultCache;
   readonly #inflight = new Map<string, Promise<CachedResult>>();
+  #gate: WriteGate | undefined;
+  #observer: CacheObserver | undefined;
 
-  constructor(servers: McpServerConfig[], connector: Connector, now: () => number = Date.now) {
+  constructor(servers: McpServerConfig[], connector: Connector, now: () => number = Date.now, { observer }: McpHubOptions = {}) {
     for (const server of servers) this.#servers.set(server.name, server);
     this.#connector = connector;
     this.#now = now;
-    this.#cache = new ResultCache(MAX_CACHE_BYTES, CACHE_LIFETIME_MS, now);
+    this.#observer = observer;
+    this.#cache = new ResultCache(MAX_CACHE_BYTES, CACHE_LIFETIME_MS, now, {
+      onEvict: (owner, bytes, reason) => this.#observer?.evict(owner, bytes, reason),
+    });
+  }
+
+  /** Tell `observer` about the read cache from now on (undefined stops): for when it is known only after the hub is made. */
+  observe(observer: CacheObserver | undefined): void {
+    this.#observer = observer;
+  }
+
+  /** What each owner holds in the read cache now. */
+  cacheStats(): Map<string, OwnerStats> {
+    return this.#cache.stats();
+  }
+
+  /** The bytes `owner` holds in the read cache now. */
+  cacheBytes(owner: string): number {
+    return this.#cache.bytesOf(owner);
   }
 
   servers(): McpServerConfig[] {
@@ -106,8 +160,36 @@ export class McpHub {
     return (await this.tools(server)).find((tool) => tool.name === name);
   }
 
-  /** Execute a tool once, uncached. Rejects with McpFailure. */
-  async call(server: string, tool: string, input: unknown): Promise<CallToolResult> {
+  /** Install the write gate every call of a tool that changes data goes through. Once: a gate is never swapped. */
+  guard(gate: WriteGate): void {
+    if (this.#gate) throw new Error("This hub has a write gate already.");
+    this.#gate = gate;
+  }
+
+  /**
+   * Execute a tool once, uncached. A read-only tool runs at once. Any other (or one the server does not list) goes
+   * through the write gate first, with `context` saying who calls; a refused or held call rejects with CallHeld, before
+   * anything reaches the server. A hub with no gate (a Source's) changes nothing. Rejects with McpFailure.
+   */
+  async call(server: string, tool: string, input: unknown, context?: GateContext): Promise<CallToolResult> {
+    const info = await this.tool(server, tool);
+    if (info && isReadOnly(info)) return this.#execute(server, tool, input);
+    const gate = this.#gate;
+    if (!gate || !context) throw changesData(server, tool);
+    const call = { server, tool, input: (input ?? {}) as Parameters<WriteGate["check"]>[0]["input"], ...(info && { info }) };
+    const verdict = await gate.check(call, context);
+    if (!verdict.run) throw new CallHeld(server, verdict);
+    try {
+      const result = await this.#execute(server, tool, input);
+      gate.ran(call, verdict);
+      return result;
+    } catch (error) {
+      gate.ran(call, verdict, errorMessage(error));
+      throw error;
+    }
+  }
+
+  async #execute(server: string, tool: string, input: unknown): Promise<CallToolResult> {
     const raw = await this.#withConnection(server, (connection) => connection.callTool(tool, input ?? {}));
     if (raw.isError) {
       throw new McpFailure({ code: "tool_error", server, message: firstText(raw.content) ?? "The tool reported an error.", result: raw });
@@ -121,21 +203,33 @@ export class McpHub {
   /**
    * A read-only call through the cache. Serves an entry younger than
    * `staleMs`, otherwise executes; identical calls in flight share one
-   * execution. `viewer` keys the cache when the server keeps viewers apart (see sharesResults).
+   * execution. `viewer` keys the cache when the server keeps viewers apart (see sharesResults). `owner` says who reads
+   * (an agent's id, "pi", or "pages"): what it stores counts against its share of the cache (see ResultCache).
    */
-  async read(server: string, tool: string, input: unknown, options: { staleMs: number; viewer: string }): Promise<ReadResult> {
+  async read(server: string, tool: string, input: unknown, options: { staleMs: number; viewer: string; owner?: string }): Promise<ReadResult> {
     const scope = sharesResults(this.#config(server)) ? "*" : options.viewer;
     const key = `${scope}\u0000${callIdentity(server, tool, input)}`;
+    const owner = options.owner ?? "";
     const hit = this.#cache.fresh(key, options.staleMs);
-    if (hit) return hit;
+    if (hit) {
+      this.#observer?.hit(owner);
+      return hit;
+    }
+    this.#observer?.miss(owner);
 
     let flight = this.#inflight.get(key);
     if (!flight) {
-      flight = this.call(server, tool, input).then((result) => {
-        const entry = { result, storedAt: this.#now() };
-        this.#cache.set(key, entry);
-        return entry;
-      });
+      // Only a tool the server lists as read-only: a read names no one who calls, so nothing that changes data.
+      flight = this.tool(server, tool)
+        .then((info) => {
+          if (!info || !isReadOnly(info)) throw changesData(server, tool);
+          return this.#execute(server, tool, input);
+        })
+        .then((result) => {
+          const entry = { result, storedAt: this.#now() };
+          this.#cache.set(key, entry, owner);
+          return entry;
+        });
       this.#inflight.set(key, flight);
       const settle = () => this.#inflight.delete(key);
       flight.then(settle, settle);

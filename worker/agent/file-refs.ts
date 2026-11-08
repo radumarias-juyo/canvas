@@ -165,6 +165,12 @@ export function sandboxLayout(paths: readonly string[]): Map<string, string> {
     if (other !== undefined) throw new FileRefError(`"${other}" and "${path}" would both be ./files/${name}; pass them in separate runs.`);
     layout.set(name, path);
   }
+  checkFolders(layout);
+  return layout;
+}
+
+/** Refuse a layout (names under ./files/, to what each comes from) with a file where another needs a folder. */
+export function checkFolders(layout: ReadonlyMap<string, string>): void {
   for (const name of layout.keys()) {
     const segments = name.split("/");
     for (let end = 1; end < segments.length; end++) {
@@ -172,7 +178,6 @@ export function sandboxLayout(paths: readonly string[]): Map<string, string> {
       if (layout.has(folder)) throw new FileRefError(`"${layout.get(folder)}" is a file where "${layout.get(name)}" needs a folder; pass them in separate runs.`);
     }
   }
-  return layout;
 }
 
 /**
@@ -195,4 +200,22 @@ export function outputPaths<T>(folder: string, outputs: readonly { name: string;
     }
   }
   return { toSave, skipped };
+}
+
+/**
+ * Save files for the conversation a tool runs in: nothing once `signal` aborted (no result would say what was saved),
+ * and `onSaving` is told the paths first (ChatScope.onSaving), so a conversation apart from the chat has them withheld
+ * even when it is stopped or cut off while saving. The paths as stored.
+ */
+export async function saveFiles<T extends ArrayBuffer | string>(
+  files: { put(path: string, body: T, contentType?: string): Promise<string> },
+  toSave: ReadonlyMap<string, T>,
+  options: { session: string; signal?: AbortSignal; onSaving?: (session: string, paths: readonly string[]) => void; contentType?: string },
+): Promise<string[]> {
+  options.signal?.throwIfAborted();
+  options.onSaving?.(
+    options.session,
+    [...toSave.keys()].map((path) => normalisePath(path)),
+  );
+  return Promise.all([...toSave].map(([path, body]) => files.put(path, body, options.contentType)));
 }

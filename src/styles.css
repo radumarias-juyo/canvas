@@ -24,6 +24,14 @@
   --person-5: #5b5f9e;
   --person-6: #a35a2a;
   --person-7: #74742c;
+  /* The badge colours a user can give their agents (AGENT_COLORS in shared/agents.ts), text on them --on-tint. */
+  --agent-blue: #2f5f9a;
+  --agent-green: #2d7a4f;
+  --agent-purple: #6b4fa0;
+  --agent-orange: #a8571c;
+  --agent-teal: #1f7a7a;
+  --agent-pink: #a5466f;
+  --agent-slate: #55606b;
   --on-tint: #ffffff;
   --radius: 10px;
   --radius-lg: 12px;
@@ -64,6 +72,13 @@
     --person-5: #a6aaea;
     --person-6: #e8a272;
     --person-7: #c8c870;
+    --agent-blue: #8db8ea;
+    --agent-green: #7fcf9f;
+    --agent-purple: #bba2ee;
+    --agent-orange: #eca46e;
+    --agent-teal: #74d0cc;
+    --agent-pink: #ee9cbf;
+    --agent-slate: #a9b3bd;
     --on-tint: #101312;
     --shadow-pop: 0 16px 36px -18px rgb(0 0 0 / 0.8);
     --shadow-card: 0 14px 34px -24px rgb(0 0 0 / 0.75);
@@ -199,19 +214,72 @@ body.resizing iframe { pointer-events: none; }
   background: var(--accent); color: var(--accent-text); font-size: 11px; font-weight: 700; line-height: 1;
 }
 .sidebar .nav-unread { flex: none; padding: 0; width: 8px; height: 8px; margin: 0 4px; border-radius: 50%; background: var(--accent); }
-/* A chat in the list, with its delete button: shown on hover or focus, and always on touch screens. */
+/* A chat in the list, with its "…" menu (ChatList.tsx): shown on hover or focus, and always on touch screens. */
 .chat-link { position: relative; display: flex; border-radius: 6px; }
 .chat-link > a { flex: 1; min-width: 0; }
-.chat-link:hover, .chat-link.active, .chat-link:focus-within { background: var(--surface-2); }
+.chat-link:hover, .chat-link.active, .chat-link:focus-within, .chat-link.menu-open { background: var(--surface-2); }
 /* The open chat: marked by a bar in the accent at its start, besides its background. */
 .chat-link.active { box-shadow: inset 3px 0 0 var(--accent); }
 .chat-link:hover > a, .chat-link > a:hover { background: none; }
-.chat-delete { flex: none; display: grid; place-items: center; padding: 0 6px; border: 0; background: none; color: var(--muted); opacity: 0; }
-.chat-link:hover .chat-delete, .chat-delete:focus-visible { opacity: 1; }
-.chat-delete:hover { color: var(--error); }
-@media (hover: none) { .chat-delete { opacity: 1; } }
+.chat-more { flex: none; display: grid; place-items: center; padding: 0 6px; border: 0; background: none; color: var(--muted); opacity: 0; }
+.chat-link:hover .chat-more, .chat-link.menu-open .chat-more, .chat-more:focus-visible { opacity: 1; }
+.chat-more:hover { color: var(--text); }
+@media (hover: none) { .chat-more { opacity: 1; } }
 /* With a mouse, the button shows over the chat's status icon on hover, so the icons line up with the other lists'. */
-@media (hover: hover) { .chat-delete { position: absolute; top: 0; right: 0; bottom: 0; border-radius: 0 6px 6px 0; background: var(--surface-2); } }
+@media (hover: hover) { .chat-more { position: absolute; top: 0; right: 0; bottom: 0; border-radius: 0 6px 6px 0; background: var(--surface-2); } }
+.sidebar nav .nav-pin { flex: none; width: 6px; height: 6px; padding: 0; border-radius: 1px; background: var(--muted); transform: rotate(45deg); }
+.sidebar nav .nav-copied { flex: none; padding: 0; color: var(--accent); font-size: 12px; }
+.chat-rename { flex: 1; min-width: 0; margin: 1px 0; padding: 4px 7px; border: 1px solid var(--accent); border-radius: 6px; background: var(--surface); color: var(--text); font: inherit; font-size: 14px; }
+/* A small menu under a sidebar row, and under the chat list's order button. */
+.row-menu {
+  position: absolute; top: calc(100% + 2px); right: 0; z-index: 8; display: flex; flex-direction: column; min-width: 160px; padding: 6px;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow-pop);
+}
+.row-menu > button { padding: 7px 10px; border: 0; border-radius: 6px; background: none; color: var(--text); text-align: left; font-size: 14px; }
+.row-menu > button:hover, .row-menu > button:focus-visible { background: var(--surface-2); }
+.row-menu > .danger-item { color: var(--error); }
+.row-menu > label { display: flex; align-items: center; gap: 8px; padding: 5px 8px; font-size: 13.5px; cursor: pointer; }
+.row-menu > label:nth-of-type(2) { margin-top: 4px; padding-top: 9px; border-top: 1px solid var(--border); }
+.chats-heading { position: relative; display: flex; align-items: center; gap: 4px; }
+.chats-heading h3 { flex: 1; }
+.chats-order { width: 24px; height: 24px; padding: 0; color: var(--muted); }
+.chat-group + .chat-group { margin-top: 2px; }
+.closed-toggle { width: 100%; margin-top: 6px; padding: 5px 8px; border: 0; border-radius: 6px; background: none; color: var(--muted); text-align: left; font-size: 12.5px; }
+.closed-toggle:hover { background: var(--surface-2); color: var(--text); }
+.chat-group.closed .nav-title { color: var(--muted); }
+/* The chat's kind, beside its title (ChatKinds.tsx), and what its owner changes it with. */
+.kind-chip-box { position: relative; flex: none; }
+.kind-chip {
+  padding: 1px 9px; border: 1px solid var(--border); border-radius: 999px; background: none; color: var(--muted);
+  font-size: 12px; line-height: 18px; white-space: nowrap; cursor: pointer;
+}
+.kind-chip:hover, .kind-chip[aria-expanded="true"] { background: var(--surface-2); color: var(--text); }
+.kind-chip.kind-group, .kind-chip.kind-page { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); color: var(--accent); }
+.kind-chip.kind-off_record { border-style: dashed; color: var(--text); }
+.kind-panel {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 9; width: min(340px, calc(100vw - 32px)); padding: 8px;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow-pop);
+}
+.kind-choices { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.kind-choice { width: 100%; padding: 8px 10px; border: 1px solid transparent; border-radius: 8px; background: none; color: var(--text); text-align: left; }
+.kind-choice:hover, .kind-choice:focus-visible { background: var(--surface-2); }
+.kind-choice.active { border-color: color-mix(in srgb, var(--accent) 45%, transparent); background: var(--accent-soft); }
+.kind-lines { display: flex; flex-direction: column; gap: 1px; font-size: 12.5px; color: var(--muted); }
+.kind-lines strong { color: var(--text); font-size: 14px; }
+.kind-panel > .kind-lines { padding: 4px 6px; }
+.kind-confirm { display: flex; flex-direction: column; gap: 6px; padding: 4px 6px; font-size: 13.5px; }
+.kind-confirm p { margin: 0; color: var(--muted); }
+.kind-loses { margin: 0; padding-left: 18px; }
+.kind-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+.kind-panel .form-error { margin: 6px 6px 0; }
+/* Over the composer: someone tagged who is not in the chat. */
+.tag-card { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow-pop); font-size: 14px; }
+.tag-card p { margin: 0; }
+.tag-card .tag-card-note { color: var(--muted); font-size: 13px; }
+.tag-card-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.tag-card-link { display: flex; gap: 8px; }
+.tag-card-link input { flex: 1; min-width: 0; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-2); color: var(--text); font: inherit; font-size: 13px; }
+.chat-notice.branch-line a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
 .confirm-dialog { width: min(440px, calc(100% - 32px)); padding: 20px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); color: var(--text); box-shadow: var(--shadow-pop); }
 .confirm-dialog::backdrop { background: rgb(0 0 0 / 0.35); }
 .confirm-dialog h2 { margin: 0 0 10px; font-size: 20px; }
@@ -346,6 +414,26 @@ body.resizing iframe { pointer-events: none; }
 }
 /* The agent's badge: a rounded square, where people's are round. */
 .avatar.agent { border-radius: 30%; background: var(--accent); color: var(--accent-text); font-size: calc(var(--size) * 0.56); }
+/* Another agent's badge: its own colour (--tone) and up to three letters. */
+.avatar.agent.toned { background: var(--tone); color: var(--on-tint); font-size: calc(var(--size) * 0.4); letter-spacing: -0.02em; }
+/* Another agent's reply: its byline over its parts, indented like pi's. */
+/* An agent's reply, or one working now: its working line (badge, time, the step's phrase, its own Stop), then its steps as they come. */
+:is(.agent-reply, .agent-live) { display: flex; flex-direction: column; gap: 4px; }
+:is(.agent-reply, .agent-live) > :not(.byline) { margin-left: var(--gutter); }
+.working-line { align-items: center; }
+.working-line .working-what { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--working); font-variant-numeric: tabular-nums; }
+.working-stop { flex: none; margin-left: 4px; padding: 0 9px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); font-size: 12px; line-height: 20px; }
+.working-stop:hover { background: var(--surface-2); }
+/* Who waits for a turn: a dashed line under the agents working, as a hand-off waits. */
+.agent-queue-line { margin-left: var(--gutter); padding: 4px 10px; border: 1px dashed var(--border); border-radius: 8px; color: var(--muted); font-size: 13px; }
+/* A long reply folds behind "Show more", fading out at the fold. */
+.fold.folded .fold-body { overflow: hidden; mask-image: linear-gradient(to bottom, #000 75%, transparent); }
+.fold-toggle { margin-top: 2px; padding: 0; border: 0; background: none; color: var(--accent); font-size: 13px; font-weight: 500; cursor: pointer; }
+.fold-toggle:hover { text-decoration: underline; }
+/* The records a reply is built on, each a chip that opens it. */
+.item-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.item-chip { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 9px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--text); font-size: 12.5px; line-height: 20px; text-decoration: none; }
+a.item-chip:hover { border-color: var(--accent); color: var(--accent); }
 /* Whether someone has the chat open: green while they do. On the agent's badge: rust at the top while it works. Its
    ring is the colour of what the badge sits on (--ring). */
 .presence { position: absolute; right: -2px; bottom: -2px; width: 9px; height: 9px; border: 2px solid var(--ring, var(--bg)); border-radius: 50%; background: var(--border); }
@@ -448,6 +536,17 @@ body.resizing iframe { pointer-events: none; }
 .call-hint-no { width: 22px; height: 22px; padding: 0; border: 0; border-radius: 50%; background: none; color: var(--muted); font: inherit; font-size: 16px; line-height: 1; cursor: pointer; }
 .call-hint-ask:hover { filter: brightness(1.1); }
 .call-hint-no:hover { background: color-mix(in srgb, var(--text) 8%, transparent); color: var(--text); }
+/* Under a reply: the next step it offers. On the chat's latest offer, for its owner, Yes and No thanks beside it. */
+.offer { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; align-self: flex-start; max-width: 100%; color: var(--muted); font-size: 13px; line-height: 20px; }
+.offer.live { padding: 4px 4px 4px 10px; border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border)); border-radius: var(--radius); background: var(--accent-soft); color: var(--text); }
+.offer-icon { flex: none; display: inline-flex; color: var(--accent); }
+.offer-text { flex: 1 1 12em; min-width: 0; overflow-wrap: anywhere; }
+.offer-actions { display: inline-flex; flex: none; gap: 6px; margin-left: auto; }
+.offer-actions button { padding: 0 12px; border-radius: 999px; font: inherit; line-height: 22px; cursor: pointer; }
+.offer-actions .offer-yes { border: 1px solid var(--accent); background: var(--accent); color: var(--accent-text); font-weight: 600; }
+.offer-actions .offer-no { border: 1px solid var(--border); background: var(--surface); color: var(--text); }
+.offer-yes:hover { filter: brightness(1.1); }
+.offer-no:hover { border-color: var(--muted); }
 /* Reactions under a message: each emoji, how many, the viewer's own marked; a click adds or takes back theirs. */
 .reactions { display: flex; flex-wrap: wrap; gap: 4px; }
 .reaction { display: inline-flex; align-items: center; gap: 4px; padding: 0 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--text); font-size: 13px; line-height: 22px; }
@@ -475,6 +574,7 @@ button.reaction:hover { border-color: var(--muted); }
 /* The message a reply answers, at the top of the reply (and over the composer while writing one). */
 .reply-quote { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; margin-bottom: 6px; padding: 2px 8px; border-left: 3px solid var(--tint, var(--muted)); border-radius: 4px; background: color-mix(in srgb, currentColor 7%, transparent); font-size: 13px; white-space: normal; }
 .reply-quote.agent { border-left-color: var(--accent); }
+.reply-quote.agent.toned { border-left-color: var(--tone, var(--accent)); }
 .reply-quote strong { font-weight: 600; }
 .replying { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; padding: 6px 6px 6px 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
 .replying .reply-quote { flex: 1; min-width: 0; margin: 0; background: none; }
@@ -485,10 +585,82 @@ button.reaction:hover { border-color: var(--muted); }
 .chat-title { flex: 0 100 auto; min-width: 0; margin: 0; font: 600 16px/1.3 var(--font-display); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .chat-people { flex: 1; min-width: 0; color: var(--muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* Everyone in a shared chat as badges in their colours (a dot for who has it open now), a rule, then the agent's. */
-/* The chat's name before it gives way (to an ellipsis) first; with many people the bar is cut too, so that the buttons
-   after it stay on screen. */
-.people-bar { flex: 0 1 auto; min-width: 0; overflow: hidden; display: flex; align-items: center; gap: 4px; margin-left: auto; padding: 3px; }
+/* The chat's name before it gives way (to an ellipsis) first; with many people the bar narrows too (and scrolls), so
+   that the buttons after it stay on screen. */
+.people-area { flex: 0 1 auto; min-width: 0; display: flex; align-items: center; gap: 2px; margin-left: auto; }
+/* Scrolls sideways when it does not fit (a phone): an agent's badge is the way to its menu, so none may be cut off. */
+.people-bar { flex: 0 1 auto; min-width: 0; overflow: auto hidden; scrollbar-width: none; display: flex; align-items: center; gap: 4px; padding: 3px; }
 .people-bar .person { display: inline-flex; flex: none; }
+/* An agent's badge opens its menu. */
+.people-bar button.person { padding: 0; border: 0; border-radius: 30%; background: none; cursor: pointer; }
+.people-bar button.person:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.avatar.agent.off { opacity: 0.4; filter: grayscale(0.7); }
+.agents-button { flex: none; }
+/* An agent's menu and the owner's list of agents to add hang from the header's right edge, as the cost panel does. */
+.agent-menu { position: absolute; top: calc(100% + 4px); right: 16px; z-index: 6; display: flex; flex-direction: column; gap: 8px; width: min(340px, calc(100vw - 24px)); max-height: min(70vh, 520px); overflow-y: auto; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow-pop); font-size: 14px; }
+.agent-menu-head { display: flex; align-items: center; gap: 8px; }
+.agent-menu-head .avatar { --size: 28px; }
+.agent-menu-head .icon-button { margin-left: auto; }
+.agent-menu p { margin: 0; }
+.agent-menu-job { color: var(--text); }
+.agent-menu-page { align-self: flex-start; font-size: 13px; }
+/* Links the theme colours, not the browser: in the agent's menu, a chat's notices, and an error that links a sign-in. */
+.agent-menu-page, .chat-notice a, .form-error a { color: var(--accent); }
+.agent-menu-state, .agent-menu-empty { color: var(--muted); font-size: 13px; }
+.agent-menu .section-head { padding: 4px 0 0; }
+.agent-menu .danger { align-self: flex-start; }
+.agent-menu > button:not(.danger):not(.icon-button) { align-self: flex-start; }
+/* An agent's window, for its owner alone: a panel at the right edge (the whole screen on a phone) over the chat. */
+.agent-window {
+  position: fixed; top: 0; right: 0; bottom: 0; z-index: 20; display: flex; flex-direction: column; width: min(560px, 100vw);
+  border-left: 1px solid var(--border); background: var(--bg); box-shadow: -18px 0 40px -30px rgb(0 0 0 / 0.55);
+}
+/* It takes focus as it opens, to be announced and take Escape; its controls show their own rings. */
+.agent-window:focus { outline: none; }
+.agent-window-head { display: flex; align-items: center; gap: 10px; min-height: var(--header-h); padding: 8px 12px 8px 16px; border-bottom: 1px solid var(--border); background: var(--surface); }
+.agent-window-head .avatar { --size: 30px; flex: none; }
+.agent-window-title { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.agent-window-title small { color: var(--muted); font-size: 12px; }
+.agent-window-sessions { display: flex; gap: 6px; padding: 8px 16px; overflow-x: auto; border-bottom: 1px solid var(--border); scrollbar-width: thin; }
+.agent-window-sessions .chip { flex: none; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.agent-window-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--working); }
+.agent-window-body { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; }
+.agent-window-about { margin: 0; color: var(--muted); font-size: 12.5px; }
+.agent-window-input { display: flex; flex-direction: column; gap: 3px; }
+.agent-window-input small { color: var(--muted); font: 600 11px/1.2 var(--font-body); text-transform: uppercase; letter-spacing: 0.06em; }
+.agent-window-input .bubble { padding: 6px 10px; border-left: 3px solid var(--border); border-radius: 4px 8px 8px 4px; background: var(--surface-2); font-size: 13.5px; }
+.agent-window-composer { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; padding: 10px 16px 14px; border-top: 1px solid var(--border); background: var(--surface); }
+.agent-window-composer textarea { flex: 1; min-width: 0; resize: none; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); color: var(--text); font: inherit; }
+.agent-window-composer > :is(.agent-window-note, .chat-error) { flex-basis: 100%; margin: 0; }
+.agent-window-note { color: var(--muted); font-size: 12.5px; }
+/* The chat's agent settings, under the owner's list of agents to add. */
+.agent-settings { display: flex; flex-direction: column; gap: 10px; padding-top: 6px; border-top: 1px solid var(--border); }
+.agent-settings .section-head { margin: 0; padding: 0; }
+.agent-settings .skill-toggle { align-items: flex-start; }
+.agent-settings .skill-toggle > span, .agent-budget label, .agent-servers-here legend { display: flex; flex-direction: column; gap: 2px; }
+.agent-settings small { color: var(--muted); font-size: 12px; }
+.agent-budget { display: flex; flex-direction: column; gap: 6px; margin: 0; }
+.agent-budget-row { display: flex; gap: 6px; }
+.agent-budget-row input { flex: 1; min-width: 0; }
+.agent-budget-row input[aria-invalid="true"] { border-color: var(--error); }
+.agent-servers-here { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; border: 0; }
+.agent-servers-here legend { padding: 0 0 4px; }
+/* Under an agent's reply nobody asked for: the mark, and Mute. */
+.mute-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
+.pill.unprompted { border-color: transparent; background: var(--working-soft); color: var(--working); }
+.budget-notice { color: var(--working); }
+.agent-runs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.agent-run { display: flex; align-items: baseline; gap: 8px; font-size: 13px; }
+.agent-run .sent-time { margin-left: auto; flex: none; opacity: 1; }
+.agent-run.failed > span:first-child { color: var(--error); }
+.agent-run.running > span:first-child { color: var(--working); }
+.agent-pick { display: flex; align-items: center; gap: 8px; }
+.agent-pick .avatar { --size: 26px; }
+.agent-pick-name { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.agent-pick-name small { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-pick button { flex: none; padding: 2px 10px; font-size: 13px; }
+/* Whose an agent is: in the "@" list and its menu. */
+.owner-pill { flex: none; padding: 0 7px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); font-size: 11.5px; line-height: 18px; white-space: nowrap; }
 .people-bar .avatar { --size: 26px; }
 .people-bar .person:not(.online, .agent) .avatar { opacity: 0.7; }
 .people-divider { flex: none; width: 1px; height: 18px; margin: 0 4px; background: var(--border); }
@@ -591,6 +763,7 @@ button.reaction:hover { border-color: var(--muted); }
 .thinking-dots i:nth-child(2) { animation-delay: 0.2s; }
 .thinking-dots i:nth-child(3) { animation-delay: 0.4s; }
 .thinking-time { margin-left: -2px; font-variant-numeric: tabular-nums; }
+.thinking-phrase { min-width: 0; margin-left: -4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* A running step's icon (Spark in Steps.tsx): it turns a quarter at a time (the easing applies per step) while its two
    sets of rays grow and shrink in turn. */
 .thinking-spark {
@@ -648,6 +821,34 @@ button.reaction:hover { border-color: var(--muted); }
 .artifact-card-icon { flex: none; display: grid; place-items: center; width: 40px; height: 40px; border-radius: 9px; background: var(--accent-soft); color: var(--accent); font-size: 22px; }
 .artifact-card small { display: block; color: var(--muted); font-size: 12.5px; }
 
+/*
+ * An agent's plan for a big ask (ChecklistCard): a card indented as the agent's other parts are, its author's badge and
+ * the title over the steps, each with its mark: an empty circle to do, a pulsing dot in progress, a check done, a dash
+ * skipped (its text struck through). It edits in place as the agent updates it.
+ */
+.checklist-card { margin: 4px 0 4px var(--gutter); padding: 12px 16px 12px 14px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-card); }
+.checklist-head { display: flex; align-items: center; gap: 10px; }
+.checklist-head > .avatar { --size: 26px; }
+.checklist-title { min-width: 0; display: flex; flex-direction: column; line-height: 1.3; }
+.checklist-title strong { overflow-wrap: anywhere; }
+.checklist-title small { color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.checklist-card.final .checklist-title small { color: var(--live); }
+.checklist-steps { margin: 10px 0 0; padding: 0; list-style: none; font-size: 14px; }
+.checklist-step { display: flex; gap: 10px; align-items: flex-start; padding: 3px 0; }
+.checklist-mark { position: relative; flex: none; display: grid; place-items: center; width: 16px; height: 16px; margin-top: 2px; border: 1.5px solid var(--border); border-radius: 50%; }
+.checklist-mark::after { content: ""; }
+.checklist-step.doing .checklist-mark { border-color: var(--working); }
+.checklist-step.doing .checklist-mark::after { width: 6px; height: 6px; border-radius: 50%; background: var(--working); animation: notify-pulse 1.6s ease-in-out infinite; }
+.checklist-step.done .checklist-mark { border-color: var(--live); background: var(--live); }
+.checklist-step.done .checklist-mark::after { content: "✓"; color: var(--surface); font: 700 10px / 1 var(--font-body); }
+.checklist-step.skipped .checklist-mark { border-style: dashed; }
+.checklist-step.skipped .checklist-mark::after { width: 7px; height: 1.5px; background: var(--muted); }
+.checklist-text { min-width: 0; display: flex; flex-direction: column; overflow-wrap: anywhere; }
+.checklist-step.doing .checklist-step-text { font-weight: 500; }
+.checklist-step.skipped .checklist-step-text { color: var(--muted); text-decoration: line-through; }
+.checklist-text small { color: var(--muted); font-size: 12.5px; }
+@media (prefers-reduced-motion: reduce) { .checklist-step.doing .checklist-mark::after { animation: none; } }
+
 /* As wide as the conversation's column (its badges' gutter included), centred under it. */
 .composer { position: relative; display: flex; flex-direction: column; gap: 6px; width: 100%; max-width: calc(var(--column) + 40px); margin: 0 auto; padding: 10px 20px max(14px, env(safe-area-inset-bottom)); }
 /* What "@" offers, over the transcript just above the input. */
@@ -674,9 +875,11 @@ button.reaction:hover { border-color: var(--muted); }
 .mention-icon { flex: none; display: inline-grid; place-items: center; width: 22px; color: var(--muted); }
 .mention-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mention-choice small { flex: none; margin-left: auto; color: var(--muted); }
+.mention-choice small.mention-job { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mention-empty { padding: 6px 8px; color: var(--muted); font-size: 14px; }
 /* A mention in a sent message: set off from the text around it. */
 .mention-chip.agent { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.mention-chip.agent.toned { background: color-mix(in srgb, var(--tone) 16%, transparent); color: color-mix(in srgb, var(--tone) 80%, var(--text)); }
 .mention-chip, .bubble a.mention-chip { padding: 0 4px; border-radius: 4px; background: color-mix(in srgb, currentColor 10%, transparent); color: inherit; font-weight: 500; text-decoration: none; }
 a.mention-chip:hover { text-decoration: underline; }
 /* A person tagged, in their colour; the viewer's own tag stands out. */
@@ -743,6 +946,19 @@ a.mention-chip:hover { text-decoration: underline; }
 .composer-more-menu .composer-history-item { align-items: baseline; }
 .composer-history-text { flex: 1; min-width: 0; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
 .composer-history-item small { flex: none; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.make-button { display: inline-flex; align-items: center; gap: 5px; height: 26px; margin-left: 2px; padding: 0 8px; border: 1px solid transparent; border-radius: 999px; background: none; color: var(--muted); font-size: 13px; }
+.make-button:hover, .make-button[aria-expanded="true"] { background: var(--surface-2); color: var(--text); }
+.make-button.chosen { border-color: color-mix(in srgb, var(--accent) 35%, transparent); background: var(--accent-soft); color: var(--accent); }
+.make-menu { min-width: 260px; }
+/* On a phone the button sits mid-row: the menu spans the composer instead, above it, so it never runs off the screen. */
+@media (max-width: 640px) {
+  .composer-make { position: static; }
+  .make-menu { left: 12px; right: 12px; width: auto; min-width: 0; max-width: none; }
+}
+.make-menu button[aria-checked="true"] { background: var(--accent-soft); }
+.make-menu button[aria-checked="true"] .composer-more-glyph { color: var(--accent); }
+.make-choice { display: flex; flex-direction: column; gap: 1px; }
+.make-choice small { color: var(--muted); font-size: 12px; }
 .composer-model { margin-left: auto; }
 .composer-model .spinner { flex: none; width: 14px; height: 14px; margin-right: 6px; border-top-color: var(--text); }
 .dictation-error, .dictation-status { min-width: 0; padding: 0 6px; font-size: 13px; color: var(--error); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -757,6 +973,11 @@ a.mention-chip:hover { text-decoration: underline; }
 .context-meter { --level: var(--muted); }
 .context-meter.high { --level: var(--accent); }
 .context-meter.full { --level: var(--error); }
+/* The daily allowance beside it: the live colour while there is room, then the working colour, then the error. */
+.allowance-meter { --level: var(--live); }
+.allowance-meter.high { --level: var(--working); }
+.context-ring .mark { fill: none; stroke: var(--muted); stroke-width: 1.3; stroke-linecap: round; stroke-linejoin: round; }
+.allowance-meter.full .mark { stroke: var(--error); }
 .context-panel { position: absolute; right: 0; bottom: calc(100% + 8px); z-index: 5; width: min(300px, calc(100vw - 32px)); gap: 6px; box-shadow: var(--shadow-pop); font-size: 14px; }
 .context-head, .panel-head { display: flex; justify-content: space-between; gap: 12px; }
 .context-head span { font-variant-numeric: tabular-nums; }
@@ -943,7 +1164,7 @@ a.mention-chip:hover { text-decoration: underline; }
   }
   .sidebar.drawer.open { translate: 0 0; visibility: visible; transition: translate 0.22s ease; }
   /* In the menu the sidebar scrolls as a whole: chats first, then artifacts, skills, the files and the account. */
-  .sidebar.drawer :is(.sidebar-scroll, .sidebar-pinned, .sidebar-pinned .artifact-list, .files-panel.open, .files-panel .files) { flex: none; overflow: visible; max-height: none; }
+  .sidebar.drawer :is(.sidebar-scroll, .sidebar-pinned, .sidebar-pinned .artifact-list, .sidebar-pinned .agent-list, .files-panel.open, .files-panel .files) { flex: none; overflow: visible; max-height: none; }
   .drawer-backdrop { position: fixed; inset: 0; z-index: 39; background: rgb(0 0 0 / 0.35); animation: thinking-in 0.2s ease-out; }
   .workspace.with-preview .main { display: none; }
   .chat-header { padding: 6px 10px 6px 12px; gap: 6px; }
@@ -961,8 +1182,10 @@ a.mention-chip:hover { text-decoration: underline; }
 /* Phones: badges and the gutter a little smaller; the people bar overlaps its badges to fit beside the name. */
 @media (max-width: 640px) {
   :root { --byline-avatar: 26px; --byline-gap: 8px; }
+  .kind-panel { position: fixed; top: calc(var(--header-h) + 6px); left: 16px; right: 16px; width: auto; }
   .people-bar { gap: 0; }
   .people-bar .person + .person { margin-left: -6px; }
+  .agent-menu { right: 12px; }
   .people-bar .avatar { --size: 24px; box-shadow: 0 0 0 2px var(--ring); }
   .people-divider { margin: 0 6px; }
   .chat-cost > button { padding: 5px 8px; font-size: 13px; }
@@ -1014,7 +1237,304 @@ a.mention-chip:hover { text-decoration: underline; }
 .skill details { margin-top: 6px; font-size: 13px; color: var(--muted); }
 .skill summary { cursor: pointer; }
 .skill pre { white-space: pre-wrap; background: var(--bg); border: 1px solid var(--border); padding: 8px 10px; border-radius: 8px; font-size: 12px; color: var(--text); max-height: 320px; overflow: auto; }
+/* Memory: the user's notes (src/memory/), as a page and as an agent's Knows tab. */
+.memory-filters { display: flex; flex-wrap: wrap; gap: 6px; margin: 18px 0 4px; }
+.memory-list { list-style: none; margin: 12px 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.memory-note { display: flex; flex-direction: column; gap: 6px; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.memory-note.unconfirmed { border-color: color-mix(in srgb, var(--working) 45%, var(--border)); }
+.memory-note.forgotten { opacity: 0.7; background: var(--surface-2); }
+.memory-note.forgotten .memory-text { text-decoration: line-through; text-decoration-color: var(--muted); }
+.memory-text { margin: 0; overflow-wrap: anywhere; }
+.memory-pin { margin-right: 6px; color: var(--accent); font-size: 10px; vertical-align: 2px; }
+.memory-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; color: var(--muted); font-size: 12.5px; }
+.memory-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.memory-actions > button { padding: 3px 9px; font-size: 13px; }
+.memory-edit { display: flex; flex-direction: column; gap: 8px; }
+.memory-form textarea { resize: vertical; }
+.memory-edit textarea { padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); font: inherit; resize: vertical; }
+.memory-edit label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 13px; font-weight: 500; }
+.memory-edit select, .memory-form select { max-width: 100%; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); font: inherit; }
+.memory-reach { margin-top: 28px; border-top: 1px solid var(--border); }
+.memory-reach h3 { margin: 20px 0 6px; font-size: 15px; }
+.memory-reach .skill-list { margin: 8px 0; }
+.memory-files { margin: 6px 0 0; padding-left: 18px; font-family: var(--font-mono); font-size: 12.5px; overflow-wrap: anywhere; }
+.memory-skills { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 0; }
+.knows-head { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 8px 16px; margin-top: 4px; }
+.knows-head p { margin: 0; max-width: 62ch; }
+/* "Learned overnight" (src/memory/Dreams.tsx): a subject's nightly dream, its summary and the notes it wrote. */
+.dream { margin: 20px 0 8px; padding: 14px 16px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface-2); }
+.dream-head { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 8px 16px; }
+.dream-head h3 { margin: 0 0 4px; font-size: 15px; }
+.dream-head p { margin: 0; max-width: 62ch; }
+.dream-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
+.dream-controls > button { padding: 4px 11px; font-size: 13px; }
+.dream-summary { display: flex; flex-direction: column; gap: 4px; margin-top: 12px; padding: 10px 12px; border-radius: var(--radius); background: var(--surface); border-left: 3px solid var(--accent); }
+.dream-summary.quiet, .dream-summary.skipped { border-left-color: var(--border); }
+.dream-summary.failed { border-left-color: var(--error); }
+.dream-summary strong { font-size: 13.5px; }
+.dream-summary p { margin: 0; overflow-wrap: anywhere; }
+.dream-counts { display: flex; flex-wrap: wrap; gap: 2px 14px; color: var(--muted); font-size: 12.5px; }
+.dream .memory-list { margin: 10px 0 0; }
+.dream-why { display: flex; flex-wrap: wrap; gap: 2px 10px; margin: 0; color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
+.dream-why span:first-child:not(:only-child)::after { content: " ·"; }
+.dream-retired { margin-top: 10px; }
+.dream-retired summary { color: var(--muted); font-size: 13px; cursor: pointer; }
+@media (max-width: 640px) {
+  .dream { padding: 12px; }
+  .dream-controls { width: 100%; justify-content: space-between; }
+}
+.skills.memory .skills-head .menu-button { margin-bottom: 8px; }
 .form-error { color: var(--error); }
+
+/* Agents (src/agents/): the sidebar's section, an agent's page with its tabs, and the draft card in a chat. */
+.sidebar-pinned .agent-list { flex: 0 1 auto; min-height: 0; max-height: min(30vh, 240px); overflow-y: auto; margin: 0 -14px; padding: 0 14px; }
+.sidebar nav a.agent-item { align-items: center; padding-block: 4px; }
+.sidebar nav .agent-item span, .sidebar nav .agent-new span { padding: 0; }
+.sidebar nav .agent-item .avatar { --size: 24px; }
+.sidebar nav .agent-item-text { display: flex; flex-direction: column; line-height: 1.25; }
+.sidebar nav .agent-item-name { display: flex; align-items: center; gap: 6px; overflow: hidden; text-overflow: ellipsis; }
+.sidebar nav .agent-item-name small { color: var(--muted); font-weight: 400; }
+.sidebar nav .agent-item-job { color: var(--muted); font-size: 12px; font-weight: 400; overflow: hidden; text-overflow: ellipsis; }
+.sidebar nav .agent-item .pill { padding: 0 6px; font-size: 11px; }
+.sidebar nav a.agent-item.off:not(.unread) .avatar { opacity: 0.55; }
+.sidebar nav .agent-new { color: var(--muted); }
+.agent-new-plus { display: inline-grid; place-items: center; width: 24px; height: 24px; border: 1px dashed var(--border); border-radius: 30%; font-size: 15px; line-height: 1; }
+
+.agent-page { height: 100%; overflow-y: auto; padding: 28px 24px 48px; max-width: 900px; }
+.agent-back { display: inline-block; margin-bottom: 12px; color: var(--muted); font-size: 13px; text-decoration: none; }
+.agent-back:hover { color: var(--text); }
+.agent-head { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 14px; }
+.agent-head > .avatar { --size: 48px; }
+.agent-head-text { flex: 1 1 260px; min-width: 0; }
+.agent-head-text h2 { margin: 0; font-size: 28px; line-height: 1.1; overflow-wrap: anywhere; }
+.agent-head-text p { margin: 4px 0 0; color: var(--muted); }
+.agent-head-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.agent-head-note { flex-basis: 100%; margin: 0; }
+.pill.agent-state.on, .pill.run-state.on { border-color: transparent; background: color-mix(in srgb, var(--live) 14%, var(--surface)); color: var(--live); }
+.pill.agent-state.draft, .pill.run-state.draft { border-color: transparent; background: var(--working-soft); color: var(--working); }
+.pill.assumed { padding: 0 7px; border: 1px dashed var(--working); background: none; color: var(--working); font-size: 11px; }
+.agent-notice { margin: 12px 0 0; }
+.agent-tabs { display: flex; gap: 4px; margin-top: 18px; overflow-x: auto; border-bottom: 1px solid var(--border); scrollbar-width: none; }
+.agent-tab { flex: none; padding: 8px 12px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; color: var(--muted); font-weight: 500; }
+.agent-tab.active { border-bottom-color: var(--accent); color: var(--text); }
+
+.agent-form { display: flex; flex-direction: column; gap: 18px; margin-top: 20px; padding: 20px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-card); }
+.agent-form > .skills-note { margin: 0; }
+.agent-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.agent-speak-limits { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+.agent-speak-limits > small { grid-column: 1 / -1; color: var(--muted); }
+.agent-speak-limits label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.agent-label { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; font-size: 13px; font-weight: 600; }
+.agent-label small { flex-basis: 100%; color: var(--muted); font-weight: 400; }
+.agent-form input:not([type="checkbox"], [type="radio"]), .agent-form textarea { width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); font-size: 15px; }
+.agent-form textarea { resize: vertical; line-height: 1.5; }
+.agent-assumed { display: inline-flex; align-items: center; gap: 6px; font-weight: 400; }
+.agent-assumed .link-button { font-size: 12px; }
+.agent-form-row { display: flex; flex-wrap: wrap; gap: 18px 28px; align-items: flex-end; }
+.agent-badge-edit { display: flex; align-items: center; gap: 10px; }
+.agent-badge-edit .avatar { --size: 36px; }
+.agent-form .agent-badge-edit input { width: 5.5em; }
+.agent-colors { display: flex; flex-wrap: wrap; gap: 8px; margin: 0; padding: 0; border: 0; }
+.agent-colors legend { margin-bottom: 6px; padding: 0; font-size: 13px; font-weight: 600; }
+.agent-color input { appearance: none; display: block; width: 26px; height: 26px; margin: 0; border-radius: 30%; background: var(--tone); cursor: pointer; }
+.agent-color input:checked { box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--tone); }
+.agent-color input:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+.agent-model { display: flex; }
+.agent-model .model-picker { margin: 0; }
+.agent-model .model-trigger { border: 1px solid var(--border); background: var(--bg); }
+.agent-servers { width: 100%; border-collapse: collapse; font-size: 14px; }
+.agent-servers th, .agent-servers td { padding: 8px 6px; border-top: 1px solid var(--border); text-align: left; vertical-align: top; }
+.agent-servers thead th { border-top: 0; color: var(--muted); font-size: 12px; font-weight: 600; }
+.agent-servers td, .agent-servers thead th:not(:first-child) { width: 7.5em; text-align: center; }
+.agent-servers tbody th { font-weight: 400; }
+.agent-servers tbody th small { display: block; color: var(--muted); font-size: 12px; }
+.agent-servers .agent-server-name { font-weight: 600; overflow-wrap: anywhere; }
+.agent-servers small.agent-server-warn { margin-top: 4px; color: var(--working); }
+.agent-servers caption { padding-bottom: 6px; text-align: left; }
+.agent-servers .agent-server-files > * { border-top-style: dashed; background: color-mix(in srgb, var(--surface-2) 55%, transparent); }
+.agent-servers .agent-server-files small + small { margin-top: 4px; }
+.agent-servers .agent-server-files .agent-switch { cursor: default; }
+.agent-switch { justify-content: center; }
+.agent-form-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.agent-foot { padding-top: 14px; border-top: 1px solid var(--border); color: var(--muted); font-size: 13px; }
+.agent-foot p { margin: 0; }
+.agent-chats { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.agent-chats li { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; }
+.agent-chats a { color: var(--text); overflow-wrap: anywhere; }
+.agent-chats small { color: var(--muted); }
+.agent-shared-note { padding: 12px 14px; border-radius: var(--radius); background: var(--accent-soft); }
+.agent-shared-note p { margin: 0; }
+.agent-turns { margin-top: 8px; font-size: 13px; }
+.agent-turns summary { cursor: pointer; color: var(--muted); }
+.agent-turns ul { list-style: none; margin: 6px 0 0; padding: 0; }
+.agent-turns li { display: flex; justify-content: space-between; gap: 12px; padding: 3px 0; }
+.agent-turns small { color: var(--muted); white-space: nowrap; }
+
+/* The draft card agent_propose leaves in the chat (pi's, or under an agent's reply): indented as the agent's other parts are. */
+.agent-card { margin: 4px 0 4px var(--gutter); padding: 14px 16px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-card); }
+.agent-card.compact { padding: 8px 12px; color: var(--muted); font-size: 14px; box-shadow: none; }
+.agent-card.compact p { margin: 0; }
+.agent-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }
+.agent-card-head > .avatar { --size: 34px; }
+.agent-card-title { flex: 1 1 200px; min-width: 0; display: flex; flex-direction: column; line-height: 1.3; }
+.agent-card-title a { color: var(--text); text-decoration: none; }
+.agent-card-title a:hover { text-decoration: underline; }
+.agent-card-title span { color: var(--muted); font-size: 13px; }
+.agent-card-actions { display: flex; gap: 6px; }
+.agent-card-actions button { padding: 4px 10px; font-size: 13px; }
+.agent-card-when { margin: 12px 0 0; font-weight: 500; }
+.agent-card-steps { margin-top: 8px; font-size: 14px; }
+.agent-card-steps ol { margin: 0; padding-left: 22px; }
+.agent-card-steps li + li { margin-top: 4px; }
+.agent-card-steps li p { margin: 0; }
+.agent-card-steps details { margin-top: 6px; color: var(--muted); }
+.agent-card-steps summary { cursor: pointer; }
+.agent-glance { margin: 12px 0 0; padding: 0; border-top: 1px solid var(--border); font-size: 14px; }
+.agent-glance-row { display: grid; grid-template-columns: 5.5em minmax(0, 1fr) auto; gap: 4px 12px; align-items: baseline; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.agent-glance-row dt { color: var(--muted); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; }
+.agent-glance-row dd { margin: 0; min-width: 0; }
+.agent-glance-value { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; overflow-wrap: anywhere; }
+.agent-glance-row.assumed .agent-glance-value { text-decoration: underline dashed var(--working); text-underline-offset: 3px; }
+.agent-glance-row dd small { display: block; color: var(--muted); font-size: 12px; }
+.agent-glance-change { font-size: 13px; }
+/* Editing the draft in place: a word of the instructions that names a row, and that row, light up together. */
+/* The lit row's tint reaches a little past its text on both sides (box-shadow), so the rows' lines stay where they are. */
+.agent-glance-row { --lit: transparent; background: var(--lit); box-shadow: -8px 0 0 var(--lit), 8px 0 0 var(--lit); transition: background-color 120ms ease, box-shadow 120ms ease; }
+.agent-glance-row.lit { --lit: color-mix(in srgb, var(--accent-soft) 70%, transparent); }
+.agent-glance-row.assumed.lit { --lit: color-mix(in srgb, var(--working-soft) 80%, transparent); }
+.agent-glance-row.open { --lit: transparent; }
+.agent-link { padding: 0; border: 0; background: none; color: inherit; font: inherit; line-height: inherit; text-align: inherit; cursor: pointer;
+  text-decoration: underline solid var(--accent); text-decoration-thickness: 1px; text-underline-offset: 3px; border-radius: 3px; }
+.agent-link.assumed { text-decoration-style: dashed; text-decoration-color: var(--working); }
+.agent-link.lit, .agent-link:hover { background: var(--accent-soft); box-shadow: 0 0 0 2px var(--accent-soft); }
+.agent-link.assumed.lit, .agent-link.assumed:hover { background: var(--working-soft); box-shadow: 0 0 0 2px var(--working-soft); }
+.agent-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.agent-step-change { margin-left: 2px; color: var(--muted); font-size: 12px; opacity: 0; }
+.agent-card-steps li:hover .agent-step-change, .agent-card-text:hover .agent-step-change, .agent-step-change:focus-visible { opacity: 1; }
+@media (hover: none) { .agent-step-change { opacity: 1; } }
+.agent-step-edit { display: flex; flex-direction: column; gap: 6px; margin: 2px 0 6px; }
+.agent-step-edit textarea { width: 100%; padding: 6px 8px; border: 1px solid var(--accent); border-radius: 8px; background: var(--surface); color: var(--text); font: inherit; resize: vertical; }
+.row-picker { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 10px; margin-top: 4px; padding: 10px 12px; border-radius: var(--radius); background: var(--surface-2); font-size: 13px; }
+.row-picker-fields { display: flex; flex-direction: column; gap: 8px; }
+.row-picker-choices { display: flex; flex-direction: column; gap: 4px; }
+.row-picker-choices label, .row-picker-check { display: inline-flex; align-items: center; gap: 6px; }
+.row-picker-check small { color: var(--muted); }
+.row-picker-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 4px 12px; padding-left: 22px; }
+.row-picker-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; }
+.row-picker-line label { display: inline-flex; align-items: center; gap: 6px; }
+.row-picker-line small, .row-picker > small, .row-picker-fields > small:not(.form-error) { color: var(--muted); }
+.row-picker-line.wide input { flex: 1 1 14em; min-width: 0; }
+.row-picker-line input[inputmode="numeric"] { width: 5em; }
+.row-picker-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.row-picker-chips button { padding: 2px 10px; border-radius: 999px; font-size: 12px; }
+.row-picker-chips button[aria-pressed="true"] { border-color: var(--accent); background: var(--accent); color: var(--accent-text); }
+.row-picker-actions { display: flex; gap: 6px; }
+.row-picker-actions button { padding: 4px 12px; font-size: 13px; }
+.row-picker-empty { margin: 0; color: var(--muted); }
+@media (prefers-reduced-motion: reduce) { .agent-glance-row { transition: none; } }
+/* Runs of an agent on its own (src/agents/RunsTab.tsx, WorkflowTab.tsx), its home chat in the sidebar, a run's post. */
+.sidebar nav .nav-contact { display: flex; align-items: center; gap: 8px; }
+.sidebar nav .nav-contact span { padding: 0; }
+.sidebar nav .nav-contact .avatar { --size: 24px; flex: none; }
+.sidebar nav .nav-contact-text { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
+.sidebar nav .nav-contact-text > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar nav .nav-contact-text small { color: var(--muted); font-size: 12px; font-weight: 400; }
+.run-marker { display: inline-block; margin-top: 6px; color: var(--muted); font-size: 12px; text-decoration: none; }
+a.run-marker:hover { color: var(--accent); text-decoration: underline; }
+/* The Runs tab's section; the people bar's menus use .agent-runs for their lists too. */
+section.agent-runs, .agent-runs-note { margin-top: 20px; }
+.agent-runs-head { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.agent-runs-when { display: flex; flex-direction: column; gap: 2px; }
+.agent-runs-when small { color: var(--muted); font-size: 13px; }
+.agent-runs-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.run-list { list-style: none; margin: 12px 0 0; padding: 0; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); overflow: hidden; }
+.run-list li + li { border-top: 1px solid var(--border); }
+.run-row { display: flex; align-items: center; gap: 12px; padding: 10px 14px; color: var(--text); text-decoration: none; }
+.run-row:hover { background: var(--surface-2); }
+.run-pills { display: inline-flex; flex: none; flex-wrap: wrap; gap: 4px; }
+.run-row .run-pills { width: 10.5em; }
+.run-row-text { display: flex; flex: 1; flex-direction: column; min-width: 0; }
+.run-row-when { color: var(--muted); font-size: 13px; }
+.run-row-summary { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.run-row-cost { flex: none; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.pill.run-state.error { border-color: transparent; background: color-mix(in srgb, var(--error) 12%, var(--surface)); color: var(--error); }
+.pill.run-test { border-style: dashed; }
+.run-detail-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.run-detail-head h3 { margin: 0; font-size: 18px; }
+.run-detail-head small { flex-basis: 100%; color: var(--muted); font-size: 13px; }
+.run-section { margin: 24px 0 8px; font-size: 14px; }
+.run-deliveries, .run-items { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.run-delivery, .run-item { padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); }
+.run-delivery-line, .run-item-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.run-delivery > small { display: block; margin-top: 2px; color: var(--muted); font-size: 13px; }
+.run-report { margin-top: 8px; max-width: 100%; }
+.run-item.not_today { background: var(--surface-2); }
+.run-item { scroll-margin-top: calc(var(--header-h) + 12px); }
+.run-steps { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.run-step { display: flex; align-items: baseline; gap: 8px; font-size: 14px; }
+.run-step-mark { flex: none; width: 1em; color: var(--live); text-align: center; }
+.run-step.stopped .run-step-mark { color: var(--muted); }
+.run-step-text { display: flex; flex: 1; flex-direction: column; min-width: 0; }
+.run-step-text small { overflow-wrap: anywhere; color: var(--muted); font-family: var(--font-mono); font-size: 12px; }
+.run-step-time { flex: none; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.run-step.running { color: var(--working); }
+.run-item .link-button { margin-top: 8px; font-size: 13px; }
+.run-trace { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border); }
+.run-trace-input summary { color: var(--muted); font-size: 13px; cursor: pointer; }
+.run-trace-input pre { max-height: 240px; overflow: auto; margin: 6px 0 0; padding: 8px 10px; border-radius: 8px; background: var(--bg); font-size: 12px; white-space: pre-wrap; }
+.run-used { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 16px; margin: 24px 0 0; padding-top: 12px; border-top: 1px solid var(--border); color: var(--muted); font-size: 13px; }
+.run-used > strong { color: var(--text); font-weight: 600; }
+.run-used dl { display: flex; flex-wrap: wrap; gap: 6px 20px; margin: 0; }
+.run-used dl div { display: flex; gap: 6px; }
+.run-used dt { font-weight: 600; }
+.run-used dd { margin: 0; color: var(--text); }
+.run-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); align-items: start; gap: 10px; margin-top: 16px; }
+.run-group { --tone: var(--muted); min-width: 0; padding: 10px 14px 12px; border: 1px solid var(--border); border-top: 3px solid var(--tone); border-radius: var(--radius-lg); background: var(--surface); }
+.run-group.acted { --tone: var(--live); }
+.run-group.failed { --tone: var(--error); }
+.run-group.running, .run-group.waiting { --tone: var(--working); }
+.run-group.not_today { background: var(--surface-2); }
+.run-group-head { display: flex; align-items: baseline; gap: 8px; margin: 0 0 6px; color: var(--tone); font-size: 14px; }
+.run-group-count { color: var(--muted); font-size: 13px; font-weight: 400; font-variant-numeric: tabular-nums; }
+.run-group ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.run-group li { display: flex; align-items: baseline; gap: 8px; min-width: 0; font-size: 14px; }
+.run-group-name { flex: none; color: var(--text); font-weight: 500; text-decoration: none; }
+.run-group-name:hover { color: var(--accent); text-decoration: underline; }
+.run-group-line { overflow: hidden; color: var(--muted); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.workflow-section { display: flex; flex-direction: column; gap: 12px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.workflow-section legend { margin-bottom: 8px; padding: 0; }
+.workflow-when, .workflow-days { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+.workflow-choice, .workflow-day { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; }
+.agent-field.grow { flex: 1 1 18em; }
+.workflow-json { font-family: var(--font-mono); font-size: 13px !important; }
+.workflow-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.workflow-step { border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); }
+.workflow-step.over { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.workflow-step > details > summary { display: flex; align-items: center; gap: 10px; padding: 8px 10px; cursor: pointer; list-style: none; }
+.workflow-step > details > summary::-webkit-details-marker { display: none; }
+.workflow-step > details[open] > summary { border-bottom: 1px solid var(--border); }
+.workflow-step > details > :not(summary) { margin: 10px; }
+.workflow-step-handle { color: var(--muted); cursor: grab; letter-spacing: -2px; }
+.workflow-step-kind { flex: none; padding: 1px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: 12px; font-weight: 600; }
+.workflow-step-summary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+.workflow-step-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.workflow-step-actions button { padding: 4px 10px; font-size: 13px; }
+.workflow-branch { display: flex; flex-direction: column; gap: 8px; padding-left: 12px; border-left: 2px solid var(--border); }
+.workflow-add { display: flex; flex-wrap: wrap; gap: 8px; }
+@media (max-width: 640px) {
+  .agent-page { padding: 16px 14px 40px; }
+  /* All five tabs in a phone's width; past that the row scrolls. */
+  .agent-tabs { gap: 0; }
+  .agent-tab { padding: 8px 7px; }
+  .agent-form { padding: 14px; }
+  .agent-card { margin-left: 0; }
+  .agent-glance-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .agent-glance-row dt { grid-column: 1 / -1; }
+  .agent-servers td, .agent-servers thead th:not(:first-child) { width: 4.5em; }
+  .run-row { flex-wrap: wrap; gap: 6px 10px; }
+  .run-row .run-pills { width: auto; }
+  .run-row-text { flex-basis: 100%; order: 2; }
+}
 
 
 /* Someone joined or left a shared chat: a quiet line between the messages. */
@@ -1046,8 +1566,9 @@ a.mention-chip:hover { text-decoration: underline; }
 .chat-files { display: flex; flex-direction: column; max-height: 30vh; overflow-y: auto; }
 .chat-files .file-name { padding: 4px 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
 
-/* Someone mentioned the user: a short notice in a corner, under the chat header's buttons, which opens the chat. */
-.toasts { position: fixed; top: calc(var(--header-h) + 24px); right: 16px; z-index: 50; display: flex; flex-direction: column; gap: 8px; width: min(340px, calc(100vw - 32px)); }
+/* Someone mentioned the user: a short notice in a corner, under the chat header's buttons, which opens the chat. Below
+   the menus and panels those buttons open (z-index 5 and up), which the user asked for: an agent's menu opens right here. */
+.toasts { position: fixed; top: calc(var(--header-h) + 24px); right: 16px; z-index: 4; display: flex; flex-direction: column; gap: 8px; width: min(340px, calc(100vw - 32px)); }
 .toast-list { display: flex; flex-direction: column; gap: 8px; }
 /* The sidebar is on top here, not the chat's header. After the rule above, so it wins. */
 @media (max-width: 900px) { .toasts { top: 12px; } }
@@ -1085,3 +1606,218 @@ a.mention-chip:hover { text-decoration: underline; }
 .chip:hover { color: var(--text); background: var(--surface-2); }
 .chip:is(.active, [aria-pressed="true"]) { border-color: transparent; background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 .sidebar .chat-filter .nav-unread { position: absolute; top: -2px; right: -2px; width: 7px; height: 7px; margin: 0; }
+
+/* Members' agents and private turns: where a reply came from, and a draft only its agent's owner sees. */
+.source-chip { align-self: flex-start; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 9px; border: 1px dashed var(--border); border-radius: 999px; color: var(--muted); font-size: 12px; line-height: 20px; }
+.agent-draft { padding: 10px 12px 12px; border: 1px dashed var(--accent); border-radius: 12px; background: color-mix(in srgb, var(--accent) 5%, var(--surface)); }
+.draft-note { color: var(--muted); font-size: 12.5px; }
+.draft-edit { width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: var(--text); font: inherit; resize: vertical; field-sizing: content; min-height: 4lh; max-height: 50vh; }
+.draft-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.assistant:focus { outline: none; }
+.held-note { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 6px 10px; border: 1px dashed var(--accent); border-radius: 10px; background: color-mix(in srgb, var(--accent) 5%, var(--surface)); }
+.agent-review { align-items: flex-start; }
+.agent-review > span { display: flex; flex-direction: column; gap: 2px; font-weight: 500; }
+.agent-review small { color: var(--muted); font-weight: 400; }
+/* Sign-ins to servers that sign in each user (src/SignIns.tsx): the sidebar's notices and the account menu's list. */
+.sign-in-notices { display: flex; flex-direction: column; gap: 6px; }
+.sign-in-notice { display: flex; align-items: flex-start; gap: 8px; padding: 10px 6px 10px 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--accent-soft); }
+.sign-in-notice.needed { box-shadow: inset 3px 0 0 var(--accent); }
+.sign-in-notice > svg { flex: none; margin-top: 2px; color: var(--accent); }
+.sign-in-notice-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
+.sign-in-notice-body strong { font-size: 14px; }
+.sign-in-notice-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.sign-in-notice-actions .button, .sign-in-notice-actions button { padding: 4px 12px; }
+.sign-in-actions { display: flex; gap: 8px; flex-shrink: 0; }
+.sign-in-notice .icon-button { width: 24px; height: 24px; color: var(--muted); }
+.account-menu .nav-unread { margin-left: auto; }
+.sign-ins-dialog { width: min(520px, calc(100% - 32px)); }
+.sign-ins { margin: 0 0 12px; padding: 0; list-style: none; display: flex; flex-direction: column; }
+.sign-ins li { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-top: 1px solid var(--border); }
+.sign-ins li:last-child { border-bottom: 1px solid var(--border); }
+.sign-in-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.sign-in-text small { color: var(--muted); font-size: 13px; }
+
+/* The agent page's Limits tab (src/agents/LimitsTab.tsx): the form's card, then cards that open and close under it. */
+.limits-tab { display: flex; flex-direction: column; }
+.agent-form select { max-width: 100%; padding: 7px 10px; background: var(--bg); color: var(--text); font-size: 14px; }
+.limit-levels { margin: 0; padding: 0; border: 0; min-width: 0; }
+.limit-levels legend { padding: 0; margin-bottom: 8px; }
+.limit-level-options { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.limit-level { position: relative; display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); cursor: pointer; }
+.limit-level:hover { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.limit-level.active { border-color: var(--accent); background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
+.limit-level:has(input:focus-visible) { outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent); outline-offset: 1px; }
+/* The radio itself is the whole card: hidden, but still in the tab order and read out. */
+.limit-level input { position: absolute; opacity: 0; pointer-events: none; }
+.limit-level strong { font-size: 14px; }
+.limit-level small { color: var(--muted); font-size: 12.5px; line-height: 1.4; }
+.limit-level.active small { color: var(--text); }
+.limit-rules { display: flex; flex-direction: column; gap: 8px; }
+.limit-rules > p { margin: 0; }
+.limit-rules ul { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--border); }
+.limit-rules li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 14px; }
+.limit-rules li.editing { display: block; padding: 10px 0; }
+.limit-rule-text { flex: 1 1 260px; min-width: 0; display: flex; flex-direction: column; overflow-wrap: anywhere; }
+.limit-rule-text small { color: var(--muted); font-size: 12.5px; }
+.limit-rule-actions { display: flex; gap: 6px; }
+.limit-rule-actions button { padding: 3px 10px; font-size: 13px; }
+.limit-add { align-self: flex-start; padding: 5px 12px; font-size: 13px; font-weight: 500; }
+.agent-form .limit-hours { font-size: 14px; font-weight: 500; }
+.agent-form .limit-hours input { width: 5.5em; margin: 0 4px; padding: 5px 8px; font-size: 14px; }
+.limits-section { margin-top: 14px; gap: 14px; padding: 0; }
+.limits-section > div { padding: 0 20px 20px; }
+.limits-section-head { display: flex; align-items: center; gap: 12px; width: 100%; padding: 14px 20px; border: 0; border-radius: var(--radius-lg); background: none; color: var(--text); text-align: left; }
+.limits-section-head > span { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.limits-section-head strong { font-size: 15px; }
+.limits-section-head small { color: var(--muted); font-size: 13px; }
+.limits-section-head svg { flex: none; color: var(--muted); transition: transform 0.15s; }
+.limits-section-head[aria-expanded="true"] svg { transform: rotate(180deg); }
+.limits-section-head:hover strong { text-decoration: underline; }
+.limits-all { display: flex; flex-direction: column; gap: 12px; }
+.limits-all > p { margin: 0; }
+/* One rule being edited: its fields, made from the tool's input schema, in a well under the list. */
+.rule-editor { display: flex; flex-direction: column; gap: 12px; padding: 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2); }
+.rule-editor-row { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 10px 14px; }
+.rule-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; font-size: 13px; }
+.rule-field > span { font-weight: 600; }
+.rule-field.grow { flex: 1 1 240px; }
+.rule-field small { max-width: 44ch; color: var(--muted); font-size: 12px; font-weight: 400; }
+.rule-field small.form-error { color: var(--error); }
+.rule-field .rule-hint { max-width: 60ch; }
+.rule-field .rule-warn, .limit-rule-text .rule-warn { color: var(--working); }
+.rule-editor .rule-field input:not([type="checkbox"], [type="radio"]), .rule-editor textarea, .rule-editor select { background: var(--surface); font-size: 14px; }
+.rule-editor .rule-field input[type="number"] { width: 10em; }
+.rule-editor textarea.code { font-family: var(--font-mono); font-size: 13px; }
+.rule-check { display: flex; align-items: center; gap: 8px; margin-top: 30px; font-size: 13px; }
+.rule-current, .rule-ranges { display: flex; flex-direction: column; gap: 10px; margin: 0; padding: 10px 12px 12px; border: 1px solid var(--border); border-radius: 8px; min-width: 0; }
+.rule-current legend, .rule-ranges legend { padding: 0 4px; font-size: 13px; font-weight: 600; }
+.rule-ranges > small { color: var(--muted); font-size: 12px; }
+.rule-ranges .link-button { align-self: flex-start; font-size: 13px; }
+.rule-range { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; font-size: 13px; }
+.rule-editor .rule-range input:not([type="checkbox"], [type="radio"]) { width: auto; min-width: 0; }
+.rule-editor .rule-range input[type="date"] { width: 11em; }
+.rule-editor .rule-range input:not([type="date"]) { width: 6.5em; }
+.rule-range .icon-button { width: 28px; height: 28px; color: var(--muted); }
+.rule-choices { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.rule-editor-actions { display: flex; gap: 8px; }
+.rule-editor-actions button { padding: 5px 14px; }
+/* The agent's latest calls: when, which tool, what came of it, and why. */
+.limit-calls { display: flex; flex-direction: column; gap: 10px; }
+.limit-calls ul { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--border); }
+.limit-calls li { display: grid; grid-template-columns: 7.5em minmax(0, auto) auto minmax(0, 1fr); align-items: baseline; gap: 4px 12px; padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.limit-call-when { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.limit-call-tool { overflow-wrap: anywhere; font-size: 12.5px; }
+.limit-call-detail { color: var(--muted); overflow-wrap: anywhere; }
+.limit-calls .link-button { align-self: flex-start; font-size: 13px; }
+.pill.limit-outcome { padding: 0 8px; font-size: 11.5px; }
+.pill.limit-outcome.error { border-color: transparent; background: color-mix(in srgb, var(--error) 14%, var(--surface)); color: var(--error); }
+.pill.limit-outcome.held { border-color: transparent; background: var(--accent-soft); color: var(--accent); }
+@media (max-width: 760px) {
+  .limit-level-options { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 640px) {
+  .limits-section-head { padding: 12px 14px; }
+  .limits-section > div { padding: 0 14px 14px; }
+  .rule-editor { padding: 12px 10px; }
+  .rule-editor-row > .rule-field { flex: 1 1 100%; }
+  .rule-editor .rule-field input[type="number"] { width: 100%; }
+  .limit-calls li { grid-template-columns: minmax(0, 1fr) auto; }
+  .limit-call-detail { grid-column: 1 / -1; }
+}
+@media (max-width: 420px) {
+  .limit-level-options { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* A held call's card in the chat (src/chat/ActionCard.tsx): the exact call, why it waits, and the owner's buttons. */
+.action-card { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-card); }
+.action-card.running { border-left-color: var(--working); }
+.action-card.done { border-left-color: var(--live); box-shadow: none; }
+.action-card.failed { border-left-color: var(--error); box-shadow: none; }
+.action-card.closed { border-left-color: var(--border); box-shadow: none; }
+.action-card-head { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 6px 10px; }
+.action-card-head > .avatar { --size: 28px; }
+.action-card-title { flex: 1 1 220px; min-width: 0; display: flex; flex-direction: column; font-size: 14px; line-height: 1.4; }
+.action-card-title code { font-size: 13px; overflow-wrap: anywhere; }
+.action-card-title small { color: var(--muted); font-size: 13px; }
+.pill.action-expiry { border-color: transparent; background: var(--working-soft); color: var(--working); }
+.action-input pre { margin: 0; padding: 8px 10px; overflow-x: auto; border-radius: 8px; background: var(--surface-2); font-size: 12.5px; line-height: 1.5; }
+.action-input .link-button { margin-top: 4px; font-size: 12.5px; }
+.action-warnings { margin: 0; padding: 6px 10px 6px 26px; border-radius: 8px; background: var(--working-soft); color: var(--working); font-size: 13px; }
+.action-ended { margin: 0; color: var(--muted); font-size: 13.5px; overflow-wrap: anywhere; }
+.action-card.done .action-ended { color: var(--live); }
+.action-card.failed .action-ended { color: var(--error); }
+.action-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+.action-buttons button { padding: 5px 14px; }
+.action-card > .form-error { margin: 0; font-size: 13px; }
+/* What a card of the viewer's own agent's seat came to (ActionOutcome): one quiet line, for them alone. */
+.action-outcome { margin: 0; padding-left: 10px; border-left: 3px solid var(--border); color: var(--muted); font-size: 13.5px; overflow-wrap: anywhere; }
+.action-outcome.done { border-left-color: var(--live); }
+.action-outcome.done strong { color: var(--live); }
+.action-outcome.failed { border-left-color: var(--error); }
+.action-outcome.failed strong { color: var(--error); }
+.action-outcome code { font-size: 12.5px; }
+.action-outcome .sent-time, [data-compact] .action-outcome .sent-time { position: static; padding: 0; opacity: 1; font-size: inherit; }
+
+/* An approval in the feed (src/feed/FeedView.tsx): its call, Approve and Decline (Run and Dismiss for a proposal), when it expires. */
+.feed-decision { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 6px; }
+.feed-decision-buttons { display: flex; gap: 6px; }
+.feed-decision-buttons button { padding: 3px 12px; font-size: 13px; }
+.feed-decision small { color: var(--muted); font-size: 12.5px; }
+.feed-decision small.form-error { color: var(--error); }
+@media (pointer: coarse) {
+  .feed-decision-buttons button { padding: 7px 14px; }
+}
+/* The feed (src/feed/): its sidebar entry, its page, and Follow on pages and shared agents. */
+.feed-nav { margin: 2px 0 6px; }
+.sidebar nav a.feed-link svg { flex: none; color: var(--muted); }
+.sidebar nav a.feed-link.unread svg { color: var(--accent); }
+.pill.feed-needs { padding: 0 7px; border-color: transparent; background: var(--working-soft); color: var(--working); font-size: 11px; }
+.sidebar nav .feed-unread { flex: none; display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--accent); color: var(--accent-text); font-size: 11px; font-weight: 700; line-height: 1; }
+.feed-page { height: 100%; overflow-y: auto; padding: 28px 24px 48px; max-width: 820px; }
+.feed-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; margin-bottom: 14px; }
+.feed-head h2 { flex: 1 1 auto; margin: 0; font-size: 30px; line-height: 1.1; }
+.feed-tabs { display: inline-flex; padding: 3px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); }
+.feed-tab { display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border: 0; border-radius: 999px; background: none; color: var(--muted); font-size: 13px; font-weight: 500; }
+.feed-tab.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.feed-count { min-width: 18px; padding: 0 5px; border-radius: 9px; background: var(--working); color: var(--surface); font-size: 11px; font-weight: 700; line-height: 18px; text-align: center; }
+.feed-switch { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; cursor: pointer; }
+.feed-all-read { font-size: 13px; }
+.feed-all-read:disabled { color: var(--muted); text-decoration: none; cursor: default; }
+.feed-empty { margin: 20px 0; color: var(--muted); }
+.feed-list { list-style: none; margin: 0; padding: 0; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); overflow: hidden; }
+.feed-list:empty { display: none; }
+.feed-item { display: flex; align-items: flex-start; gap: 12px; padding: 12px 14px; border-top: 1px solid var(--border); }
+.feed-item:first-child { border-top: 0; }
+.feed-item > .avatar { --size: 32px; margin-top: 1px; }
+.feed-item.unread { background: color-mix(in srgb, var(--accent-soft) 45%, var(--surface)); }
+.feed-item.unread.needs { box-shadow: inset 3px 0 0 var(--working); }
+.feed-icon { background: var(--surface-2); color: var(--muted); }
+.feed-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.feed-title { color: var(--text); font-weight: 500; text-decoration: none; overflow-wrap: anywhere; }
+.feed-item.unread .feed-title { font-weight: 650; }
+.feed-title:hover { text-decoration: underline; }
+.feed-text { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.45; white-space: pre-line; overflow-wrap: anywhere; }
+.feed-text.clamped { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.feed-more { align-self: flex-start; font-size: 13px; }
+.feed-meta { display: flex; align-items: center; gap: 8px; margin-top: 2px; color: var(--muted); font-size: 12px; }
+.pill.feed-kind { padding: 0 7px; font-size: 11px; }
+.pill.feed-kind.needs { border-color: transparent; background: var(--working-soft); color: var(--working); }
+.feed-item.run-failed .pill.feed-kind { border-color: transparent; background: color-mix(in srgb, var(--error) 12%, var(--surface)); color: var(--error); }
+.feed-side { flex: none; display: flex; align-items: center; gap: 4px; }
+.feed-side .nav-unread { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+.feed-mark { width: 28px; height: 28px; color: var(--muted); }
+.feed-following { margin-top: 28px; }
+.feed-following h3 { margin: 0 0 8px; font-size: 16px; }
+.feed-following h3 small { color: var(--muted); font-weight: 400; }
+.feed-following ul { list-style: none; margin: 0; padding: 0; }
+.feed-following li { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid var(--border); }
+.feed-following li a { flex: 1; min-width: 0; color: var(--text); overflow-wrap: anywhere; }
+.feed-following li small { color: var(--muted); }
+.feed-following li button { padding: 3px 10px; font-size: 13px; }
+.follow-button.following { border-color: transparent; background: var(--accent-soft); color: var(--accent); }
+.follow-error { font-size: 12px; }
+@media (max-width: 640px) {
+  .feed-page { padding: 12px 12px 40px; }
+  .feed-head h2 { font-size: 24px; }
+  .feed-item { padding: 12px 10px; gap: 10px; }
+}

@@ -1,7 +1,6 @@
 import { exports, waitUntil } from "cloudflare:workers";
 import { DICTATION_ROUTE } from "../shared/dictation.ts";
 import { ID_PATTERN, isSecondSeatUid, UID_PATTERN, type ArtifactView, type ProxyRequest } from "../shared/protocol.ts";
-import { errorMessage } from "../shared/util.ts";
 import { PageCallCache } from "./artifacts/page-calls.ts";
 import { pageAiRoute, pageFailed, pageStorageRoute, type PageHome } from "./artifacts/page-routes.ts";
 import { artifactETag, artifactResponse, notModified, sourceETag, sourceResponse } from "./artifacts/serve.ts";
@@ -10,16 +9,28 @@ import { dataRoute } from "./data-routes.ts";
 import { dictationRoute } from "./dictation.ts";
 import { filesRoute } from "./files-routes.ts";
 import { json, readJson } from "./http.ts";
-import { chatRoute } from "./chat-routes.ts";
+import type { UserDirectory } from "./users.ts";
+import { chatRoute, discussRoute } from "./chat-routes.ts";
 import { mcpRoute } from "./mcp-routes.ts";
+import { pushRoute } from "./push-routes.ts";
+import { mcpServers } from "./mcp/servers.ts";
 import { catalogSource, loadCatalog } from "./models.ts";
 import { skillsRoute } from "./skills-routes.ts";
+import { agentsRoute } from "./agents-routes.ts";
+import { memoryRoute } from "./memory-routes.ts";
+import { runsRoute } from "./runs-routes.ts";
+import { devRoute } from "./dev-routes.ts";
+import { limitsRoute } from "./limits-routes.ts";
+import { feedRoute } from "./feed-routes.ts";
+import { dollars, type Allowance } from "../shared/allowance.ts";
 import { chatAgentName } from "./chat-agent.ts";
+import { newestShown } from "./agents/roster.ts";
 import { newId, PathError, Storage } from "./storage/index.ts";
 
 export { ChatAgent } from "./chat-agent.ts";
 export { Sandbox } from "./sandbox.ts";
 export { UserDirectory } from "./users.ts";
+export { Source } from "./source.ts";
 
 /**
  * Where each artifact lives. That never changes once an artifact exists, so a
@@ -93,10 +104,10 @@ async function route(request: Request, env: Env): Promise<Response> {
 
   // The artifact page itself, framed by the viewer, or (/source) the page as written, to read. Whoever may view the page may read it.
   const page = path.match(/^\/u\/([a-z0-9]+)\/v(\d+)(\/source)?$/);
-  if (page && method === "GET") return artifactPage(request, storage, page[1], Number(page[2]), !!page[3]);
+  if (page && method === "GET") return artifactPage(request, storage, uid, page[1], Number(page[2]), !!page[3]);
 
   // Artifact metadata, the MCP proxy, and what a page saves and asks its model.
-  const artifact = path.match(/^\/api\/artifacts\/([a-z0-9]+)(\/mcp|\/tools|\/clone|\/seen|\/storage|\/ai)?$/);
+  const artifact = path.match(/^\/api\/artifacts\/([a-z0-9]+)(\/mcp|\/tools|\/clone|\/seen|\/storage|\/ai|\/discuss)?$/);
   if (artifact && ID_PATTERN.test(artifact[1])) {
     const id = artifact[1];
     // The owner opened a version of one of their artifacts: only their own sidebar entry changes.
@@ -105,6 +116,11 @@ async function route(request: Request, env: Env): Promise<Response> {
       if (!Number.isInteger(version)) return json({ error: "Expected {version}." }, 400);
       await exports.UserDirectory.getByName(uid).markArtifactSeen(id, version as number);
       return json({});
+    }
+    // The chat that discusses the page (worker/chat-routes.ts).
+    if (artifact[2] === "/discuss" && method === "POST") {
+      const create = (await readJson<{ create?: unknown }>(request))?.create === true;
+      return discussRoute(storage, id, { uid, name: identity.email ?? uid }, create);
     }
     // A page's saved values and its model run as the viewer (worker/artifacts/page-routes.ts).
     if ((artifact[2] === "/storage" || artifact[2] === "/ai") && method === "POST") {
@@ -137,8 +153,23 @@ async function route(request: Request, env: Env): Promise<Response> {
       // Not who owns it, only whether the viewer does. The chat it lives in only when asked (?chat), and only to people
       // in that chat, so they can go back to building it there.
       const { chatId, ownerUid: _ownerUid, ...visible } = meta;
-      const inChat = url.searchParams.has("chat") && (await exports.ChatAgent.getByName(chatAgentName(meta.ownerUid, chatId)).isInChat(uid));
-      return json({ ...visible, isOwner: uid === meta.ownerUid, ...(inChat && { chatId }) } satisfies ArtifactView);
+      const isOwner = uid === meta.ownerUid;
+      const chat = exports.ChatAgent.getByName(chatAgentName(meta.ownerUid, chatId));
+      // Not what turns apart from the chat published with their replies not posted: someone else sees the newest
+      // version that is the chat's.
+      const [withheld, inChat] = await Promise.all([
+        isOwner ? undefined : chat.withheldFrom(id, uid),
+        url.searchParams.has("chat") && chat.isInChat(uid),
+      ]);
+      if (withheld?.page) return json({ error: "No such artifact" }, 404);
+      const hidden = new Set(withheld?.versions);
+      const latest = newestShown(visible.latest, hidden);
+      if (!latest) return json({ error: "No such artifact" }, 404);
+      const versions = visible.versions.filter((version) => !hidden.has(version.version));
+      // Nor when a withheld one came out.
+      const updatedAt =
+        latest === visible.latest ? visible.updatedAt : (versions.find((version) => version.version === latest)?.publishedAt ?? visible.updatedAt);
+      return json({ ...visible, latest, updatedAt, versions, isOwner, ...(inChat && { chatId }) } satisfies ArtifactView);
     }
     // A read-only Git token for the artifact's repo, for `git clone`. Only the owner gets one:
     // the repo also holds the version history and the metadata.
@@ -151,6 +182,8 @@ async function route(request: Request, env: Env): Promise<Response> {
 
   const mcp = await mcpRoute(request, env, uid);
   if (mcp) return mcp;
+  const push = await pushRoute(request, env, uid);
+  if (push) return push;
 
   const directory = exports.UserDirectory.getByName(uid);
   // The sidebar's socket: it hears which of the chat, artifact and skill lists changed (worker/users.ts).
@@ -161,12 +194,27 @@ async function route(request: Request, env: Env): Promise<Response> {
   // Speech to text for browsers whose own recognition is missing or cannot reach its service (worker/dictation.ts).
   if (path === DICTATION_ROUTE && method === "POST") return dictationRoute(request, env, uid, directory);
   if (path === "/api/chats" && method === "GET") return json(await directory.listChats());
+  // The people this user shares chats with: whom "@" offers to add to a chat.
+  if (path === "/api/me/people" && method === "GET") return json(await directory.knownPeople());
   if (path === "/api/chats" && method === "POST") return json(await directory.createChat(newId()));
   if (path === "/api/artifacts" && method === "GET") return json(await directory.listArtifacts());
   // The model picker's choices: the models AI Gateway's providers list (for those it holds a key for), and Workers AI's.
   // POST asks the providers again now, for a key added since.
   if (path === "/api/models" && (method === "GET" || method === "POST")) {
     return json(await loadCatalog(catalogSource(env, storage.models, waitUntil), { refresh: method === "POST" }), 200, { "cache-control": "private, no-cache" });
+  }
+
+  // The user's daily allowance (shared/allowance.ts): what their model calls cost today against the deployment's limits.
+  if (path === "/api/me/allowance" && method === "GET") {
+    const [{ costUsd, tokens }, pages] = await Promise.all([directory.modelSpentToday(), directory.pageAiSpentToday()]);
+    const allowance: Allowance = {
+      day: new Date().toISOString().slice(0, 10),
+      spent: costUsd,
+      tokens,
+      limit: dollars(env.RUNS_DAILY_USD),
+      pages: { spent: pages, limit: dollars(env.PAGE_AI_DAILY_USD) },
+    };
+    return json(allowance, 200, { "cache-control": "private, no-store" });
   }
 
   // The user's own system prompt, added to the built-in one in all their chats. PUT {text}; empty clears it. readJson
@@ -177,6 +225,13 @@ async function route(request: Request, env: Env): Promise<Response> {
     return json(saved, "error" in saved ? 400 : 200);
   }
 
+  // pi's settings for all the user's chats (shared/pi-settings.ts). PUT {sharedServers?, reviewBeforePosting?}: the whole of them.
+  if (path === "/api/me/pi" && method === "GET") return json(await directory.piSettings());
+  if (path === "/api/me/pi" && method === "PUT") {
+    const saved = await directory.setPiSettings(await readJson<unknown>(request));
+    return json(saved, "error" in saved ? 400 : 200);
+  }
+
   // Export and import of everything the user has (worker/data-routes.ts).
   const data = await dataRoute(request, uid, directory, storage);
   if (data) return data;
@@ -184,20 +239,35 @@ async function route(request: Request, env: Env): Promise<Response> {
   const skills = await skillsRoute(request, directory, () => storage.skillFiles(uid));
   if (skills) return skills;
 
+  const agents = await agentsRoute(
+    request,
+    directory,
+    // A chat of someone else's the agent's owner brought it into as a member is named after that chat's owner.
+    ({ chatId, ownerUid }, agentId) => exports.ChatAgent.getByName(chatAgentName(ownerUid ?? uid, chatId)).agentDeleted(agentId, uid),
+    mcpServers(env),
+  );
+  if (agents) return agents;
+  // Local development's routes (/api/dev/*), each only with devOn: elsewhere every one of them is a 404.
+  const dev = await devRoute(request, env, uid, directory, {
+    chat: (chatId) => exports.ChatAgent.getByName(chatAgentName(uid, chatId)),
+    runs: () => runsRoute(request, uid, directory, true),
+  });
+  if (dev) return dev;
+
+  const runs = await runsRoute(request, uid, directory, false);
+  if (runs) return runs;
+  const limits = await limitsRoute(request, uid, directory, mcpServers(env));
+  if (limits) return limits;
+  // The feed, and follows of others' pages and agents (worker/feed-routes.ts).
+  const feed = await feedRoute(request, uid, directory, storage);
+  if (feed) return feed;
+
+  const memory = await memoryRoute(request, directory);
+  if (memory) return memory;
+
   // A chat's Durable Object is named after its owner's verified uid; others reach it only once they joined by an invite.
   const chat = await chatRoute(request, directory, { uid, name: identity.email ?? uid }, (owner) => storage.userFiles(owner));
   if (chat) return chat;
-
-  // Publish a page without the model, to try the live-data path locally. Needs DEV_TOOLS=true.
-  const devPublish = path.match(/^\/api\/dev\/chats\/([a-z0-9]+)\/publish$/);
-  if (devPublish && method === "POST" && env.DEV_TOOLS === "true") {
-    if (!(await directory.hasChat(devPublish[1]))) return json({ error: "No such chat" }, 404);
-    try {
-      return json(await exports.ChatAgent.getByName(chatAgentName(uid, devPublish[1])).devPublish(await request.json()));
-    } catch (error) {
-      return json({ error: errorMessage(error) }, 400);
-    }
-  }
 
   const files = await filesRoute(request, () => storage.userFiles(uid));
   if (files) return files;
@@ -209,13 +279,21 @@ async function route(request: Request, env: Env): Promise<Response> {
  * One version of a published page, or with `source` its HTML as plain text. Versions never change, so a repeat view
  * is a 304 without reading R2.
  */
-async function artifactPage(request: Request, storage: Storage, id: string, version: number, source: boolean): Promise<Response> {
+async function artifactPage(request: Request, storage: Storage, uid: string, id: string, version: number, source: boolean): Promise<Response> {
   if (!ID_PATTERN.test(id)) return new Response("Not found", { status: 404 });
   const [etag, respond] = source ? [sourceETag(id, version), sourceResponse] : [artifactETag(id, version), artifactResponse];
   const cached = notModified(request, etag);
   if (cached) return cached;
-  const html = await storage.artifacts.readHtml(id, version);
-  return html === null ? new Response("Not found", { status: 404 }) : respond(html, etag);
+  // Not a version a turn apart from the chat published with its reply not posted, but for the owner. Asked while the
+  // page is read: what it holds is not sent unless the viewer may see it.
+  const shown = artifactHome(storage, id).then(async (home) => {
+    if (!home) return false;
+    if (home.ownerUid === uid) return true;
+    const withheld = await exports.ChatAgent.getByName(home.chat).withheldFrom(id, uid);
+    return !withheld.page && !withheld.versions.includes(version);
+  });
+  const [html, may] = await Promise.all([storage.artifacts.readHtml(id, version), shown]);
+  return html === null || !may ? new Response("Not found", { status: 404 }) : respond(html, etag);
 }
 
 function demoCookie(url: URL, value: string, maxAge: number): string {

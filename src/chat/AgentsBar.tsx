@@ -1,0 +1,384 @@
+import { useCallback, useEffect, useId, useState } from "react";
+import type { ChatAgentSettingsView } from "../../shared/agent-settings.ts";
+import { isDraftAgent, MAX_CHAT_AGENTS, type AgentDefinition, type AgentTurnView, type ChatAgentView } from "../../shared/agents.ts";
+import { AGENT_NAME } from "../../shared/mentions.ts";
+import { everyone, isSecondSeatUid, type ChatPeople, type Presence } from "../../shared/protocol.ts";
+import { errorMessage } from "../../shared/util.ts";
+import { api } from "../api.ts";
+import { agentPath } from "../agents/nav.ts";
+import { Icon } from "../Icon.tsx";
+import { AppLink, useDismiss } from "../layout.tsx";
+import { callerName, turnLine } from "./agentLines.ts";
+import { formatElapsed, useElapsed } from "./elapsed.ts";
+import { ownerLabel } from "./Mentions.tsx";
+import { AgentSettingsPanel } from "./AgentSettings.tsx";
+import { AgentAvatar, Avatar, tintOf } from "./people.tsx";
+import { SentTime } from "./SentTime.tsx";
+import type { AgentsLive } from "./useChat.ts";
+
+/** What an agent is doing, as its badge's hover and its menu say it. */
+function agentState(agent: ChatAgentView): string {
+  if (agent.off) return "off: its owner turned it off";
+  const doing = agent.busy ? (agent.queued ? `working, ${agent.queued} more waiting` : "working") : agent.queued ? `${agent.queued} waiting` : "idle";
+  return agent.muted ? `${doing}, muted here` : doing;
+}
+
+/**
+ * Who is in the chat: its people first, each in their colour with a dot for those who have it open now; then, after a
+ * divider, pi and the chat's other agents, each with its own badge colour, a dot on the one working and a faded badge
+ * for one its owner turned off. Names, job lines and owners show on hover. Each agent opens a menu: what it does, its
+ * latest turns, its window for its owner, and Remove for the chat's owner and the agent's. Everyone's Agents button adds their own agents: a
+ * member's runs as them, from their own object. Without `bar` (a chat of the owner alone, with no agents yet) only that
+ * button shows.
+ */
+export function PeopleBar({
+  chatId,
+  people,
+  online,
+  uid,
+  piWorking,
+  agents,
+  live,
+  settings,
+  bar = true,
+  onWindow,
+}: {
+  chatId: string;
+  people: ChatPeople;
+  online: readonly Presence[];
+  uid: string;
+  piWorking: boolean;
+  agents: readonly ChatAgentView[];
+  /** The agents' live turns, for when each started as this socket heard it (useChat). */
+  live: AgentsLive;
+  /** The chat's agent settings (useChat), for the owner's panel. */
+  settings: ChatAgentSettingsView | null;
+  bar?: boolean;
+  /** Open the window on one of the viewer's own agents (AgentWindow). */
+  onWindow?: (agentId: string) => void;
+}) {
+  // Each open window is a socket; someone no longer in the chat may still show for a moment, so only people in it count.
+  const windows = new Map(online.map((presence) => [presence.uid, presence.windows]));
+  const all = everyone(people);
+  const here = all.filter((person) => windows.has(person.uid)).length;
+  const isOwner = people.owner.uid === uid;
+  const secondSeat = isSecondSeatUid(uid);
+  // One popup at a time: an agent's menu (by its id), or the viewer's list of their agents to add.
+  const [open, setOpen] = useState<string | null>(null);
+  const close = useCallback(() => setOpen(null), []);
+  const box = useDismiss<HTMLDivElement>(open !== null, close);
+  const agent = open && agents.find((view) => view.id === open);
+  return (
+    <div className="people-area" ref={box}>
+      {bar && (
+      <div className="people-bar" role="group" aria-label={`${all.length} ${all.length === 1 ? "person" : "people"}, ${here} here now; ${agents.length + 1} agents`}>
+        {all.map((person) => {
+          const count = windows.get(person.uid) ?? 0;
+          const you = person.uid === uid;
+          const state = count === 0 ? "away" : count > 1 ? `here now, in ${count} windows` : "here now";
+          return (
+            <span key={person.uid} className={count ? "person online" : "person"} title={`${person.name}${you ? " (you)" : ""}: ${state}`}>
+              <Avatar name={person.name} tint={tintOf(people, person.uid)} online={count > 0} />
+              <span className="sr-only">
+                {you ? "You" : person.name}
+                {count > 1 && <small> ×{count}</small>}
+              </span>
+            </span>
+          );
+        })}
+        <span className="people-divider" aria-hidden="true" />
+        <span className="person agent" title={`${AGENT_NAME}, the chat's assistant: ${piWorking ? "working" : "idle"}`}>
+          <AgentAvatar working={piWorking} />
+          <span className="sr-only">
+            {AGENT_NAME}
+            {piWorking && <small> working</small>}
+          </span>
+        </span>
+        {agents.map((view) => (
+          <button
+            key={view.id}
+            type="button"
+            className={view.off ? "person agent off" : "person agent"}
+            data-agent={view.id}
+            title={`@${view.name} · ${view.job} · ${ownerLabel(view, uid)} · ${agentState(view)}`}
+            aria-expanded={open === view.id}
+            onClick={() => setOpen(open === view.id ? null : view.id)}
+          >
+            <AgentAvatar badge={view} working={view.busy} off={view.off} />
+            <span className="sr-only">
+              @{view.name}, {agentState(view)}
+            </span>
+          </button>
+        ))}
+      </div>
+      )}
+      {/* The owner's second seat is a person in the chat with no agents of its own: it adds none. */}
+      {!secondSeat && (
+        <button
+          type="button"
+          className="icon-button agents-button"
+          onClick={() => setOpen(open === ADDING ? null : ADDING)}
+          aria-expanded={open === ADDING}
+          title="Agents in this chat"
+          aria-label="Agents in this chat"
+        >
+          <Icon size={16} stroke={1.8}>
+            <rect x="5" y="7" width="14" height="11" rx="3" />
+            <path d="M12 4v3M9.5 12h.01M14.5 12h.01" />
+          </Icon>
+        </button>
+      )}
+      {agent && (
+        <AgentMenu
+          key={agent.id}
+          chatId={chatId}
+          agent={agent}
+          startedAt={live[agent.id]?.turn === agent.running?.turn ? live[agent.id]?.startedAt : undefined}
+          uid={uid}
+          mayRemove={isOwner || agent.ownerUid === uid}
+          onClose={close}
+          onWindow={
+            onWindow &&
+            (() => {
+              onWindow(agent.id);
+              close();
+            })
+          }
+        />
+      )}
+      {open === ADDING && <AddAgents chatId={chatId} roster={agents} uid={uid} isOwner={isOwner} settings={settings} onClose={close} />}
+    </div>
+  );
+}
+
+/** The key of the viewer's list of agents to add, among the bar's popups. */
+const ADDING = "+agents";
+
+/** How many of an agent's latest turns its menu lists. */
+const RUNS_SHOWN = 8;
+
+/**
+ * An agent's menu, from its badge in the people bar: its job line and owner, a link to its page (for its owner, or
+ * read-only for the others when its owner shares it here), what it is doing, its latest turns (who asked, when, how
+ * long, how it ended), read when the menu opens, and for the chat's owner and the agent's, Remove.
+ */
+function AgentMenu({
+  chatId,
+  agent,
+  startedAt,
+  uid,
+  mayRemove,
+  onClose,
+  onWindow,
+}: {
+  chatId: string;
+  agent: ChatAgentView;
+  startedAt?: number;
+  uid: string;
+  mayRemove: boolean;
+  onClose: () => void;
+  /** Open its window: offered to its owner alone. */
+  onWindow?: () => void;
+}) {
+  const [turns, setTurns] = useState<AgentTurnView[] | null>(null);
+  const [error, setError] = useState<string>();
+  const [removing, setRemoving] = useState(false);
+  const title = useId();
+  // Read again when it starts or ends a turn, so the list keeps up while the menu is open.
+  const running = agent.running?.turn;
+  useEffect(() => {
+    let live = true;
+    api.chatAgents(chatId).then(
+      (all) => live && setTurns(all.turns[agent.id]?.slice(0, RUNS_SHOWN) ?? []),
+      (e: unknown) => live && setError(errorMessage(e)),
+    );
+    return () => {
+      live = false;
+    };
+  }, [chatId, agent.id, running, agent.queued]);
+  const [muting, setMuting] = useState(false);
+  // Its page: its owner's to edit; anyone else's only when its owner shares it in this chat (the server checks).
+  const mine = agent.ownerUid === uid;
+  const pagePath = mine || agent.shared ? agentPath({ id: agent.id, chat: chatId }) : undefined;
+  // Anyone in the chat may mute it; only its owner, or the chat's, may unmute it (as they may remove it).
+  const mayUnmute = mayRemove;
+  const toggleMute = async () => {
+    setMuting(true);
+    setError(undefined);
+    try {
+      await api.muteChatAgent(chatId, agent.id, !agent.muted);
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setMuting(false);
+    }
+  };
+  const remove = async () => {
+    setRemoving(true);
+    try {
+      await api.removeChatAgent(chatId, agent.id);
+      onClose();
+    } catch (e) {
+      setError(errorMessage(e));
+      setRemoving(false);
+    }
+  };
+  return (
+    <div className="agent-menu" role="dialog" aria-labelledby={title}>
+      <div className="agent-menu-head">
+        <AgentAvatar badge={agent} working={agent.busy} off={agent.off} />
+        <strong id={title}>@{agent.name}</strong>
+        <span className="owner-pill">{ownerLabel(agent, uid)}</span>
+      </div>
+      <p className="agent-menu-job">{agent.job}</p>
+      {pagePath && (
+        <AppLink path={pagePath} className="agent-menu-page">
+          {mine ? "Open its page" : "See how it is set up"}
+        </AppLink>
+      )}
+      {mine && onWindow && (
+        <button type="button" className="agent-menu-window" onClick={onWindow} title="See what it does here, and steer it as it works: only you">
+          Open its window
+        </button>
+      )}
+      <p className="agent-menu-state">
+        {/* Keyed by its turn: a new turn counts from its own start, not the one before's. */}
+        {agent.running ? <Working key={agent.running.turn} running={agent.running} startedAt={startedAt} /> : agentState(agent)}
+      </p>
+      <div className="section-head">Turns</div>
+      {turns === null && !error && <p className="agent-menu-empty">Loading…</p>}
+      {turns?.length === 0 && <p className="agent-menu-empty">No turns yet: call it with @{agent.name}.</p>}
+      {turns && turns.length > 0 && (
+        <ul className="agent-runs">
+          {turns.map((turn) => (
+            <li key={turn.id} className={`agent-run ${turn.status}`}>
+              <span>{turnLine(turn, Date.now())}</span>
+              <SentTime at={turn.endedAt ?? turn.startedAt ?? turn.createdAt} />
+            </li>
+          ))}
+        </ul>
+      )}
+      {error && <div className="chat-error">{error}</div>}
+      {(!agent.muted || mayUnmute) && (
+        <button
+          type="button"
+          onClick={toggleMute}
+          disabled={muting}
+          title={agent.muted ? "Let it speak up unasked here again" : "It posts nothing here unless someone calls it"}
+        >
+          {muting ? "…" : agent.muted ? "Unmute here" : "Mute here"}
+        </button>
+      )}
+      {mayRemove && (
+        <button type="button" className="danger" onClick={remove} disabled={removing}>
+          {removing ? "Removing…" : "Remove from this chat"}
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** How long since `at`, counting on each second. */
+export function Since({ at }: { at: number }) {
+  return <>{formatElapsed(useElapsed(at))}</>;
+}
+
+/**
+ * "Working for 12s, Ana asked", counting on from when the turn started: as the socket heard it (`startedAt`, set when
+ * the roster's view arrived), else from the view's own elapsed time.
+ */
+function Working({ running, startedAt: heard }: { running: NonNullable<ChatAgentView["running"]>; startedAt?: number }) {
+  const [fallback] = useState(() => Date.now() - running.elapsedMs);
+  const startedAt = heard ?? fallback;
+  return (
+    <>
+      Working for <Since at={startedAt} />, {running.calledBy.schedule ? "on its schedule" : `${callerName(running.calledBy)} asked`}
+    </>
+  );
+}
+
+/**
+ * The viewer's list of their agents that are on and not in the chat yet, each with Add: the agent joins the chat's
+ * roster and answers when called. Drafts the model proposed wait for their owner in the agent editor, and do not show.
+ * A member's agent works as them: others in the chat can make it use only the servers they share with chats.
+ */
+function AddAgents({
+  chatId,
+  roster,
+  uid,
+  isOwner,
+  settings,
+  onClose,
+}: {
+  chatId: string;
+  roster: readonly ChatAgentView[];
+  uid: string;
+  isOwner: boolean;
+  settings: ChatAgentSettingsView | null;
+  onClose: () => void;
+}) {
+  const [mine, setMine] = useState<AgentDefinition[] | null>(null);
+  const [error, setError] = useState<string>();
+  const [adding, setAdding] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    api.agents().then(
+      (agents) => live && setMine(agents),
+      (e: unknown) => live && setError(errorMessage(e)),
+    );
+    return () => {
+      live = false;
+    };
+  }, []);
+  const here = new Set(roster.filter((agent) => agent.ownerUid === uid).map((agent) => agent.id));
+  const addable = mine?.filter((agent) => agent.enabled && !isDraftAgent(agent) && !here.has(agent.id)) ?? [];
+  const full = roster.length >= MAX_CHAT_AGENTS;
+  const add = async (agent: AgentDefinition) => {
+    setAdding(agent.id);
+    setError(undefined);
+    try {
+      await api.addChatAgent(chatId, agent.id);
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setAdding(null);
+    }
+  };
+  return (
+    <div className="agent-menu add-agents" role="dialog" aria-label="Add agents to this chat">
+      <div className="agent-menu-head">
+        <strong>Agents</strong>
+        <button type="button" className="icon-button" onClick={onClose} aria-label="Close" title="Close">
+          ×
+        </button>
+      </div>
+      <p className="agent-menu-job">
+        {isOwner
+          ? "Agents answer when someone calls them with @name or replies to them, and work as you. Remove one from its badge in the bar."
+          : "Your agents answer when someone calls them with @name, and work as you, from your own account. When others call one, it uses only the servers you share with chats, and only reads."}
+      </p>
+      {mine === null && !error && <p className="agent-menu-empty">Loading…</p>}
+      {mine && addable.length === 0 && (
+        <p className="agent-menu-empty">{mine.length ? "All your agents that are on are in this chat." : "You have no agents yet."}</p>
+      )}
+      {addable.length > 0 && (
+        <ul className="agent-runs">
+          {addable.map((agent) => (
+            <li key={agent.id} className="agent-pick">
+              <AgentAvatar badge={agent} />
+              <span className="agent-pick-name">
+                <strong>@{agent.name}</strong>
+                <small>{agent.job}</small>
+              </span>
+              <button type="button" onClick={() => add(agent)} disabled={adding !== null || full} title={full ? `A chat holds at most ${MAX_CHAT_AGENTS} agents` : undefined}>
+                {adding === agent.id ? "Adding…" : "Add"}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {error && <div className="chat-error">{error}</div>}
+      <AgentSettingsPanel chatId={chatId} view={settings} agents={roster} />
+    </div>
+  );
+}

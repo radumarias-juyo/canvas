@@ -1,14 +1,76 @@
 import { DurableObject, exports } from "cloudflare:workers";
+import { devOn } from "./dev-model.ts";
+import { directoryUid } from "./user-uid.ts";
 import type { ModelSetting } from "../shared/models.ts";
-import { PAGE_STORAGE_LIMITS, SOCKET_PING, type ArtifactSummary, type ChatStatus, type ChatSummary, type MentionNotice, type SidebarList } from "../shared/protocol.ts";
-import type { ExportedChat, ExportedPageValues, ExportedSkill, ExportStart, ImportedSettings } from "../shared/data-export.ts";
+import { PAGE_STORAGE_LIMITS, SOCKET_PING, MAX_CHAT_TITLE, type ArtifactSummary, type ChatStatus, type ChatSummary, type ChatRowChange, type MentionNotice, type Person, type RunsNotice, type SidebarList } from "../shared/protocol.ts";
+import type { ExportedAgent, ExportedChat, ExportedPageValues, ExportedSkill, ExportStart, ImportedSettings } from "../shared/data-export.ts";
 import type { SkillFileInfo } from "../shared/skill-files.ts";
 import { checkSystemPrompt, type ChatSystemPrompt } from "../shared/system-prompt.ts";
+import { checkPiSettings, type PiSettings } from "../shared/pi-settings.ts";
 import { checkSkill, MAX_SKILL_PROPOSALS, MAX_USER_SKILLS, SkillError, type SavedSkillOrigin, type SkillInfo, type SkillInput, type SkillResult } from "../shared/skills.ts";
 import { BUILTIN_SKILLS, builtinSkill, parseSkillFile } from "./skills/index.ts";
 import { titleFromMessage, UNNAMED_CHAT } from "./agent/title.ts";
-import { applyAuthChange, type McpAuthChange, type McpAuthRecord, type McpAuthStore } from "./mcp/oauth.ts";
+import type { McpAuthChange, McpAuthRecord, McpAuthStore } from "./mcp/oauth.ts";
+import type { SignInCheck } from "./mcp/background.ts";
+import { McpSignIns, type SignInNeededContext } from "./mcp/sign-ins.ts";
+import { oauthServerNames } from "./mcp/servers.ts";
+import { chatAgentName } from "./chat-name.ts";
+import { PushSubscriptions, vapidKeys, type PushMessage } from "./push/subscriptions.ts";
+import type { PushSubscriptionKeys } from "./push/web-push.ts";
+import { mcpTokensKey } from "./storage/index.ts";
+import type { McpSignInView, SignInNotice } from "../shared/sign-ins.ts";
+import { AgentStore, type AgentSave } from "./agents/store.ts";
+import { LimitsDirectory, type CallEntry } from "./agents/limits/directory.ts";
+import { approvalAsk, approvalFeed, approvalRef } from "./agents/limits/feed.ts";
+import { actorName, LIMIT_FIELDS, type CallLogView, type GuardrailRule, type PendingActionView } from "../shared/limits.ts";
+import { UserMemory, type Learned, type LearnedNote } from "./memory/memory.ts";
+import { SignalStore } from "./memory/signals.ts";
+import { completeDream } from "./dream-model.ts";
+import { UserDreams, type DreamExcerpt, type DreamSettings, type DreamsView } from "./memory/user-dreams.ts";
+import type { DreamRecord } from "../shared/dream.ts";
+import type { Forgot, MemoryNote, MemoryNoteView, MemoryReader, MemoryWriter, Recalled, ServerCoverage } from "../shared/memory.ts";
+import { ChatRows } from "./chat-rows.ts";
+import { addColumns } from "./members.ts";
+import { mayLeave, type ChatKind, type ChatRef } from "../shared/chat-kinds.ts";
+import { keepsSignals, type AgentSignal } from "../shared/signals.ts";
+import {
+  agentFrom,
+  NEEDS_YOU,
+  runFeedRef,
+  type FeedActionEnd,
+  type FeedInput,
+  type FeedList,
+  type FollowKind,
+  type FollowView,
+} from "../shared/feed.ts";
+import {
+  aboutOf,
+  FAN_OUT,
+  fanOut,
+  FeedStore,
+  FollowStore,
+  postsReachFollowers,
+  runItem,
+  type FeedAdded,
+  type Follower,
+  type FollowRecord,
+  type RunEnded,
+} from "./feed/store.ts";
 import { mcpServers } from "./mcp/servers.ts";
+import {
+  withoutSignInShares,
+  type AgentChanges,
+  type AgentChatUse,
+  type AgentDefinition,
+  type AgentInput,
+  type AgentOrigin,
+  type AgentResult,
+} from "../shared/agents.ts";
+import { excerpt } from "../shared/replies.ts";
+import { errorMessage, isObject, mapLimit, memoAsync, randomHex } from "../shared/util.ts";
+
+/** Where a user's directory keeps what the MCP servers cover (ServerCoverage[]). */
+const COVERAGE_KEY = "serverCoverage";
 
 /** One user's OAuth state for one MCP server. `uid` must come from a verified identity. */
 export function mcpAuthStore(uid: string, server: string): McpAuthStore {
@@ -18,6 +80,8 @@ export function mcpAuthStore(uid: string, server: string): McpAuthStore {
 
 /** Where a user's, or a chat's, own system prompt is kept, in its object's KV storage. */
 export const SYSTEM_PROMPT_KEY = "systemPrompt";
+/** Where pi's settings are kept (shared/pi-settings.ts). Not in an export: an import never widens what pi reads for others. */
+const PI_SETTINGS_KEY = "piSettings";
 
 /** The system prompt kept under SYSTEM_PROMPT_KEY in `kv`; "" for none. */
 export function readSystemPrompt(kv: SyncKvStorage): string {
@@ -33,8 +97,15 @@ export function saveSystemPrompt(kv: SyncKvStorage, value: unknown): { text: str
   return checked;
 }
 
-/** A message that tagged this user: who wrote it, its start, and when. */
-export type Tag = Pick<MentionNotice, "from" | "text" | "at">;
+/** A message that tagged this user: who wrote it, its start, and when; or (`added`) the owner adding them to the chat. */
+export type Tag = Pick<MentionNotice, "from" | "text" | "at" | "added"> & {
+  /** What tagged them in the chat (a message's key, a post's request id): the same one placed again is one feed item. */
+  key: string;
+  /** The chat's kind as the chat itself has it now: the feed checks it beside this sidebar's row, which can lag. */
+  kind: ChatKind;
+  /** A run's report, which its owner's feed has as the run's item (runEnded): the tag notifies, and adds no item. */
+  run?: true;
+};
 
 type ArtifactRow = { id: string; title: string; chat_id: string; latest: number; updated_at: number; seen: number };
 
@@ -56,66 +127,555 @@ export interface SkillPackageFiles {
   list: SkillFileInfo[];
 }
 
+/** An agent as an export carries it: its fields, its state and its id, without its version or times. */
+function exportedAgent({ version: _version, createdAt: _created, updatedAt: _updated, ...agent }: AgentDefinition): ExportedAgent {
+  return agent;
+}
+
 /**
  * One per user: the index of their chats, the chats others shared with them, their artifacts, skills and model.
  * The chats themselves live in ChatAgent objects, which decide who may open them.
  */
 export class UserDirectory extends DurableObject<Env> {
+  /** The user's agents (worker/agents/store.ts). */
+  readonly #agents: AgentStore;
+  /** The user's sign-ins to servers that sign in each user (worker/mcp/sign-ins.ts). */
+  readonly #signIns: McpSignIns;
+  /** The browsers the user turned notifications on in (worker/push/subscriptions.ts). */
+  readonly #push: PushSubscriptions;
+  /** Their rules for all agents, the log of calls that change data, and the actions waiting for them (worker/agents/limits/). */
+  readonly #limits: LimitsDirectory;
+  /** The user's memory notes (worker/memory/). */
+  readonly #memory: UserMemory;
+  /** How people worked with this user's agents, in every chat they are in (shared/signals.ts). */
+  readonly #signals: SignalStore;
+  /** pi's and the agents' nightly dreams (worker/memory/user-dreams.ts). */
+  readonly #dreams: UserDreams;
+  /** When the sign-ins want the alarm (McpSignIns), kept: the alarm is shared with the dreams (#setAlarm). */
+  #signInsAlarm: number | null = null;
+  /** What of each sidebar row is this user's alone (pinned, closed, their name for it), chats' kinds, page chats, people (worker/chat-rows.ts). */
+  readonly #rows: ChatRows;
+  /** What came in for this user across their chats, pages and agents (worker/feed/store.ts). */
+  readonly #feed: FeedStore;
+  /** What this user follows, and who follows their pages and agents. */
+  readonly #follows: FollowStore;
+  /**
+   * The user this directory is: its name, or, for an object woken without it (its alarm), the name it kept when it last
+   * had it. Undefined only for a directory that never had its name, which no request makes.
+   */
+  readonly #uid: string | undefined;
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+    // The uid names the key that opens this user's sign-ins, and every place their chats, follows and feed are found. An
+    // object woken only by its alarm may not know its name, so it is kept: a wrong key would make every record look
+    // unreadable, and be forgotten.
+    this.#uid = directoryUid(ctx.id.name, ctx.storage.kv);
+    this.#agents = new AgentStore(ctx.storage.sql);
+    this.#push = new PushSubscriptions(ctx.storage.sql);
+    this.#limits = new LimitsDirectory(ctx.storage.sql, ctx.storage.kv);
     ctx.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS chats (id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS artifacts (id TEXT PRIMARY KEY, title TEXT NOT NULL, chat_id TEXT NOT NULL, latest INTEGER NOT NULL, updated_at INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS mcp_auth (server TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS skills (name TEXT PRIMARY KEY, description TEXT NOT NULL, instructions TEXT NOT NULL, tools TEXT NOT NULL, origin TEXT NOT NULL, enabled INTEGER NOT NULL, updated_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS builtin_skills_off (name TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS shared_chats (id TEXT PRIMARY KEY, owner_uid TEXT NOT NULL, owner_name TEXT NOT NULL, title TEXT NOT NULL, joined_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS page_values (artifact_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT, updated_at INTEGER NOT NULL, PRIMARY KEY (artifact_id, key));
       CREATE TABLE IF NOT EXISTS page_ai_spend (day TEXT PRIMARY KEY, calls INTEGER NOT NULL, input INTEGER NOT NULL, output INTEGER NOT NULL, cost REAL NOT NULL);
       CREATE TABLE IF NOT EXISTS dictation_use (day TEXT PRIMARY KEY, clips INTEGER NOT NULL, seconds REAL NOT NULL);
+      CREATE TABLE IF NOT EXISTS model_spend (day TEXT PRIMARY KEY, calls INTEGER NOT NULL, tokens INTEGER NOT NULL, cost REAL NOT NULL);
     `);
     // Added later: what the chat's agent is doing (ChatStatus), when something last came in that this user did not
     // write, and when they last saw the chat. activity_at > seen_at is unread. Then: when someone last tagged them in
     // it; mentioned_at > seen_at is a tag they have not seen.
-    for (const table of ["chats", "shared_chats"]) {
-      this.#addColumn(table, "status", "TEXT");
-      this.#addColumn(table, "activity_at", "INTEGER NOT NULL DEFAULT 0");
-      this.#addColumn(table, "seen_at", "INTEGER NOT NULL DEFAULT 0");
-      this.#addColumn(table, "mentioned_at", "INTEGER NOT NULL DEFAULT 0");
-    }
-    // Whether this user's own chat has members: the chat tells (setChatShared) when that changes, and when it opens.
-    this.#addColumn("chats", "shared", "INTEGER NOT NULL DEFAULT 0");
+    const sql = ctx.storage.sql;
+    const read = { status: "TEXT", activity_at: "INTEGER NOT NULL DEFAULT 0", seen_at: "INTEGER NOT NULL DEFAULT 0", mentioned_at: "INTEGER NOT NULL DEFAULT 0" };
+    // With, in the user's own chats, whether the chat has members: it tells (setChatShared) when that changes, and when it opens.
+    addColumns(sql, "chats", { ...read, shared: "INTEGER NOT NULL DEFAULT 0" });
+    addColumns(sql, "shared_chats", read);
+    this.#rows = new ChatRows(ctx.storage.sql);
+    this.#memory = new UserMemory(ctx.storage.sql, {
+      // Only the user's own chats keep notes: one shared with them is its owner's.
+      chatKind: (id) => (this.hasChat(id) ? this.#rows.kindOf(id) : null),
+      chatTitles: () => this.#rows.ownTitles(),
+      agentNames: () => this.#agents.names(),
+      changed: () => {
+        this.#changed("memory");
+        this.#dreams?.notesChanged();
+      },
+    });
+    this.#signals = new SignalStore(ctx.storage.sql);
+    this.#dreams = new UserDreams({
+      sql: ctx.storage.sql,
+      kv: ctx.storage.kv,
+      memory: this.#memory.store,
+      signals: this.#signals,
+      agents: () => this.#agents.list(),
+      excerpt: (chat, subject, from, to) => this.#dreamExcerpt(chat, subject, from, to),
+      overBudget: async () => {
+        const cap = Number(env.RUNS_DAILY_USD);
+        const { costUsd } = this.modelSpentToday();
+        if (!Number.isFinite(cap) || cap <= 0 || costUsd < cap) return undefined;
+        return `Today's model calls cost $${costUsd.toFixed(2)}, past the daily cap of $${cap.toFixed(2)}.`;
+      },
+      complete: (agent, system, prompt) => completeDream(env, agent ? agent.model : (this.modelChoice()?.model ?? undefined), system, prompt),
+      spent: ({ tokens, costUsd }) => this.recordModelSpend({ calls: 1, tokens, cost: costUsd }),
+      unopenedReports: (agentId, from, to) => this.#feed.unreadBy(aboutOf("agent", agentId, this.#me), "run", from, to),
+      changed: () => this.#changed("memory"),
+      armed: () => this.#setAlarm(),
+      addFeed: (input) => void this.addFeed(input),
+      resolveFeed: (ref) => this.resolveFeed(ref),
+    });
+    this.#feed = new FeedStore(ctx.storage.sql);
+    this.#follows = new FollowStore(ctx.storage.sql);
     // The files of a skill imported as a package (SkillPackageFiles as JSON).
-    this.#addColumn("skills", "files", "TEXT");
+    addColumns(sql, "skills", { files: "TEXT" });
     // The newest version of each artifact its owner opened. Artifacts from before count as seen.
-    if (this.#addColumn("artifacts", "seen", "INTEGER NOT NULL DEFAULT 0")) ctx.storage.sql.exec("UPDATE artifacts SET seen = latest");
+    if (addColumns(sql, "artifacts", { seen: "INTEGER NOT NULL DEFAULT 0" }).length) sql.exec("UPDATE artifacts SET seen = latest");
     // A sidebar's socket stays open for hours: answer its keep-alive pings without waking this object.
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair(SOCKET_PING.request, SOCKET_PING.response));
-    // Forget sign-ins to servers this deployment no longer has, tokens included.
-    const configured = mcpServers(env).map((server) => server.name);
-    const placeholders = configured.map(() => "?").join(", ");
-    ctx.storage.sql.exec(`DELETE FROM mcp_auth${configured.length ? ` WHERE server NOT IN (${placeholders})` : ""}`, ...configured);
+    const uid = this.#uid;
+    this.#signIns = new McpSignIns({
+      sql: ctx.storage.sql,
+      env,
+      key: memoAsync(async () => {
+        if (!uid) throw new Error("This directory does not know its user.");
+        return mcpTokensKey(env, uid);
+      }),
+      changed: () => this.#changed("sign-ins"),
+      notify: async (notice, message) => {
+        this.#changed(notice);
+        await this.push(message);
+      },
+      signedIn: async (chatId, server) => {
+        if (uid) await exports.ChatAgent.getByName(chatAgentName(uid, chatId)).signedIn(server);
+      },
+      setAlarm: (at) => {
+        this.#signInsAlarm = at;
+        ctx.storage.kv.put("alarm.signIns", at);
+        this.#setAlarm();
+      },
+    });
+    const kept = ctx.storage.kv.get<number | null>("alarm.signIns");
+    this.#signInsAlarm = kept ?? null;
+    // A directory from before the dreams shared the alarm: the one set is the sign-ins', kept so a dream's never moves it.
+    if (kept === undefined) {
+      void ctx.blockConcurrencyWhile(async () => {
+        this.#signInsAlarm = await ctx.storage.getAlarm();
+        ctx.storage.kv.put("alarm.signIns", this.#signInsAlarm);
+      });
+    }
   }
 
-  /** Add a column a table made before it lacks; true when it was added. `table`, `column` and `type` are written here, never input. */
-  #addColumn(table: string, column: string, type: string): boolean {
-    const columns = this.ctx.storage.sql.exec<{ name: string }>(`SELECT name FROM pragma_table_info('${table}')`).toArray();
-    if (columns.some((row) => row.name === column)) return false;
-    this.ctx.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
-    return true;
-  }
 
   /** This user's OAuth state for one MCP server (worker/mcp/oauth.ts): registration, tokens, a sign-in in progress. */
-  mcpAuth(server: string): McpAuthRecord {
-    const row = this.ctx.storage.sql.exec<{ data: string }>("SELECT data FROM mcp_auth WHERE server = ?", server).toArray()[0];
-    return row ? (JSON.parse(row.data) as McpAuthRecord) : {};
+  mcpAuth(server: string): Promise<McpAuthRecord> {
+    return this.#signIns.record(server);
   }
 
-  /** Read, change and write in one step: this object runs one call at a time, and nothing here awaits. */
-  updateMcpAuth(server: string, change: McpAuthChange): void {
-    const record = applyAuthChange(this.mcpAuth(server), change);
-    if (Object.keys(record).length === 0) this.ctx.storage.sql.exec("DELETE FROM mcp_auth WHERE server = ?", server);
-    else this.ctx.storage.sql.exec("INSERT INTO mcp_auth (server, data) VALUES (?, ?) ON CONFLICT(server) DO UPDATE SET data = excluded.data", server, JSON.stringify(record));
+  /** Read, change and write in one step: McpSignIns runs one record change at a time. */
+  updateMcpAuth(server: string, change: McpAuthChange): Promise<void> {
+    return this.#signIns.update(server, change);
+  }
+
+  /** The account menu's list of sign-ins: each server that signs in each user, with when (no tokens). */
+  mcpSignIns(): McpSignInView[] {
+    return this.#signIns.list();
+  }
+
+  /** Remove the stored sign-in to `server`, tokens and registration. */
+  async disconnectMcp(server: string): Promise<McpSignInView[]> {
+    await this.#signIns.disconnect(server);
+    return this.#signIns.list();
+  }
+
+  dismissSignInNotice(server: string): McpSignInView[] {
+    this.#signIns.dismiss(server);
+    return this.#signIns.list();
+  }
+
+  /**
+   * For scheduled runs (worker/agents/runs): the servers one chat's runs use, kept refreshed daily and warned about
+   * before their grant ends. Replaces that chat's list; empty clears it.
+   */
+  setRunServers(chatId: string, servers: readonly string[], stepReads?: readonly string[]): void {
+    this.#signIns.setRunServers(chatId, servers, stepReads);
+  }
+
+  /** Before a run: whether each server's sign-in works with nobody present (refreshed now). See McpSignIns.check. */
+  checkSignIns(servers: readonly string[]): Promise<Record<string, SignInCheck>> {
+    return this.#signIns.check(servers);
+  }
+
+  /**
+   * A run needs a new sign-in to `server`: a notice with the sign-in link in the sidebar, the browser, and a push when no
+   * app is open, once until they sign in. With `chatId`, that chat hears `ChatAgent.signedIn(server)` when they do.
+   */
+  notifySignInNeeded(server: string, context: SignInNeededContext = {}): Promise<void> {
+    return this.#signIns.needed(server, context);
+  }
+
+  /** The sign-in callback finished for `server` (worker/mcp-routes.ts). */
+  onSignedIn(server: string): Promise<void> {
+    return this.#signIns.onSignedIn(server);
+  }
+
+  /** The servers this user has signed in to, now or before a refused refresh (not Disconnected), by name. */
+  mcpSignInRecords(): string[] {
+    return this.#signIns.known().sort();
+  }
+
+  /** The servers this user has signed in to (tokens kept), by name: never the tokens. */
+  mcpSignedIn(): string[] {
+    return this.#signIns
+      .list()
+      .filter((item) => item.signedIn)
+      .map((item) => item.server)
+      .sort();
+  }
+
+  /**
+   * Warnings before sign-ins end, and the daily keep-alive refresh of the ones runs use (McpSignIns.alarm); and the
+   * nightly dreams when they are due. One alarm for both, set again after (#setAlarm).
+   */
+  async alarm(): Promise<void> {
+    try {
+      await this.#signIns.alarm();
+    } finally {
+      try {
+        await this.#dreams.alarm();
+      } finally {
+        this.#setAlarm();
+      }
+    }
+  }
+
+  /** The one alarm, at the sooner of what the sign-ins want and when the dreams are due; none when neither wants one. */
+  #setAlarm(): void {
+    const times = [this.#signInsAlarm, this.#dreams?.due() ?? null].filter((at): at is number => at !== null);
+    void (times.length ? this.ctx.storage.setAlarm(Math.min(...times)) : this.ctx.storage.deleteAlarm());
+  }
+
+  /** The user this directory is (#uid); throws for one that never had its name, rather than use another's. */
+  get #me(): string {
+    if (!this.#uid) throw new Error("This directory does not know its user.");
+    return this.#uid;
+  }
+
+  /**
+   * What chat `chat` gives a dream of `subject`'s day there (ChatAgent.dreamLines): read as this user, a person in it.
+   * A chat whose owner is unknown (an agent's home with only unopened reports) is this user's own.
+   */
+  async #dreamExcerpt(chat: { chatId: string; chatOwner: string }, subject: string, from: number, to: number): Promise<DreamExcerpt | null> {
+    const uid = this.#me;
+    const owner = chat.chatOwner || uid;
+    // Off the record as this user's row says, whatever the chat says: nothing is read.
+    const row = this.#rows.kindOf(chat.chatId);
+    if (row && !keepsSignals(row)) return { off: true };
+    return exports.ChatAgent.getByName(chatAgentName(owner, chat.chatId)).dreamLines(uid, subject, from, to);
+  }
+
+  /** pi's and the agents' dreams: the settings, the latest ones, when the next is due. */
+  dreams(): DreamsView {
+    return this.#dreams.view();
+  }
+
+  setDreamSettings(input: unknown): DreamSettings | { error: string } {
+    const set = this.#dreams.setSettings(input);
+    if (!("error" in set)) this.#changed("memory");
+    return set;
+  }
+
+  /** The owner's "Dream now" for pi ("pi") or one of their agents. */
+  async dreamNow(subject: string, scripted?: string): Promise<DreamRecord | { error: string; retryAt?: number }> {
+    // A scripted answer only in local development (POST /api/dev/dream, devOn): the e2e suite's stand-in for the model.
+    const script = devOn(this.env) ? scripted : undefined;
+    const done = await this.#dreams.dreamNow(subject === "pi" ? { kind: "pi" } : { kind: "agent", agentId: subject }, script);
+    if (!("error" in done)) this.#changed("memory");
+    return done;
+  }
+
+  addPushSubscription(sub: PushSubscriptionKeys): void {
+    this.#push.add(sub);
+  }
+
+  removePushSubscription(endpoint: string): void {
+    this.#push.remove(endpoint);
+  }
+
+  /**
+   * Push a notification to every browser this user turned notifications on in, for when the app is closed: only when
+   * none of their apps is open (an open one hears it on its socket and shows it itself). `body` says only that something
+   * arrived, never data. Nothing happens without the VAPID secrets.
+   */
+  async push(message: PushMessage): Promise<void> {
+    if (this.ctx.getWebSockets().length === 0) await this.#push.push(message, vapidKeys(this.env));
+  }
+
+  /**
+   * Keep an item in this user's feed (worker/feed/store.ts), and tell their open apps; with no app open, push that
+   * something arrived when it is worth a push (it needs them, or comes from something they follow). With `follow`, it
+   * comes from a page or agent this user follows (with its `title` now): false when they no longer follow it, so its
+   * owner forgets them. An item from an off-the-record chat is refused here, whoever sends it.
+   */
+  addFeed(input: FeedInput, follow?: { kind: FollowKind; id: string; ownerUid: string; title?: string }): boolean {
+    return this.#addFeed(input, follow) !== null;
+  }
+
+  /** What `addFeed` did with it, or null when they no longer follow what it is from. */
+  #addFeed(input: FeedInput, follow?: { kind: FollowKind; id: string; ownerUid: string; title?: string }): FeedAdded | null {
+    const followed = follow ? this.#follows.get(follow.kind, follow.id, follow.ownerUid) : null;
+    if (follow && !followed) return null;
+    if (follow?.title && this.#follows.retitle(follow.kind, follow.id, follow.ownerUid, follow.title)) this.#changed("follows");
+    // An agent opens for a follower only from the chat that shares it with them: the one they followed it from.
+    if (follow?.kind === "agent" && input.open.to === "agent" && !input.open.chatId) {
+      if (followed?.chatId) input = { ...input, open: { ...input.open, chatId: followed.chatId } };
+    }
+    const known = input.chat ? this.#rows.kindOf(input.chat.id) : null;
+    // What it is about goes with it: a page or agent unfollowed or gone, or one of this user's agents deleted.
+    const about = follow ? aboutOf(follow.kind, follow.id, follow.ownerUid) : input.aboutAgent && aboutOf("agent", input.aboutAgent, this.#me);
+    const added = this.#feed.add(input, known, about);
+    if (added === "same" || added === "refused") return added;
+    this.#changed("feed");
+    // A tag pushes on its own (#touch), a run waiting for a sign-in did already (McpSignIns.needed), and so does an
+    // approval (addNeedsYou, naming who asks).
+    if (!input.quiet && input.kind !== "approval" && (follow || NEEDS_YOU[input.kind])) {
+      this.ctx.waitUntil(this.push({ title: "New in your feed", body: "Something new arrived in your feed.", url: "/feed", tag: `feed:${input.kind}` }));
+    }
+    return added;
+  }
+
+  /** This user's feed: the newest items, the unread ones or those needing them when asked, and the counts. */
+  feed(filter: { unread?: boolean; needsYou?: boolean }): FeedList {
+    this.#dropExpiredNeedsYou();
+    return this.#feed.list(filter);
+  }
+
+  feedCounts(): Pick<FeedList, "unread" | "needsYou"> {
+    this.#dropExpiredNeedsYou();
+    return this.#feed.counts();
+  }
+
+  /** Approvals whose time is past though their chat never said they ended: their feed items wait no more either. */
+  #dropExpiredNeedsYou(): void {
+    for (const { chatId, id } of this.#limits.dropExpired()) this.#endApproval(chatId, id, { status: "expired" });
+  }
+
+  /**
+   * What `ref` asked of this user is done: an approval decided or expired (T6), an agent's guesses confirmed. The item
+   * no longer waits on them, and is read.
+   */
+  resolveFeed(ref: string): void {
+    if (this.#feed.resolve(ref)) this.#changed("feed");
+  }
+
+  /** Mark feed items read (or unread again): by id, or all. */
+  markFeed(ids: readonly number[] | "all", read: boolean): Pick<FeedList, "unread" | "needsYou"> {
+    if (this.#feed.mark(ids, read)) this.#changed("feed");
+    return this.#feed.counts();
+  }
+
+  /** What this user follows, newest first. */
+  listFollows(): FollowView[] {
+    return this.#follows.list();
+  }
+
+  /**
+   * Follow someone else's page or agent (the Worker checked this user may open it). This side is written first, then
+   * its owner's (addFollower): a post fanned out in between finds them followed here and is kept. Refused by the owner
+   * (too many followers), this side is taken back. Returns what this user follows now.
+   */
+  async follow(record: Omit<FollowRecord, "at">): Promise<FollowView[] | { error: string }> {
+    const had = this.#follows.get(record.kind, record.id, record.ownerUid);
+    const result = this.#follows.follow(record);
+    if ("error" in result) return result;
+    const via = record.chatOwner && record.chatId ? { ownerUid: record.chatOwner, chatId: record.chatId } : undefined;
+    const counted = await exports.UserDirectory.getByName(record.ownerUid)
+      .addFollower(record.kind, record.id, { uid: this.#me, ...(via && { via }) })
+      .catch((error: unknown) => ({ error: errorMessage(error) }));
+    if ("error" in counted) {
+      if (had) this.#follows.follow(had);
+      else this.#follows.unfollow(record.kind, record.id, record.ownerUid);
+      return counted;
+    }
+    this.#changed("follows");
+    return this.#follows.list();
+  }
+
+  /**
+   * Stop following what the app names (a page by id, an agent by id and whose it is): its owner forgets this user, and
+   * its items leave the feed. Returns what this user follows now.
+   */
+  async unfollow(kind: FollowKind, id: string, ownerUid?: string): Promise<FollowView[]> {
+    const had = kind === "page" ? this.#follows.findPage(id) : ownerUid ? this.#follows.get(kind, id, ownerUid) : null;
+    if (had) {
+      this.#dropFollow(had);
+      // Not told, the owner forgets them at its next post (addFeed answers false): the follow is gone here either way.
+      await exports.UserDirectory.getByName(had.ownerUid)
+        .removeFollower(kind, id, this.#me)
+        .catch((error: unknown) => console.error("feed:", errorMessage(error)));
+    }
+    return this.#follows.list();
+  }
+
+  /** `ownerUid`'s page or agent this user follows is gone, or they may no longer open it: the follow and its items go. */
+  followGone(kind: FollowKind, id: string, ownerUid: string): void {
+    const had = this.#follows.get(kind, id, ownerUid);
+    if (had) this.#dropFollow(had);
+  }
+
+  /** Drop follows here, with their items; the open apps hear of it once. */
+  #dropFollow(...follows: FollowRecord[]): void {
+    let items = 0;
+    for (const follow of follows) {
+      this.#follows.unfollow(follow.kind, follow.id, follow.ownerUid);
+      items += this.#feed.forgetAbout(aboutOf(follow.kind, follow.id, follow.ownerUid));
+    }
+    if (items) this.#changed("feed");
+    this.#changed("follows");
+  }
+
+  /** This user left `chatOwner`'s chat `chatId`: what they followed through it (agents shared there) they follow no more. */
+  #leftChat(chatOwner: string, chatId: string): void {
+    const gone = this.#follows.through(chatOwner, chatId);
+    if (!gone.length) return;
+    this.#dropFollow(...gone);
+    const uid = this.#me;
+    this.ctx.waitUntil(
+      mapLimit(gone, FAN_OUT, (follow) => exports.UserDirectory.getByName(follow.ownerUid).removeFollower(follow.kind, follow.id, uid)).catch(
+        (error: unknown) => console.error("feed:", errorMessage(error)),
+      ),
+    );
+  }
+
+  /** Someone follows one of this user's pages or agents (the Worker checked they may open it). */
+  addFollower(kind: FollowKind, id: string, follower: Follower): { ok: true } | { error: string } {
+    return this.#follows.addFollower(kind, id, follower);
+  }
+
+  removeFollower(kind: FollowKind, id: string, uid: string): void {
+    this.#follows.removeFollower(kind, id, uid);
+  }
+
+  /**
+   * Hand `input` to every follower of this user's page or agent, off the caller's path. A follower who no longer
+   * follows it is forgotten. An agent's followers are checked first in the chat each followed it from: only those
+   * still in it, while it is still shared there, get it (ChatAgent.followersIn).
+   */
+  #fanOut(kind: FollowKind, id: string, input: FeedInput, title?: string): void {
+    const followers = this.#follows.followersOf(kind, id);
+    if (!followers.length) return;
+    const owner = this.#me;
+    const sent = fanOut(kind, followers, {
+      stillIn: (via, uids) => exports.ChatAgent.getByName(chatAgentName(via.ownerUid, via.chatId)).followersIn(id, owner, uids),
+      deliver: (uid) => exports.UserDirectory.getByName(uid).addFeed(input, { kind, id, ownerUid: owner, ...(title && { title }) }),
+      forget: (uid) => this.#follows.removeFollower(kind, id, uid),
+      lost: (uid) => {
+        this.#follows.removeFollower(kind, id, uid);
+        this.ctx.waitUntil(exports.UserDirectory.getByName(uid).followGone(kind, id, owner).catch((error: unknown) => console.error("feed:", errorMessage(error))));
+      },
+    });
+    this.ctx.waitUntil(sent.catch((error: unknown) => console.error("feed fan-out:", errorMessage(error))));
+  }
+
+  /**
+   * One of this user's agents left `chatOwner`'s chat `chatId`: whoever follows it through that chat may no longer open
+   * it, so they follow it no more (each told now, rather than at its next post). Its followers through other chats stay.
+   */
+  agentLeftChat(agentId: string, chatOwner: string, chatId: string): void {
+    const owner = this.#me;
+    const uids = this.#follows.dropFollowersThrough("agent", agentId, chatOwner, chatId);
+    if (!uids.length) return;
+    this.ctx.waitUntil(
+      mapLimit(uids, FAN_OUT, (uid) => exports.UserDirectory.getByName(uid).followGone("agent", agentId, owner)).catch((error: unknown) =>
+        console.error("feed:", errorMessage(error)),
+      ),
+    );
+  }
+
+  /**
+   * Some of the pages this user published from their chat `chatId` are gone (a member's agent's seat cleaned up what it
+   * never posted): out of the lists, the values viewers saved on them, and whoever followed them stops.
+   */
+  forgetArtifacts(chatId: string, ids: readonly string[]): void {
+    const mine = new Set(this.chatArtifactIds(chatId));
+    const gone = ids.filter((id) => mine.has(id));
+    if (!gone.length) return;
+    for (const id of gone) {
+      this.ctx.storage.sql.exec("DELETE FROM page_values WHERE artifact_id = ?", id);
+      this.#targetGone("page", id);
+      this.ctx.storage.sql.exec("DELETE FROM artifacts WHERE id = ? AND chat_id = ?", id, chatId);
+    }
+    this.#changed("artifacts");
+  }
+
+  /** One of this user's pages or agents is gone: its followers stop following it. */
+  #targetGone(kind: FollowKind, id: string): void {
+    const owner = this.#me;
+    const uids = this.#follows.dropTarget(kind, id);
+    if (!uids.length) return;
+    this.ctx.waitUntil(
+      mapLimit(uids, FAN_OUT, (uid) => exports.UserDirectory.getByName(uid).followGone(kind, id, owner)).catch((error: unknown) =>
+        console.error("feed:", errorMessage(error)),
+      ),
+    );
+  }
+
+  /** A run of one of this user's agents that waited for a sign-in went on: its feed item waits for them no more. */
+  runResumed(agentId: string, dueAt: number): void {
+    this.resolveFeed(runFeedRef(agentId, dueAt));
+  }
+
+  /**
+   * A run of one of this user's agents ended (its home chat tells it, not for a test): an item in their feed, a quiet
+   * one when it had nothing to report; and when it posted a report, the agent's followers get the post, if nothing it
+   * may read is kept from them (postsReachFollowers) and its chat is not off the record.
+   */
+  runEnded(run: RunEnded): void {
+    const agent = this.#agents.get(run.agentId);
+    if (!agent) return;
+    const from = agentFrom(agent);
+    // A chat reaches the feed as it says and as this user's row says (when it has one).
+    const reaches = (chat: ChatRef) => {
+      const row = this.#rows.kindOf(chat.id);
+      return mayLeave({ what: "feed" }, chat.kind, ...(row ? [row] : []));
+    };
+    const made = runItem(agent, run, reaches, Date.now());
+    if (!made) return;
+    this.addFeed(made.item);
+    if (!made.postShown) return;
+    // Followers are other people: neither the home chat nor the one the report is shown from may be off the record,
+    // and a chat this user does not list (no row) lets nothing out to them.
+    const shown = run.postedIn ?? { id: run.chatId, kind: run.chatKind };
+    if (!mayLeave({ what: "feed" }, run.chatKind, this.#rows.kindOf(run.chatId), shown.kind, this.#rows.kindOf(shown.id))) return;
+    const signIn = new Set(oauthServerNames(this.env));
+    const all = mcpServers(this.env).map((server) => server.name);
+    if (!postsReachFollowers(agent, all, (server) => signIn.has(server))) return;
+    this.#fanOut("agent", agent.id, {
+      kind: "agent_post",
+      ref: `post:${this.#me}:${agent.id}:${run.dueAt}`,
+      at: Date.now(),
+      title: `@${agent.name} posted`,
+      text: run.post,
+      from,
+      open: { to: "agent", agentId: agent.id },
+    });
+  }
+
+  /**
+   * Chat `chatId` of this user's now discusses their page `artifactId` (made from its page with Discuss): the page's
+   * followers may join it. Only while it is "on a page": a chat changed to another kind takes nobody in by the page.
+   */
+  pageChatStarted(artifactId: string, chatId: string, pageTitle: string): void {
+    const kind = this.#rows.kindOf(chatId);
+    if (kind !== "page") return;
+    this.#fanOut("page", artifactId, {
+      kind: "page_chat",
+      ref: `page-chat:${artifactId}:${chatId}`,
+      at: Date.now(),
+      title: `${pageTitle} has a chat you can join`,
+      open: { to: "discuss", artifactId },
+    });
   }
 
   /**
@@ -144,7 +704,7 @@ export class UserDirectory extends DurableObject<Env> {
   }
 
   /** Tell the open sidebars that a list changed, or that someone tagged this user. */
-  #changed(message: SidebarList | MentionNotice): void {
+  #changed(message: SidebarList | MentionNotice | RunsNotice | SignInNotice): void {
     const sent = typeof message === "string" ? message : JSON.stringify(message);
     for (const ws of this.ctx.getWebSockets()) {
       try {
@@ -157,33 +717,130 @@ export class UserDirectory extends DurableObject<Env> {
 
   /** The user's own chats and the ones shared with them, most recent first. */
   listChats(): ChatSummary[] {
-    return this.ctx.storage.sql
-      .exec<{
-        id: string;
-        title: string;
-        created_at: number;
-        updated_at: number;
-        shared_by: string | null;
-        shared: number;
-        status: ChatStatus;
-        unread: number;
-        mentioned: number;
-      }>(
-        `SELECT id, title, created_at, updated_at, NULL AS shared_by, shared, status, activity_at > seen_at AS unread, mentioned_at > seen_at AS mentioned FROM chats
-         UNION ALL SELECT id, title, joined_at, updated_at, owner_name, 0, status, activity_at > seen_at, mentioned_at > seen_at FROM shared_chats
-         ORDER BY updated_at DESC`,
-      )
-      .toArray()
-      .map((row) => ({
-        id: row.id,
-        title: row.title,
-        createdAt: row.created_at,
-        updatedAt: row.updated_at,
-        ...(row.shared_by !== null ? { sharedBy: row.shared_by } : row.shared === 1 && { shared: true as const }),
-        ...(row.status && { status: row.status }),
-        ...(row.unread === 1 && { unread: true as const }),
-        ...(row.mentioned === 1 && { mentioned: true as const }),
-      }));
+    return this.#rows.list((agentId, preview) => this.#contact(agentId, preview));
+  }
+
+  /** Change what of chat `id`'s row is this user's alone: pinned, closed, marked unread, their own name for it. */
+  changeChatRow(id: string, change: ChatRowChange): boolean {
+    const changed = this.#rows.change(id, change);
+    if (changed) this.#changed("chats");
+    return changed;
+  }
+
+  /** The chat `id`'s kind, which its chat object told this sidebar (setChatKind); null for a chat it does not list. */
+  chatKind(id: string): ChatKind | null {
+    return this.#rows.kindOf(id);
+  }
+
+  /** The chat `ownerUid`'s chat `id` is now `kind`: told by the chat, to every sidebar that lists it. */
+  setChatKind(id: string, ownerUid: string, kind: ChatKind): void {
+    // Written, and the sidebars told, only on a change: the chat tells a member again each time they open it.
+    const own = ownerUid === this.#uid;
+    const sql = own
+      ? this.ctx.storage.sql.exec("UPDATE chats SET kind = ? WHERE id = ? AND kind IS NOT ?", kind, id, kind)
+      : this.ctx.storage.sql.exec("UPDATE shared_chats SET kind = ? WHERE id = ? AND owner_uid = ? AND kind IS NOT ?", kind, id, ownerUid, kind);
+    if (!sql.rowsWritten) return;
+    this.#changed("chats");
+    this.#kindSet(id, kind);
+  }
+
+  /** Chat `id`'s row now says `kind`: off the record, what the feed kept of it leaves too (wherever a row's kind is set). */
+  #kindSet(id: string, kind: ChatKind | undefined): void {
+    if (kind && !mayLeave({ what: "feed" }, kind) && this.#feed.forgetChat(id)) this.#changed("feed");
+    // Nothing recorded of how people worked with an agent there stays.
+    if (kind && !keepsSignals(kind)) this.#signals.forgetChat(id);
+  }
+
+  /** The chat that discusses one of this user's artifacts (Discuss on its page), or null. */
+  pageChat(artifactId: string): string | null {
+    return this.#rows.pageChat(artifactId);
+  }
+
+  linkPageChat(artifactId: string, chatId: string): void {
+    this.#rows.linkPage(artifactId, chatId);
+  }
+
+  /** People this user shares chat `chatId` with: what "@" offers to add to a chat (see ChatRows.knowPeople). */
+  knowPeople(chatId: string, people: readonly Person[]): void {
+    this.#rows.knowPeople(chatId, people, this.#me);
+  }
+
+  /** Count a branch of this user's conversation that started in chat `root`, unless it has `max` (ChatRows.takeBranch). */
+  takeBranch(root: string, max: number): boolean {
+    return this.#rows.takeBranch(root, max);
+  }
+
+  returnBranch(root: string): void {
+    this.#rows.returnBranch(root);
+  }
+
+  /** `uid` left chat `chatId`, or was removed from it: this user no longer knows them through it. */
+  forgetPerson(chatId: string, uid: string): void {
+    this.#rows.forgetPeople(chatId, uid);
+  }
+
+  knownPeople(): Person[] {
+    return this.#rows.people();
+  }
+
+  knownPerson(uid: string): Person | null {
+    return this.#rows.person(uid);
+  }
+
+  /** What an agent's home conversation shows of its agent in the list: its badge and last post. */
+  #contact(agentId: string | null, preview: string | null): Pick<ChatSummary, "agent"> {
+    const agent = agentId ? this.#agents.get(agentId) : null;
+    if (!agent) return {};
+    return { agent: { id: agent.id, name: agent.name, avatar: agent.avatar, color: agent.color, ...(preview && { preview }) } };
+  }
+
+  /** The chat that is an agent's own conversation; null when it has none yet. */
+  agentHome(agentId: string): string | null {
+    return this.ctx.storage.sql.exec<{ id: string }>("SELECT id FROM chats WHERE agent_id = ? ORDER BY created_at LIMIT 1", agentId).toArray()[0]?.id ?? null;
+  }
+
+  /**
+   * An agent's own conversation, made when it has none (it is turned on, or runs for the first time): an ordinary chat
+   * of this user's, named after it and marked with it, which it is told it is the home of. Null for no such agent.
+   */
+  ensureAgentHome(agentId: string): string | null {
+    const found = this.agentHome(agentId);
+    if (found) return found;
+    const agent = this.#agents.get(agentId);
+    if (!agent) return null;
+    const id = randomHex(8);
+    const now = Date.now();
+    this.ctx.storage.sql.exec("INSERT INTO chats (id, title, created_at, updated_at, agent_id) VALUES (?, ?, ?, ?, ?)", id, `@${agent.name}`, now, now, agentId);
+    this.#changed("chats");
+    this.#tellHome(id, agentId, agent);
+    return id;
+  }
+
+  /** Tell an agent's home conversation about it as it is now (null: deleted). Off the caller's path; a failure is logged. */
+  #tellHome(chatId: string, agentId: string, agent: AgentDefinition | null): void {
+    const chat = exports.ChatAgent.getByName(chatAgentName(this.#me, chatId));
+    this.ctx.waitUntil(chat.agentChanged(agentId, agent).catch((error: unknown) => console.error("agent home:", errorMessage(error))));
+  }
+
+  /** One of this user's agents was saved, turned on or off, or deleted: the lists and its home conversation follow. */
+  #agentChanged(agentId: string): void {
+    this.#changed("agents");
+    // It may learn overnight now, or no longer: the night's alarm follows.
+    this.#dreams.arm();
+    const agent = this.#agents.get(agentId);
+    const home = this.agentHome(agentId);
+    if (!home) {
+      if (agent?.enabled) this.ensureAgentHome(agentId);
+      return;
+    }
+    this.#tellHome(home, agentId, agent);
+    // A deleted agent's conversation stays, as an ordinary chat.
+    if (!agent && this.ctx.storage.sql.exec("UPDATE chats SET agent_id = NULL WHERE agent_id = ?", agentId).rowsWritten) this.#changed("chats");
+  }
+
+  /** A run of agent `agentId` started, moved on or ended (its home chat says so): an open Runs tab reads it again. */
+  runsChanged(agentId: string): void {
+    this.#changed({ type: "runs", agentId });
   }
 
   /**
@@ -192,7 +849,7 @@ export class UserDirectory extends DurableObject<Env> {
    * when a row changed, and returns whether one did.
    */
   #updateChat(id: string, ownerUid: string, set: string, ...values: SqlStorageValue[]): boolean {
-    const own = ownerUid === this.ctx.id.name;
+    const own = ownerUid === this.#uid;
     const sql = own ? `UPDATE chats SET ${set} WHERE id = ?` : `UPDATE shared_chats SET ${set} WHERE id = ? AND owner_uid = ?`;
     const written = this.ctx.storage.sql.exec(sql, ...values, id, ...(own ? [] : [ownerUid])).rowsWritten > 0;
     if (written) this.#changed("chats");
@@ -221,16 +878,24 @@ export class UserDirectory extends DurableObject<Env> {
    * since, so the app can mark what is new; null when nothing was unread, or they never looked at the chat.
    */
   markSeen(id: string): number | null {
-    const unread = "WHERE id = ? AND activity_at > seen_at";
+    // Marked unread by hand (ChatRows.change) counts too, though nothing new came in.
+    const unread = "WHERE id = ? AND (activity_at > seen_at OR marked_unread = 1)";
     const before = this.ctx.storage.sql
-      .exec<{ seen_at: number }>(`SELECT seen_at FROM chats ${unread} UNION ALL SELECT seen_at FROM shared_chats ${unread}`, id, id)
+      .exec<{ seen_at: number; activity_at: number }>(
+        `SELECT seen_at, activity_at FROM chats ${unread} UNION ALL SELECT seen_at, activity_at FROM shared_chats ${unread}`,
+        id,
+        id,
+      )
       .toArray()[0];
+    // What the feed told them of in it (tags, questions, a run's post) they have now seen, also when the chat's row was
+    // not unread (a member's row is bumped only now and then: ChatAgent's MEMBERS_TOUCH_MS).
+    if (this.#feed.markChatRead(id)) this.#changed("feed");
     if (!before) return null;
     const now = Date.now();
-    this.ctx.storage.sql.exec(`UPDATE chats SET seen_at = ? ${unread}`, now, id);
-    this.ctx.storage.sql.exec(`UPDATE shared_chats SET seen_at = ? ${unread}`, now, id);
+    this.ctx.storage.sql.exec(`UPDATE chats SET seen_at = ?, marked_unread = 0 ${unread}`, now, id);
+    this.ctx.storage.sql.exec(`UPDATE shared_chats SET seen_at = ?, marked_unread = 0 ${unread}`, now, id);
     this.#changed("chats");
-    return before.seen_at > 0 ? before.seen_at : null;
+    return before.seen_at > 0 && before.activity_at > before.seen_at ? before.seen_at : null;
   }
 
   /**
@@ -246,18 +911,21 @@ export class UserDirectory extends DurableObject<Env> {
 
   /** Whose chat `id` is: this user's own uid, the owner's for a chat shared with them, or null. The chat itself still checks membership. */
   chatOwner(id: string): string | null {
-    if (this.hasChat(id)) return this.ctx.id.name!;
+    if (this.hasChat(id)) return this.#me;
     const row = this.ctx.storage.sql.exec<{ owner_uid: string }>("SELECT owner_uid FROM shared_chats WHERE id = ?", id).toArray()[0];
     return row?.owner_uid ?? null;
   }
 
   /** Index a chat this user joined by an invite. Chat ids are random, so one never names both an own and a shared chat. */
-  addSharedChat(chat: { id: string; ownerUid: string; ownerName: string; title: string; status: ChatStatus | null }): void {
+  addSharedChat(chat: { id: string; ownerUid: string; ownerName: string; title: string; status: ChatStatus | null; kind?: ChatKind }): void {
     if (this.hasChat(chat.id)) return;
     const now = Date.now();
+    // Joining again opens a chat this user had closed.
     this.ctx.storage.sql.exec(
-      `INSERT INTO shared_chats (id, owner_uid, owner_name, title, joined_at, updated_at, status) VALUES (?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET owner_name = excluded.owner_name, title = excluded.title, updated_at = excluded.updated_at, status = excluded.status`,
+      `INSERT INTO shared_chats (id, owner_uid, owner_name, title, joined_at, updated_at, status, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET owner_name = excluded.owner_name, title = excluded.title, updated_at = excluded.updated_at, status = excluded.status,
+         kind = COALESCE(excluded.kind, kind), closed_at = 0
+       WHERE owner_uid = excluded.owner_uid`,
       chat.id,
       chat.ownerUid,
       chat.ownerName,
@@ -265,40 +933,96 @@ export class UserDirectory extends DurableObject<Env> {
       now,
       now,
       chat.status,
+      chat.kind ?? null,
     );
     this.#changed("chats");
+    this.#kindSet(chat.id, chat.kind);
   }
 
   /**
    * Bump a shared chat to the top with its current title, as touchChat does for the owner. `byOther`: someone else wrote.
-   * `named`: the title was just cut from this message.
+   * `named`: the title was just cut from this message. `sentAt`: when the message was sent, by the chat's clock.
    */
-  touchSharedChat(id: string, ownerUid: string, title: string, byOther: boolean, tag?: Tag, named = false): void {
-    this.#touch(id, ownerUid, title, byOther, tag, named);
+  touchSharedChat(
+    id: string,
+    ownerUid: string,
+    title: string,
+    byOther: boolean,
+    tag?: Tag,
+    named = false,
+    answered: readonly string[] = [],
+    sentAt = Date.now(),
+  ): void {
+    this.#touch(id, ownerUid, title, byOther, tag, named, answered, sentAt);
   }
 
   /**
    * Bump a chat. With `tag`, the message tagged this user: the chat is marked so until they look, and the open apps hear
-   * it (MentionNotice), with the chat's title unless the chat is named after this very message (`named`).
+   * it (MentionNotice), with the chat's title unless the chat is named after this very message (`named`). `answered`:
+   * this user wrote it (also as the owner's second seat), to these agents: what they asked this user there before
+   * `sentAt` (the chat's clock, as the questions' times are) is answered.
    */
-  #touch(id: string, ownerUid: string, title: string, byOther: boolean, tag?: Tag, named = false): void {
+  #touch(
+    id: string,
+    ownerUid: string,
+    title: string,
+    byOther: boolean,
+    tag: Tag | undefined,
+    named: boolean,
+    answered: readonly string[],
+    sentAt: number,
+  ): void {
     // This object's own clock for the row, as every other write to it uses: a tag's time comes from the chat, and could
     // put activity_at back behind a later write. The notice keeps the tag's time, which windows share.
     const now = Date.now();
     const set = "title = ?, updated_at = ?, activity_at = CASE WHEN ? THEN ? ELSE activity_at END, mentioned_at = CASE WHEN ? THEN ? ELSE mentioned_at END";
-    if (!this.#updateChat(id, ownerUid, set, title, now, byOther ? 1 : 0, now, tag ? 1 : 0, now) || !tag) return;
-    this.#changed({ type: "mention", chatId: id, ...(!named && { title }), ...tag });
+    const listed = this.#updateChat(id, ownerUid, set, title, now, byOther ? 1 : 0, now, tag ? 1 : 0, now);
+    // This user wrote in it to `answered` (the agents the message reached): what those agents asked them there is answered.
+    if (listed && this.#feed.resolveReplies(id, answered, sentAt)) this.#changed("feed");
+    if (!listed || !tag) return;
+    // A tag opens the chat again for someone who closed it.
+    this.#rows.reopen(id);
+    const { key, kind, run, ...notice } = tag;
+    this.#changed({ type: "mention", chatId: id, ...(!named && { title }), ...notice });
+    // In the feed too, unless the chat is off the record: as the chat says, and as this sidebar's row says (addFeed).
+    if (!run) {
+      this.addFeed({
+        kind: "tag",
+        ref: `tag:${id}:${key}`,
+        at: tag.at,
+        // A chat named after this very message is not named again: its text says it.
+        title: tag.added ? `${tag.from} added you to ${title}` : `${tag.from} mentioned you${named ? "" : ` in ${title}`}`,
+        ...(!tag.added && tag.text && { text: tag.text }),
+        from: { name: tag.from },
+        open: { to: "chat", chatId: id },
+        chat: { id, kind },
+      });
+    }
+    this.ctx.waitUntil(this.push({ title: "You were mentioned", body: "Someone mentioned you in a chat.", url: `/c/${id}`, tag: `mention:${id}` }));
+  }
+
+  /** The last post of an agent's own conversation, as its contact row shows it. */
+  #notePreview(id: string, text: string): void {
+    this.ctx.storage.sql.exec("UPDATE chats SET preview = ? WHERE id = ? AND agent_id IS NOT NULL", excerpt(text, 120), id);
   }
 
   removeSharedChat(id: string, ownerUid: string): void {
-    if (this.ctx.storage.sql.exec("DELETE FROM shared_chats WHERE id = ? AND owner_uid = ?", id, ownerUid).rowsWritten) this.#changed("chats");
+    if (!this.ctx.storage.sql.exec("DELETE FROM shared_chats WHERE id = ? AND owner_uid = ?", id, ownerUid).rowsWritten) return;
+    // Out of the chat, this user shares it with nobody, and its items leave their feed.
+    this.#rows.forgetPeople(id);
+    this.#changed("chats");
+    if (this.#feed.forgetChat(id)) this.#changed("feed");
+    this.#leftChat(ownerUid, id);
   }
 
-  createChat(id: string): ChatSummary {
+  /** A new chat of this user's: unnamed (named after its first message), or with `title` (a branch, a page's chat). */
+  createChat(id: string, made: { title?: string; kind?: ChatKind } = {}): ChatSummary {
     const now = Date.now();
-    this.ctx.storage.sql.exec("INSERT INTO chats (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)", id, UNNAMED_CHAT, now, now);
+    const title = made.title?.slice(0, MAX_CHAT_TITLE) || UNNAMED_CHAT;
+    const kind = made.kind ?? "private";
+    this.ctx.storage.sql.exec("INSERT INTO chats (id, title, created_at, updated_at, kind) VALUES (?, ?, ?, ?, ?)", id, title, now, now, kind);
     this.#changed("chats");
-    return { id, title: UNNAMED_CHAT, createdAt: now, updatedAt: now };
+    return { id, title, createdAt: now, updatedAt: now, kind };
   }
 
   hasChat(id: string): boolean {
@@ -307,13 +1031,22 @@ export class UserDirectory extends DurableObject<Env> {
 
   /**
    * Bump a chat to the top. A chat still unnamed is named after the prompt, so the first prompt names it (`named`), until
-   * a model gives it a better title (nameChat). `byOther`: someone other than this user wrote it. Returns its title.
+   * a model gives it a better title (nameChat). `byOther`: someone other than this user wrote it; `answered`: the agents
+   * this user's message (as themselves or from their second seat) reached, sent at `sentAt`. Returns its title.
    */
-  touchChat(id: string, prompt: string, byOther: boolean, tag?: Tag): { title: string; named: boolean } {
+  touchChat(
+    id: string,
+    prompt: string,
+    byOther: boolean,
+    tag?: Tag,
+    answered: readonly string[] = [],
+    sentAt = Date.now(),
+  ): { title: string; named: boolean } {
+    this.#notePreview(id, prompt);
     const before = this.chatTitle(id);
     const named = before === UNNAMED_CHAT;
     const title = named || before === null ? titleFromMessage(prompt) : before;
-    this.#touch(id, this.ctx.id.name!, title, byOther, tag, named);
+    this.#touch(id, this.#me, title, byOther, tag, named, answered, sentAt);
     return { title, named };
   }
 
@@ -328,10 +1061,79 @@ export class UserDirectory extends DurableObject<Env> {
 
   /** Take a deleted chat, and the artifacts it published, out of this user's lists. The chat deletes the rest first. */
   forgetChat(id: string): void {
+    const home = this.ctx.storage.sql.exec<{ agent_id: string | null }>("SELECT agent_id FROM chats WHERE id = ?", id).toArray()[0]?.agent_id;
+    this.#signIns.forgetChat(id);
+    this.#agents.forgetChat(id);
+    this.#limits.forgetChat(id);
+    this.#memory.forgetChat(id);
+    this.#signals.forgetChat(id);
     // The values its pages saved for this user, which were everyone's defaults.
     this.ctx.storage.sql.exec("DELETE FROM page_values WHERE artifact_id IN (SELECT id FROM artifacts WHERE chat_id = ?)", id);
+    // Its pages are gone: whoever follows them stops; and its items leave this user's feed.
+    for (const artifactId of this.chatArtifactIds(id)) this.#targetGone("page", artifactId);
+    if (this.#feed.forgetChat(id)) this.#changed("feed");
+    this.#leftChat(this.#me, id);
     if (this.ctx.storage.sql.exec("DELETE FROM artifacts WHERE chat_id = ?", id).rowsWritten) this.#changed("artifacts");
+    this.#rows.forgetChat(id);
     if (this.ctx.storage.sql.exec("DELETE FROM chats WHERE id = ?", id).rowsWritten) this.#changed("chats");
+    // An agent's home deleted while the agent is on: it gets a new one, so its schedule and watches go on there.
+    if (home && this.#agents.get(home)?.enabled) this.ensureAgentHome(home);
+  }
+
+  // ---- Limits (worker/agents/limits/) ----
+
+  /** The user's rules for all their agents, pi and pages (shared/limits.ts). */
+  guardrails(): GuardrailRule[] {
+    return this.#limits.rules();
+  }
+
+  setGuardrails(input: unknown): GuardrailRule[] | { error: string } {
+    return this.#limits.setRules(input);
+  }
+
+  /** A call that changes data, as the write gate of one of the user's chats let it through, refused or held it. */
+  logCall(entry: CallEntry): void {
+    this.#limits.log(entry);
+  }
+
+  callsSince(server: string, tool: string, since: number): number {
+    return this.#limits.callsSince(server, tool, since);
+  }
+
+  /** The newest calls, of one agent (by id) when given. */
+  calls(agentId?: string, limit?: number): CallLogView[] {
+    return this.#limits.calls(agentId, limit);
+  }
+
+  /**
+   * An action of one of the user's chats waits for them: in their feed's Needs you, where they decide it (not from a
+   * chat off the record: that one only in its chat), and a push when no app is open.
+   */
+  async addNeedsYou(view: PendingActionView, chatKind: ChatKind): Promise<void> {
+    // A seat's action names the chat shared with this user that its card is in.
+    const shared = this.ctx.storage.sql.exec<{ title: string }>("SELECT title FROM shared_chats WHERE id = ?", view.chatId).toArray()[0];
+    const chatTitle = this.chatTitle(view.chatId) ?? shared?.title ?? "a chat";
+    this.#dropExpiredNeedsYou();
+    // The feed refuses it from a chat off the record: then only its card there asks, and the push says not even whose or where.
+    const offRecord = this.#addFeed(approvalFeed(view, chatTitle, chatKind)) === "refused";
+    if (!offRecord) this.#limits.addNeedsYou(view);
+    // Only that something waits: the call itself stays in the app.
+    const said = offRecord
+      ? { title: "Something needs your approval", body: "Open the app to see it." }
+      : { title: approvalAsk(view), body: excerpt(`In “${chatTitle}”`, 120) };
+    await this.push({ ...said, url: `/c/${view.chatId}`, tag: approvalRef(view.chatId, view.id) }).catch((error: unknown) =>
+      console.error("push:", errorMessage(error)),
+    );
+  }
+
+  /** An action ended (approved, declined, expired): its feed item waits no more, and keeps how it ended. */
+  removeNeedsYou(chatId: string, id: string, ended: FeedActionEnd): void {
+    this.#limits.removeNeedsYou(chatId, id);
+    this.#endApproval(chatId, id, ended);
+  }
+
+  #endApproval(chatId: string, id: string, ended: FeedActionEnd): void {
+    if (this.#feed.endAction(approvalRef(chatId, id), ended)) this.#changed("feed");
   }
 
   listArtifacts(): ArtifactSummary[] {
@@ -360,8 +1162,13 @@ export class UserDirectory extends DurableObject<Env> {
     if (this.ctx.storage.sql.exec("UPDATE artifacts SET seen = ? WHERE id = ? AND seen < ?", version, id, version).rowsWritten) this.#changed("artifacts");
   }
 
-  /** A version was published. `seen`: the user has it already (an import brought it), so it is not unread. */
-  recordArtifact(artifact: ArtifactSummary, seen = false): void {
+  /**
+   * A version was published. `seen`: the user has it already (an import brought it), so it is not unread. `chatKind`:
+   * the kind of the chat it was published from, as that chat has it now (this user's row of it can lag). `held`: a turn
+   * apart from the chat published it, so it reaches the page's followers only once its reply is posted (announceArtifact).
+   */
+  recordArtifact(artifact: ArtifactSummary, seen = false, chatKind?: ChatKind, held = false): void {
+    const before = this.#latestOf(artifact.id) ?? 0;
     this.ctx.storage.sql.exec(
       `INSERT INTO artifacts (id, title, chat_id, latest, updated_at, seen) VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET title = excluded.title, latest = excluded.latest, updated_at = excluded.updated_at, seen = MAX(seen, excluded.seen)`,
@@ -373,6 +1180,40 @@ export class UserDirectory extends DurableObject<Env> {
       seen ? artifact.latest : 0,
     );
     this.#changed("artifacts");
+    if (!seen && !held && artifact.latest > before) this.#announce(artifact, chatKind);
+  }
+
+  /**
+   * A version a turn apart from the chat published (recordArtifact's `held`) is the chat's now: it reaches the page's
+   * followers. Whether a newer one they heard of is out already is the chat's to say (it knows which are still held):
+   * this list's newest can be one that is.
+   */
+  announceArtifact(artifact: ArtifactSummary, chatKind?: ChatKind): void {
+    if (this.#latestOf(artifact.id) === undefined) return;
+    this.#announce(artifact, chatKind);
+  }
+
+  /** The newest version of an artifact this user's list has; undefined for one it lacks. */
+  #latestOf(id: string): number | undefined {
+    return this.ctx.storage.sql.exec<{ latest: number }>("SELECT latest FROM artifacts WHERE id = ?", id).toArray()[0]?.latest;
+  }
+
+  /** A new version reaches the page's followers, unless the chat it was published from is off the record: as it says (when it told), and as this user's row of it says. */
+  #announce(artifact: ArtifactSummary, chatKind?: ChatKind): void {
+    const kinds = [this.#rows.kindOf(artifact.chatId), ...(chatKind ? [chatKind] : [])];
+    if (!mayLeave({ what: "feed" }, ...kinds)) return;
+    this.#fanOut(
+      "page",
+      artifact.id,
+      {
+        kind: "page_version",
+        ref: `version:${artifact.id}:${artifact.latest}`,
+        at: Date.now(),
+        title: `${artifact.title} has version ${artifact.latest}`,
+        open: { to: "page", artifactId: artifact.id },
+      },
+      artifact.title,
+    );
   }
 
   /**
@@ -489,11 +1330,201 @@ export class UserDirectory extends DurableObject<Env> {
     return this.getSkill(name) ?? { error: `No skill named "${name}".` };
   }
 
+  /** The user's agents, by name. */
+  listAgents(): AgentDefinition[] {
+    return this.#agents.list();
+  }
+
+  getAgent(id: string): AgentDefinition | null {
+    return this.#agents.get(id);
+  }
+
+  /**
+   * Save one of the user's agents (AgentStore.save): a new one, or with `save.id` a change to one. One the model
+   * proposes is saved off, for the user to review and turn on.
+   */
+  saveAgent(input: unknown, origin: AgentOrigin, enabled?: boolean, save?: AgentSave): AgentResult {
+    // The model proposing again, in the chat it proposed it in, an agent that is still its draft: that draft is
+    // revised (AgentStore.proposalSave), never one the user saved or turned on.
+    const target = origin === "agent" ? this.#agents.proposalSave(input, save) : save;
+    const draft = target?.id !== undefined && target.id !== save?.id;
+    save = target;
+    if (origin === "agent") {
+      const signIn = new Set(oauthServerNames(this.env));
+      input = withoutSignInShares(input, (server) => signIn.has(server));
+      // An agent's limits (how far it goes on its own, its rules, its wait) are its owner's to set, on its Limits tab:
+      // the model's draft keeps the ones it has (the defaults for a new one), whatever it asks for.
+      if (isObject(input)) {
+        const existing = save?.id === undefined ? undefined : this.#agents.get(save.id);
+        const kept = Object.fromEntries(LIMIT_FIELDS.flatMap((field) => (existing?.[field] === undefined ? [] : [[field, existing[field]]])));
+        input = { ...Object.fromEntries(Object.entries(input).filter(([key]) => !(LIMIT_FIELDS as readonly string[]).includes(key))), ...kept };
+      }
+    }
+    const saved = this.#agents.save(input, origin, enabled, save);
+    if ("error" in saved) return saved;
+    this.#agentChanged(saved.id);
+    // Saved off (a PUT with enabled false turns it off as PATCH does).
+    if (!saved.enabled) this.#agentOff(saved.id);
+    // A draft the model made with fields it guessed: the user is asked, in the feed, to confirm them.
+    if (origin === "agent" && !saved.enabled && saved.assumed?.length) {
+      this.addFeed({
+        kind: "assumption",
+        ref: assumptionRef(saved.id),
+        at: Date.now(),
+        title: `Confirm what @${saved.name}'s draft guessed`,
+        text: `Assumed: ${saved.assumed.join(", ")}`,
+        from: agentFrom(saved),
+        open: { to: "agent", agentId: saved.id },
+        aboutAgent: saved.id,
+      });
+    } else if (!saved.assumed?.length && (origin !== "agent" || draft)) {
+      // The user saved it, or the model revised its draft, with nothing left guessed: what the item asked is done.
+      this.resolveFeed(assumptionRef(saved.id));
+    }
+    return saved;
+  }
+
+  /** Turn one of the user's agents on or off; `version` is the one they read (see AgentStore.setEnabled). */
+  setAgentEnabled(id: string, enabled: boolean, version?: number): AgentResult {
+    const before = this.#agents.get(id)?.version;
+    const result = this.#agents.setEnabled(id, enabled, version);
+    if (!("error" in result) && result.version !== before) this.#agentChanged(id);
+    // Turning it on confirms its guesses (AgentStore.setEnabled clears them).
+    if (!("error" in result) && result.enabled) this.resolveFeed(assumptionRef(id));
+    if (!("error" in result) && !result.enabled) this.#agentOff(id);
+    return result;
+  }
+
+  /** One of this user's agents is off: its runs wait on nothing more, no sign-in or answer is needed for a run that will not go on. */
+  #agentOff(id: string): void {
+    if (this.#feed.resolveAbout(aboutOf("agent", id, this.#me), "run")) this.#changed("feed");
+  }
+
+  deleteAgent(id: string): { error: string } | null {
+    const refused = this.#agents.delete(id);
+    if (refused) return refused;
+    this.#memory.forgetAgent(id);
+    this.#signals.forgetAgent(id);
+    this.#dreams.forgetAgent(id);
+    this.#agentChanged(id);
+    // Its followers stop following it, and its items (runs, guesses to confirm) leave this user's feed.
+    this.#targetGone("agent", id);
+    if (this.#feed.forgetAbout(aboutOf("agent", id, this.#me))) this.#changed("feed");
+    return null;
+  }
+
+  /** The user's own copy of an agent someone shared with them, saved off (AgentStore.saveCopy). */
+  copyAgent(input: AgentChanges, copiedFrom: NonNullable<AgentDefinition["copiedFrom"]>): AgentResult {
+    const saved = this.#agents.saveCopy(input, copiedFrom);
+    if (!("error" in saved)) this.#changed("agents");
+    return saved;
+  }
+
+  /** An agent from an export (AgentStore.import): the id it has here, `skipped` when the user had one by its name. */
+  importAgent(agent: ExportedAgent): { id: string; skipped?: true } | { error: string } {
+    const result = this.#agents.import(agent);
+    if ("id" in result && !result.skipped) this.#changed("agents");
+    return result;
+  }
+
+  /**
+   * A chat added an agent of the user's, took it out, or changed whether it shares it (AgentStore.noteChat): one of the
+   * user's own, or one of `ownerUid`'s they brought it into as a member.
+   */
+  noteAgentChat(agentId: string, chatId: string, inChat: boolean, shared = false, ownerUid?: string): void {
+    // Only the index: the agents list the sidebars read is the same.
+    this.#agents.noteChat(agentId, chatId, inChat, shared, ownerUid);
+  }
+
+  /** The chats an agent of the user's is in, by title, with whether it is shared there: theirs, and others' they are in. */
+  agentChats(agentId: string): AgentChatUse[] {
+    return this.#agents.chatsOf(agentId).flatMap(({ chatId, shared, ownerUid }) => {
+      const title = this.#rows.shownTitle(chatId, ownerUid);
+      return title === null ? [] : [{ chatId, title, shared, ...(ownerUid !== undefined && { ownerUid }) }];
+    });
+  }
+
   /** Delete one of the user's skills. Built-in ones can only be turned off. */
   deleteSkill(name: string): SkillResult | null {
     const deleted = this.ctx.storage.sql.exec("DELETE FROM skills WHERE name = ?", name).rowsWritten;
     if (deleted) this.#changed("skills");
     return deleted ? null : { error: `No skill named "${name}".` };
+  }
+
+  /** A note the user writes under Memory. */
+  addNote(input: unknown): MemoryNote | { error: string } {
+    return this.#memory.add(input);
+  }
+
+  /** The user changes a note: its text, pin, a confirm, or where it goes. */
+  changeNote(id: string, change: unknown): MemoryNote | { error: string } {
+    return this.#memory.change(id, change);
+  }
+
+  forgetNote(id: string): MemoryNote | { error: string } {
+    return this.#memory.forget(id);
+  }
+
+  restoreNote(id: string): MemoryNote | { error: string } {
+    return this.#memory.restore(id);
+  }
+
+  deleteNote(id: string): { error: string } | null {
+    return this.#memory.delete(id);
+  }
+
+  /**
+   * Keep what a chat recorded of how people worked with this user's agents there (shared/signals.ts): each checked, and
+   * none from a chat off the record, as the chat says or as this user's sidebar row of it says.
+   */
+  recordSignals(signals: AgentSignal[]): void {
+    // Something happened: the night's dream is set, when anything learns overnight.
+    if (this.#signals.record(signals, (chatId) => this.#rows.kindOf(chatId)) && this.#dreams.due() === null) this.#dreams.arm();
+  }
+
+  /** A note the model saves in one of the user's chats, which says who reads and asks there (UserMemory.learn). */
+  learnNote(writer: MemoryWriter, note: LearnedNote): Learned {
+    return this.#memory.learn(writer, note);
+  }
+
+  /** The notes a conversation's prompt holds (UserMemory.read). */
+  readNotes(reader: MemoryReader): { notes: MemoryNote[]; more: number; off?: true } {
+    return this.#memory.read(reader);
+  }
+
+  /** Count a read of each note: they entered a conversation's prompt. */
+  useNotes(ids: readonly string[]): void {
+    this.#memory.use(ids);
+  }
+
+  recallNotes(reader: MemoryReader, query: string, shown: readonly string[], offset?: number): Recalled {
+    return this.#memory.recall(reader, query, shown, offset);
+  }
+
+  /** The model forgets a note in a conversation (UserMemory.forgetFor). Only its id: the chat never gets its text. */
+  forgetNoteFor(writer: MemoryWriter, id: string): Forgot {
+    const forgotten = this.#memory.forgetFor(writer, id);
+    return "error" in forgotten ? forgotten : { id: forgotten.id };
+  }
+
+  /** Notes from an export (UserMemory.import), with the ids the import gave the agents it brought. */
+  importNotes(notes: readonly unknown[], agents?: Record<string, string>): ({ id: string; skipped?: true } | { error: string })[] {
+    return this.#memory.import(notes, agents);
+  }
+
+  /** What the Memory view shows: every note, and what the servers cover. */
+  memoryView(): { notes: MemoryNoteView[]; coverage: ServerCoverage[]; dreams: DreamsView } {
+    return { notes: this.#memory.list(), coverage: this.serverCoverage(), dreams: this.#dreams.view() };
+  }
+
+  /** What the MCP servers cover, as one of the user's chats last listed them: what Memory shows of the data agents reach. */
+  serverCoverage(): ServerCoverage[] {
+    return this.ctx.storage.kv.get<ServerCoverage[]>(COVERAGE_KEY) ?? [];
+  }
+
+  /** One of the user's chats listed the servers: only a view, kept for the servers this deployment has. */
+  noteCoverage(servers: readonly ServerCoverage[]): void {
+    this.ctx.storage.kv.put(COVERAGE_KEY, servers);
   }
 
   /** The model and effort the user last picked in any chat: what their new chats start on. Checked by the chat that reads it. */
@@ -576,8 +1607,36 @@ export class UserDirectory extends DurableObject<Env> {
   }
 
   /**
+   * The daily meter of this user's model calls in their own chats (pi's, their agents', their runs'), counted by each
+   * chat as its answers end (worker/agents/spend.ts). Scheduled runs and unprompted posts stop once today's reaches the
+   * deployment's RUNS_DAILY_USD; a person's own messages are not stopped by it.
+   */
+  modelSpentToday(): { tokens: number; costUsd: number } {
+    const row = this.ctx.storage.sql.exec<{ tokens: number; cost: number }>("SELECT tokens, cost FROM model_spend WHERE day = ?", utcDay()).toArray()[0];
+    return { tokens: row?.tokens ?? 0, costUsd: row?.cost ?? 0 };
+  }
+
+  /** Count model calls against this user's day: `calls` answers that used `tokens` and cost `cost` dollars. */
+  recordModelSpend(spent: { calls: number; tokens: number; cost: number }): void {
+    const sql = this.ctx.storage.sql;
+    const day = utcDay();
+    // A month is kept, for a look back: older days go as a new one starts.
+    if (!sql.exec("SELECT 1 FROM model_spend WHERE day = ?", day).toArray().length) {
+      sql.exec("DELETE FROM model_spend WHERE day < ?", utcDay(Date.now() - 31 * 86_400_000));
+    }
+    sql.exec(
+      `INSERT INTO model_spend (day, calls, tokens, cost) VALUES (?, ?, ?, ?)
+       ON CONFLICT(day) DO UPDATE SET calls = calls + excluded.calls, tokens = tokens + excluded.tokens, cost = cost + excluded.cost`,
+      day,
+      spent.calls,
+      spent.tokens,
+      spent.cost,
+    );
+  }
+
+  /**
    * What an export of this user's data takes from here (shared/data-export.ts): their settings and skills, what pages
-   * saved for them, their own chats and artifacts, and by name the chats others shared with them. Not their sign-ins
+   * saved for them, what they follow, their own chats and artifacts, and by name the chats others shared with them. Not their sign-ins
    * to MCP servers (tokens, which belong to this deployment), nor what their pages' model calls cost.
    */
   exportAccount(): Pick<ExportStart, "account" | "chats" | "artifacts" | "sharedWithMe"> {
@@ -599,6 +1658,9 @@ export class UserDirectory extends DurableObject<Env> {
         model: this.modelChoice(),
         builtinSkillsOff: sql.exec<{ name: string }>("SELECT name FROM builtin_skills_off ORDER BY name").toArray().map((row) => row.name),
         skills,
+        agents: this.#agents.list().map(exportedAgent),
+        memory: this.#memory.exported(),
+        follows: this.#follows.list().map(({ kind, id, chatId }) => ({ kind, id, ...(chatId && { chatId }) })),
         pageValues: [...values].map(([artifactId, entries]): ExportedPageValues => ({ artifactId, values: entries })),
       },
       chats: sql
@@ -640,15 +1702,16 @@ export class UserDirectory extends DurableObject<Env> {
   }
 
   /** Add a chat an import filled (ChatAgent.importFinish) to this user's list, read: the import is the commit point. */
-  importChat(chat: Pick<ExportedChat, "id" | "title" | "createdAt" | "updatedAt">): void {
+  importChat(chat: Pick<ExportedChat, "id" | "title" | "createdAt" | "updatedAt">, kind: ChatKind = "private"): void {
     const now = Date.now();
     this.ctx.storage.sql.exec(
-      "INSERT OR IGNORE INTO chats (id, title, created_at, updated_at, seen_at) VALUES (?, ?, ?, ?, ?)",
+      "INSERT OR IGNORE INTO chats (id, title, created_at, updated_at, seen_at, kind) VALUES (?, ?, ?, ?, ?, ?)",
       chat.id,
-      chat.title.slice(0, 200) || UNNAMED_CHAT,
+      chat.title.slice(0, MAX_CHAT_TITLE) || UNNAMED_CHAT,
       chat.createdAt || now,
       chat.updatedAt || now,
       now,
+      kind,
     );
     this.#changed("chats");
   }
@@ -699,14 +1762,31 @@ export class UserDirectory extends DurableObject<Env> {
     const saved = saveSystemPrompt(this.ctx.storage.kv, value);
     return "error" in saved ? saved : { ...saved, editable: true };
   }
+
+  /** pi's settings, for all the user's chats (shared/pi-settings.ts): its defaults when they set none. */
+  piSettings(): PiSettings {
+    return this.ctx.storage.kv.get<PiSettings>(PI_SETTINGS_KEY) ?? {};
+  }
+
+  /** Check and keep pi's settings (the whole of them: a field left out goes back to its default); the settings kept, or why not. */
+  setPiSettings(input: unknown): PiSettings | { error: string } {
+    const checked = checkPiSettings(input);
+    if ("error" in checked) return checked;
+    if (Object.keys(checked).length) this.ctx.storage.kv.put(PI_SETTINGS_KEY, checked);
+    else this.ctx.storage.kv.delete(PI_SETTINGS_KEY);
+    return checked;
+  }
 }
+
+/** The feed item that asks to confirm an agent draft's guesses: one per agent, the latest draft's. */
+const assumptionRef = (agentId: string) => `assumption:${agentId}`;
 
 /** A page's write that would go over PAGE_STORAGE_LIMITS: it rolls the write back. */
 class PageLimitError extends Error {}
 
 /** Today, as YYYY-MM-DD in UTC. */
-function utcDay(): string {
-  return new Date().toISOString().slice(0, 10);
+function utcDay(at = Date.now()): string {
+  return new Date(at).toISOString().slice(0, 10);
 }
 
 const packageFiles = (row: Pick<SkillRow, "files"> | undefined) => (row?.files ? (JSON.parse(row.files) as SkillPackageFiles) : null);

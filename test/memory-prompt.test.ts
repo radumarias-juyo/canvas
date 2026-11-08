@@ -1,0 +1,364 @@
+import { describe, expect, it, vi } from "vitest";
+import { fauxAssistantMessage, fauxProvider, fauxToolCall, Type, type AssistantMessage, type Message } from "@earendil-works/pi-ai";
+import { createModels } from "@earendil-works/pi-ai/models";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import {
+  createRegistry,
+  defineExtension,
+  defineTool,
+  GenerationTask,
+  Harness,
+  hook,
+  MemoryStorage,
+  section,
+  watchEvents,
+  type AgentEvent,
+} from "@earendil-works/pi-durable";
+import { MEMORY_FORGET_TOOL, MEMORY_RECALL_TOOL } from "../shared/memory.ts";
+import { text } from "../worker/agent/output.ts";
+import { freshPrompt, withoutNoteResults, withoutSummaries } from "../worker/memory/fresh.ts";
+
+/** Start a conversation's prompt afresh, and whether it ended sure no compaction read the notes (freshPrompt's `done`). */
+const freshDone = async (...args: Parameters<typeof freshPrompt>) => (await freshPrompt(...args)).done;
+
+/**
+ * pi over a faux model with one `memory` section whose text the test sets, a memory_recall that finds the owner's
+ * note and a memory_forget that quotes one, the messages each request carried, and the replies to give (`replies`,
+ * else "ok"). A compaction's summary is `summary` (or what it makes of the request), given once `summarizing` (when
+ * set) resolves; a large `contextWindow` keeps pi from compacting on its own; `rendering` runs as the section renders.
+ */
+async function piWithMemory(
+  replies: AssistantMessage[] = [],
+  {
+    summary = "Summary: nothing to note.",
+    summarizing,
+    contextWindow,
+    rendering,
+    recalling,
+  }: {
+    summary?: string | ((request: string) => string);
+    summarizing?: (signal?: AbortSignal) => Promise<void>;
+    contextWindow?: number;
+    rendering?: () => Promise<void>;
+    recalling?: () => Promise<void>;
+  } = {},
+) {
+  const faux = fauxProvider({ models: [{ id: "m", contextWindow }] });
+  const models = createModels();
+  models.setProvider(faux.provider);
+  const requests: Message[][] = [];
+  faux.setResponses(
+    Array.from({ length: 12 }, () => (context: { messages: Message[]; systemPrompt?: string }, options?: { signal?: AbortSignal }) => {
+      // A compaction's request asks for a summary, in its own instructions.
+      const all = JSON.stringify(context);
+      if (all.includes("context summarization assistant")) {
+        const text = typeof summary === "string" ? summary : summary(all);
+        return summarizing ? summarizing(options?.signal).then(() => fauxAssistantMessage(text)) : fauxAssistantMessage(text);
+      }
+      requests.push(structuredClone(context.messages));
+      return replies.shift() ?? fauxAssistantMessage("ok");
+    }),
+  );
+  const notes = { text: "" };
+  const registry = createRegistry();
+  const recall = defineTool({
+    name: MEMORY_RECALL_TOOL,
+    description: "Look through the memory notes.",
+    parameters: Type.Object({}),
+    execute: async () => (await recalling?.(), { output: text("- [a2] (just me) My bonus is private too.") }),
+  });
+  const forget = defineTool({
+    name: MEMORY_FORGET_TOOL,
+    description: "Forget a memory note.",
+    parameters: Type.Object({}),
+    execute: async () => ({ output: text("Forgot [a3]: “My bonus is private too.”") }),
+  });
+  // While `leaving`, each request leaves out summaries, as the memory extension's hook does (MemoryHost.leavesOutSummaries).
+  const leaving = { on: false };
+  const leaveOut = hook(GenerationTask, { beforeRequest: ({ messages }) => (leaving.on ? { messages: withoutSummaries(messages) } : undefined) });
+  registry.install(
+    defineExtension({
+      name: "memory",
+      sections: [section("memory", async () => (await rendering?.(), notes.text))],
+      tools: [recall, forget],
+      hooks: [leaveOut],
+    }),
+  );
+  const pi = await Harness.open(new MemoryStorage(), { models, registry }, BACKGROUND_CONTEXT);
+  const root = await pi.root(BACKGROUND_CONTEXT);
+  await root.configure({ model: { provider: faux.provider.id, modelId: "m" } }, BACKGROUND_CONTEXT);
+  const ask = async (text: string) => (await root.submit({ type: "input", content: text }, BACKGROUND_CONTEXT)).wait(BACKGROUND_CONTEXT);
+  return { pi, root, notes, ask, requests, leaving };
+}
+
+describe("a prompt that held the owner's own notes", () => {
+  it("is not in the next request once the conversation starts its prompt afresh", async () => {
+    const { pi, root, notes, ask, requests } = await piWithMemory();
+    try {
+      notes.text = "- [a1] (just me) My salary is private.";
+      await ask("hello");
+      expect(JSON.stringify(requests[0])).toContain("salary");
+      // Shared: the section no longer holds the note, but the first prompt entry stays in the transcript.
+      notes.text = "No notes yet.";
+      expect(await freshDone(root, pi)).toBe(true);
+      await ask("and now?");
+      const next = JSON.stringify(requests[1]);
+      expect(next).not.toContain("salary");
+      expect(next).toContain("No notes yet.");
+      expect(next).toContain("hello");
+    } finally {
+      await pi.close(BACKGROUND_CONTEXT);
+    }
+  });
+
+  it("leaves out what memory_recall found, keeping the call answered", async () => {
+    const { pi, root, notes, ask, requests } = await piWithMemory([
+      fauxAssistantMessage(fauxToolCall(MEMORY_RECALL_TOOL, {}, { id: "c1" }), { stopReason: "toolUse" }),
+    ]);
+    try {
+      notes.text = "No notes yet.";
+      await ask("what do you know?");
+      expect(JSON.stringify(requests.at(-1))).toContain("bonus");
+      expect(await freshDone(root, pi)).toBe(true);
+      await ask("and now?");
+      const next = JSON.stringify(requests.at(-1));
+      expect(next).not.toContain("bonus");
+      expect(next).toContain("left out");
+      expect(next).toContain("c1");
+    } finally {
+      await pi.close(BACKGROUND_CONTEXT);
+    }
+  });
+
+  it("leaves out a summary of the conversation, which may have kept the notes", async () => {
+    const { pi, root, notes, ask, requests } = await piWithMemory([], { summary: "Summary: the owner's bonus is private." });
+    try {
+      notes.text = "No notes yet.";
+      await ask(`first ${"words ".repeat(30_000)}`);
+      await ask(`second ${"words ".repeat(30_000)}`);
+      await pi.waitForTask(await root.compact(undefined, BACKGROUND_CONTEXT), BACKGROUND_CONTEXT);
+      await ask("third");
+      expect(JSON.stringify(requests.at(-1))).toContain("bonus");
+      expect(await freshDone(root, pi)).toBe(true);
+      await ask("and now?");
+      expect(JSON.stringify(requests.at(-1))).not.toContain("bonus");
+    } finally {
+      await pi.close(BACKGROUND_CONTEXT);
+    }
+  });
+
+  it("sends a member's socket no note, of a recall or a summary, in the harness's own events", async () => {
+    const { pi, root, notes, ask } = await piWithMemory(
+      [fauxAssistantMessage(fauxToolCall(MEMORY_RECALL_TOOL, {}, { id: "c1" }), { stopReason: "toolUse" })],
+      {
+        summary: "Summary: the owner's bonus is private.",
+      },
+    );
+    const events: AgentEvent[] = [];
+    const stream = await watchEvents(pi, root.id, BACKGROUND_CONTEXT);
+    stream.start(async (batch) => void events.push(...batch));
+    try {
+      notes.text = "No notes yet.";
+      await ask(`what do you know? ${"words ".repeat(30_000)}`);
+      await ask(`second ${"words ".repeat(30_000)}`);
+      await pi.waitForTask(await root.compact(undefined, BACKGROUND_CONTEXT), BACKGROUND_CONTEXT);
+      await ask("third");
+      // The stream delivers the last commits after them: wait until the summary's are in.
+      await vi.waitFor(() => expect(JSON.stringify(events)).toContain("the owner's bonus"));
+      // The owner's socket gets them (a result as it starts, and the summary), a member's none of either.
+      expect(events.some((event) => event.type === "message_start")).toBe(true);
+      expect(JSON.stringify(events)).toContain("My bonus");
+      expect(JSON.stringify(events)).toContain("the owner's bonus");
+      const shown = JSON.stringify([stream.snapshot, ...events].map(withoutNoteResults));
+      expect(shown).not.toContain("bonus");
+    } finally {
+      await stream.stop();
+      await pi.close(BACKGROUND_CONTEXT);
+    }
+  });
+
+  it("leaves out a recall answered while the fresh start read the context", async () => {
+    let reached!: () => void;
+    const there = new Promise<void>((resolve) => (reached = resolve));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const { pi, root, notes, ask, requests } = await piWithMemory(
+      [fauxAssistantMessage(fauxToolCall(MEMORY_RECALL_TOOL, {}, { id: "c1" }), { stopReason: "toolUse" })],
+      { recalling: async () => (reached(), gate) },
+    );
+    try {
+      notes.text = "No notes yet.";
+      const turn = ask("what do you know?");
+      await there;
+      // Someone joins while the recall is answered: its result lands after the fresh start read the context.
+      const { done } = await freshPrompt(root, pi);
+      release();
+      await turn;
+      expect(await done).toBe(true);
+      await ask("and now?");
+      expect(JSON.stringify(requests.at(-1))).not.toContain("bonus");
+    } finally {
+      await pi.close(BACKGROUND_CONTEXT);
+    }
+  });
+
+  it("leaves out what an earlier memory_forget said (results once quoted the note)", async () => {
+    const { pi, root, notes, ask, requests } = await piWithMemory([
+      fauxAssistantMessage(fauxToolCall(MEMORY_FORGET_TOOL, {}, { id: "c2" }), { stopReason: "toolUse" }),
+    ]);
+    try {
+      notes.text = "No notes yet.";
+      await ask("forget that note");
+      expect(JSON.stringify(requests.at(-1))).toContain("bonus");
+      expect(await freshDone(root, pi)).toBe(true);
+      await ask("and now?");
+      expect(JSON.stringify(requests.at(-1))).not.toContain("bonus");
+    } finally {
+      await pi.close(BACKGROUND_CONTEXT);
+    }
+  });
+
+  /**
+   * pi whose prompt held the owner's salary, two long messages in, and a compaction's summarizer (whose summary keeps
+   * the salary) held at a gate: `summarizing` once it got there, until `release`d or stopped. `compacts` starts it by
+   * hand (pi then never compacts on its own); else the second message's turn compacts first, and waits for it (`turn`).
+   * The note is out of the section by then.
+   */
+  async function compacting(compacts: boolean) {
+    let started!: () => void;
+    const summarizing = new Promise<void>((resolve) => (started = resolve));
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    const wait = (signal?: AbortSignal) => {
+      started();
+      return Promise.race([released, new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve()))]);
+    };
+    const summary = "Summary: the owner's salary is private.";
+    const pi = await piWithMemory([], { summary, summarizing: wait, ...(compacts && { contextWindow: 10_000_000 }) });
+    pi.notes.text = "- [a1] (just me) My salary is private.";
+    await pi.ask(`first ${"words ".repeat(30_000)}`);
+    const turn = pi.ask(`second ${"words ".repeat(30_000)}`);
+    if (compacts) await turn;
+    const compaction = compacts ? await pi.root.compact(undefined, BACKGROUND_CONTEXT) : undefined;
+    await summarizing;
+    pi.notes.text = "No notes yet.";
+    return { ...pi, turn, compaction, release };
+  }
+
+  it("stops a compaction summarizing the context as it was, so its summary never comes in", async () => {
+    const { pi, root, ask, requests, compaction, release } = await compacting(true);
+    try {
+      expect(await freshDone(root, pi)).toBe(true);
+      expect((await pi.waitForTask(compaction!, BACKGROUND_CONTEXT)).state.outcome.status).toBe("aborted");
+      await ask("and now?");
+      expect(JSON.stringify(requests.at(-1))).not.toContain("salary");
+      expect(JSON.stringify(requests.at(-1))).toContain("second");
+    } finally {
+      release();
+      await pi.close(BACKGROUND_CONTEXT);
+    }
+  });
+
+  it("leaves out a summary placed while it stopped the compactions", async () => {
+    const { pi, root, ask, requests, compaction, release } = await compacting(true);
+    try {
+      // It finishes before it is stopped: its summary comes in after the first edits.
+      const fresh = freshPrompt(root, pi);
+      release();
+      expect(await (await fresh).done).toBe(true);
+      await pi.waitForTask(compaction!, BACKGROUND_CONTEXT);
+      await ask("and now?");
+      expect(JSON.stringify(requests.at(-1))).not.toContain("salary");
+    } finally {
+      await pi.close(BACKGROUND_CONTEXT);
+    }
+  });
+
+  it("leaves out the summary of a compaction a turn waits for, from the turn's next request on", async () => {
+    const { pi, root, ask, requests, turn, release, leaving } = await compacting(false);
+    try {
+      const { done } = await freshPrompt(root, pi);
+      leaving.on = true;
+      release();
+      await turn;
+      // The turn went on before the edits were in: its requests left the summary out themselves.
+      expect(JSON.stringify(requests.at(-1))).toContain("second");
+      expect(JSON.stringify(requests.at(-1))).not.toContain("salary");
+      // Once they are, the summary is left out for good.
+      expect(await done).toBe(true);
+      leaving.on = false;
+      await ask("and now?");
+      expect(JSON.stringify(requests.at(-1))).not.toContain("salary");
+    } finally {
+      release();
+      await pi.close(BACKGROUND_CONTEXT);
+    }
+  });
+
+  it("would carry the summary of a compaction a turn waits for without leaving it out", async () => {
+    const { pi, root, requests, turn, release } = await compacting(false);
+    try {
+      const { done } = await freshPrompt(root, pi);
+      release();
+      await turn;
+      expect(JSON.stringify(requests.at(-1))).toContain("salary");
+      await done;
+    } finally {
+      release();
+      await pi.close(BACKGROUND_CONTEXT);
+    }
+  });
+
+  it("leaves out a compaction started after its first look, before its edits were in", async () => {
+    // The owner's turn renders its sections (an RPC in the app) when the chat is shared: the compaction it then
+    // starts reads the context from before the fresh start's edits.
+    let gate: Promise<void> | undefined;
+    let rendering!: () => void;
+    const rendered = new Promise<void>((resolve) => (rendering = resolve));
+    const { pi, root, notes, ask, requests } = await piWithMemory(
+      [fauxAssistantMessage(fauxToolCall(MEMORY_RECALL_TOOL, {}, { id: "c1" }), { stopReason: "toolUse" })],
+      {
+        summary: (all) => (all.includes("bonus") ? "Summary: the owner's bonus is private." : "Summary: nothing."),
+        rendering: async () => {
+          if (!gate) return;
+          rendering();
+          await gate;
+        },
+      },
+    );
+    try {
+      notes.text = "- [a1] (just me) My salary is private.";
+      await ask(`first, what do you know? ${"words ".repeat(30_000)}`);
+      expect(JSON.stringify(requests.at(-1))).toContain("bonus");
+      let open!: () => void;
+      gate = new Promise<void>((resolve) => (open = resolve));
+      const turn = ask(`second ${"words ".repeat(30_000)}`);
+      await rendered;
+      notes.text = "No notes yet.";
+      const { done } = await freshPrompt(root, pi);
+      gate = undefined;
+      open();
+      await turn;
+      expect(await done).toBe(true);
+      await ask("and now?");
+      const last = JSON.stringify(requests.at(-1));
+      expect(last).not.toContain("salary");
+      expect(last).not.toContain("bonus");
+    } finally {
+      await pi.close(BACKGROUND_CONTEXT);
+    }
+  });
+
+  it("would still be there without it (what the fresh start is for)", async () => {
+    const { pi, notes, ask, requests } = await piWithMemory();
+    try {
+      notes.text = "- [a1] (just me) My salary is private.";
+      await ask("hello");
+      notes.text = "No notes yet.";
+      await ask("and now?");
+      expect(JSON.stringify(requests[1])).toContain("salary");
+    } finally {
+      await pi.close(BACKGROUND_CONTEXT);
+    }
+  });
+});
