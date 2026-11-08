@@ -60,7 +60,9 @@ with `@cloudflare/vite-plugin`, pnpm; configured and deployed with the `cf` CLI 
   and durable turn queue (`ChatRoster`) and the turn controller (`AgentTurns`) run each roster agent in its own pi
   session of the chat object, configured per turn (`#configureAgent`: the session's tools are an allow-list,
   `allowedTools`, and a turn its owner did not ask for gets only read tools: the shared servers' (all its servers' when it runs apart in a chat with nobody else in it) and `READ_TOOLS`, plus
-  `DISPLAY_TOOLS`, which only show something (a checklist card, no data; not for an unprompted turn); the owner's Yes to an
+  `DISPLAY_TOOLS`, which only show something (a checklist card, no data; not for an unprompted turn); the owner's files
+  (`FILE_TOOLS`) only as the agent's `files` allows, `own` for its owner's turns, `shared` for others' (reading only, never
+  unprompted, a run or a Yes), and the prompt names them only to a request that may read them; the owner's Yes to an
   offered next step (`offer_yes`, `ChatAgent.takeOffer`) gets only `draftTools`, reading and `agent_propose`, pi's run too; the
   harness offers and runs no tool off that list); keep it that way. A turn its owner asked for, their Yes, and any turn that
   starts with nobody but the owner in the chat run apart, in a fork of the agent's session (`runsApart`): only the posted

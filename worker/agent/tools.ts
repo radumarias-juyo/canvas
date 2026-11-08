@@ -46,6 +46,7 @@ import { clip, MAX_TOOL_TEXT, text } from "./output.ts";
 import { pagePart } from "./page-part.ts";
 import type { AgentsScope } from "../agents/tools.ts";
 import { shownOf, type HeldPage } from "../agents/roster.ts";
+import { readsFiles } from "../agents/turns.ts";
 import { upTo, versionRefusal } from "./page-authors.ts";
 
 /** What the tools need from the chat they run in. */
@@ -182,11 +183,13 @@ export function filesExtension(scope: ChatScope): Extension {
   });
 }
 
-/** The prompt's list of the user's files (see filesIndex), installed again whenever it changes. */
+/**
+ * The prompt's list of the user's files (see filesIndex), installed again whenever it changes. Only in a request that
+ * may read them (readsFiles): an agent's turn without its owner's files (allowedTools) is not told their names.
+ */
 export function filesIndexExtension(index: string): Extension {
-  return defineExtension({ name: "files-index", sections: [section("user_files", () => index)] });
+  return defineExtension({ name: "files-index", sections: [section("user_files", ({ agent }) => (readsFiles(agent.tools) ? index : undefined))] });
 }
-
 const SANDBOX_FILES =
   "Files you name are copied from the user's files into ./files/, in their folders but without the leading uploads/ " +
   "(uploads/q3/sales.csv is ./files/q3/sales.csv, out/<chat>/report.csv is ./files/out/<chat>/report.csv). " +

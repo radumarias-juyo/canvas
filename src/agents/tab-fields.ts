@@ -8,7 +8,7 @@ import { LIMIT_FIELDS } from "../../shared/limits.ts";
  * What a tab saves without editing: the rest of the definition (its trigger, scope, workflow, limits) stays as it is.
  * Every field some tab edits is here, or saving another tab would drop it.
  */
-const KEPT = [...COPIED_FIELDS, ...LIMIT_FIELDS, "assumed", "reviewBeforePosting"] as const satisfies readonly (keyof AgentInput)[];
+const KEPT = [...COPIED_FIELDS, ...LIMIT_FIELDS, "assumed", "reviewBeforePosting", "files"] as const satisfies readonly (keyof AgentInput)[];
 
 /**
  * The fields Setup edits. It also confirms the model's guesses (assumed), which a save of another tab keeps. Every
@@ -24,6 +24,7 @@ export const SETUP_FIELDS = [
   "effort",
   "servers",
   "sharedServers",
+  "files",
   "assumed",
   "reviewBeforePosting",
   "speaksUp",
