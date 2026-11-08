@@ -257,7 +257,7 @@ import {
   agentRouterOn,
   AgentSettingsError,
   budgetDay,
-  chatAllowsServer,
+  inChatServers,
   checkAgentSettings,
   messageBudget,
   type ChatAgentSettings,
@@ -3453,15 +3453,12 @@ export class ChatAgent extends DurableObject<Env> {
    * the servers both name. Every reader of `servers` (a turn's tools, a run's tools, its reads and watches) follows it.
    */
   #inThisChat(agent: AgentDefinition | null): AgentDefinition | null {
-    const settings = this.#agentSettings();
-    if (!agent || !settings.servers) return agent;
-    const here = (server: string) => chatAllowsServer(settings, server);
-    const mine = agent.servers ?? this.hub.servers().map((server) => server.name);
-    return {
-      ...agent,
-      servers: mine.filter(here),
-      ...(agent.sharedServers && { sharedServers: agent.sharedServers.filter(here) }),
-    };
+    return agent && inChatServers(agent, this.#agentSettings(), this.#serverNames());
+  }
+
+  /** The deployment's MCP servers, by name: what an agent that names none may use. */
+  #serverNames(): string[] {
+    return this.hub.servers().map((server) => server.name);
   }
 
   /**
@@ -3992,7 +3989,12 @@ export class ChatAgent extends DurableObject<Env> {
     const seat = exports.ChatAgent.getByName(chatAgentName(entry.ownerUid, entry.seat));
     const room = this.#room;
     return {
-      give: (batch, turn) => seat.seatGive(room, entry.agentId, { ...turn, ownerName: this.#nameOf(entry.ownerUid), kind: this.kinds.kind() }, batch),
+      // With the servers this chat's owner lets agents use here, which a member's agent keeps to as the owner's do.
+      give: (batch, turn) => {
+        const { servers } = this.#agentSettings();
+        const given = { ...turn, ownerName: this.#nameOf(entry.ownerUid), kind: this.kinds.kind(), ...(servers && { servers }) };
+        return seat.seatGive(room, entry.agentId, given, batch);
+      },
       abort: (turn) => seat.seatAbort(room, turn),
       steer: (turn, line) => seat.seatSteer(room, turn, line),
       wake: () => seat.seatWake(room),
@@ -4146,11 +4148,12 @@ export class ChatAgent extends DurableObject<Env> {
       create: async () => (await this.harness.sessions.create()).id,
       fork: async (session) => (await this.#fork(session)).session,
       write: (session, text, requestId) => this.#writeTo(session, text, requestId),
-      // Tools that change data only as far as the write gate lets the turn's calls through (seatLevel, as seatCaller).
+      // Tools that change data only as far as the write gate lets the turn's calls through (seatLevel, as seatCaller),
+      // and only of the servers the room lets agents use (SeatTurn.servers).
       configure: (session, agent, turn) =>
         this.#configureAgent(
           session,
-          agent,
+          inChatServers(agent, turn, this.#serverNames()),
           { ask: turn.input, byOwner: turn.byOwner, calledBy: turn.calledBy, alone: false, writes: seatLevel(turn).level === 4 },
           turn.ownerName,
         ),

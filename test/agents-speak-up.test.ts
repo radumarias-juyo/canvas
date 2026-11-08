@@ -7,6 +7,7 @@ import {
   AgentSettingsError,
   budgetNotice,
   chatAllowsServer,
+  inChatServers,
   checkAgentSettings,
   DEFAULT_MESSAGE_TOKENS,
   messageBudget,
@@ -814,5 +815,12 @@ describe("a chat's agent settings", () => {
     expect(agentRouterOn({ router: false }, "private")).toBe(false);
     expect(chatAllowsServer({}, "crm")).toBe(true);
     expect(chatAllowsServer({ servers: ["docs"] }, "crm")).toBe(false);
+  });
+
+  it("keeps an agent to the servers the chat names, its shared list too; one that names none to the deployment's there", () => {
+    const all = ["crm", "docs", "mail"];
+    expect(inChatServers({ servers: ["crm", "docs"], sharedServers: ["crm"] }, {}, all)).toEqual({ servers: ["crm", "docs"], sharedServers: ["crm"] });
+    expect(inChatServers({ servers: ["crm", "docs"], sharedServers: ["crm"] }, { servers: ["docs"] }, all)).toEqual({ servers: ["docs"], sharedServers: [] });
+    expect(inChatServers({}, { servers: ["docs", "mail"] }, all)).toEqual({ servers: ["docs", "mail"] });
   });
 });

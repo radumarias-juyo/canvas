@@ -2,6 +2,7 @@ import type { EntryRecord } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
 import type { AgentDefinition, ChatTurnData, StepInput } from "../shared/agents.ts";
 import type { GuardrailRule, PendingActionView } from "../shared/limits.ts";
+import { inChatServers } from "../shared/agent-settings.ts";
 import { placeNote } from "../shared/memory.ts";
 import type { ToolInfo } from "../shared/protocol.ts";
 import { ChatActions, type NewAction } from "../worker/agents/limits/actions.ts";
@@ -224,6 +225,27 @@ describe("Seat turns through the write gate", () => {
     await expect(callerWith(null)).rejects.toThrow("gone");
     await expect(callerWith({ ...PLANNER, enabled: false })).rejects.toThrow("off");
     await expect(callerWith({ ...PLANNER, servers: ["db"] })).rejects.toThrow("not one of the servers");
+  });
+
+  it("keeps a seat's agent to the servers the room lets agents use: its tools and its calls", async () => {
+    const configured: string[][] = [];
+    const ana = new (class extends AnasObject {
+      async configure(session: string, agent: AgentDefinition, turn: SeatTurn) {
+        // As ChatAgent's seat host does (inChatServers with the turn's servers).
+        configured.push(inChatServers(agent, turn, ["crm", "db"]).servers ?? []);
+        await super.configure(session, agent, turn);
+      }
+    })();
+    await ana.seats.give(ROOM, "p", { ...seatTurn(1, ANA, true), servers: ["db"] });
+    await settle();
+    expect(configured).toEqual([["db"]]);
+    // The room names only db: Ana's own message cannot make her agent write to crm there, whatever its tools.
+    const fork = ana.sessionOf(1);
+    await expect(ana.seats.caller(fork, { server: "crm" }, async () => PLANNER)).rejects.toThrow("may use in this chat");
+    // A room that names none leaves it its own.
+    await ana.seats.give(ROOM, "p", seatTurn(2, ANA, true));
+    await settle();
+    await expect(ana.seats.caller(ana.sessionOf(2), { server: "crm" }, async () => PLANNER)).resolves.toMatchObject({ level: 4 });
   });
 
   it("runs only its owner's Yes to an offer apart, with draftTools; anyone else's is a turn that reads as any other", async () => {
