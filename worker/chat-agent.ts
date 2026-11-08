@@ -209,6 +209,8 @@ import { agentsExtension } from "./agents/tools.ts";
 import { historyExtension, HISTORY_SCAN_ENTRIES, searchHistory, type HistoryQuery } from "./agents/history.ts";
 import { ChatMemory, runAskedByOwner, type Whose } from "./memory/chat.ts";
 import { ChatSignals } from "./memory/chat-signals.ts";
+import { dreamLines, type DreamExcerpt } from "./memory/dream-input.ts";
+import { keepsSignals } from "../shared/signals.ts";
 import { freshPrompt, withoutNoteResults } from "./memory/fresh.ts";
 import { memoryExtension } from "./memory/tools.ts";
 import { coverageOf } from "./memory/coverage.ts";
@@ -3099,6 +3101,19 @@ export class ChatAgent extends DurableObject<Env> {
     this.#setReaction(entry, emoji, by.uid, on);
     const reactedTo = reacted && (replyAgent(reacted) ?? (reacted.kind === "pi.assistant" ? AGENT_NAME : undefined));
     if (reactedTo) this.signals.reacted(by.uid, reactedTo, entry, emoji);
+  }
+
+  /**
+   * What a nightly dream of `uid`'s (their agent `subject`, or pi for the chat's owner) reads of this chat from `from`
+   * to `to`: the lines everyone in it sees (worker/memory/dream-input.ts). Nothing for someone not in it, nor off the record.
+   */
+  async dreamLines(uid: string, subject: string, from: number, to: number): Promise<DreamExcerpt> {
+    const kind = this.kinds.kind();
+    if (!this.isInChat(uid) || !keepsSignals(kind) || (subject === AGENT_NAME && uid !== this.uid)) return { off: true };
+    const own = uid === this.uid;
+    const alone = own && kind === "private" && !this.members.hasAny();
+    const read = await dreamLines(this.#log({ order: "descending" }), { subject, owner: uid, private: alone, from, to });
+    return { kind, private: alone, own, ...read };
   }
 
   /** The agent's reaction (the react tool): to the newest message a person sent, which is the one it is answering. */

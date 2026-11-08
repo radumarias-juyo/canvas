@@ -1251,6 +1251,28 @@ a.mention-chip:hover { text-decoration: underline; }
 .memory-skills { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 0; }
 .knows-head { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 8px 16px; margin-top: 4px; }
 .knows-head p { margin: 0; max-width: 62ch; }
+/* "Learned overnight" (src/memory/Dreams.tsx): a subject's nightly dream, its summary and the notes it wrote. */
+.dream { margin: 20px 0 8px; padding: 14px 16px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface-2); }
+.dream-head { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 8px 16px; }
+.dream-head h3 { margin: 0 0 4px; font-size: 15px; }
+.dream-head p { margin: 0; max-width: 62ch; }
+.dream-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
+.dream-controls > button { padding: 4px 11px; font-size: 13px; }
+.dream-summary { display: flex; flex-direction: column; gap: 4px; margin-top: 12px; padding: 10px 12px; border-radius: var(--radius); background: var(--surface); border-left: 3px solid var(--accent); }
+.dream-summary.quiet, .dream-summary.skipped { border-left-color: var(--border); }
+.dream-summary.failed { border-left-color: var(--error); }
+.dream-summary strong { font-size: 13.5px; }
+.dream-summary p { margin: 0; overflow-wrap: anywhere; }
+.dream-counts { display: flex; flex-wrap: wrap; gap: 2px 14px; color: var(--muted); font-size: 12.5px; }
+.dream .memory-list { margin: 10px 0 0; }
+.dream-why { display: flex; flex-wrap: wrap; gap: 2px 10px; margin: 0; color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
+.dream-why span:first-child:not(:only-child)::after { content: " ·"; }
+.dream-retired { margin-top: 10px; }
+.dream-retired summary { color: var(--muted); font-size: 13px; cursor: pointer; }
+@media (max-width: 640px) {
+  .dream { padding: 12px; }
+  .dream-controls { width: 100%; justify-content: space-between; }
+}
 .skills.memory .skills-head .menu-button { margin-bottom: 8px; }
 .form-error { color: var(--error); }
 

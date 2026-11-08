@@ -145,6 +145,11 @@ export interface AgentInput {
    * chat's own holds (shared/speak-up.ts).
    */
   speakUpLimits?: SpeakUpLimits;
+  /**
+   * It learns overnight: a nightly dream reads how people worked with it that day and saves what is worth keeping as
+   * memory notes (shared/dream.ts). On for an agent made since it exists, off when absent (one made before).
+   */
+  learns?: boolean;
 }
 
 /** The longest "worth a post" bar, and the most posts a day an agent may be limited to. */
@@ -461,6 +466,8 @@ export function checkAgent(input: unknown): AgentInput {
     if (error instanceof SpeakUpLimitsError) fail(`An agent's limits on speaking up: ${error.message}`);
     throw error;
   }
+  const learns = input.learns ?? undefined;
+  if (learns !== undefined && typeof learns !== "boolean") fail("An agent's learns is true or false.");
   return {
     name,
     ...(avatar && { avatar }),
@@ -483,6 +490,7 @@ export function checkAgent(input: unknown): AgentInput {
     ...(worthPosting && { worthPosting }),
     ...(postsPerDay !== undefined && { postsPerDay: postsPerDay as number }),
     ...(speakUpLimits && { speakUpLimits }),
+    ...(learns !== undefined && { learns }),
   };
 }
 

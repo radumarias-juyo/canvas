@@ -51,7 +51,13 @@ with `@cloudflare/vite-plugin`, pnpm; configured and deployed with the `cf` CLI 
   How people work with an agent or pi (corrections, drafts, decisions, mutes, reactions, repeats) is recorded as signals,
   with no model call and never what anyone said (`shared/signals.ts`, `worker/memory/chat-signals.ts`), in the agent's
   owner's directory (pi's: the chat owner's; `SignalStore`), tagged with the chat and its kind; nothing from a chat off
-  the record, checked at both ends.
+  the record, checked at both ends. Each night at 03:00 in the owner's time zone (`worker/memory/user-dreams.ts`, one
+  alarm with the sign-ins'), pi (account setting, on) and each agent with `learns` (on for new agents) dream once per day
+  (`Dreamer`, `worker/memory/dream.ts`): one cheap call (`internalModel(DREAM_MODEL)`, on the owner's meter and runs' cap) per audience,
+  the owner's private chats together and each shared chat alone, over the day's signals and the log's lines (never a
+  reply built on private servers). The model only proposes; `placeDreamNote` (`shared/dream.ts`) puts
+  each note from where what it cites came from: a shared chat's into that chat, a "how to work" lesson for wider use
+  off until confirmed, a fact off until confirmed. Notes left waiting are a Needs you item (`lesson`).
   Keep those rules in code.
 - Shared chats (`worker/chat-routes.ts`, `worker/members.ts`): the owner invites people by single-use link; they share
   the one conversation and the one agent, which always acts as the owner (owner's MCP sign-ins, files, skills; artifacts
