@@ -53,6 +53,31 @@ describe("conditions", () => {
     expect(holds("exists(nothing)", scope)).toBe(false);
   });
 
+  it("refuses min and max of no numbers, as avg, and takes a long list", () => {
+    for (const fn of ["min", "max", "avg"]) {
+      expect(() => evaluate(`${fn}(alerts)`, scope)).toThrow(new ConditionError(`${fn}() of an empty list.`));
+      expect(() => evaluate(`${fn}(signups.regions, "missing")`, scope)).toThrow(ConditionError);
+    }
+    expect(evaluate('min(signups.regions, "signups")', scope)).toBe(120);
+    expect(evaluate('max(signups.regions, "signups")', scope)).toBe(300);
+    expect(evaluate("min(3, 1, 2)", scope)).toBe(1);
+    // More numbers than a call's arguments could carry (Math.min(...list) throws a RangeError past that).
+    const many = { values: Array.from({ length: 300_000 }, (_, i) => i - 7) };
+    expect(evaluate("min(values)", many)).toBe(-7);
+    expect(evaluate("max(values)", many)).toBe(299_992);
+  });
+
+  it("never reads Infinity or another non-finite text as a number", () => {
+    const odd = { big: "Infinity", small: "-Infinity", nan: "NaN", list: ["Infinity", 2, "3"] };
+    expect(() => evaluate("big > 1", odd)).toThrow(/big is not a number/);
+    expect(() => evaluate("small - 1", odd)).toThrow(/is not a number/);
+    expect(() => evaluate("nan * 2", odd)).toThrow(/is not a number/);
+    expect(evaluate("max(list)", odd)).toBe(3);
+    expect(evaluate("sum(list)", odd)).toBe(5);
+    // Still text, compared as text.
+    expect(holds('big == "Infinity"', odd)).toBe(true);
+  });
+
   it("treats a missing step as null, and says so when it needs a number", () => {
     expect(evaluate("nothing.at.all", scope)).toBe(null);
     expect(() => holds("nothing.weekly > 3", scope)).toThrow("nothing.weekly is missing.");
