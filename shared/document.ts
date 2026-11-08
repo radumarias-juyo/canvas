@@ -215,6 +215,11 @@ const TYPES: Record<string, TypeRule> = {
   // A placeholder for a section being written (pi plants one per section, then fills them): what will go there.
   pending: { content: "", group: "block", atom: true, attrs: block({ intent: { check: text(MAX_ATTR_TEXT) } }) },
   text: { content: "", group: "inline", inline: true, attrs: {} },
+<<<<<<< HEAD
+=======
+  // A line break inside a block (Shift+Enter), as Tiptap's HardBreak writes it.
+  hardBreak: { content: "", group: "inline", inline: true, attrs: {} },
+>>>>>>> origin/agents/main
   // A person: their user id and name as written.
   mention: { content: "", group: "inline", inline: true, atom: true, attrs: { uid: { check: text(200) }, name: { check: text(MAX_ATTR_TEXT) } } },
   date: { content: "", group: "inline", inline: true, atom: true, attrs: { value: { check: validDate } } },
@@ -466,7 +471,12 @@ function checkNode(value: unknown, path: string, depth: number, walk: Walk, pare
     const length = children.reduce((sum, child) => sum + (child.text?.length ?? 0), 0);
     if (length > MAX_TEXT) throw new DocumentError(path, `holds more than ${MAX_TEXT} characters`);
   }
+<<<<<<< HEAD
   const node: DocNode = { type: value.type, attrs };
+=======
+  // A node without attributes (a line break) is written without them, as Tiptap does.
+  const node: DocNode = Object.keys(attrs).length ? { type: value.type, attrs } : { type: value.type };
+>>>>>>> origin/agents/main
   if (children.length) node.content = children;
   const whole = rule.whole?.(node);
   if (whole) throw new DocumentError(path, `${value.type} ${whole}`);
@@ -620,9 +630,16 @@ export function emptyDocument(title: string, tabTitle = "Tab 1"): DocDocument {
 
 // ---- Text, finding, the outline ----
 
+<<<<<<< HEAD
 /** The text an inline node shows: a text node's text, a mention's @name, a date, a dropdown's value. */
 function inlineText(node: DocNode): string {
   if (node.type === "text") return node.text ?? "";
+=======
+/** The text an inline node shows: a text node's text, a line break as one, a mention's @name, a date, a dropdown's value. */
+function inlineText(node: DocNode): string {
+  if (node.type === "text") return node.text ?? "";
+  if (node.type === "hardBreak") return "\n";
+>>>>>>> origin/agents/main
   if (node.type === "mention") return `@${String(node.attrs?.name ?? "")}`;
   if (node.type === "date") return String(node.attrs?.value ?? "");
   if (node.type === "dropdown") return node.attrs?.value == null ? "" : String(node.attrs.value);
