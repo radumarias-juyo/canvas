@@ -247,7 +247,7 @@ import {
   speakersFor,
   turnSources,
 } from "./agents/turns.ts";
-import { entryOffer, OFFER_YES } from "../shared/offers.ts";
+import { offerOwner, OFFER_YES } from "../shared/offers.ts";
 import {
   answersEveryMessage,
   CHAT_BUDGET_KIND,
@@ -272,7 +272,7 @@ import {
   agentRouterOn,
   AgentSettingsError,
   budgetDay,
-  chatAllowsServer,
+  inChatServers,
   checkAgentSettings,
   messageBudget,
   type ChatAgentSettings,
@@ -1702,15 +1702,18 @@ export class ChatAgent extends DurableObject<Env> {
   }
 
   /**
-   * The owner's Yes to the next step the reply `entryId` offers (shared/offers.ts): a reply to it the chat writes
-   * (OFFER_YES, never the offer's words as the owner's), whose turn may only read and draft the routine (draftTools).
+   * The Yes to the next step the reply `entryId` offers (shared/offers.ts), by the owner of the agent that offered it
+   * (offerOwner: the chat's owner for pi's and their agents', a member for their own agent's): a reply to it the chat
+   * writes (OFFER_YES, never the offer's words as theirs), whose turn may only read and draft the routine (draftTools).
    * pi's tools change for its whole run, so not while it works on another (#piTools refuses it then).
    */
   async takeOffer(author: Person, entryId: unknown): Promise<void> {
-    if (author.uid !== this.uid) throw new Error("Only the chat's owner answers an offer.");
     const entry = await this.#entryAt(entryId);
     // The offer as the app shows it (entryOffer), so Yes is taken only where it is offered.
-    if (!entry || entryOffer(entry) === undefined) throw new Error("That message offers no next step.");
+    const owner = entry && offerOwner(entry, this.uid);
+    if (!entry || owner === undefined) throw new Error("That message offers no next step.");
+    // Its turn reads every server of the agent's, private ones too: only the agent's owner says Yes to that.
+    if (author.uid !== owner) throw new Error("Only the owner of the agent that offered it answers an offer.");
     this.signals.offerTaken(author.uid, replyAgent(entry) ?? AGENT_NAME, entry.id as number);
     await this.prompt(OFFER_YES, author, [], [], entry.id, true);
   }
@@ -3501,15 +3504,12 @@ export class ChatAgent extends DurableObject<Env> {
    * the servers both name. Every reader of `servers` (a turn's tools, a run's tools, its reads and watches) follows it.
    */
   #inThisChat(agent: AgentDefinition | null): AgentDefinition | null {
-    const settings = this.#agentSettings();
-    if (!agent || !settings.servers) return agent;
-    const here = (server: string) => chatAllowsServer(settings, server);
-    const mine = agent.servers ?? this.hub.servers().map((server) => server.name);
-    return {
-      ...agent,
-      servers: mine.filter(here),
-      ...(agent.sharedServers && { sharedServers: agent.sharedServers.filter(here) }),
-    };
+    return agent && inChatServers(agent, this.#agentSettings(), this.#serverNames());
+  }
+
+  /** The deployment's MCP servers, by name: what an agent that names none may use. */
+  #serverNames(): string[] {
+    return this.hub.servers().map((server) => server.name);
   }
 
   /**
@@ -4043,7 +4043,12 @@ export class ChatAgent extends DurableObject<Env> {
     const seat = exports.ChatAgent.getByName(chatAgentName(entry.ownerUid, entry.seat));
     const room = this.#room;
     return {
-      give: (batch, turn) => seat.seatGive(room, entry.agentId, { ...turn, ownerName: this.#nameOf(entry.ownerUid), kind: this.kinds.kind() }, batch),
+      // With the servers this chat's owner lets agents use here, which a member's agent keeps to as the owner's do.
+      give: (batch, turn) => {
+        const { servers } = this.#agentSettings();
+        const given = { ...turn, ownerName: this.#nameOf(entry.ownerUid), kind: this.kinds.kind(), ...(servers && { servers }) };
+        return seat.seatGive(room, entry.agentId, given, batch);
+      },
       abort: (turn) => seat.seatAbort(room, turn),
       steer: (turn, line) => seat.seatSteer(room, turn, line),
       wake: () => seat.seatWake(room),
@@ -4158,11 +4163,17 @@ export class ChatAgent extends DurableObject<Env> {
   /**
    * The newest version of another person's page conversation `session` may read as posted in its chat: in a seat's
    * session, as its room shows it to this seat's owner (seatPage); else as a member's agent's replies posted it here.
+   * With what the page's own chat withholds from this object's owner (postedPage): the log only says what was posted.
    */
-  async #chatPage(meta: Pick<ArtifactMeta, "id" | "ownerUid">, session: string): Promise<number> {
+  async #chatPage(meta: Pick<ArtifactMeta, "id" | "ownerUid" | "chatId">, session: string): Promise<{ upTo: number; held: HeldPage }> {
     const seated = this.seats.turnIn(session);
-    if (seated) return exports.ChatAgent.getByName(chatAgentName(seated.room.ownerUid, seated.room.chatId)).seatPage(this.uid, seated.agentId, meta.id);
-    return meta.ownerUid === this.uid ? 0 : this.#postedVersion(meta);
+    const upTo = seated
+      ? await exports.ChatAgent.getByName(chatAgentName(seated.room.ownerUid, seated.room.chatId)).seatPage(this.uid, seated.agentId, meta.id)
+      : meta.ownerUid === this.uid
+        ? 0
+        : await this.#postedVersion(meta);
+    const held = upTo ? await exports.ChatAgent.getByName(chatAgentName(meta.ownerUid, meta.chatId)).withheldFrom(meta.id, this.uid) : NOTHING_HELD;
+    return { upTo, held };
   }
 
   /** The newest version of `meta` the replies of its owner's agents posted in this chat's log (postedVersion), within MAX_POSTED_PAGES. */
@@ -4192,11 +4203,12 @@ export class ChatAgent extends DurableObject<Env> {
       create: async () => (await this.harness.sessions.create()).id,
       fork: async (session) => (await this.#fork(session)).session,
       write: (session, text, requestId) => this.#writeTo(session, text, requestId),
-      // Tools that change data only as far as the write gate lets the turn's calls through (seatLevel, as seatCaller).
+      // Tools that change data only as far as the write gate lets the turn's calls through (seatLevel, as seatCaller),
+      // and only of the servers the room lets agents use (SeatTurn.servers).
       configure: (session, agent, turn) =>
         this.#configureAgent(
           session,
-          agent,
+          inChatServers(agent, turn, this.#serverNames()),
           { ask: turn.input, byOwner: turn.byOwner, calledBy: turn.calledBy, alone: false, writes: seatLevel(turn).level === 4 },
           turn.ownerName,
         ),

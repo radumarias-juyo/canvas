@@ -783,8 +783,8 @@ The project uses Cloudflare's [`cf` CLI](https://developers.cloudflare.com/cf/);
    button; no redeploy is needed. `MODEL` in `cloudflare.config.ts`, what new chats run on until Auto or their user picks, is a pi-ai
    gateway specifier (`anthropic/claude-sonnet-5.5`); a Workers AI id such as `@cf/zai-org/glm-5.3-flash` needs no key. See [Models](#models).
 4. Put the app behind Cloudflare Access: create a self-hosted Access application for the Worker's hostname with a
-   policy listing who may sign in, then set `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` (the application's audience tag) in
-   `cloudflare.config.ts`. That hostname is `domains` there, a custom domain on a zone in your account, with
+   policy listing who may sign in, then set `accessTeamDomain` and `accessAud` (the application's audience tag) in
+   `production` in `cloudflare.config.ts`. That hostname is `domains` there, a custom domain on a zone in your account, with
    workers.dev and Preview URLs off so the Worker is reachable only through Access; change it to yours, or drop it and
    set `workersDev: true` to serve on workers.dev.
 5. Generate the file-encryption master key (`openssl rand -base64 32`, at least 32 bytes) and keep a copy somewhere
@@ -801,6 +801,10 @@ The project uses Cloudflare's [`cf` CLI](https://developers.cloudflare.com/cf/);
      and `PUSH_SUBJECT` (a `mailto:` or `https:` contact for the push services): push notifications. Changing the key
      pair makes each browser subscribe again the next time the app opens.
 6. `pnpm run deploy` (`cf deploy`). This builds the sandbox image with Docker and needs the Workers Paid plan.
+
+To try a branch next to production, deploy it as a preview: a separate Worker with its own hostname, Access
+application, bucket, Artifacts namespace, gateway, dataset, container, rate limits and secrets, set by `PI_PREVIEW` and a
+few other variables. Without them the config is production's, unchanged. See [docs/preview-deploy.md](docs/preview-deploy.md).
 
 A website that links to the app gets a "Back to <hostname>" link at the top of the sidebar, taken from the browser's
 referrer and kept for the tab. The Access sign-in on a first visit replaces the referrer, so a site that wants the

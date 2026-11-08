@@ -9,6 +9,7 @@ import { PI_TURN, sessionOf, type AgentTurn, type ChatRoster, type PostedPage, t
 import { isPass } from "./funnel.ts";
 import type { SeatBatch, SeatLink, SeatResult } from "./seats/link.ts";
 import { chatTraces } from "../chat-traces.ts";
+import { withoutYes } from "../../shared/offers.ts";
 import {
   askedApart,
   askOf,
@@ -167,7 +168,10 @@ export class AgentTurns {
       const byOwner = caller.byOwner && !caller.unattended && (caller.calledBy.uid === undefined || caller.calledBy.uid === ownerUid);
       const ask = typeof caller.ask === "function" ? caller.ask(byOwner) : caller.ask;
       const by = caller.by ?? caller.calledBy.uid;
-      const request = { ...caller, agentId, byOwner, ask, hop: caller.hop ?? 0, root, ...(by !== undefined && { by }) };
+      // A Yes to an offer reads every server of the agent's (draftTools): only its owner's is one. Anyone else's (a
+      // member's agent's offer the chat's owner answered) is a turn as any other they give it, which only reads.
+      const calledBy = caller.calledBy.drafts && caller.calledBy.uid !== ownerUid ? withoutYes(caller.calledBy) : caller.calledBy;
+      const request = { ...caller, calledBy, agentId, byOwner, ask, hop: caller.hop ?? 0, root, ...(by !== undefined && { by }) };
       const turn = this.#host.roster.enqueue(request, pi && piPlaced);
       // What pi's answer to it costs counts from now (its tokens are read as it ends).
       if (pi && piPlaced) this.#host.piTokens?.();
@@ -762,11 +766,11 @@ export class AgentTurns {
       else if (entry) sessions.add(sessionOf(entry, turn));
     }
     aborts.push(...[...sessions].map((session) => this.#host.abort(session)));
+    // Everyone hears it at once: the roster says stopped already, and an abort settles only once the tool call it cut
+    // into returns (a slow one keeps it for as long). The next turns start only after.
+    if (stopped.length) this.#host.changed();
     await Promise.all(aborts.map((abort) => abort.catch((error: unknown) => console.error("agent stop:", errorMessage(error)))));
-    if (stopped.length) {
-      this.#host.changed();
-      this.#pumpAfter();
-    }
+    if (stopped.length) this.#pumpAfter();
     return stopped.length > 0;
   }
 

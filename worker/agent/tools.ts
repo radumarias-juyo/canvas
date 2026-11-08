@@ -47,7 +47,7 @@ import { pagePart } from "./page-part.ts";
 import type { AgentsScope } from "../agents/tools.ts";
 import { shownOf, type HeldPage } from "../agents/roster.ts";
 import { readsFiles } from "../agents/turns.ts";
-import { upTo, versionRefusal } from "./page-authors.ts";
+import { postedPage, versionRefusal } from "./page-authors.ts";
 import type { ReadDetails } from "./reach.ts";
 
 /** What the tools need from the chat they run in. */
@@ -64,7 +64,7 @@ export interface ChatScope extends PublishScope, AgentsScope {
    * The newest version of another person's page (a member's agent's, or the room's for a seat) that conversation
    * `session` may read as posted in its chat; 0 for none. Unset: no other person's page is read here.
    */
-  chatPage?(meta: Pick<ArtifactMeta, "id" | "ownerUid" | "chatId">, session: string): Promise<number>;
+  chatPage?(meta: Pick<ArtifactMeta, "id" | "ownerUid" | "chatId">, session: string): Promise<{ upTo: number; held: HeldPage }>;
   /** Save a skill for the user, turned off until they turn it on. */
   proposeSkill(skill: SkillInput): Promise<SkillResult>;
   /** The checks that found errors in a row; the chat resets it when someone writes. */
@@ -389,7 +389,8 @@ async function ownArtifact(scope: ChatScope, id: string, session: string, rules?
     return shown;
   }
   // Another person's page posted in this chat (a member's agent's, or the room's to a seat): up to the newest version posted.
-  const posted = upTo(meta, (await scope.chatPage?.(meta, session)) ?? 0);
+  const page = await scope.chatPage?.(meta, session);
+  const posted = page && postedPage(meta, page);
   if (!posted) throw missing();
   return posted;
 }

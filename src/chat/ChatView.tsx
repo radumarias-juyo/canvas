@@ -1,7 +1,7 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode, type RefObject } from "react";
-import { assistantOffer } from "../../shared/offers.ts";
+import { assistantOffer, offerOwner } from "../../shared/offers.ts";
 import { CHAT_AGENT_KIND, CHAT_TURN_KIND, proposedBy, type ChatAgentReplyData, type ChatAgentView } from "../../shared/agents.ts";
 import { AgentWindow } from "./AgentWindow.tsx";
 import { DraftCard } from "../agents/DraftCard.tsx";
@@ -180,9 +180,14 @@ export function ChatView({ chatId, title, uid, newSince, onArtifact, onActivity,
     },
     [prompt, dropHint],
   );
-  // The latest next step a reply offered (shared/offers.ts), which only the chat's owner answers: Yes replies to that
-  // message, which calls the agent that wrote it, asking it to set the step up.
-  const offered = useMemo(() => (isOwner ? liveOffer(state.entries) : undefined), [isOwner, state.entries]);
+  // The latest next step a reply offered (shared/offers.ts), which only the owner of the agent that offered it answers
+  // (offerOwner: the chat's owner for pi's and their agents'): Yes replies to that message, which calls the agent that
+  // wrote it, asking it to set the step up.
+  const offered = useMemo(() => {
+    const live = people ? liveOffer(state.entries) : undefined;
+    const entry = live === undefined ? undefined : state.entries.find((one) => one.id === live);
+    return entry && offerOwner(entry, people!.owner.uid) === uid ? live : undefined;
+  }, [people, state.entries, uid]);
   const takeOffer = useCallback(
     (entry: number) => {
       if (!sendYes(entry)) return false;
