@@ -70,6 +70,9 @@ type SeatTurnRow = {
   submitted: number;
   /** The turn as given, checked (SeatTurn JSON): what sets it up again when its give died before it submitted. */
   given: string | null;
+  /** Who asked for it, and whether from its owner's window: what the window lists, kept once `given` is let go. */
+  asked_by: string | null;
+  by_window: number;
   /** When the room took its result (`taken`). */
   taken_at: number | null;
   /** The room's kind and the agent's name as the turn started: what its memory notes go by (memoryAgent). */
@@ -136,6 +139,8 @@ export class AgentSeats {
       submitted: "INTEGER NOT NULL DEFAULT 1",
       given: "TEXT",
       taken_at: "INTEGER",
+      asked_by: "TEXT",
+      by_window: "INTEGER NOT NULL DEFAULT 0",
     });
     // The room's kind as it last said it (a give, or a change of it: setKind).
     addColumns(sql, "agent_seats", { kind: "TEXT" });
@@ -343,8 +348,8 @@ export class AgentSeats {
     // Given meanwhile by a retry: that one runs.
     if (this.#turn(ref, turn.turn)) return delivered;
     this.#sql.exec(
-      `INSERT INTO agent_seat_turns (room_owner, room_chat, agent_id, turn, session, forked, status, kind, name, submitted, given)
-       VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, 0, ?)`,
+      `INSERT INTO agent_seat_turns (room_owner, room_chat, agent_id, turn, session, forked, status, kind, name, submitted, given, asked_by, by_window)
+       VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, 0, ?, ?, ?)`,
       ref.ownerUid,
       ref.chatId,
       agentId,
@@ -355,6 +360,8 @@ export class AgentSeats {
       isChatKind(turn.kind) ? turn.kind : null,
       agent.name,
       JSON.stringify(checked),
+      turn.calledBy.name,
+      turn.calledBy.window ? 1 : 0,
     );
     const row = this.#turn(ref, turn.turn)!;
     await this.#claimed(row, () => this.#start(row, agent, checked, seat.session));
@@ -576,22 +583,25 @@ export class AgentSeats {
     if (!seat) return null;
     const rows = this.#sql
       .exec(
-        "SELECT turn, session, forked, status, given FROM agent_seat_turns WHERE room_owner = ? AND room_chat = ? AND agent_id = ? ORDER BY turn DESC",
+        `SELECT turn, session, forked, status, given, asked_by, by_window FROM agent_seat_turns
+         WHERE room_owner = ? AND room_chat = ? AND agent_id = ? ORDER BY turn DESC`,
         ref.ownerUid,
         ref.chatId,
         agentId,
       )
-      .toArray() as Pick<SeatTurnRow, "turn" | "session" | "forked" | "status" | "given">[];
+      .toArray() as Pick<SeatTurnRow, "turn" | "session" | "forked" | "status" | "given" | "asked_by" | "by_window">[];
     const forks = rows.flatMap((row): AgentWindowSession[] => {
       if (row.forked !== 1) return [];
+      // A row from before the label was kept reads it from the turn as given, while that is kept.
       const given = parsedTurn(row.given);
+      const askedBy = row.asked_by ?? given?.calledBy.name;
       return [
         {
           id: row.session,
           kind: "fork",
           turn: row.turn,
-          ...(given && { askedBy: given.calledBy.name }),
-          ...(given?.calledBy.window && { window: true as const }),
+          ...(askedBy && { askedBy }),
+          ...((row.by_window === 1 || given?.calledBy.window) && { window: true as const }),
           running: row.status === "running",
         },
       ];
