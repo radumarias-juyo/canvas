@@ -108,6 +108,11 @@ export interface AgentInput {
   /** The MCP servers it may use when its owner asks, by name; every server when absent. */
   servers?: string[];
   /**
+   * Its owner's private files: `own`, read and written on a turn its owner asks for; `shared`, read (only) on a turn
+   * anyone else in a shared chat gives it, who then sees what it reads. When absent: own on, shared off (agentFiles).
+   */
+  files?: AgentFiles;
+  /**
    * The servers anyone else in a shared chat can make it use, read-only. When absent: those of `servers` that do not
    * sign in each user (the owner can widen it, knowing the chat sees what the agent reads).
    */
@@ -145,6 +150,11 @@ export interface AgentInput {
    * chat's own holds (shared/speak-up.ts).
    */
   speakUpLimits?: SpeakUpLimits;
+  /**
+   * It learns overnight: a nightly dream reads how people worked with it that day and saves what is worth keeping as
+   * memory notes (shared/dream.ts). On for an agent made since it exists, off when absent (one made before).
+   */
+  learns?: boolean;
 }
 
 /** The longest "worth a post" bar, and the most posts a day an agent may be limited to. */
@@ -420,6 +430,7 @@ export function checkAgent(input: unknown): AgentInput {
   if (autonomy !== undefined && autonomy !== 1 && autonomy !== 2 && autonomy !== 3 && autonomy !== 4) fail("An agent's autonomy is 1 (inform) to 4 (run).");
   const model = str(input.model, field("An agent", "a", "model"), 200, { required: false });
   const servers = names(input.servers, "servers");
+  const files = checkFiles(input.files);
   const sharedServers = names(input.sharedServers, "servers for shared chats");
   if (servers && sharedServers?.some((server) => !servers.includes(server))) fail("An agent shares only servers it may use itself.");
   const trigger = checkTrigger(input.trigger);
@@ -461,6 +472,8 @@ export function checkAgent(input: unknown): AgentInput {
     if (error instanceof SpeakUpLimitsError) fail(`An agent's limits on speaking up: ${error.message}`);
     throw error;
   }
+  const learns = input.learns ?? undefined;
+  if (learns !== undefined && typeof learns !== "boolean") fail("An agent's learns is true or false.");
   return {
     name,
     ...(avatar && { avatar }),
@@ -471,6 +484,7 @@ export function checkAgent(input: unknown): AgentInput {
     ...(effort !== undefined && { effort: effort as ModelThinkingLevel }),
     ...(servers && { servers }),
     ...(sharedServers && { sharedServers }),
+    ...(files && { files }),
     ...(trigger && { trigger }),
     ...(scope && { scope }),
     ...(workflow && { workflow }),
@@ -483,7 +497,28 @@ export function checkAgent(input: unknown): AgentInput {
     ...(worthPosting && { worthPosting }),
     ...(postsPerDay !== undefined && { postsPerDay: postsPerDay as number }),
     ...(speakUpLimits && { speakUpLimits }),
+    ...(learns !== undefined && { learns }),
   };
+}
+
+/** Whether an agent may use its owner's private files: on a turn its owner asks for, and on anyone else's in a shared chat. */
+export interface AgentFiles {
+  own: boolean;
+  shared: boolean;
+}
+
+/** An agent's files setting as it holds: its own, else the default (own on, shared off). Shared needs own. */
+export function agentFiles(agent: Pick<AgentInput, "files">): AgentFiles {
+  const own = agent.files?.own ?? true;
+  return { own, shared: own && agent.files?.shared === true };
+}
+
+/** The files setting of a definition being saved: undefined when absent (the default), else both booleans, shared only with own. */
+function checkFiles(value: unknown): AgentFiles | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!isObject(value) || typeof value.own !== "boolean" || typeof value.shared !== "boolean") fail("An agent's files are {own, shared}, each true or false.");
+  if (value.shared && !value.own) fail("An agent shares your files in shared chats only when it may use them itself.");
+  return { own: value.own as boolean, shared: value.shared as boolean };
 }
 
 /** An agent's badge when it has none of its own: its name's first two letters. */
@@ -591,7 +626,7 @@ export const COPIED_FIELDS = [
 ] as const satisfies readonly (keyof AgentInput)[];
 export type CopiedField = (typeof COPIED_FIELDS)[number];
 /** The fields a copy takes only as its new owner sets them when they copy it, never from the one it copies. */
-export const OWN_FIELDS = ["reviewBeforePosting"] as const satisfies readonly (keyof AgentInput)[];
+export const OWN_FIELDS = ["reviewBeforePosting", "files"] as const satisfies readonly (keyof AgentInput)[];
 
 /** Changes to a definition's fields, as a request carries them: null clears an optional one (checkAgent reads it as none). */
 export type AgentChanges = { [K in keyof AgentInput]?: AgentInput[K] | null };
@@ -601,8 +636,11 @@ export type AgentChanges = { [K in keyof AgentInput]?: AgentInput[K] | null };
  * shared chat could make it read what its owner sees there. Only its owner adds one, in Setup, under its warning.
  */
 export function withoutSignInShares(input: unknown, signsIn: (server: string) => boolean): unknown {
-  if (!isObject(input) || !Array.isArray(input.sharedServers)) return input;
-  return { ...input, sharedServers: input.sharedServers.filter((server) => typeof server !== "string" || !signsIn(server)) };
+  if (!isObject(input)) return input;
+  // Nor the owner's files in shared chats: they too are the owner's alone (AgentFiles.shared).
+  const files = isObject(input.files) && input.files.shared === true ? { ...input, files: { ...input.files, shared: false } } : input;
+  if (!Array.isArray(files.sharedServers)) return files;
+  return { ...files, sharedServers: files.sharedServers.filter((server) => typeof server !== "string" || !signsIn(server)) };
 }
 
 /** The fields a copy takes of `agent`, those it has. */

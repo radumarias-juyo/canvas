@@ -94,6 +94,7 @@ import {
   CLOSED_REACH,
   heldReply,
   ownersInput,
+  piPrivateEntry,
   piShares,
   reachExtension,
   shownPiEvent,
@@ -222,6 +223,9 @@ import { SEAT_CHAT_PATTERN } from "../shared/protocol.ts";
 import { agentsExtension } from "./agents/tools.ts";
 import { historyExtension, HISTORY_SCAN_ENTRIES, searchHistory, type HistoryQuery } from "./agents/history.ts";
 import { ChatMemory, runAskedByOwner, type Whose } from "./memory/chat.ts";
+import { ChatSignals } from "./memory/chat-signals.ts";
+import { dreamLines, type DreamExcerpt } from "./memory/dream-input.ts";
+import { keepsSignals } from "../shared/signals.ts";
 import { freshPrompt, withoutNoteResults } from "./memory/fresh.ts";
 import { memoryExtension } from "./memory/tools.ts";
 import { coverageOf } from "./memory/coverage.ts";
@@ -372,6 +376,11 @@ const PI_BUSY_FOR_YES = "pi is still working: say yes once it is done.";
 const PI_PRIVATE_KEY = "piPrivateSince";
 /** When pi's run going now first read such a result with nobody but the owner in the chat (#settlePiAlone). */
 const PI_ALONE_KEY = "piAlonePrivate";
+/**
+ * Set while pi's run going now started with nobody but the owner in the chat (#notePiRunAlone): what it reads then is
+ * read alone with them, though someone joins before it does; cleared as it ends (#settlePiAlone).
+ */
+const PI_RUN_ALONE_KEY = "piRunAlone";
 /** pi's replies held for the owner (PiHeld): runs alone with them that read what only they see and ended after someone joined. */
 const PI_HELD_KEY = "piHeld";
 /** Set once the owner's sidebar heard whether this chat has members: chats shared before it kept that tell it once. */
@@ -571,6 +580,7 @@ export class ChatAgent extends DurableObject<Env> {
   /** Agents that speak up (worker/agents/speak-up.ts). */
   readonly speakUp = new SpeakUp({
     roster: this.roster,
+    ...(scriptPauseMs(this.env) !== undefined && { devPauseMs: scriptPauseMs(this.env) }),
     settings: () => this.#agentSettings(),
     definition: async (entry) => this.#inThisChat(await this.#index(entry.ownerUid).getAgent(entry.agentId)),
     budgetLeft: () => this.spend.refusal() === undefined,
@@ -612,6 +622,17 @@ export class ChatAgent extends DurableObject<Env> {
     kv: this.ctx.storage.kv,
   });
   readonly reactions = new ChatReactions(this.ctx.storage.sql);
+  /** How people work with the roster's agents, for their owners' nightly dream (worker/memory/chat-signals.ts). */
+  readonly signals = new ChatSignals({
+    chatId: this.chatId,
+    chatOwner: this.uid,
+    kind: () => this.kinds.kind(),
+    alone: () => !this.members.hasAny(),
+    ownerOf: (agentId) => this.roster.get(agentId)?.ownerUid,
+    directory: (uid) => this.#index(uid),
+    kv: this.ctx.storage.kv,
+    waitUntil: (promise) => this.ctx.waitUntil(promise),
+  });
   /** The calls that wait, or waited, for the owner: proposals and approvals (worker/agents/limits/). */
   readonly actions = new ChatActions(this.ctx.storage.sql, () => this.chatId);
   /** The cards of the actions members' agents held in their seats for this chat (each only for its agent's owner). */
@@ -766,6 +787,9 @@ export class ChatAgent extends DurableObject<Env> {
         // A version a conversation apart from the chat published (an agent's private turn): kept by version, before
         // anything else, so members never reach it before its reply is posted, nor hear of it (ChatRoster.release).
         const held = session !== undefined && chatId === this.chatId && this.roster.recordPage(session, artifact.id, artifact.latest);
+        if (session !== undefined && isPiConversation(session) && chatId === this.chatId) {
+          this.signals.published(artifact.id, artifact.latest);
+        }
         return afterPublish(this.#published, artifact, chatId, held);
       },
       rulesFor: (session) => this.#rulesFor(session),
@@ -825,10 +849,10 @@ export class ChatAgent extends DurableObject<Env> {
         reach: (files) => this.#piReach({ files }),
         privateSince: () => this.ctx.storage.kv.get<number>(PI_PRIVATE_KEY),
         marksPrivate: () =>
-          this.ctx.storage.kv.get(PI_PRIVATE_KEY) === undefined || (!this.members.hasAny() && this.ctx.storage.kv.get(PI_ALONE_KEY) === undefined),
+          this.ctx.storage.kv.get(PI_PRIVATE_KEY) === undefined || (this.#piReadsAlone() && this.ctx.storage.kv.get(PI_ALONE_KEY) === undefined),
         readPrivate: (at) => {
           if (this.ctx.storage.kv.get(PI_PRIVATE_KEY) === undefined) this.ctx.storage.kv.put(PI_PRIVATE_KEY, at);
-          if (!this.members.hasAny() && this.ctx.storage.kv.get(PI_ALONE_KEY) === undefined) this.ctx.storage.kv.put(PI_ALONE_KEY, at);
+          if (this.#piReadsAlone() && this.ctx.storage.kv.get(PI_ALONE_KEY) === undefined) this.ctx.storage.kv.put(PI_ALONE_KEY, at);
         },
       }),
     );
@@ -1687,6 +1711,7 @@ export class ChatAgent extends DurableObject<Env> {
     const entry = await this.#entryAt(entryId);
     // The offer as the app shows it (entryOffer), so Yes is taken only where it is offered.
     if (!entry || entryOffer(entry) === undefined) throw new Error("That message offers no next step.");
+    this.signals.offerTaken(author.uid, replyAgent(entry) ?? AGENT_NAME, entry.id as number);
     await this.prompt(OFFER_YES, author, [], [], entry.id, true);
   }
 
@@ -1796,6 +1821,7 @@ export class ChatAgent extends DurableObject<Env> {
     // With files, artifacts or people named, their "@name"s may hide what looks like a call now: pi may be summoned after all.
     const callsAgents = mentionInputs.length === 0 && speakersOf().length > 0;
     const calling = (everyMessage && !callsAgents) || repliesToAgent || summonsAgent(text);
+    if (!drafts) this.signals.message(author.uid, text, repliesToAgent ? AGENT_NAME : repliesTo, replyTo, calling);
     const byOwner = author.uid === this.uid;
     // Someone else's own files they named come as attachments, copied to the owner's files, where the agent works. The
     // owner's second seat has none of its own.
@@ -1998,8 +2024,7 @@ export class ChatAgent extends DurableObject<Env> {
     // lets go after SETTLE_MS, which they can outlast. Only a view: the prompt goes on without it.
     await this.#watchRuns().catch((error: unknown) => console.error("chat status:", errorMessage(error)));
     this.scope.failedChecks.reset();
-    // A run alone with the owner whose end no watch saw (the object restarted): settled before a new one starts.
-    if (this.ctx.storage.kv.get(PI_ALONE_KEY) !== undefined && !(await this.#replying().catch(() => true))) this.#settlePiAlone();
+    await this.#notePiRunAlone();
     try {
       await this.harness.submit(content, { entry: { kind: CHAT_MESSAGE_KIND, data } });
     } catch (error) {
@@ -2297,6 +2322,7 @@ export class ChatAgent extends DurableObject<Env> {
         if (this.#runWatch === watch && batch.some((event) => event.type === "run_end")) {
           this.#settlePiAlone();
           this.#scanPi();
+          this.signals.piReplied();
         }
         // Most batches are streamed tokens, which change nothing here.
         if (this.#runWatch !== watch || tracker.status === shown) return;
@@ -2651,6 +2677,7 @@ export class ChatAgent extends DurableObject<Env> {
     if (to === from) return this.peopleFor(by.uid);
     this.kinds.setKind(to);
     this.#audienceChanged();
+    if (to === "off_record") this.signals.forget();
     // "Only you": a link sent before must not let anyone in, which would make it a group again (#joined).
     if (to === "private") this.members.revokeInvites();
     const removed = plan.removed.map(personOf);
@@ -3116,8 +3143,28 @@ export class ChatAgent extends DurableObject<Env> {
     if (!isReaction(emoji)) throw new Error("Not a reaction this chat takes.");
     if (typeof entry !== "number" || !Number.isSafeInteger(entry) || entry < 0) throw new Error("No such message.");
     // Taking one back needs no message: one that is not there changes nothing. An entry with reactions was checked.
-    if (on && !this.reactions.has(entry) && !isReactable(await this.#entryAt(entry))) throw new Error("That message cannot be reacted to.");
+    const reacted = on ? await this.#entryAt(entry) : undefined;
+    if (on && !this.reactions.has(entry) && !isReactable(reacted)) throw new Error("That message cannot be reacted to.");
     this.#setReaction(entry, emoji, by.uid, on);
+    const reactedTo = reacted && (replyAgent(reacted) ?? (reacted.kind === "pi.assistant" ? AGENT_NAME : undefined));
+    if (reactedTo) this.signals.reacted(by.uid, reactedTo, entry, emoji);
+  }
+
+  /**
+   * What a nightly dream of `uid`'s (their agent `subject`, or pi for the chat's owner) reads of this chat from `from`
+   * to `to`: the lines everyone in it sees (worker/memory/dream-input.ts). Nothing for someone not in it, nor off the record.
+   */
+  async dreamLines(uid: string, subject: string, from: number, to: number): Promise<DreamExcerpt> {
+    const kind = this.kinds.kind();
+    if (!this.isInChat(uid) || !keepsSignals(kind) || (subject === AGENT_NAME && uid !== this.uid)) return { off: true };
+    const own = uid === this.uid;
+    const alone = own && kind === "private" && !this.members.hasAny();
+    // Without pi's replies held for the owner; one of its replies built on what only they see reads as theirs (fork).
+    const reach = alone ? undefined : await this.#piReach();
+    const pages = withoutHeld(this.#log({ order: "descending" }), () => this.#piHeld(true));
+    const privateResult = reach && ((entry: EntryRecord) => entry.model?.[0]?.role === "toolResult" && piPrivateEntry(entry, reach));
+    const read = await dreamLines(pages, { subject, owner: uid, private: alone, from, to, ...(privateResult && { privateResult }) });
+    return { kind, private: alone, own, ...read };
   }
 
   /** The agent's reaction (the react tool): to the newest message a person sent, which is the one it is answering. */
@@ -3214,7 +3261,8 @@ export class ChatAgent extends DurableObject<Env> {
     this.#broadcastAgents();
     this.#tellDrafts(entry.ownerUid);
     if (entry.seat !== undefined) {
-      // Its cards here go with it: what it held ends in its owner's object, by its expiry.
+      // Its open cards here go with it (what it held ends in its owner's object, by its expiry); the outcomes of those
+      // that ended stay for its owner (SeatActions.dropAgent).
       this.seatActions.dropAgent(entry.agentId);
       this.sockets.sendTo(entry.ownerUid, { type: "actions", actions: this.#actionsFor(entry.ownerUid) });
     }
@@ -3346,8 +3394,11 @@ export class ChatAgent extends DurableObject<Env> {
       return refuse(400, 'Expected {turn, action: "post" | "discard", text?}.');
     }
     if (typeof text === "string" && text.length > MAX_ASK_CHARS) return refuse(400, `A reply is at most ${MAX_ASK_CHARS} characters.`);
+    const held = this.roster.held(by.uid).find((draft) => draft.turn === turn && draft.agentId === agentId);
     const refused = action === "discard" ? this.turns.discard(by.uid, agentId, turn) : await this.turns.post(by.uid, agentId, turn, text);
     if (refused) return refuse(404, refused.error);
+    const edited = typeof text === "string" && text.trim() !== held?.reply.text.trim();
+    this.signals.draft(by.uid, agentId, turn, action === "discard" ? "discarded" : edited ? "edited" : "posted");
     return this.draftsFor(by.uid);
   }
 
@@ -3437,7 +3488,10 @@ export class ChatAgent extends DurableObject<Env> {
     if (!muted && by.uid !== this.uid && by.uid !== entry.ownerUid) return refuse(403, `Only the chat's owner or @${entry.name}'s can unmute it.`);
     this.roster.setMuted(agentId, muted);
     // It learns: its threshold for speaking up here goes up for a while.
-    if (muted) this.speakUp.lowered(agentId, "mute");
+    if (muted) {
+      this.speakUp.lowered(agentId, "mute");
+      this.signals.muted(by.uid, agentId);
+    }
     this.#broadcastAgents();
     return this.agentViews();
   }
@@ -3687,6 +3741,7 @@ export class ChatAgent extends DurableObject<Env> {
     void this.#restorePiTools();
     const entry = this.roster.get(turn.agentId);
     const session = entry ? sessionOf(entry, turn) : undefined;
+    this.signals.turnEnded(turn, outcome.status);
     // A seat's turn (a member's agent) ran in its owner's object, which paid for it: the chat's budget counts it here.
     if (outcome.spent) this.spend.count(outcome.spent);
     const used = (session && this.#turnSpend.get(session)) || { tokens: 0, costUsd: 0, toolCalls: 0, ...outcome.spent };
@@ -3925,6 +3980,7 @@ export class ChatAgent extends DurableObject<Env> {
         await this.#watchRuns().catch((error: unknown) => console.error("chat status:", errorMessage(error)));
         // A hand-off: nobody may have asked for it, so pi saves nothing as the owner in its run (runAskedByOwner).
         await Promise.all([this.#refreshForTurn(input), this.memory.refresh()]);
+        await this.#notePiRunAlone();
         // The handing turn names the input: handed again after a restart, it is placed once. Its entry says which chain
         // pi's answer is in (#piScan).
         try {
@@ -4323,6 +4379,7 @@ export class ChatAgent extends DurableObject<Env> {
     // After every message sent before it, even in the same millisecond: none of those saw it.
     const placedAt = Math.max(Date.now(), this.#lastSentAt + 1);
     const author = { uid: `agent:${reply.agentId}`, name: reply.name };
+    this.signals.replied(reply);
     void this.#touchIndexes(reply.text || reply.name, author, tags, reply.text, requestId, { run: Boolean(reply.run) }).catch((error) =>
       console.error("chat index:", errorMessage(error)),
     );
@@ -5277,6 +5334,7 @@ export class ChatAgent extends DurableObject<Env> {
    * shows them to the chat or keeps them (showPiHeld). Their sockets hear of it; the others' get the chat anew.
    */
   #settlePiAlone(): void {
+    this.ctx.storage.kv.delete(PI_RUN_ALONE_KEY);
     const from = this.ctx.storage.kv.get<number>(PI_ALONE_KEY);
     if (from === undefined) return;
     this.ctx.storage.kv.delete(PI_ALONE_KEY);
@@ -5284,6 +5342,21 @@ export class ChatAgent extends DurableObject<Env> {
     const held = withHeld(this.ctx.storage.kv.get<PiHeld[]>(PI_HELD_KEY) ?? [], { from, through: Date.now() });
     this.ctx.storage.kv.put(PI_HELD_KEY, held);
     this.sockets.sendTo(this.uid, { type: "piHeld", held });
+  }
+
+  /**
+   * Before an input of pi's goes in: a run whose end no watch saw (the object restarted) is settled first, and with
+   * nobody but the owner in the chat the run it starts or joins is marked as one alone with them (PI_RUN_ALONE_KEY).
+   */
+  async #notePiRunAlone(): Promise<void> {
+    const kv = this.ctx.storage.kv;
+    if ((kv.get(PI_ALONE_KEY) !== undefined || kv.get(PI_RUN_ALONE_KEY) !== undefined) && !(await this.#replying().catch(() => true))) this.#settlePiAlone();
+    if (!this.members.hasAny()) kv.put(PI_RUN_ALONE_KEY, true);
+  }
+
+  /** Whether what pi reads now is read alone with the owner: nobody else is in the chat, or its run started so. */
+  #piReadsAlone(): boolean {
+    return !this.members.hasAny() || this.ctx.storage.kv.get(PI_RUN_ALONE_KEY) === true;
   }
 
   /** The owner shows pi's held reply that started at `from` to everyone in the chat (null), or it was not held. */
@@ -5394,6 +5467,8 @@ export class ChatAgent extends DurableObject<Env> {
       await this.#expireAction(id);
       return this.actions.get(id) ?? found;
     }
+    const actor = found.actor.agentId ?? (found.actor.name === AGENT_NAME ? AGENT_NAME : undefined);
+    if (found.status === "pending" && actor) this.signals.action(uid, actor, decision);
     if (decision === "decline") {
       const declined = this.actions.move(id, "pending", "declined");
       if (!declined) return found;
@@ -6234,4 +6309,9 @@ function pageNote(page: ChatPage, what: "discusses" | "has a new version" | "cam
 /** A branch's title, from the chat it branched off from. */
 function branchTitleOf(title: string): string {
   return `${title || "Chat"} (branch)`;
+}
+
+/** The agent whose reply `entry` is (a `chat.agent` entry); undefined for any other entry. */
+function replyAgent(entry: EntryRecord): string | undefined {
+  return entry.kind === CHAT_AGENT_KIND ? (entry.data as unknown as ChatAgentReplyData).agentId : undefined;
 }

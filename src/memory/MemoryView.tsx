@@ -3,6 +3,8 @@ import { waitsForConfirm } from "../../shared/memory.ts";
 import type { ChatSummary } from "../../shared/protocol.ts";
 import { useAgents } from "../agents/store.ts";
 import { MenuButton } from "../layout.tsx";
+import { api } from "../api.ts";
+import { LearnedOvernight } from "./Dreams.tsx";
 import { AddNote, NoteList, Reach, type NoteTargets } from "./Notes.tsx";
 import { toConfirm, useMemory } from "./store.ts";
 
@@ -21,7 +23,7 @@ const FILTERS: { id: Filter; label: string }[] = [
  * back; and what else agents reach (connected data, documents, skills).
  */
 export function MemoryView({ chats, onMenu }: { chats: readonly ChatSummary[]; onMenu?: () => void }) {
-  const { notes, coverage, error } = useMemory();
+  const { notes, coverage, dreams, error } = useMemory();
   const { agents } = useAgents();
   const [adding, setAdding] = useState(false);
   const [filter, setFilter] = useState<Filter>("all");
@@ -47,6 +49,15 @@ export function MemoryView({ chats, onMenu }: { chats: readonly ChatSummary[]; o
       </header>
       {adding && <AddNote targets={targets} initial="user" onDone={() => setAdding(false)} />}
       {error && <p className="form-error">Could not read your notes: {error}</p>}
+      <LearnedOvernight
+        subject="pi"
+        who="pi"
+        notes={notes ?? []}
+        dreams={dreams}
+        learns={dreams?.settings.piLearns !== false}
+        onLearns={(piLearns) => api.setDreamSettings({ piLearns })}
+        about="Each night pi reads how you and others worked with it that day. From your private chats it keeps notes just for you; what it learns in a shared chat stays with that chat; a lesson for everywhere, or a fact, waits for you here and in Needs you."
+      />
       <nav className="memory-filters" aria-label="Show">
         {FILTERS.map((each) => (
           <button

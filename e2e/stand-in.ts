@@ -2,8 +2,9 @@
 //   <port>     "crm": list_deals (read-only) and update_deal (a write), over a few made-up deals; GET /state tells what
 //              they are now and which writes came in
 //   <port + 1> "vault": the tests' stand-in portal (test/fake-portal.ts: an MCP server behind OAuth, with discovery,
-//              dynamic registration, PKCE and refresh), whose authorize page approves at once; one read-only tool,
-//              read_notes
+//              dynamic registration, PKCE and refresh), whose authorize page approves at once; read-only tools
+//              read_notes, and read_notes_slowly, which answers the same after `ms` (up to 15 s): a call still going
+//              while someone joins a chat
 // Generic names and data only. The servers keep nothing between runs.
 
 import { createServer, type ServerResponse } from "node:http";
@@ -66,9 +67,16 @@ createServer(async (req, res) => {
   }
 }).listen(port, "127.0.0.1", () => console.log(`stand-in crm on http://127.0.0.1:${port}/mcp`));
 
+const notes = { notes: ["Quarterly review on Friday", "Renewals are due next month"] };
 const vault = new FakePortal((server) => {
-  server.registerTool("read_notes", { description: "Read the shared notes.", annotations: { readOnlyHint: true } }, async () =>
-    text({ notes: ["Quarterly review on Friday", "Renewals are due next month"] }),
+  server.registerTool("read_notes", { description: "Read the shared notes.", annotations: { readOnlyHint: true } }, async () => text(notes));
+  server.registerTool(
+    "read_notes_slowly",
+    { description: "Read the shared notes, after a wait.", inputSchema: { ms: z.number().int().min(0).max(15_000) }, annotations: { readOnlyHint: true } },
+    async ({ ms }) => {
+      await new Promise((done) => setTimeout(done, ms));
+      return text(notes);
+    },
   );
 });
 vault.origin = `http://127.0.0.1:${port + 1}`;

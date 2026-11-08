@@ -291,6 +291,12 @@ export function withoutPrivate(messages: readonly Message[], reach: Reach, since
   return changed ? kept : messages;
 }
 
+/** Whether a log entry is one of pi's tool results that only the owner may see (privateResult), not othersCall's refusal. */
+export function piPrivateEntry(entry: Pick<EntryRecord, "kind" | "model">, reach: Reach): boolean {
+  const message = entry.model?.[0];
+  return entry.kind === "pi.tool-result" && message?.role === "toolResult" && !refusedHere(message) && privateResult(message.toolName, message.details, reach);
+}
+
 /** `message` as `owner` or anyone else sees it, if it is a result only the owner may see; undefined for any other. */
 function shownResult(message: Message | undefined, reach: Reach, owner: boolean): ToolResultMessage | undefined {
   if (message?.role !== "toolResult" || refusedHere(message) || !privateResult(message.toolName, message.details, reach)) return undefined;

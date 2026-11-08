@@ -48,6 +48,16 @@ with `@cloudflare/vite-plugin`, pnpm; configured and deployed with the `cf` CLI 
   once one held the owner's own notes and the chat is shared, its conversation starts the prompt afresh
   (`worker/memory/fresh.ts`, `ChatMemory.audienceChanged`): a compaction going then is stopped, or, when a turn waits
   for it, its summary is left out of each request (the memory extension's `beforeRequest` hook) until the edits are in.
+  How people work with an agent or pi (corrections, drafts, decisions, mutes, reactions, repeats) is recorded as signals,
+  with no model call and never what anyone said (`shared/signals.ts`, `worker/memory/chat-signals.ts`), in the agent's
+  owner's directory (pi's: the chat owner's; `SignalStore`), tagged with the chat and its kind; nothing from a chat off
+  the record, checked at both ends. Each night at 03:00 in the owner's time zone (`worker/memory/user-dreams.ts`, one
+  alarm with the sign-ins'), pi (account setting, on) and each agent with `learns` (on for new agents) dream once per day
+  (`Dreamer`, `worker/memory/dream.ts`): one cheap call (`internalModel(DREAM_MODEL)`, on the owner's meter and runs' cap) per audience,
+  the owner's private chats together and each shared chat alone, over the day's signals and the log's lines (never a
+  reply built on private servers). The model only proposes; `placeDreamNote` (`shared/dream.ts`) puts
+  each note from where what it cites came from: a shared chat's into that chat, a "how to work" lesson for wider use
+  off until confirmed, a fact off until confirmed. Notes left waiting are a Needs you item (`lesson`).
   Keep those rules in code.
 - Shared chats (`worker/chat-routes.ts`, `worker/members.ts`): the owner invites people by single-use link; they share
   the one conversation and the one agent, which always acts as the owner (owner's MCP sign-ins, files, skills; artifacts
@@ -59,13 +69,15 @@ with `@cloudflare/vite-plugin`, pnpm; configured and deployed with the `cf` CLI 
   pi's reach too (`worker/agent/reach.ts`): a run that answers anyone but the owner reads only the servers that do not sign
   in each user and the chat's files, and what pi read for the owner alone is left out of its requests and, with its
   calls' output, of others' screens; a run alone with the owner that read such a result and ends after someone joined
-  has its replies held for the owner (Show to the chat), which no agent's catch-up or `chat_history` reads and which hand
-  nothing on. Keep it that way.
+  has its replies held for the owner (Show to the chat), which no agent's catch-up, `chat_history` or dream reads and
+  which hand nothing on; a dream reads a reply of pi's built on what only the owner sees as theirs (`fork`). Keep it that way.
 - Agents (`shared/agents.ts`, `worker/agents/`): definitions per user in `UserDirectory` (`AgentStore`); a chat's roster
   and durable turn queue (`ChatRoster`) and the turn controller (`AgentTurns`) run each roster agent in its own pi
   session of the chat object, configured per turn (`#configureAgent`: the session's tools are an allow-list,
   `allowedTools`, and a turn its owner did not ask for gets only read tools: the shared servers' (all its servers' when it runs apart in a chat with nobody else in it) and `READ_TOOLS`, plus
-  `DISPLAY_TOOLS`, which only show something (a checklist card, no data; not for an unprompted turn); the owner's Yes to an
+  `DISPLAY_TOOLS`, which only show something (a checklist card, no data; not for an unprompted turn); the owner's files
+  (`FILE_TOOLS`) only as the agent's `files` allows, `own` for its owner's turns, `shared` for others' (reading only, never
+  unprompted, a run or a Yes), and the prompt names them only to a request that may read them; the owner's Yes to an
   offered next step (`offer_yes`, `ChatAgent.takeOffer`) gets only `draftTools`, reading and `agent_propose`, pi's run too; the
   harness offers and runs no tool off that list); keep it that way. A turn its owner asked for, their Yes, and any turn that
   starts with nobody but the owner in the chat run apart, in a fork of the agent's session (`runsApart`): only the posted

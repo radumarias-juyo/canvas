@@ -57,6 +57,7 @@ describe("AgentStore: saving", () => {
       avatar: "re",
       color: defaultColor("research"),
       autonomy: 1,
+      learns: true,
       origin: "user",
       enabled: true,
       version: 1,

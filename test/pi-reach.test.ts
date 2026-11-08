@@ -11,6 +11,7 @@ import {
   MAX_PI_HELD,
   othersCall,
   ownersInput,
+  piPrivateEntry,
   piShares,
   privateResult,
   reachExtension,
@@ -23,6 +24,7 @@ import {
   type Reach,
 } from "../worker/agent/reach.ts";
 import { text } from "../worker/agent/output.ts";
+import { dreamLines } from "../worker/memory/dream-input.ts";
 import { heldReplies, PRIVATE_FILES, replySources } from "../src/chat/entries.ts";
 
 // The chat's servers: "db" every member shares; "calendar" signs in each user (the owner's alone).
@@ -353,5 +355,41 @@ describe("pi in a shared chat, run for real", () => {
     } finally {
       await pi.close(BACKGROUND_CONTEXT);
     }
+  });
+});
+
+describe("what a dream of pi's reads of a shared chat", () => {
+  const r = reach();
+  const at = (id: number) => 1_000 + id;
+  const person = (id: number, uid: string, said: string) =>
+    ({ id, conversationId: 0, kind: "chat.message", data: { uid, name: uid, text: said, sentAt: at(id) } }) as unknown as EntryRecord;
+  const piSays = (id: number, said: string) =>
+    ({ id, conversationId: 0, kind: "pi.assistant", model: [{ ...fauxAssistantMessage(said), timestamp: at(id) }] }) as unknown as EntryRecord;
+  const piResult = (id: number, toolName: string, server: string) =>
+    ({ id, conversationId: 0, kind: "pi.tool-result", model: [toolResult(toolName, "Board dinner", { server }, `c${id}`)] }) as unknown as EntryRecord;
+  async function* newestFirst(entries: EntryRecord[]) {
+    yield [...entries].reverse();
+  }
+  const query = { subject: "pi", owner: "radu", private: false, from: 0, to: 10_000, privateResult: (entry: EntryRecord) => piPrivateEntry(entry, r) };
+
+  it("reads a reply built on what only the owner sees as theirs (fork), and one on shared servers as the chat's", async () => {
+    const log = [
+      person(1, "radu", "my calendar?"),
+      piResult(2, "calendar__events", "calendar"),
+      piSays(3, "Friday."),
+      person(4, "mia", "signups?"),
+      piResult(5, "db__query", "db"),
+      piSays(6, "41."),
+    ];
+    const { items } = await dreamLines(newestFirst(log), query);
+    expect(items.find((item) => item.seq === 3)?.origin).toBe("fork");
+    expect(items.find((item) => item.seq === 6)?.origin).toBe("shared");
+  });
+
+  it("never reads pi's held replies", async () => {
+    const log = [person(1, "radu", "hi"), piSays(2, "Dinner with the bank."), person(3, "mia", "hello"), piSays(4, "Hi Mia.")];
+    const { items } = await dreamLines(withoutHeld(newestFirst(log), () => [{ from: at(2), through: at(2) }]), query);
+    expect(JSON.stringify(items)).not.toContain("bank");
+    expect(items.some((item) => item.seq === 4)).toBe(true);
   });
 });
