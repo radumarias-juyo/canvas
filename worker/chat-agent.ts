@@ -3538,16 +3538,16 @@ export class ChatAgent extends DurableObject<Env> {
     }
   }
 
-  /**
-   * The pause check: once the chat was quiet for its pause after a person's message, the agents past the gates whose job
-   * is close to the conversation may speak up (worker/agents/speak-up.ts). While pi or an agent works, it waits again.
-   */
   /** pi or an agent just finished: a pause waiting counts its quiet from now, not from the person's message. */
   #quietFrom(at: number): void {
     const kept = this.ctx.storage.kv.get<PauseState>(PAUSE_KEY);
     if (kept && kept.after < at) this.ctx.storage.kv.put(PAUSE_KEY, { ...kept, after: at } satisfies PauseState);
   }
 
+  /**
+   * The pause check: once the chat was quiet for its pause after a person's message, the agents past the gates whose job
+   * is close to the conversation may speak up (worker/agents/speak-up.ts). While pi or an agent works, it waits again.
+   */
   async #afterPause(): Promise<void> {
     const kept = this.ctx.storage.kv.get<PauseState>(PAUSE_KEY);
     if (!kept) return;
