@@ -98,7 +98,9 @@ describe("built-in skills", () => {
     const help = builtinSkill("app-help")!;
     expect(help.description).toMatch(/what can we do in this chat/i);
     expect(help.tools).toEqual([]);
-    expect(help.instructions.length).toBeLessThan(6_000);
+    expect(help.instructions.length).toBeLessThan(7_000);
+    // Writes are built now (a Do step goes as the agent's autonomy says): the help no longer calls them unavailable.
+    expect(help.instructions).not.toMatch(/not available yet/);
     for (const kind of ["Private", "Group", "On a page", "Off the record"]) expect(help.instructions).toContain(kind);
     expect(help.instructions).toMatch(/Never invent features/);
     expect(`${help.description}\n${help.instructions}`).not.toMatch(/claude|anthropic/i);

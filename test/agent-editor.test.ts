@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  agentFiles,
   AGENT_PROPOSE_TOOL,
+  checkAgent,
   copyInput,
   copyName,
   proposedBy,
@@ -102,6 +104,39 @@ describe("a drafted agent's shares", () => {
     // Without a list it shares the default, which leaves sign-in servers out already.
     expect(withoutSignInShares(research, signsIn)).toBe(research);
     expect(withoutSignInShares("not an agent", signsIn)).toBe("not an agent");
+  });
+
+  it("never include the owner's files in shared chats either; whether the agent may use them itself stays as drafted", () => {
+    const signsIn = () => false;
+    expect(withoutSignInShares({ ...research, files: { own: true, shared: true } }, signsIn)).toEqual({ ...research, files: { own: true, shared: false } });
+    const own = { ...research, files: { own: false, shared: false } };
+    expect(withoutSignInShares(own, signsIn)).toBe(own);
+  });
+});
+
+describe("an agent's files setting", () => {
+  const base = { name: "research", job: "Finds sources", instructions: "Search." };
+
+  it("is optional, both booleans when given, and shares only what the agent may use itself", () => {
+    expect(checkAgent(base)).not.toHaveProperty("files");
+    expect(checkAgent({ ...base, files: null })).not.toHaveProperty("files");
+    expect(checkAgent({ ...base, files: { own: true, shared: true } }).files).toEqual({ own: true, shared: true });
+    expect(checkAgent({ ...base, files: { own: false, shared: false } }).files).toEqual({ own: false, shared: false });
+    expect(() => checkAgent({ ...base, files: { own: false, shared: true } })).toThrow(/only when it may use them itself/);
+    expect(() => checkAgent({ ...base, files: { own: "yes", shared: false } })).toThrow(/own, shared/);
+    expect(() => checkAgent({ ...base, files: true })).toThrow(/own, shared/);
+  });
+
+  it("reads as own on and shared off when absent", () => {
+    expect(agentFiles({})).toEqual({ own: true, shared: false });
+    expect(agentFiles({ files: { own: true, shared: true } })).toEqual({ own: true, shared: true });
+    expect(agentFiles({ files: { own: false, shared: true } })).toEqual({ own: false, shared: false });
+  });
+
+  it("is never copied from a shared agent: the copy's owner sets their own", () => {
+    const original = { ...research, files: { own: true, shared: true } } as AgentInput;
+    expect(copyInput(original, {})).not.toHaveProperty("files");
+    expect(copyInput(original, { files: { own: false, shared: false } }).files).toEqual({ own: false, shared: false });
   });
 });
 

@@ -1,4 +1,5 @@
 import { mayLeave, type ChatKind } from "./chat-kinds.ts";
+import type { NoteWhy } from "./dream.ts";
 import { isObject } from "./util.ts";
 
 /**
@@ -14,8 +15,9 @@ import { isObject } from "./util.ts";
 export type MemoryScope = "user" | "agent" | "chat";
 export const MEMORY_SCOPES: readonly MemoryScope[] = ["user", "agent", "chat"];
 
-/** learned: an agent saved it in a conversation; person: the owner wrote it. */
-export type MemorySource = "learned" | "person";
+/** learned: an agent saved it in a conversation; overnight: its nightly dream did (shared/dream.ts); person: the owner wrote it. */
+export type MemorySource = "learned" | "overnight" | "person";
+export const MEMORY_SOURCES: readonly MemorySource[] = ["learned", "overnight", "person"];
 
 /** preference: how someone wants things (saved at once); fact: something an agent computes with (waits for a confirm). */
 export type MemoryKind = "preference" | "fact";
@@ -68,6 +70,10 @@ export interface MemoryNote {
   forgottenAt?: number;
   createdAt: number;
   updatedAt: number;
+  /** A note learned overnight: why, and what it came from (by chat and entry, or signal). */
+  why?: NoteWhy;
+  /** A note learned overnight: how sure its dream was, from 0 to 1. */
+  confidence?: number;
 }
 
 /** A note as the Memory view shows it: with the title of its chat and the name of its agent, as they are now. */
@@ -163,7 +169,7 @@ export function waitsForConfirm(note: Pick<MemoryNote, "confirmed" | "forgottenA
 
 /** A learned note that waits for a confirm: nothing read it, so dismissing it deletes it (no forgotten copy is kept). */
 export function dismisses(note: Pick<MemoryNote, "source" | "confirmed" | "forgottenAt">): boolean {
-  return note.source === "learned" && waitsForConfirm(note);
+  return note.source !== "person" && waitsForConfirm(note);
 }
 
 /**
@@ -321,7 +327,7 @@ export function isExportedNote(value: unknown): value is MemoryNote {
     typeof value.id === "string" &&
     (MEMORY_SCOPES as readonly unknown[]).includes(value.scope) &&
     (MEMORY_KINDS as readonly unknown[]).includes(value.kind) &&
-    (value.source === "learned" || value.source === "person") &&
+    (MEMORY_SOURCES as readonly unknown[]).includes(value.source) &&
     checkNoteText(value.text) === value.text &&
     optional("agentId", "string") &&
     optional("chatId", "string") &&
