@@ -161,7 +161,13 @@ export type ChatBudgetData = { scope: "chat" | "runs" | "message"; text: string 
  * messages and other agents' replies are copied as the entries they were (chat.message, chat.agent).
  */
 export const CHAT_COPY_KIND = "chat.copy";
-export type ChatCopyData = { from: "pi"; text: string; sentAt?: number } | { from: "artifact"; artifactId: string; title: string; version: number };
+/**
+ * A copy in a branch's log: one of pi's replies as its text (`held`: one held for the owner in the chat it came from,
+ * which only they see, and which no agent reads: shared/protocol.ts PiHeld), or a card of an artifact it published.
+ */
+export type ChatCopyData =
+  | { from: "pi"; text: string; sentAt?: number; held?: true }
+  | { from: "artifact"; artifactId: string; title: string; version: number };
 
 /** What the model reads that the app does not show: the page a chat discusses, or the conversation a branch carries. */
 export const CHAT_CONTEXT_KIND = "chat.context";
