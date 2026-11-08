@@ -7,7 +7,7 @@ import { errorMessage } from "../../shared/util.ts";
 import { decisionLabels, endedText, expiresText } from "../agents/limits/rules.ts";
 import { api } from "../api.ts";
 import { AgentAvatar } from "./people.tsx";
-import { useClock } from "./SentTime.tsx";
+import { SentTime, useClock } from "./SentTime.tsx";
 
 /** What the chat's action cards read: each action's live state (the `actions` socket message), and who may decide. */
 export interface ChatActionsView {
@@ -133,6 +133,40 @@ export function ActionCard({ action: made }: { action: PendingActionView }) {
       )}
       {error && <p className="form-error">{error}</p>}
     </article>
+  );
+}
+
+/** How an ended action came out, in a word: an outcome line's. */
+export function outcomeWord(action: Pick<PendingActionView, "kind" | "status">): string {
+  switch (action.status) {
+    case "done":
+      return "Ran";
+    case "failed":
+      return "Failed";
+    case "declined":
+      return action.kind === "proposal" ? "Dismissed" : "Declined";
+    case "expired":
+      return "Expired";
+    default:
+      return "Waiting";
+  }
+}
+
+/**
+ * What a card of the viewer's own agent's seat came to, once it ended: one line in the chat, where it was decided, for
+ * them alone (the room sends it to no one else), as the owner's own cards keep their outcome.
+ */
+export function ActionOutcome({ action }: { action: PendingActionView }) {
+  const word = outcomeWord(action);
+  const tone = TONES[action.status] ?? "closed";
+  return (
+    <p className={`action-outcome ${tone}`} aria-label={`${word}: ${actorName(action.actor)} ${action.server}.${action.tool}, only you see this`}>
+      <strong>{word}</strong> · {actorName(action.actor)}{" "}
+      <code>
+        {action.server}.{action.tool}
+      </code>{" "}
+      · <SentTime at={action.decidedAt ?? action.expiresAt} /> · <span className="action-outcome-note">only you see this</span>
+    </p>
   );
 }
 

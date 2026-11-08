@@ -552,6 +552,7 @@ export class ChatAgent extends DurableObject<Env> {
   /** Agents that speak up (worker/agents/speak-up.ts). */
   readonly speakUp = new SpeakUp({
     roster: this.roster,
+    ...(scriptPauseMs(this.env) !== undefined && { devPauseMs: scriptPauseMs(this.env) }),
     settings: () => this.#agentSettings(),
     definition: async (entry) => this.#inThisChat(await this.#index(entry.ownerUid).getAgent(entry.agentId)),
     budgetLeft: () => this.spend.refusal() === undefined,
@@ -3194,7 +3195,8 @@ export class ChatAgent extends DurableObject<Env> {
     this.#broadcastAgents();
     this.#tellDrafts(entry.ownerUid);
     if (entry.seat !== undefined) {
-      // Its cards here go with it: what it held ends in its owner's object, by its expiry.
+      // Its open cards here go with it (what it held ends in its owner's object, by its expiry); the outcomes of those
+      // that ended stay for its owner (SeatActions.dropAgent).
       this.seatActions.dropAgent(entry.agentId);
       this.sockets.sendTo(entry.ownerUid, { type: "actions", actions: this.#actionsFor(entry.ownerUid) });
     }

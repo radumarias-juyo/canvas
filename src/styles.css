@@ -1711,6 +1711,14 @@ a.run-marker:hover { color: var(--accent); text-decoration: underline; }
 .action-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
 .action-buttons button { padding: 5px 14px; }
 .action-card > .form-error { margin: 0; font-size: 13px; }
+/* What a card of the viewer's own agent's seat came to (ActionOutcome): one quiet line, for them alone. */
+.action-outcome { margin: 0; padding-left: 10px; border-left: 3px solid var(--border); color: var(--muted); font-size: 13.5px; overflow-wrap: anywhere; }
+.action-outcome.done { border-left-color: var(--live); }
+.action-outcome.done strong { color: var(--live); }
+.action-outcome.failed { border-left-color: var(--error); }
+.action-outcome.failed strong { color: var(--error); }
+.action-outcome code { font-size: 12.5px; }
+.action-outcome .sent-time, [data-compact] .action-outcome .sent-time { position: static; padding: 0; opacity: 1; font-size: inherit; }
 
 /* An approval in the feed (src/feed/FeedView.tsx): its call, Approve and Decline (Run and Dismiss for a proposal), when it expires. */
 .feed-decision { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 6px; }
