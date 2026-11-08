@@ -276,7 +276,7 @@ describe("pi's reply chips in a shared chat", () => {
 
   it("put Show to the chat under the last reply of each held run that ended", () => {
     const entries = [person(1), assistant(2, "Looking.", 15), assistant(3, "Dinner.", 20), person(4), assistant(5, "Later.", 40)];
-    expect([...heldReplies(entries, [{ from: 10, through: 30 }, { from: 35 }])]).toEqual([[3, 10]]);
+    expect([...heldReplies(entries, [{ from: 10, through: 30 }, { from: 35 }])]).toEqual([[3, { from: 10, through: 30 }]]);
   });
 });
 

@@ -206,17 +206,17 @@ export function replySources(entries: readonly EntryRecord[], previous?: Readonl
 
 /**
  * The entry each of pi's held replies (PiHeld) shows its "Show to the chat" under, for the owner: its last message with
- * text, once its run has ended; by the time its run started (PiHeld.from).
+ * text, once its run has ended, with the hold it is under.
  */
-export function heldReplies(entries: readonly EntryRecord[], held: readonly PiHeld[]): ReadonlyMap<number, number> {
-  const at = new Map<number, number>();
+export function heldReplies(entries: readonly EntryRecord[], held: readonly PiHeld[]): ReadonlyMap<number, PiHeld> {
+  const at = new Map<number, PiHeld>();
   for (const range of held) {
     if (range.through === undefined) continue;
     const last = entries.findLast((entry) => {
       const message = entry.model?.[0];
       return entry.kind === "pi.assistant" && message?.role === "assistant" && heldIn([range], message.timestamp) && blocks(message.content).some((block) => block.type === "text");
     });
-    if (last) at.set(last.id as number, range.from);
+    if (last) at.set(last.id as number, range);
   }
   return at;
 }

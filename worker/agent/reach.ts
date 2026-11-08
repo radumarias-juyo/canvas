@@ -6,6 +6,7 @@
 
 import type { AssistantMessage, Message, ToolCall, ToolResultMessage } from "@earendil-works/pi-ai";
 import { defineExtension, GenerationTask, hook, ToolTask, type AgentEvent, type EntryRecord, type Extension, type JsonObject } from "@earendil-works/pi-durable";
+import type { JsonValue } from "@earendil-works/chord";
 import { CHAT_TURN_KIND } from "../../shared/agents.ts";
 import {
   CHAT_MESSAGE_KIND,
@@ -76,8 +77,23 @@ export const MAX_PI_HELD = 50;
 /** `held` with `range` added; past MAX_PI_HELD the two oldest become one, which holds what came between them too. */
 export function withHeld(held: readonly PiHeld[], range: PiHeld): PiHeld[] {
   const all = [...held, range];
-  if (all.length > MAX_PI_HELD) all.splice(0, 2, { from: all[0].from, through: all[1].through });
+  if (all.length > MAX_PI_HELD) {
+    const [first, second] = all;
+    all.splice(0, 2, { from: first.from, through: second.through, ...(first.review && second.review && { review: true as const }) });
+  }
   return all;
+}
+
+/**
+ * The hold pi's run takes as it reads what only the owner sees at `at`, if it takes one now: with nobody but the owner in
+ * the chat (`alone`: held should someone join before it ends), or in a chat others are in with the owner's review before
+ * posting on (`review`: a run that reads such a result runs on the owner's own message there). None when it holds
+ * already, or in a chat others are in without review (only the owner's message reads it, and the reply is theirs to give).
+ */
+export function holdOnRead(hold: PiHeld | undefined, { alone, review }: { alone: boolean; review: boolean }, at: number): PiHeld | undefined {
+  if (hold) return undefined;
+  if (alone) return { from: at };
+  return review ? { from: at, review: true } : undefined;
 }
 
 /** Whether a log entry is one of pi's held replies (heldIn, by when its message started). */
@@ -139,6 +155,8 @@ function namedPaths(toolName: string, args: unknown): string[] | undefined {
  * paths its call named; none known is private). `args`: the call's arguments, when known.
  */
 export function privateResult(toolName: string, details: unknown, reach: Reach, args?: unknown): boolean {
+  // Marked as it was read (markedPrivate): a server shared since, or a file the chat has since, shows none of it.
+  if (isObject(details) && details.private === true) return true;
   const server = serverOf(toolName, details, reach.mcp);
   if (server !== undefined) return server === null || !reach.shares(server);
   if (!FILE_TOOLS.has(toolName)) return false;
@@ -318,6 +336,17 @@ export function showsResults(event: AgentEvent): boolean {
   return SHOWN_TYPES.has(event.type);
 }
 
+/**
+ * A result only the owner may see, marked so in its details as it is read (PrivateMark), with the server it came from:
+ * it stays theirs whatever pi shares later (privateResult), so widening pi's list for shared chats never shows others
+ * what it read before.
+ */
+export function markedPrivate<R extends { details?: JsonValue }>(toolName: string, result: R, reach: Reach): R {
+  const server = serverOf(toolName, result.details, reach.mcp) ?? undefined;
+  const mark: PrivateMark = { private: true, ...(server !== undefined && { server }) };
+  return { ...result, details: { ...(isObject(result.details) ? (result.details as JsonObject) : {}), ...mark } };
+}
+
 /** Whether a running call's output may hold what only the owner sees, by its tool alone (its server, or a file tool). */
 function privateCall(toolName: string, reach: Reach): boolean {
   const server = serverOf(toolName, undefined, reach.mcp);
@@ -420,12 +449,12 @@ export function reachExtension(host: ReachHost): Extension {
           return othersCall(call, await host.reach(!mcpParts(call.name)));
         },
         afterTool: async (call, result, api) => {
-          if (!host.isPi(api.conversationId) || !host.marksPrivate()) return undefined;
+          if (!host.isPi(api.conversationId) || !privateCall(call.name, await host.reach(false))) return undefined;
           // The chat's files are read only for a tool that reads files: an MCP tool's result goes by its server.
-          if (privateResult(call.name, result.details, await host.reach(FILE_TOOLS.has(call.name)), call.arguments)) {
-            host.readPrivate(Date.now());
-          }
-          return undefined;
+          const reach = await host.reach(FILE_TOOLS.has(call.name));
+          if (!privateResult(call.name, result.details, reach, call.arguments)) return undefined;
+          if (host.marksPrivate()) host.readPrivate(Date.now());
+          return markedPrivate(call.name, result, reach);
         },
       }),
       hook(GenerationTask, {

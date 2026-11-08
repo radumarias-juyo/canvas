@@ -3,7 +3,7 @@ import { ID_PATTERN } from "../../shared/protocol.ts";
 
 /** Where an agent's page opens: on one of its tabs and fields, from a chat (`chat`: back to it, or a shared agent of it). */
 export interface AgentPlace {
-  /** An agent's id, or "new" for the form of a new one. */
+  /** An agent's id, "new" for the form of a new one, or PI_PAGE for pi's page. */
   id: string;
   tab?: string;
   /** A field to scroll to and focus: what a draft card's Change opens. */
@@ -15,6 +15,8 @@ export interface AgentPlace {
 }
 
 export const NEW_AGENT = "new";
+/** pi's own page (src/agents/PiPage.tsx): its settings, in the editor's style. pi is no agent definition. */
+export const PI_PAGE = "pi";
 
 /** The page's path for `place`. */
 export function agentPath({ id, tab, field, chat, run }: AgentPlace): string {
@@ -25,7 +27,7 @@ export function agentPath({ id, tab, field, chat, run }: AgentPlace): string {
 /** The place a URL of the app names, if it is an agent's page. */
 export function agentPlace(url: URL): AgentPlace | null {
   const id = url.pathname.match(/^\/agents\/([^/]+)$/)?.[1];
-  if (!id || (id !== NEW_AGENT && !AGENT_ID_PATTERN.test(id))) return null;
+  if (!id || (id !== NEW_AGENT && id !== PI_PAGE && !AGENT_ID_PATTERN.test(id))) return null;
   const param = (name: string) => url.searchParams.get(name) ?? undefined;
   const chat = param("chat");
   const run = param("run");

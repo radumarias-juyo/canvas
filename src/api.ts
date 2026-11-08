@@ -38,6 +38,7 @@ import type { ModelCatalog } from "../shared/models.ts";
 import type { McpSignInView } from "../shared/sign-ins.ts";
 import type { MemoryNote, MemoryNoteView, NoteChange, NoteInput, ServerCoverage } from "../shared/memory.ts";
 import type { ChatSystemPrompt } from "../shared/system-prompt.ts";
+import type { PiSettings } from "../shared/pi-settings.ts";
 import { skillPath, type SkillInfo, type SkillInput } from "../shared/skills.ts";
 import { FILE_ROUTE, VIEW_PARAM, ZIP_ROUTE } from "../shared/uploads.ts";
 import {
@@ -239,6 +240,10 @@ export const api = {
   systemPrompt: () => request<ChatSystemPrompt>("/api/me/system-prompt"),
   /** Save it; empty clears it. */
   setSystemPrompt: (text: string) => request<ChatSystemPrompt>("/api/me/system-prompt", send("PUT", { text })),
+  /** pi's settings for all the user's chats (shared/pi-settings.ts). */
+  piSettings: () => request<PiSettings>("/api/me/pi"),
+  /** Save them, the whole of them: a field left out goes back to its default. */
+  setPiSettings: (settings: PiSettings) => request<PiSettings>("/api/me/pi", send("PUT", settings)),
   /** A chat's system prompt, which adds to its owner's own: everyone in the chat reads it, only the owner changes it. */
   chatSystemPrompt: (chatId: string) => request<ChatSystemPrompt>(chatPath(chatId, "/system-prompt")),
   setChatSystemPrompt: (chatId: string, text: string) => request<ChatSystemPrompt>(chatPath(chatId, "/system-prompt"), send("PUT", { text })),

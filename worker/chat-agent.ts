@@ -90,9 +90,11 @@ import { recordSpend } from "./agent/ledger.ts";
 import type { ModelRunner } from "./agent/workers-ai.ts";
 import { asksUser, RunTracker } from "./chat-status.ts";
 import { mcpExtension, type McpToolInfo, type ServerCatalog } from "./agent/mcp.ts";
+import type { PiSettings } from "../shared/pi-settings.ts";
 import {
   CLOSED_REACH,
   heldReply,
+  holdOnRead,
   ownersInput,
   piShares,
   reachExtension,
@@ -370,8 +372,11 @@ const DRAFTING_KEY = "drafting";
 const PI_BUSY_FOR_YES = "pi is still working: say yes once it is done.";
 /** When pi first read a result only the chat's owner may see (worker/agent/reach.ts): a summary made since may hold it. */
 const PI_PRIVATE_KEY = "piPrivateSince";
-/** When pi's run going now first read such a result with nobody but the owner in the chat (#settlePiAlone). */
-const PI_ALONE_KEY = "piAlonePrivate";
+/**
+ * The hold of pi's run going now (PiHeld, open): taken when it first read such a result with nobody but the owner in
+ * the chat, or in a chat others are in with review before posting on (holdOnRead); settled as it ends (#settlePiHold).
+ */
+const PI_HOLD_KEY = "piHold";
 /** pi's replies held for the owner (PiHeld): runs alone with them that read what only they see and ended after someone joined. */
 const PI_HELD_KEY = "piHeld";
 /** Set once the owner's sidebar heard whether this chat has members: chats shared before it kept that tell it once. */
@@ -824,11 +829,11 @@ export class ChatAgent extends DurableObject<Env> {
         answersOthers: () => this.#answersOthers(),
         reach: (files) => this.#piReach({ files }),
         privateSince: () => this.ctx.storage.kv.get<number>(PI_PRIVATE_KEY),
-        marksPrivate: () =>
-          this.ctx.storage.kv.get(PI_PRIVATE_KEY) === undefined || (!this.members.hasAny() && this.ctx.storage.kv.get(PI_ALONE_KEY) === undefined),
+        marksPrivate: () => this.ctx.storage.kv.get(PI_PRIVATE_KEY) === undefined || this.#holdOnRead(0) !== undefined,
         readPrivate: (at) => {
           if (this.ctx.storage.kv.get(PI_PRIVATE_KEY) === undefined) this.ctx.storage.kv.put(PI_PRIVATE_KEY, at);
-          if (!this.members.hasAny() && this.ctx.storage.kv.get(PI_ALONE_KEY) === undefined) this.ctx.storage.kv.put(PI_ALONE_KEY, at);
+          const hold = this.#holdOnRead(at);
+          if (hold) this.ctx.storage.kv.put(PI_HOLD_KEY, hold);
         },
       }),
     );
@@ -1876,6 +1881,7 @@ export class ChatAgent extends DurableObject<Env> {
       calling && picks.then((pick) => this.refreshSkills({ text: skillText, recent: recentOnce, pick })),
       calling && this.refreshFiles(),
       calling && this.refreshUserPrompt(),
+      calling && this.refreshPiSettings(),
       calling && this.memory.refresh(),
     ]);
     // The files they named of their own are named too: "@pi notes.md" is not a call.
@@ -1999,7 +2005,7 @@ export class ChatAgent extends DurableObject<Env> {
     await this.#watchRuns().catch((error: unknown) => console.error("chat status:", errorMessage(error)));
     this.scope.failedChecks.reset();
     // A run alone with the owner whose end no watch saw (the object restarted): settled before a new one starts.
-    if (this.ctx.storage.kv.get(PI_ALONE_KEY) !== undefined && !(await this.#replying().catch(() => true))) this.#settlePiAlone();
+    if (this.ctx.storage.kv.get(PI_HOLD_KEY) !== undefined && !(await this.#replying().catch(() => true))) this.#settlePiHold();
     try {
       await this.harness.submit(content, { entry: { kind: CHAT_MESSAGE_KIND, data } });
     } catch (error) {
@@ -2295,7 +2301,7 @@ export class ChatAgent extends DurableObject<Env> {
         tracker.apply(batch);
         // pi answered: the agents its answer names get turns.
         if (this.#runWatch === watch && batch.some((event) => event.type === "run_end")) {
-          this.#settlePiAlone();
+          this.#settlePiHold();
           this.#scanPi();
         }
         // Most batches are streamed tokens, which change nothing here.
@@ -3817,7 +3823,13 @@ export class ChatAgent extends DurableObject<Env> {
   #refreshForTurn(ask: string): Promise<void> {
     const now = Date.now();
     if (this.#refreshed?.ask === ask && now - this.#refreshed.at < REFRESHED_FOR) return this.#refreshed.done;
-    const done = Promise.all([this.refreshMcpTools(), this.refreshSkills(this.#skillsForTurn(ask)), this.refreshFiles(), this.refreshUserPrompt()]).then(
+    const done = Promise.all([
+      this.refreshMcpTools(),
+      this.refreshSkills(this.#skillsForTurn(ask)),
+      this.refreshFiles(),
+      this.refreshUserPrompt(),
+      this.refreshPiSettings(),
+    ]).then(
       () => {},
     );
     this.#refreshed = { ask, at: now, done };
@@ -5262,26 +5274,32 @@ export class ChatAgent extends DurableObject<Env> {
   }
 
   /**
-   * pi's replies held for the owner (PiHeld); `going`: with the run going now when it read what only the owner sees
-   * while they were alone and someone has joined since (held from then on, until it ends: #settlePiAlone).
+   * pi's replies held for the owner (PiHeld); `going`: with the run going now when it holds (PI_HOLD_KEY) and someone
+   * else is in the chat (held from then on, until it ends: #settlePiHold).
    */
   #piHeld(going = false): PiHeld[] {
     const held = this.ctx.storage.kv.get<PiHeld[]>(PI_HELD_KEY) ?? [];
-    const alone = going && this.members.hasAny() ? this.ctx.storage.kv.get<number>(PI_ALONE_KEY) : undefined;
-    return alone === undefined ? held : [...held, { from: alone }];
+    const hold = going && this.members.hasAny() ? this.ctx.storage.kv.get<PiHeld>(PI_HOLD_KEY) : undefined;
+    return hold === undefined ? held : [...held, hold];
+  }
+
+  /** The hold pi's run takes as it reads what only the owner sees at `at` (holdOnRead), as the chat is now. */
+  #holdOnRead(at: number): PiHeld | undefined {
+    const review = this.#piSettingsNow.reviewBeforePosting === true;
+    return holdOnRead(this.ctx.storage.kv.get<PiHeld>(PI_HOLD_KEY), { alone: !this.members.hasAny(), review }, at);
   }
 
   /**
-   * pi's run is over (or none is going): one that read what only the owner sees while they were alone, and ended with
-   * someone else in the chat, has its replies held for the owner, as an agent's turn apart is held (#6); the owner
-   * shows them to the chat or keeps them (showPiHeld). Their sockets hear of it; the others' get the chat anew.
+   * pi's run is over (or none is going): one that holds (PI_HOLD_KEY) and ended with someone else in the chat has its
+   * replies held for the owner, as an agent's turn apart, or reviewed, is held (#6); the owner shows them to the chat or
+   * keeps them (showPiHeld). Their sockets hear of it; the others' get the chat anew.
    */
-  #settlePiAlone(): void {
-    const from = this.ctx.storage.kv.get<number>(PI_ALONE_KEY);
-    if (from === undefined) return;
-    this.ctx.storage.kv.delete(PI_ALONE_KEY);
+  #settlePiHold(): void {
+    const hold = this.ctx.storage.kv.get<PiHeld>(PI_HOLD_KEY);
+    if (hold === undefined) return;
+    this.ctx.storage.kv.delete(PI_HOLD_KEY);
     if (!this.members.hasAny()) return;
-    const held = withHeld(this.ctx.storage.kv.get<PiHeld[]>(PI_HELD_KEY) ?? [], { from, through: Date.now() });
+    const held = withHeld(this.ctx.storage.kv.get<PiHeld[]>(PI_HELD_KEY) ?? [], { ...hold, through: Date.now() });
     this.ctx.storage.kv.put(PI_HELD_KEY, held);
     this.sockets.sendTo(this.uid, { type: "piHeld", held });
   }
@@ -5299,10 +5317,25 @@ export class ChatAgent extends DurableObject<Env> {
     return null;
   }
 
-  /** The servers pi reads for anyone in this chat (piShares): those that do not sign in each user. */
+  /** The servers pi reads for anyone in this chat (piShares): the owner's list for shared chats, else those that do not sign in each user. */
   #piShares(): (server: string) => boolean {
-    return piShares(this.#signsIn);
+    return piShares(this.#signsIn, this.#piSettingsNow.sharedServers);
   }
+
+  /** pi's settings as last read from the owner's directory (refreshPiSettings); until then its defaults, the narrowest. */
+  #piSettingsNow: PiSettings = {};
+
+  /**
+   * Read pi's settings again (shared/pi-settings.ts): before every message and turn it answers, so a change applies
+   * from the next one on. Never rejects: on a failure pi keeps the ones it has.
+   */
+  readonly refreshPiSettings = singleFlight(async () => {
+    try {
+      this.#piSettingsNow = await this.#directory.piSettings();
+    } catch (error) {
+      console.error("pi settings:", errorMessage(error));
+    }
+  });
 
   /** The chat's traces as #piReach last read them: what the sockets go by between reads (a file saved since reads as private). */
   #piTraces: SessionTraces | undefined;

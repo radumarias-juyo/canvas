@@ -134,6 +134,7 @@
     "src/agents/ServersTable.tsx",
     "src/agents/tab-fields.ts",
     "src/agents/nav.ts",
+    "src/agents/pi-form.ts",
     "src/agents/runs.ts",
     "src/agents/workflow.ts",
     "src/agents/limits/rules.ts",

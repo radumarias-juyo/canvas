@@ -25,7 +25,8 @@ import type { McpSignInView } from "../shared/sign-ins.ts";
 import { SkillsView } from "./skills/SkillsView.tsx";
 import { AgentPage } from "./agents/AgentPage.tsx";
 import { AgentsNav } from "./agents/AgentsNav.tsx";
-import { agentPlace, type AgentPlace } from "./agents/nav.ts";
+import { agentPlace, PI_PAGE, type AgentPlace } from "./agents/nav.ts";
+import { PiPage } from "./agents/PiPage.tsx";
 import { reloadAgents } from "./agents/store.ts";
 import { MemoryView } from "./memory/MemoryView.tsx";
 import { reloadMemory, toConfirm, useMemory } from "./memory/store.ts";
@@ -541,7 +542,11 @@ function Workspace({ uid, label, chatId, secondSeat, opening, showSkills, showFe
             <h1 className="chat-title">{showSkills ? "Skills" : "Chats"}</h1>
           </header>
         )}
-        {agentPage ? (
+        {agentPage?.id === PI_PAGE ? (
+          <ErrorBoundary key="pi" what="pi's settings">
+            <PiPage onMenu={narrow ? openMenu : undefined} />
+          </ErrorBoundary>
+        ) : agentPage ? (
           // One page for every agent, so a notice of a save that made another (a new agent, a copy) shows on that one.
           <ErrorBoundary key="agent" what="this agent">
             <AgentPage place={agentPage} chats={chats} navigate={navigate} onMenu={narrow ? openMenu : undefined} />
