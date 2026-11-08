@@ -7,7 +7,7 @@ agent that builds **live dashboards**, preview them beside the chat, and share t
 
 - **Pi Durable** runs the agent inside a Durable Object, one per chat, and survives evictions mid-turn.
 - **Durable Objects** hold each chat (agent, MCP connections, live calls) and each user's index of chats and artifacts.
-- **Sandbox** (a Linux container per chat) runs the Python the agent writes, with no internet.
+- **Sandbox** (a Linux container per chat, and one per agent in it) runs the Python the agent writes, with no internet.
 - **[Artifacts](https://developers.cloudflare.com/artifacts/)** keeps each published artifact as a Git repo: one commit
   and tag per version.
 - **R2** keeps each user's files, which the agent reads and writes, plus a read cache of artifact versions.
@@ -354,8 +354,10 @@ opens quickly.
 
 ## The sandbox
 
-`run_python` and `run_bash` run in one Linux container per chat (`worker/sandbox.ts`, the Sandbox SDK's container
-in a Durable Object). It runs Debian with Python 3.13, pandas, numpy, the libraries skills' scripts commonly import (pypdf, pdfplumber,
+`run_python` and `run_bash` run in a Linux container (`worker/sandbox.ts`, the Sandbox SDK's container in a Durable
+Object): pi's sessions in the chat's, and each agent's sessions in one of the agent's own in that chat
+(`worker/agent/sandbox-names.ts`), so no agent reads what another, or pi, left in its container; a session nobody is known
+of runs none. A member's agent runs in its seat's object, one per room. It runs Debian with Python 3.13, pandas, numpy, the libraries skills' scripts commonly import (pypdf, pdfplumber,
 reportlab, openpyxl, python-docx, python-pptx, pillow, matplotlib, pyyaml, jinja2, beautifulsoup4, lxml) and the usual command-line tools, and has no
 internet. Each run is limited to 60 seconds. Files move like this:
 
@@ -369,7 +371,8 @@ internet. Each run is limited to 60 seconds. Files move like this:
   own folder, so two chats of one user running at once never overwrite each other's outputs; the agent is told to keep
   the files it writes with `files_write` there too.
 - **Between runs:** `./files` and `./out` start empty each run. Anything else in the working directory stays until
-  the container stops, 10 minutes after the last run.
+  the container stops, 10 minutes after the last run, for the same session only: a run of another session (an agent's
+  next turn, in a fork of its own) starts with an empty working directory. Runs in one container go one at a time.
 
 The container never sees R2, the bucket or any key: only the bytes the Worker hands it.
 

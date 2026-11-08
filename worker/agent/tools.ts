@@ -76,6 +76,11 @@ export interface ChatScope extends PublishScope, AgentsScope {
    */
   skillFolders(names: readonly string[], maxBytes: number): Promise<SandboxFile[]>;
   /**
+   * The sandbox object conversation `session` runs code in (worker/agent/sandbox-names.ts): pi's the chat's, an agent's
+   * its own; null for a session nobody is known of, which runs none.
+   */
+  sandboxOf(session: string): string | null;
+  /**
    * Conversation `session` is about to save these files: one apart from the chat records them first, so they stay
    * withheld until its reply is posted even when the tool is stopped before its result names them.
    */
@@ -250,13 +255,8 @@ function tooMuch(bytes: number, maxBytes: number): string {
   return `Those files hold ${formatBytes(bytes)}; one run takes at most ${formatBytes(maxBytes)}${maxBytes < MAX_SANDBOX_BYTES ? " besides the skills" : ""}. Pass fewer.`;
 }
 
-/** The name of a chat's sandbox object. */
-export function sandboxName(uid: string, chatId: string): string {
-  return `${uid}-${chatId}`;
-}
-
 /**
- * Copy the named user files in, run in this chat's sandbox, save ./out back to
+ * Copy the named user files in, run in the session's sandbox (ChatScope.sandboxOf), save ./out back to
  * this chat's folder in the user's files (chatOutFolder). The files go through the user's UserFiles, so they are
  * decrypted on the way in and encrypted with the user's key on the way out.
  */
@@ -265,8 +265,12 @@ async function runInSandbox(
   api: { conversationId: unknown },
   signal: AbortSignal | undefined,
   args: { files?: string[]; skills?: string[] },
-  run: (sandbox: ReturnType<typeof exports.Sandbox.getByName>, inputs: SandboxFile[], skills: SandboxFile[]) => Promise<SandboxRun>,
+  run: (sandbox: ReturnType<typeof exports.Sandbox.getByName>, inputs: SandboxFile[], skills: SandboxFile[], session: string) => Promise<SandboxRun>,
 ) {
+  const session = String(api.conversationId);
+  // Asked first: a session that may run no code reads no files for it either.
+  const name = scope.sandboxOf(session);
+  if (name === null) throw new Error("This conversation has no sandbox to run code in.");
   const files = await scope.files();
   const folder = chatOutFolder(scope.chatId);
   // The skills and saved results first: their sizes are known before the files are read, which get what they leave of the limit.
@@ -287,7 +291,7 @@ async function runInSandbox(
   }
   checkFolders(layout);
   const inputs = [...results, ...own];
-  const result = await run(exports.Sandbox.getByName(sandboxName(scope.uid, scope.chatId)), inputs, skills);
+  const result = await run(exports.Sandbox.getByName(name), inputs, skills, session);
   const { toSave, skipped } = outputPaths(folder, result.outputs);
   // A reviewed turn apart from the chat saves no file over one the chat has: those are left out, saying why.
   const rules = await rulesOf(scope, api);
@@ -327,10 +331,12 @@ export function sandboxExtension(scope: ChatScope): Extension {
     tools: [
       defineTool({
         name: RUN_PYTHON_TOOL,
-        description: `Run a Python 3.13 script in this chat's isolated Linux sandbox (installed: pandas, numpy, pypdf, pdfplumber, reportlab, openpyxl, python-docx, python-pptx, pillow, matplotlib, pyyaml, jinja2, beautifulsoup4, lxml): no internet, 60 s limit. ${SANDBOX_FILES}`,
+        description: `Run a Python 3.13 script in your isolated Linux sandbox (yours alone in this chat; installed: pandas, numpy, pypdf, pdfplumber, reportlab, openpyxl, python-docx, python-pptx, pillow, matplotlib, pyyaml, jinja2, beautifulsoup4, lxml): no internet, 60 s limit. ${SANDBOX_FILES}`,
         parameters: Type.Object({ code: Type.String(), files: inputFiles, skills: inputSkills }),
         execute: async (args, api, context) =>
-          runInSandbox(scope, api, context.abortSignal, args, (sandbox, inputs, skills) => sandbox.runPython(args.code, inputs, skills)),
+          runInSandbox(scope, api, context.abortSignal, args, (sandbox, inputs, skills, session) =>
+            sandbox.runPython(args.code, inputs, skills, session),
+          ),
       }),
       defineTool({
         name: RUN_BASH_TOOL,
@@ -339,7 +345,9 @@ export function sandboxExtension(scope: ChatScope): Extension {
           `Runs as written; start with set -e to stop at the first failing command. ${SANDBOX_FILES}`,
         parameters: Type.Object({ script: Type.String(), files: inputFiles, skills: inputSkills }),
         execute: async (args, api, context) =>
-          runInSandbox(scope, api, context.abortSignal, args, (sandbox, inputs, skills) => sandbox.runBash(args.script, inputs, skills)),
+          runInSandbox(scope, api, context.abortSignal, args, (sandbox, inputs, skills, session) =>
+            sandbox.runBash(args.script, inputs, skills, session),
+          ),
       }),
     ],
   });

@@ -21,10 +21,12 @@ import { LimitsDirectory, type CallEntry } from "./agents/limits/directory.ts";
 import { approvalAsk, approvalFeed, approvalRef } from "./agents/limits/feed.ts";
 import { actorName, LIMIT_FIELDS, type CallLogView, type GuardrailRule, type PendingActionView } from "../shared/limits.ts";
 import { UserMemory, type Learned, type LearnedNote } from "./memory/memory.ts";
+import { SignalStore } from "./memory/signals.ts";
 import type { Forgot, MemoryNote, MemoryNoteView, MemoryReader, MemoryWriter, Recalled, ServerCoverage } from "../shared/memory.ts";
 import { ChatRows } from "./chat-rows.ts";
 import { addColumns } from "./members.ts";
 import { mayLeave, type ChatKind, type ChatRef } from "../shared/chat-kinds.ts";
+import { keepsSignals, type AgentSignal } from "../shared/signals.ts";
 import {
   agentFrom,
   NEEDS_YOU,
@@ -137,6 +139,8 @@ export class UserDirectory extends DurableObject<Env> {
   readonly #limits: LimitsDirectory;
   /** The user's memory notes (worker/memory/). */
   readonly #memory: UserMemory;
+  /** How people worked with this user's agents, in every chat they are in (shared/signals.ts). */
+  readonly #signals: SignalStore;
   /** What of each sidebar row is this user's alone (pinned, closed, their name for it), chats' kinds, page chats, people (worker/chat-rows.ts). */
   readonly #rows: ChatRows;
   /** What came in for this user across their chats, pages and agents (worker/feed/store.ts). */
@@ -176,6 +180,7 @@ export class UserDirectory extends DurableObject<Env> {
       agentNames: () => this.#agents.names(),
       changed: () => this.#changed("memory"),
     });
+    this.#signals = new SignalStore(ctx.storage.sql);
     this.#feed = new FeedStore(ctx.storage.sql);
     this.#follows = new FollowStore(ctx.storage.sql);
     // The files of a skill imported as a package (SkillPackageFiles as JSON).
@@ -631,6 +636,8 @@ export class UserDirectory extends DurableObject<Env> {
   /** Chat `id`'s row now says `kind`: off the record, what the feed kept of it leaves too (wherever a row's kind is set). */
   #kindSet(id: string, kind: ChatKind | undefined): void {
     if (kind && !mayLeave({ what: "feed" }, kind) && this.#feed.forgetChat(id)) this.#changed("feed");
+    // Nothing recorded of how people worked with an agent there stays.
+    if (kind && !keepsSignals(kind)) this.#signals.forgetChat(id);
   }
 
   /** The chat that discusses one of this user's artifacts (Discuss on its page), or null. */
@@ -946,6 +953,7 @@ export class UserDirectory extends DurableObject<Env> {
     this.#agents.forgetChat(id);
     this.#limits.forgetChat(id);
     this.#memory.forgetChat(id);
+    this.#signals.forgetChat(id);
     // The values its pages saved for this user, which were everyone's defaults.
     this.ctx.storage.sql.exec("DELETE FROM page_values WHERE artifact_id IN (SELECT id FROM artifacts WHERE chat_id = ?)", id);
     // Its pages are gone: whoever follows them stops; and its items leave this user's feed.
@@ -1283,6 +1291,7 @@ export class UserDirectory extends DurableObject<Env> {
     const refused = this.#agents.delete(id);
     if (refused) return refused;
     this.#memory.forgetAgent(id);
+    this.#signals.forgetAgent(id);
     this.#agentChanged(id);
     // Its followers stop following it, and its items (runs, guesses to confirm) leave this user's feed.
     this.#targetGone("agent", id);
@@ -1348,6 +1357,14 @@ export class UserDirectory extends DurableObject<Env> {
 
   deleteNote(id: string): { error: string } | null {
     return this.#memory.delete(id);
+  }
+
+  /**
+   * Keep what a chat recorded of how people worked with this user's agents there (shared/signals.ts): each checked, and
+   * none from a chat off the record, as the chat says or as this user's sidebar row of it says.
+   */
+  recordSignals(signals: AgentSignal[]): void {
+    this.#signals.record(signals, (chatId) => this.#rows.kindOf(chatId));
   }
 
   /** A note the model saves in one of the user's chats, which says who reads and asks there (UserMemory.learn). */

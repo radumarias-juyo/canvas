@@ -90,7 +90,8 @@ import type { ModelRunner } from "./agent/workers-ai.ts";
 import { asksUser, RunTracker } from "./chat-status.ts";
 import { mcpExtension, type McpToolInfo, type ServerCatalog } from "./agent/mcp.ts";
 import { deferredTools, MIN_TOOLS_TO_PICK, pickerId, pickFailure, pickTools, TOOL_PICK_MS, toolPicker, toolsToOffer, type PickableTool } from "./agent/tool-pick.ts";
-import { artifactExtension, filesExtension, filesIndexExtension, reactionsExtension, sandboxExtension, sandboxName, skillsExtension, type ChatScope } from "./agent/tools.ts";
+import { artifactExtension, filesExtension, filesIndexExtension, reactionsExtension, sandboxExtension, skillsExtension, type ChatScope } from "./agent/tools.ts";
+import { agentSandboxName, sandboxFor, sandboxName } from "./agent/sandbox-names.ts";
 import type { SandboxFile } from "./sandbox.ts";
 import { formatSkillFile } from "./skills/index.ts";
 import { ChatReactions } from "./reactions.ts";
@@ -207,6 +208,7 @@ import { SEAT_CHAT_PATTERN } from "../shared/protocol.ts";
 import { agentsExtension } from "./agents/tools.ts";
 import { historyExtension, HISTORY_SCAN_ENTRIES, searchHistory, type HistoryQuery } from "./agents/history.ts";
 import { ChatMemory, runAskedByOwner, type Whose } from "./memory/chat.ts";
+import { ChatSignals } from "./memory/chat-signals.ts";
 import { freshPrompt, withoutNoteResults } from "./memory/fresh.ts";
 import { memoryExtension } from "./memory/tools.ts";
 import { coverageOf } from "./memory/coverage.ts";
@@ -347,6 +349,8 @@ const RUNNING_WHEN_PICKED = "a reply started while the router picked, so the mes
 const PROGRESS = { partialIntervalMs: STREAM_STEP_MS, outputIntervalMs: STREAM_STEP_MS };
 /** The chat's status as the sidebars last heard it, in this object's storage: after a restart, whether a run may be going. */
 const STATUS_KEY = "status";
+/** The sandbox objects this chat's sessions ran code in (ChatAgent.#sandboxOf): what deleting the chat destroys. */
+const SANDBOXES_KEY = "sandboxes";
 /** Set while pi's tools are only those of a Yes to an offer (draftTools), until its run is over (#piTools). */
 const DRAFTING_KEY = "drafting";
 /** Why a Yes to pi's offer is refused while pi works: its tools change for the whole run (#piTools). */
@@ -589,6 +593,17 @@ export class ChatAgent extends DurableObject<Env> {
     kv: this.ctx.storage.kv,
   });
   readonly reactions = new ChatReactions(this.ctx.storage.sql);
+  /** How people work with the roster's agents, for their owners' nightly dream (worker/memory/chat-signals.ts). */
+  readonly signals = new ChatSignals({
+    chatId: this.chatId,
+    chatOwner: this.uid,
+    kind: () => this.kinds.kind(),
+    alone: () => !this.members.hasAny(),
+    ownerOf: (agentId) => this.roster.get(agentId)?.ownerUid,
+    directory: (uid) => this.#index(uid),
+    kv: this.ctx.storage.kv,
+    waitUntil: (promise) => this.ctx.waitUntil(promise),
+  });
   /** The calls that wait, or waited, for the owner: proposals and approvals (worker/agents/limits/). */
   readonly actions = new ChatActions(this.ctx.storage.sql, () => this.chatId);
   /** The cards of the actions members' agents held in their seats for this chat (each only for its agent's owner). */
@@ -734,10 +749,14 @@ export class ChatAgent extends DurableObject<Env> {
       artifacts: this.storage.artifacts,
       // Deriving the user's key is not free, so derive it once per object.
       files: memoAsync(() => this.storage.userFiles(this.uid)),
+      sandboxOf: (session) => this.#sandboxOf(session),
       onPublished: (artifact, chatId, session) => {
         // A version a conversation apart from the chat published (an agent's private turn): kept by version, before
         // anything else, so members never reach it before its reply is posted, nor hear of it (ChatRoster.release).
         const held = session !== undefined && chatId === this.chatId && this.roster.recordPage(session, artifact.id, artifact.latest);
+        if (session !== undefined && isPiConversation(session) && chatId === this.chatId) {
+          this.signals.published(artifact.id, artifact.latest);
+        }
         return afterPublish(this.#published, artifact, chatId, held);
       },
       rulesFor: (session) => this.#rulesFor(session),
@@ -821,6 +840,27 @@ export class ChatAgent extends DurableObject<Env> {
     // seat with the same id (agent ids are unique per user only): its sessions run in its owner's object, not here.
     const entry = entries.find((each) => each.agentId === agentId && each.seat === undefined);
     return { agentId, ownerUid: entry?.ownerUid ?? this.uid, name: entry?.name ?? "agent", byOwner: turn?.byOwner === true, ...(ran && { run: true }) };
+  }
+
+  /**
+   * The sandbox object a session runs code in (worker/agent/sandbox-names.ts): the chat's for pi's, one of its own for
+   * each agent's (its own session, its turns' forks, its runs', a seat's); null for one nobody is known of. Remembered,
+   * so deleting the chat stops and forgets every one of them.
+   */
+  #sandboxOf(session: string): string | null {
+    const name = sandboxFor(this.#memoryAgent(session), this.uid, this.chatId);
+    if (name !== null) {
+      const used = this.#sandboxesUsed();
+      if (!used.includes(name)) this.ctx.storage.kv.put(SANDBOXES_KEY, [...used, name]);
+    }
+    return name;
+  }
+
+  /** The sandboxes this chat's sessions ran code in: pi's always, with the agents' that did (#sandboxOf). */
+  #sandboxesUsed(): string[] {
+    const pi = sandboxName(this.uid, this.chatId);
+    const used = this.ctx.storage.kv.get<string[]>(SANDBOXES_KEY) ?? [];
+    return used.includes(pi) ? used : [pi, ...used];
   }
 
   /** The uid is this object's name, which the Worker sets from a verified identity. */
@@ -1623,6 +1663,7 @@ export class ChatAgent extends DurableObject<Env> {
     const entry = await this.#entryAt(entryId);
     // The offer as the app shows it (entryOffer), so Yes is taken only where it is offered.
     if (!entry || entryOffer(entry) === undefined) throw new Error("That message offers no next step.");
+    this.signals.offerTaken(author.uid, replyAgent(entry) ?? AGENT_NAME, entry.id as number);
     await this.prompt(OFFER_YES, author, [], [], entry.id, true);
   }
 
@@ -1732,6 +1773,7 @@ export class ChatAgent extends DurableObject<Env> {
     // With files, artifacts or people named, their "@name"s may hide what looks like a call now: pi may be summoned after all.
     const callsAgents = mentionInputs.length === 0 && speakersOf().length > 0;
     const calling = (everyMessage && !callsAgents) || repliesToAgent || summonsAgent(text);
+    if (!drafts) this.signals.message(author.uid, text, repliesToAgent ? AGENT_NAME : repliesTo, replyTo, calling);
     const byOwner = author.uid === this.uid;
     // Someone else's own files they named come as attachments, copied to the owner's files, where the agent works. The
     // owner's second seat has none of its own.
@@ -2228,7 +2270,10 @@ export class ChatAgent extends DurableObject<Env> {
       events.start(async (batch) => {
         tracker.apply(batch);
         // pi answered: the agents its answer names get turns.
-        if (this.#runWatch === watch && batch.some((event) => event.type === "run_end")) this.#scanPi();
+        if (this.#runWatch === watch && batch.some((event) => event.type === "run_end")) {
+          this.#scanPi();
+          this.signals.piReplied();
+        }
         // Most batches are streamed tokens, which change nothing here.
         if (this.#runWatch !== watch || tracker.status === shown) return;
         shown = tracker.status;
@@ -2582,6 +2627,7 @@ export class ChatAgent extends DurableObject<Env> {
     if (to === from) return this.peopleFor(by.uid);
     this.kinds.setKind(to);
     this.#audienceChanged();
+    if (to === "off_record") this.signals.forget();
     // "Only you": a link sent before must not let anyone in, which would make it a group again (#joined).
     if (to === "private") this.members.revokeInvites();
     const removed = plan.removed.map(personOf);
@@ -2857,7 +2903,7 @@ export class ChatAgent extends DurableObject<Env> {
         // The tool results kept whole for this chat's turns (#spill).
         this.scope.toolResults().then((results) => results.deleteAll()),
         this.scope.drafts().then((drafts) => drafts.deleteAll()),
-        this.env.SANDBOX_ENABLED === "true" && exports.Sandbox.getByName(sandboxName(this.uid, this.chatId)).destroy(),
+        ...(this.env.SANDBOX_ENABLED === "true" ? this.#sandboxesUsed().map((name) => exports.Sandbox.getByName(name).destroy()) : []),
       ]);
       await this.runner.clearAll();
       // A branch's place among its conversation's MAX_BRANCHES is free again (an imported one took none).
@@ -3047,8 +3093,11 @@ export class ChatAgent extends DurableObject<Env> {
     if (!isReaction(emoji)) throw new Error("Not a reaction this chat takes.");
     if (typeof entry !== "number" || !Number.isSafeInteger(entry) || entry < 0) throw new Error("No such message.");
     // Taking one back needs no message: one that is not there changes nothing. An entry with reactions was checked.
-    if (on && !this.reactions.has(entry) && !isReactable(await this.#entryAt(entry))) throw new Error("That message cannot be reacted to.");
+    const reacted = on ? await this.#entryAt(entry) : undefined;
+    if (on && !this.reactions.has(entry) && !isReactable(reacted)) throw new Error("That message cannot be reacted to.");
     this.#setReaction(entry, emoji, by.uid, on);
+    const reactedTo = reacted && (replyAgent(reacted) ?? (reacted.kind === "pi.assistant" ? AGENT_NAME : undefined));
+    if (reactedTo) this.signals.reacted(by.uid, reactedTo, entry, emoji);
   }
 
   /** The agent's reaction (the react tool): to the newest message a person sent, which is the one it is answering. */
@@ -3158,7 +3207,20 @@ export class ChatAgent extends DurableObject<Env> {
             .agentLeftChat(entry.agentId, this.uid, this.chatId)
             .catch((error: unknown) => console.error("agent followers:", errorMessage(error))),
       index && this.#noteAgentChat(entry, false),
+      entry.seat === undefined && this.#dropSandbox(agentSandboxName(this.uid, this.chatId, entry.agentId)),
     ]);
+  }
+
+  /** An agent of this chat's object left it: its sandbox here stops and forgets what it held (one it never used, nothing). */
+  async #dropSandbox(name: string): Promise<void> {
+    const used = this.#sandboxesUsed();
+    if (!used.includes(name)) return;
+    if (this.env.SANDBOX_ENABLED === "true") {
+      await exports.Sandbox.getByName(name)
+        .destroy()
+        .catch((error: unknown) => console.error("agent sandbox:", errorMessage(error)));
+    }
+    this.ctx.storage.kv.put(SANDBOXES_KEY, used.filter((each) => each !== name));
   }
 
   /**
@@ -3264,8 +3326,11 @@ export class ChatAgent extends DurableObject<Env> {
       return refuse(400, 'Expected {turn, action: "post" | "discard", text?}.');
     }
     if (typeof text === "string" && text.length > MAX_ASK_CHARS) return refuse(400, `A reply is at most ${MAX_ASK_CHARS} characters.`);
+    const held = this.roster.held(by.uid).find((draft) => draft.turn === turn && draft.agentId === agentId);
     const refused = action === "discard" ? this.turns.discard(by.uid, agentId, turn) : await this.turns.post(by.uid, agentId, turn, text);
     if (refused) return refuse(404, refused.error);
+    const edited = typeof text === "string" && text.trim() !== held?.reply.text.trim();
+    this.signals.draft(by.uid, agentId, turn, action === "discard" ? "discarded" : edited ? "edited" : "posted");
     return this.draftsFor(by.uid);
   }
 
@@ -3355,7 +3420,10 @@ export class ChatAgent extends DurableObject<Env> {
     if (!muted && by.uid !== this.uid && by.uid !== entry.ownerUid) return refuse(403, `Only the chat's owner or @${entry.name}'s can unmute it.`);
     this.roster.setMuted(agentId, muted);
     // It learns: its threshold for speaking up here goes up for a while.
-    if (muted) this.speakUp.lowered(agentId, "mute");
+    if (muted) {
+      this.speakUp.lowered(agentId, "mute");
+      this.signals.muted(by.uid, agentId);
+    }
     this.#broadcastAgents();
     return this.agentViews();
   }
@@ -3605,6 +3673,7 @@ export class ChatAgent extends DurableObject<Env> {
     void this.#restorePiTools();
     const entry = this.roster.get(turn.agentId);
     const session = entry ? sessionOf(entry, turn) : undefined;
+    this.signals.turnEnded(turn, outcome.status);
     // A seat's turn (a member's agent) ran in its owner's object, which paid for it: the chat's budget counts it here.
     if (outcome.spent) this.spend.count(outcome.spent);
     const used = (session && this.#turnSpend.get(session)) || { tokens: 0, costUsd: 0, toolCalls: 0, ...outcome.spent };
@@ -4237,6 +4306,7 @@ export class ChatAgent extends DurableObject<Env> {
     // After every message sent before it, even in the same millisecond: none of those saw it.
     const placedAt = Math.max(Date.now(), this.#lastSentAt + 1);
     const author = { uid: `agent:${reply.agentId}`, name: reply.name };
+    this.signals.replied(reply);
     void this.#touchIndexes(reply.text || reply.name, author, tags, reply.text, requestId, { run: Boolean(reply.run) }).catch((error) =>
       console.error("chat index:", errorMessage(error)),
     );
@@ -5225,6 +5295,8 @@ export class ChatAgent extends DurableObject<Env> {
       await this.#expireAction(id);
       return this.actions.get(id) ?? found;
     }
+    const actor = found.actor.agentId ?? (found.actor.name === AGENT_NAME ? AGENT_NAME : undefined);
+    if (found.status === "pending" && actor) this.signals.action(uid, actor, decision);
     if (decision === "decline") {
       const declined = this.actions.move(id, "pending", "declined");
       if (!declined) return found;
@@ -6035,4 +6107,9 @@ function pageNote(page: ChatPage, what: "discusses" | "has a new version" | "cam
 /** A branch's title, from the chat it branched off from. */
 function branchTitleOf(title: string): string {
   return `${title || "Chat"} (branch)`;
+}
+
+/** The agent whose reply `entry` is (a `chat.agent` entry); undefined for any other entry. */
+function replyAgent(entry: EntryRecord): string | undefined {
+  return entry.kind === CHAT_AGENT_KIND ? (entry.data as unknown as ChatAgentReplyData).agentId : undefined;
 }

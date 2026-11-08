@@ -48,6 +48,10 @@ with `@cloudflare/vite-plugin`, pnpm; configured and deployed with the `cf` CLI 
   once one held the owner's own notes and the chat is shared, its conversation starts the prompt afresh
   (`worker/memory/fresh.ts`, `ChatMemory.audienceChanged`): a compaction going then is stopped, or, when a turn waits
   for it, its summary is left out of each request (the memory extension's `beforeRequest` hook) until the edits are in.
+  How people work with an agent or pi (corrections, drafts, decisions, mutes, reactions, repeats) is recorded as signals,
+  with no model call and never what anyone said (`shared/signals.ts`, `worker/memory/chat-signals.ts`), in the agent's
+  owner's directory (pi's: the chat owner's; `SignalStore`), tagged with the chat and its kind; nothing from a chat off
+  the record, checked at both ends.
   Keep those rules in code.
 - Shared chats (`worker/chat-routes.ts`, `worker/members.ts`): the owner invites people by single-use link; they share
   the one conversation and the one agent, which always acts as the owner (owner's MCP sign-ins, files, skills; artifacts
