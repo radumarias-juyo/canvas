@@ -3,6 +3,7 @@
 // definition); a page runs as its author.
 
 import { CHAT_TURN_KIND, mayUseServer, type AgentDefinition, type ChatTurnData } from "../../../shared/agents.ts";
+import { chatAllowsServer } from "../../../shared/agent-settings.ts";
 import type { CallerLevel } from "../../../shared/limits.ts";
 import { CHAT_MESSAGE_KIND, type ChatMessageData } from "../../../shared/protocol.ts";
 import type { AgentTurn } from "../roster.ts";
@@ -80,6 +81,7 @@ export function seatCaller(found: SeatTurnIn, agent: AgentDefinition | null, cal
   if (!agent.enabled) throw new Error(`@${agent.name} is off.`);
   if (!mayUseServer(agent, call.server)) throw new Error(`${call.server} is not one of the servers @${agent.name} may use.`);
   const { room, agentId, turn } = found;
+  if (!chatAllowsServer(turn, call.server)) throw new Error(`${call.server} is not one of the servers agents may use in this chat.`);
   return {
     actor: { name: agent.name, agentId: agent.id, avatar: agent.avatar, color: agent.color },
     agent,
