@@ -762,11 +762,11 @@ export class AgentTurns {
       else if (entry) sessions.add(sessionOf(entry, turn));
     }
     aborts.push(...[...sessions].map((session) => this.#host.abort(session)));
+    // Everyone hears it at once: the roster says stopped already, and an abort settles only once the tool call it cut
+    // into returns (a slow one keeps it for as long). The next turns start only after.
+    if (stopped.length) this.#host.changed();
     await Promise.all(aborts.map((abort) => abort.catch((error: unknown) => console.error("agent stop:", errorMessage(error)))));
-    if (stopped.length) {
-      this.#host.changed();
-      this.#pumpAfter();
-    }
+    if (stopped.length) this.#pumpAfter();
     return stopped.length > 0;
   }
 

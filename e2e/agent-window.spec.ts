@@ -84,6 +84,10 @@ test("b. she steers the turn mid-way: it reads her words at its next step, and i
   // Read at its next step: once the call it waits on answers, her words are in its session, and its reply follows them.
   await release(page, "w1");
   await expect(agentReply(page, "steady", "Steered: only the mornings.")).toBeVisible();
+  // The turn ended, so the window shows the shared session again: her words are in the turn's own session only.
+  await expect(window.getByRole("button", { name: "Shared with the chat" })).toHaveAttribute("aria-pressed", "true");
+  await expect(window.getByText("You, steering", { exact: true })).toHaveCount(0);
+  await window.getByRole("button", { name: /Turn #\d+ · wendy/ }).click();
   await expect(window.locator(".agent-window-input", { hasText: "Steered: only the mornings." })).toContainText("You, steering");
   // Her words are in no message of the chat: only the reply they led to.
   await expect(page.locator(".message.mine", { hasText: "only the mornings" })).toHaveCount(0);
