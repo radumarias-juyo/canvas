@@ -211,25 +211,6 @@ export function conditionProblem(source: string): string | null {
   }
 }
 
-/** The names a condition reads at its top level ("signups" of `signups.weekly > 3`): what earlier steps must provide. */
-export function conditionNames(source: string): string[] {
-  const names = new Set<string>();
-  const walk = (node: Node): void => {
-    if (node.kind === "name") names.add(node.name);
-    else if (node.kind === "member") {
-      walk(node.object);
-      walk(node.key);
-    } else if (node.kind === "call") node.args.forEach(walk);
-    else if (node.kind === "unary") walk(node.operand);
-    else if (node.kind === "binary") {
-      walk(node.left);
-      walk(node.right);
-    }
-  };
-  walk(parseCondition(source));
-  return [...names];
-}
-
 /** A name of a path, for messages: `signups.weekly`. */
 function describe(node: Node): string {
   if (node.kind === "name") return node.name;

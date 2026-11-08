@@ -1,5 +1,5 @@
 import { useEffect, useId, useState } from "react";
-import { MIN_WATCH_MINUTES, MAX_WATCH_MINUTES, WEEKDAYS, type AgentDefinition, type AgentStep, type Weekday } from "../../shared/agents.ts";
+import { allSteps, MIN_WATCH_MINUTES, MAX_WATCH_MINUTES, WEEKDAYS, type AgentDefinition, type AgentStep, type Weekday } from "../../shared/agents.ts";
 import { isReadOnly, type ToolInfo } from "../../shared/protocol.ts";
 import { errorMessage } from "../../shared/util.ts";
 import { api } from "../api.ts";
@@ -16,9 +16,6 @@ export interface PickerKnown {
   chat?: { id: string };
 }
 
-/** Every step of a workflow, those inside an if's branches too. */
-const allSteps = (steps: readonly AgentStep[] | undefined): AgentStep[] =>
-  (steps ?? []).flatMap((step) => (step.kind === "if" ? [step, ...allSteps(step.then), ...allSteps(step.else)] : [step]));
 
 /** A server's tools, read once per picker; [] when they cannot be read (signed out, down). */
 function useTools(server: string | undefined): { tools: ToolInfo[] | null; error?: string } {
