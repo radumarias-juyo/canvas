@@ -1,6 +1,7 @@
 import { exports } from "cloudflare:workers";
 import { errorMessage } from "../shared/util.ts";
 import { json, readJson } from "./http.ts";
+import { devOn } from "./dev-model.ts";
 import { mcpAuthStore } from "./users.ts";
 import { finishSignIn, OAUTH_CALLBACK_PATH, serverOfState, SIGN_IN_PATH, startSignIn } from "./mcp/oauth.ts";
 import { oauthServers } from "./mcp/servers.ts";
@@ -30,7 +31,7 @@ export async function mcpRoute(request: Request, env: Env, uid: string): Promise
     return json(change[1] === "sign-ins" ? await directory().disconnectMcp(server.name) : await directory().dismissSignInNotice(server.name));
   }
   const dev = /^\/api\/mcp\/dev\/([^/]+)\/(runs|needed)$/.exec(url.pathname);
-  if (dev && request.method === "POST" && env.DEV_TOOLS === "true") {
+  if (dev && request.method === "POST" && devOn(env)) {
     const server = servers.find((s) => s.name === decodeURIComponent(dev[1]!));
     const body = (await readJson<{ chatId?: unknown; what?: unknown }>(request)) ?? {};
     const chatId = typeof body.chatId === "string" ? body.chatId : undefined;

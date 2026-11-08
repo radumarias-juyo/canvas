@@ -163,7 +163,7 @@ import {
   type Catalog,
 } from "./models.ts";
 import { withFailuresReported } from "./model-health.ts";
-import { scriptEmbedder, scriptGapMs, scriptModel, scriptOn, scriptPauseMs, SCRIPT_MODEL } from "./dev-model.ts";
+import { devOn, scriptEmbedder, scriptGapMs, scriptModel, scriptOn, scriptPauseMs, SCRIPT_MODEL } from "./dev-model.ts";
 import { chatAgentName, parseChatAgentName } from "./chat-name.ts";
 import { inboxIds, queuedIdsOf, queuedMessages } from "./queue.ts";
 import { readSystemPrompt, saveSystemPrompt, SYSTEM_PROMPT_KEY, type Tag } from "./users.ts";
@@ -600,8 +600,8 @@ export class ChatAgent extends DurableObject<Env> {
     },
     observe: (event: FunnelEvent) => {
       this.metrics.funnel({ ...event, stage: event.refusal ? `${event.stage}:${event.refusal}` : event.stage });
-      // With DEV_TOOLS, kept a while for GET /api/dev/chats/:id/funnel (devFunnel).
-      if (this.env.DEV_TOOLS === "true") this.#funnelLog.splice(0, this.#funnelLog.push({ ...event, at: Date.now() }) - MAX_FUNNEL_LOG);
+      // In local development only (devOn), kept a while for GET /api/dev/chats/:id/funnel (devFunnel).
+      if (devOn(this.env)) this.#funnelLog.splice(0, this.#funnelLog.push({ ...event, at: Date.now() }) - MAX_FUNNEL_LOG);
     },
     now: () => Date.now(),
     messagesSince: (at, max) => countMessagesSince(this.#log({ order: "descending" }), at, max),
@@ -3143,6 +3143,7 @@ export class ChatAgent extends DurableObject<Env> {
    * errors throws the check's errors. Only routed when DEV_TOOLS is on.
    */
   async devPublish({ html, mcp, ...target }: PublishTarget & { html: string; mcp?: WriteInput["mcp"] }) {
+    if (!devOn(this.env)) throw new Error("Not found.");
     const { id } = await writeDraft(this.scope, { html, mcp });
     // Without the code review: a model's findings would make this publish fail at random.
     const { report, unchecked } = await checkDraft(this.scope, id, { review: false });
@@ -4083,7 +4084,7 @@ export class ChatAgent extends DurableObject<Env> {
    * e2e suite reads to know an agent was weighed and why it stayed quiet. Nothing is kept without DEV_TOOLS.
    */
   devFunnel(uid: string): (FunnelEvent & { at: number })[] | ChatRefusal {
-    if (this.env.DEV_TOOLS !== "true") return refuse(404, "Not found.");
+    if (!devOn(this.env)) return refuse(404, "Not found.");
     if (uid !== this.uid) return refuse(403, "Only the chat's owner reads its funnel.");
     return [...this.#funnelLog];
   }

@@ -49,6 +49,21 @@ const NAME = /^[a-z0-9][a-z0-9-]{1,46}[a-z0-9]$/;
 const HOST = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
 const DEFAULT_OFFSET = 100;
 
+/** The development switches: each only for local development, with the demo sign-in. */
+export const DEV_SWITCHES = ["DEV_TOOLS", "DEV_MODEL", "DEV_PAUSE_MS", "DEV_GAP_MS"] as const;
+
+/**
+ * Refuse a development switch set without the demo sign-in (AUTH_MODE=demo): that is a deploy, or a mistake on the way
+ * to one. Local development sets both (`AUTH_MODE=demo DEV_TOOLS=true pnpm dev`, the e2e suite); the Worker reads the
+ * switches only with both too (worker/dev-model.ts: devOn). A preview refuses them all, demo or not (deployTarget).
+ */
+export function checkLocalSwitches(env: PreviewEnv): void {
+  if (env.AUTH_MODE === "demo") return;
+  for (const flag of DEV_SWITCHES) {
+    if (env[flag]) throw new Error(`${flag} is for local development, with AUTH_MODE=demo: unset it, or set AUTH_MODE=demo to run locally.`);
+  }
+}
+
 /** Production, or the preview the environment asks for. Throws on a preview that is incomplete or would touch production. */
 export function deployTarget(production: DeployTarget, env: PreviewEnv): DeployTarget {
   const name = env.PI_PREVIEW?.trim();

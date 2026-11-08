@@ -1,4 +1,5 @@
 import { DurableObject, exports } from "cloudflare:workers";
+import { devOn } from "./dev-model.ts";
 import type { ModelSetting } from "../shared/models.ts";
 import { PAGE_STORAGE_LIMITS, SOCKET_PING, MAX_CHAT_TITLE, type ArtifactSummary, type ChatStatus, type ChatSummary, type ChatRowChange, type MentionNotice, type Person, type RunsNotice, type SidebarList } from "../shared/protocol.ts";
 import type { ExportedAgent, ExportedChat, ExportedPageValues, ExportedSkill, ExportStart, ImportedSettings } from "../shared/data-export.ts";
@@ -374,8 +375,8 @@ export class UserDirectory extends DurableObject<Env> {
 
   /** The owner's "Dream now" for pi ("pi") or one of their agents. */
   async dreamNow(subject: string, scripted?: string): Promise<DreamRecord | { error: string; retryAt?: number }> {
-    // A scripted answer only with DEV_TOOLS (POST /api/dev/dream): the e2e suite's stand-in for the model.
-    const script = this.env.DEV_TOOLS === "true" ? scripted : undefined;
+    // A scripted answer only in local development (POST /api/dev/dream, devOn): the e2e suite's stand-in for the model.
+    const script = devOn(this.env) ? scripted : undefined;
     const done = await this.#dreams.dreamNow(subject === "pi" ? { kind: "pi" } : { kind: "agent", agentId: subject }, script);
     if (!("error" in done)) this.#changed("memory");
     return done;
